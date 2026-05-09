@@ -62,7 +62,7 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	}
 	done := make(chan relayResult, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "", "hello")
 		done <- relayResult{resp: resp, err: err}
 	}()
 
@@ -105,7 +105,7 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	}
 	done := make(chan relayResult, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "", "hello")
 		done <- relayResult{resp: resp, err: err}
 	}()
 
@@ -164,7 +164,7 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	ctx := context.Background()
 	done := make(chan string, 1)
 	go func() {
-		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "", "hello")
 		if err != nil {
 			done <- "error: " + err.Error()
 			return

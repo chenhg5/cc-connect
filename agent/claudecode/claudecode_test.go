@@ -649,8 +649,8 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 	if !reflect.DeepEqual(child.allowedTools, []string{"Edit", "Read"}) {
 		t.Errorf("allowedTools = %v, want [Edit Read]", child.allowedTools)
 	}
-	if !reflect.DeepEqual(child.disallowedTools, []string{"Bash"}) {
-		t.Errorf("disallowedTools = %v, want [Bash]", child.disallowedTools)
+	if !reflect.DeepEqual(child.disallowedTools, []string{"mcp__claude_ai_Gmail", "mcp__claude_ai_Google_Calendar", "Bash"}) {
+		t.Errorf("disallowedTools = %v, want [mcp__claude_ai_Gmail mcp__claude_ai_Google_Calendar Bash]", child.disallowedTools)
 	}
 	if child.maxContextTokens != 200000 {
 		t.Errorf("maxContextTokens = %d, want 200000", child.maxContextTokens)

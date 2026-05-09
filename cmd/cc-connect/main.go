@@ -113,6 +113,11 @@ func main() {
 			return
 		case "web":
 			runWeb(os.Args[2:])
+		case "react":
+			runReact(os.Args[2:])
+			return
+		case "unreact":
+			runUnreact(os.Args[2:])
 			return
 		}
 	}
@@ -537,6 +542,20 @@ func main() {
 		if defaulted {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
+		}
+
+		// Wire thread-aware session routing.
+		// Enabled by default (max_concurrent = 3) when the [threads] section is present
+		// or the binary is built with Slack support.  Can be disabled by setting
+		// max_concurrent = 1, which prevents forking but still dedups client_msg_id.
+		{
+			maxConcurrent := 3
+			if cfg.Threads.MaxConcurrent != nil {
+				maxConcurrent = *cfg.Threads.MaxConcurrent
+			}
+			if maxConcurrent > 0 {
+				engine.SetThreadRouter(core.NewThreadRouter(maxConcurrent))
+			}
 		}
 
 		// Wire sender injection

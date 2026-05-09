@@ -110,6 +110,7 @@ type Config struct {
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Threads            ThreadsConfig           `toml:"threads"`                     // thread-aware session routing
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -127,6 +128,23 @@ type CronConfig struct {
 // QueueConfig controls the per-session message queue.
 type QueueConfig struct {
 	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
+}
+
+// ThreadsConfig controls thread-aware session routing.
+type ThreadsConfig struct {
+	// MaxConcurrent is the maximum number of simultaneous mid-turn sessions per project
+	// binding. When the limit is reached, new threads fall back to the base session and
+	// their messages are queued. Default: 3.
+	//
+	// Resource guidance: each additional concurrent session requires ~430 MB RAM
+	// (300-360 MB for Claude Code + 70 MB Node.js worker). Provision ~512 MB headroom
+	// per slot above the base session.
+	//
+	// Examples:
+	//   max_concurrent = 3 (default): ~4 GB RAM minimum per project binding
+	//   max_concurrent = 5:           ~6 GB RAM minimum per project binding
+	//   max_concurrent = 1:           ~2 GB RAM (no forking, sequential only)
+	MaxConcurrent *int `toml:"max_concurrent,omitempty"`
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.

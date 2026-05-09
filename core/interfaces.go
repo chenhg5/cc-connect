@@ -144,6 +144,14 @@ the trailing marker before delivery:
   delivered as a normal reply (the marker only suppresses itself, not the
   surrounding text).
 Use this sparingly; when in doubt, send a brief reply instead.
+### Emoji reactions
+To add or remove an emoji reaction on a Slack message, use:
+
+  cc-connect react --emoji white_check_mark --channel C0AL12WCNBG --ts 1775870955.961349
+  cc-connect unreact --emoji white_check_mark --channel C0AL12WCNBG --ts 1775870955.961349
+
+--channel and --ts are required. --emoji is the Slack short name without colons.
+If the Slack message context provides channel_id and thread_ts, those can be used directly.
 `
 }
 
@@ -169,6 +177,13 @@ type TypingIndicator interface {
 // a push notification (e.g. Feishu card edits don't trigger pushes).
 type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
+}
+
+// Reactor is an optional interface for platforms that support adding and
+// removing emoji reactions on messages.
+type Reactor interface {
+	AddReaction(ctx context.Context, channel, ts, emoji string) error
+	RemoveReaction(ctx context.Context, channel, ts, emoji string) error
 }
 
 // ImageSender is an optional interface for platforms that support sending images.

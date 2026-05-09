@@ -107,6 +107,10 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			filePaths = append(filePaths, args[i])
+		case "--new-thread":
+			req.NewThread = true
+		case "--as-prompt":
+			req.AsPrompt = true
 		case "--stdin":
 			useStdin = true
 		case "--data-dir":
@@ -259,6 +263,12 @@ Options:
       --stdin              Read message from stdin (best for long/special-char messages)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
+      --new-thread         Post as a new top-level channel message; does not require
+                           an active session. Requires a session key (--session or
+                           CC_SESSION_KEY) to identify the target channel.
+      --as-prompt          Inject as an inbound message the agent will process and
+                           respond to, instead of posting as the bot. Use for
+                           external triggers (file watchers, CI hooks).
       --data-dir <path>    Data directory (default: ~/.cc-connect)
   -h, --help               Show this help
 
@@ -267,6 +277,7 @@ Examples:
   cc-connect send -m "Build completed successfully"
   cc-connect send --message "Chart generated" --image /tmp/chart.png
   cc-connect send --file /tmp/report.pdf
+  cc-connect send --new-thread -m "New completion file: STORY-22.3.md"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)

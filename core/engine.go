@@ -244,8 +244,14 @@ type Engine struct {
 	// Terminal observation (--observe)
 	observeEnabled    bool
 	observeProjectDir string // ~/.claude/projects/{projectKey}
-	observeSessionKey string // e.g. "slack:C123:U456" — target for forwarding
+	observeSessionKey string // e.g. "slack:C123:U456" -- target for forwarding
 	observeCancel     context.CancelFunc
+
+	// Thread-aware session routing (nil = disabled, all messages share one session)
+	threadRouter *ThreadRouter
+	// threadInteractiveKeys maps interactiveKey -> effectiveSessionKey so that
+	// cleanupInteractiveState can release thread router affinity for the correct key.
+	threadInteractiveKeys sync.Map
 
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
@@ -274,17 +280,18 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
-	messageID     string
-	platform      Platform
-	replyCtx      any
-	content       string
-	images        []ImageAttachment
-	files         []FileAttachment
-	fromVoice     bool
-	userID        string
-	userName      string // sender's display name for sender injection
-	msgPlatform   string // platform name for sender injection
-	msgSessionKey string // session key for extracting chat ID
+	messageID       string
+	platform        Platform
+	replyCtx        any
+	content         string
+	images          []ImageAttachment
+	files           []FileAttachment
+	fromVoice       bool
+	userID          string
+	userName        string // sender's display name for sender injection
+	msgPlatform     string // platform name for sender injection
+	msgSessionKey   string // session key for extracting chat ID
+	platformContext string // platform-specific context block (e.g. Slack channel/thread metadata)
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -595,6 +602,13 @@ func (e *Engine) SetReplyFooterEnabled(show bool) {
 // Default false = show all sessions from the agent.
 func (e *Engine) SetFilterExternalSessions(v bool) {
 	e.filterExternalSessions = v
+}
+
+// SetThreadRouter enables thread-aware session routing for this engine.
+// When set, incoming messages are routed to per-thread sessions based on
+// their ThreadID field, with context-switch-first, fork-on-contention semantics.
+func (e *Engine) SetThreadRouter(r *ThreadRouter) {
+	e.threadRouter = r
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -2035,8 +2049,46 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	session := sessions.GetOrCreateActive(msg.SessionKey)
-	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	// Thread-aware routing: resolve the effective session key for this message.
+	// This runs BEFORE the session lock so that messages route to the correct
+	// session rather than being queued against the wrong one.
+	effectiveSessionKey := msg.SessionKey
+	if e.threadRouter != nil {
+		// Drop "also send to channel" duplicates: Slack fires two events with
+		// the same client_msg_id when the user ticks "also send to #channel".
+		if msg.ClientMsgID != "" && e.threadRouter.IsDuplicateClientMsg(msg.ClientMsgID) {
+			slog.Debug("thread router: dropping duplicate client_msg_id",
+				"client_msg_id", msg.ClientMsgID,
+				"session", msg.SessionKey,
+			)
+			return
+		}
+
+		routeResult := e.threadRouter.Route(msg.SessionKey, msg.ThreadID, sessions)
+		effectiveSessionKey = routeResult.EffectiveKey
+		if routeResult.Forked {
+			slog.Info("thread router: forked new session for thread",
+				"thread_id", msg.ThreadID,
+				"session_key", effectiveSessionKey,
+			)
+			// Warn the user before starting the fork so they see it in their thread.
+			e.reply(p, msg.ReplyCtx, routeResult.ForkWarning)
+		}
+
+		// Update interactiveKey to use the effective session key.
+		if e.multiWorkspace && wsSessions != nil {
+			interactiveKey = resolvedWorkspace + ":" + effectiveSessionKey
+		} else {
+			interactiveKey = effectiveSessionKey
+		}
+
+		// Register the interactiveKey → effectiveSessionKey mapping so that
+		// cleanupInteractiveState can release thread affinity on session expiry.
+		e.threadInteractiveKeys.Store(interactiveKey, effectiveSessionKey)
+	}
+
+	session := sessions.GetOrCreateActive(effectiveSessionKey)
+	sessions.UpdateUserMeta(effectiveSessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
@@ -2062,7 +2114,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 sessionLocked:
-	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
+	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session, effectiveSessionKey); rotated != nil {
 		session = rotated
 	}
 
@@ -2075,12 +2127,17 @@ sessionLocked:
 		"platform", msg.Platform,
 		"user", msg.UserName,
 		"session", session.ID,
+		"thread_id", msg.ThreadID,
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
-func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
+// maybeAutoResetSessionOnIdle rotates to a fresh session when the current one has
+// been idle for longer than resetOnIdle.  effectiveSessionKey is the (possibly
+// thread-routed) key that the session was looked up under; it defaults to
+// msg.SessionKey when thread routing is not active.
+func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session, effectiveSessionKey string) *Session {
 	if e.resetOnIdle <= 0 || session == nil {
 		return nil
 	}
@@ -2097,7 +2154,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	}
 
 	slog.Info("auto-resetting idle session",
-		"session_key", msg.SessionKey,
+		"session_key", effectiveSessionKey,
 		"session_id", session.ID,
 		"idle_for", time.Since(lastActive),
 		"threshold", e.resetOnIdle,
@@ -2120,9 +2177,9 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate()
 
-	newSession := sessions.NewSession(msg.SessionKey, "")
+	newSession := sessions.NewSession(effectiveSessionKey, "")
 	if !newSession.TryLock() {
-		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
+		slog.Error("failed to lock new session after idle auto-reset", "session_key", effectiveSessionKey, "new_session", newSession.ID)
 		return nil
 	}
 
@@ -2161,17 +2218,18 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
-		messageID:     msg.MessageID,
-		platform:      p,
-		replyCtx:      msg.ReplyCtx,
-		content:       msg.Content,
-		images:        msg.Images,
-		files:         msg.Files,
-		fromVoice:     msg.FromVoice,
-		userID:        msg.UserID,
-		userName:      msg.UserName,
-		msgPlatform:   msg.Platform,
-		msgSessionKey: msg.SessionKey,
+		messageID:       msg.MessageID,
+		platform:        p,
+		replyCtx:        msg.ReplyCtx,
+		content:         msg.Content,
+		images:          msg.Images,
+		files:           msg.Files,
+		fromVoice:       msg.FromVoice,
+		userID:          msg.UserID,
+		userName:        msg.UserName,
+		msgPlatform:     msg.Platform,
+		msgSessionKey:   msg.SessionKey,
+		platformContext: msg.PlatformContext,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
@@ -2595,7 +2653,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
+	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.PlatformContext)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -2852,10 +2910,63 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		return state
 	}
 
+	// Check for a pending fork — if armed, use the fork prefix so the agent
+	// starts with --resume <base_id> --fork-session instead of a plain resume.
+	if forkID := session.ConsumeForkOnNextStart(); forkID != "" {
+		startSessionID := ResumeForkPrefix + forkID
+		isResume := true
+		startAt := time.Now()
+		agentSession, err := agent.StartSession(e.ctx, startSessionID)
+		startElapsed := time.Since(startAt)
+		if err != nil {
+			slog.Error("fork session failed, falling back to fresh session",
+				"session_key", sessionKey, "fork_source", forkID, "error", err)
+			agentSession, err = agent.StartSession(e.ctx, "")
+			isResume = false
+		}
+		if err != nil {
+			slog.Error("failed to start session after fork failure", "error", err)
+			state = &interactiveState{platform: p, replyCtx: replyCtx}
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
+		if newID := agentSession.CurrentSessionID(); newID != "" {
+			if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+				sessions.Save()
+			}
+		}
+		if isResume {
+			agentSession = e.drainStaleResumeResult(agentSession, agent, session, sessions, sessionKey)
+		}
+		state = &interactiveState{
+			agentSession: agentSession,
+			platform:     p,
+			replyCtx:     replyCtx,
+		}
+		e.interactiveStates[sessionKey] = state
+		slog.Info("session spawned (fork)", "session_key", sessionKey, "fork_source", forkID, "elapsed", startElapsed)
+		return state
+	}
+
 	// Resume only when we have a concrete saved agent session ID. If the session
 	// is unbound, force a fresh start instead of attaching to whichever CLI
 	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
+
+	// /resume <n> arms forkOnNextStart with a workspace session ID that the
+	// user explicitly picked. Consume it here and convert to the fork
+	// sentinel so the claudecode agent spawns with --resume <id>
+	// --fork-session. This overrides any AgentSessionID that might already
+	// be on the session (though cmdResume clears it anyway) and is a
+	// one-shot: next spawn falls back to the normal resume path.
+	if forkID := session.ConsumeForkOnNextStart(); forkID != "" {
+		startSessionID = ResumeForkPrefix + forkID
+		slog.Info("session: fork-on-next-start consumed",
+			"session_key", sessionKey,
+			"fork_from_backend_session", forkID,
+		)
+	}
+
 	isResume := startSessionID != ""
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
@@ -2903,6 +3014,15 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 
+	// When resuming, the Claude process replays the prior turn's final
+	// EventResult before accepting new input. Wait briefly to consume it;
+	// if we get a stale result (no preceding content), discard and start
+	// fresh. This prevents processInteractiveEvents from treating the
+	// replayed result as the response to the next message.
+	if isResume {
+		agentSession = e.drainStaleResumeResult(agentSession, agent, session, sessions, sessionKey)
+	}
+
 	newState := &interactiveState{
 		agentSession:     agentSession,
 		platform:         p,
@@ -2927,6 +3047,81 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	})
 
 	return state
+}
+
+// drainStaleResumeResult waits briefly for the stale EventResult that a resumed
+// Claude session replays from the prior turn. If a stale result arrives (no
+// preceding content), it is consumed silently and the same session is returned.
+// If the session exits after the stale result (process closed stdin), a fresh
+// session is started. If no event arrives within the timeout, the session is
+// assumed clean and returned as-is.
+func (e *Engine) drainStaleResumeResult(agentSession AgentSession, agent Agent, session *Session, sessions *SessionManager, sessionKey string) AgentSession {
+	// Longer conversations take more time to replay on --resume before the
+	// stale EventResult arrives. 10 seconds handles most cases.
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	events := agentSession.Events()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				// Channel closed — process exited after resume. Start fresh.
+				slog.Info("interactive: resumed session exited, starting fresh",
+					"session_key", sessionKey)
+				agentSession.Close()
+				session.CompareAndSetAgentSessionID("", agent.Name())
+				fresh, err := agent.StartSession(e.ctx, "")
+				if err != nil {
+					slog.Error("interactive: failed to start fresh session after stale drain",
+						"session_key", sessionKey, "error", err)
+					return agentSession // return closed session; caller will handle nil check
+				}
+				if newID := fresh.CurrentSessionID(); newID != "" {
+					if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+						sessions.Save()
+					}
+				}
+				return fresh
+			}
+			switch event.Type {
+			case EventResult:
+				// Stale result consumed. The resumed process may exit shortly after
+				// replaying, so always start a fresh session instead of trying to
+				// reuse it. Save the session ID first for context continuity.
+				if event.SessionID != "" {
+					session.SetAgentSessionID(event.SessionID, agent.Name())
+					sessions.Save()
+				}
+				slog.Info("interactive: drained stale resume result, starting fresh",
+					"session_key", sessionKey, "session_id", event.SessionID)
+				agentSession.Close()
+				fresh, err := agent.StartSession(e.ctx, "")
+				if err != nil {
+					slog.Error("interactive: failed to start fresh session after stale drain",
+						"session_key", sessionKey, "error", err)
+					return agentSession // return closed session; caller handles nil check
+				}
+				if newID := fresh.CurrentSessionID(); newID != "" {
+					if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+						sessions.Save()
+					}
+				}
+				return fresh
+			default:
+				// Unexpected content before we sent anything — shouldn't happen,
+				// but return the session and let the normal flow handle it.
+				slog.Warn("interactive: unexpected event during stale drain",
+					"session_key", sessionKey, "event_type", event.Type)
+				return agentSession
+			}
+		case <-timer.C:
+			// No stale result arrived — session is clean.
+			return agentSession
+		case <-e.ctx.Done():
+			return agentSession
+		}
+	}
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
@@ -2990,12 +3185,20 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// Re-check that the state hasn't been replaced during the close
 	currentState, currentOk := e.interactiveStates[sessionKey]
 	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
-		// Another turn has replaced the state during our close — don't delete it.
+		// Another turn has replaced the state during our close -- don't delete it.
 		e.interactiveMu.Unlock()
 		return
 	}
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
+
+	// Release thread affinity for this session so future messages from the
+	// same thread re-route fresh (context-switch or fork) after session expiry.
+	if e.threadRouter != nil {
+		if effKey, loaded := e.threadInteractiveKeys.LoadAndDelete(sessionKey); loaded {
+			e.threadRouter.ReleaseSession(effKey.(string))
+		}
+	}
 }
 
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
@@ -4149,7 +4352,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.platformContext)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -4403,7 +4606,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.platformContext)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
@@ -4441,6 +4644,7 @@ var builtinCommands = []struct {
 	id    string
 }{
 	{[]string{"new"}, "new"},
+	{[]string{"resume"}, "resume"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
@@ -4609,6 +4813,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	switch cmdID {
 	case "new":
 		e.cmdNew(p, msg, args)
+	case "resume":
+		e.cmdResume(p, msg, args)
 	case "list":
 		e.cmdList(p, msg, args)
 	case "switch":
@@ -5021,6 +5227,164 @@ func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{})
 		}
 	}
 	return filtered
+}
+
+// resumePickerLimit is the maximum number of prior workspace sessions
+// shown to the user by /resume. Enough to cover a day or two of work
+// without blowing out the mobile screen.
+const resumePickerLimit = 10
+
+// cmdResume implements the /resume slash command.
+//
+// Two modes:
+//
+//   - /resume            — list up to resumePickerLimit of the most recent
+//                          workspace sessions known to the agent backend.
+//                          Each row shows the numbered index, a relative
+//                          timestamp, the session's opening user message,
+//                          and (indented on a second line) the most recent
+//                          user message so the user can identify a drifted
+//                          long-running session by both its origin and its
+//                          current topic. The session IDs are stashed on
+//                          the Session object as pendingResumeCandidates
+//                          for the next invocation to resolve.
+//
+//   - /resume <n>        — pick the Nth candidate from the last list. Starts
+//                          a new cc-connect session with --resume <id>
+//                          --fork-session via the ResumeForkPrefix sentinel
+//                          so the source session is not mutated (it may
+//                          still be live in a terminal or another Slack
+//                          conversation). Cleans up any prior interactive
+//                          state for this session_key first.
+//
+// TODO: i18n. First cut uses hardcoded English strings. Once the feature
+// shape stabilises, promote these to MsgKey constants in core/i18n.go.
+func (e *Engine) cmdResume(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+
+	// Pick mode: /resume <n>
+	if len(args) > 0 {
+		n, parseErr := strconv.Atoi(strings.TrimSpace(args[0]))
+		if parseErr != nil || n < 1 {
+			e.reply(p, msg.ReplyCtx,
+				"/resume <n> expects a positive integer picked from the list. Run /resume with no args first to see the options.")
+			return
+		}
+		sessionID, ok := session.TakePendingResumeCandidate(n)
+		if !ok {
+			e.reply(p, msg.ReplyCtx,
+				"No /resume list is pending — run /resume with no args to see the candidates, then pick one.")
+			return
+		}
+
+		// Safe to fork off the picked session: the source session (which may
+		// be a live terminal session) is never mutated because claudecode
+		// strips the ResumeForkPrefix and passes --fork-session to claude.
+		slog.Info("cmdResume: picking candidate",
+			"session_key", msg.SessionKey,
+			"picked_session_id", sessionID,
+			"index", n,
+		)
+
+		e.cleanupInteractiveState(interactiveKey)
+
+		// Arm the next StartSession call on this session to fork off the
+		// picked session. We deliberately do NOT stash the fork sentinel in
+		// AgentSessionID — that field is persisted to disk and a crash in
+		// the window between here and the first message would leave a
+		// stale sentinel on the next startup. forkOnNextStart is a
+		// transient field that survives only in memory; worst case is
+		// cc-connect crashes and the user re-picks from a fresh /resume.
+		//
+		// Clear the existing AgentSessionID so the engine's normal resume
+		// path does not race ahead of the fork. The engine consumes
+		// forkOnNextStart before falling back to AgentSessionID, but
+		// clearing it removes the fallback entirely and makes the logged
+		// state easier to reason about.
+		session.SetAgentInfo("", agent.Name(), "")
+		session.SetForkOnNextStart(sessionID)
+		sessions.Save()
+
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Forked from session #%d. Your next message will branch off that session's context — the original is unchanged.",
+			n,
+		))
+		return
+	}
+
+	// List mode: /resume (no args)
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		session.ClearPendingResumeCandidates()
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("/resume: could not list workspace sessions: %v", err))
+		return
+	}
+
+	// The session the user is currently in (according to cc-connect's own
+	// session store) stays in the list — filtering it out makes the
+	// chronological "most recent" row mysteriously missing. Instead, we
+	// note its ID so the picker can label that row with "(current)" and
+	// the user still has the option to re-pick it explicitly (e.g. to
+	// branch off their own current thread).
+	currentID := session.GetAgentSessionID()
+
+	if len(agentSessions) == 0 {
+		session.ClearPendingResumeCandidates()
+		e.reply(p, msg.ReplyCtx,
+			"/resume: no prior sessions found in this workspace. Start talking and one will be created.")
+		return
+	}
+
+	if len(agentSessions) > resumePickerLimit {
+		agentSessions = agentSessions[:resumePickerLimit]
+	}
+
+	ids := make([]string, 0, len(agentSessions))
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("*Recent sessions in this workspace* (showing %d of the most recent):\n", len(agentSessions)))
+	for i, s := range agentSessions {
+		ids = append(ids, s.ID)
+		rel := formatRelativeAge(time.Since(s.ModifiedAt))
+		first := s.FirstSummary
+		if first == "" {
+			first = "(no opening user message)"
+		}
+		marker := ""
+		if currentID != "" && s.ID == currentID {
+			marker = " *(current)*"
+		}
+		fmt.Fprintf(&b, "%2d. %s%s  — \"%s\"\n", i+1, rel, marker, first)
+		if last := s.Summary; last != "" && last != s.FirstSummary {
+			fmt.Fprintf(&b, "     ↳ \"%s\"\n", last)
+		}
+	}
+	b.WriteString("\nType `/resume <n>` to fork the chosen session into this conversation. The source session will not be modified.")
+
+	session.SetPendingResumeCandidates(ids)
+	e.reply(p, msg.ReplyCtx, b.String())
+}
+
+// formatRelativeAge renders a duration as a compact human-readable string
+// for the /resume picker rows ("2m ago", "1h ago", "3d ago", etc.).
+func formatRelativeAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	default:
+		return fmt.Sprintf("%dw ago", int(d/(7*24*time.Hour)))
+	}
 }
 
 const listPageSize = 20
@@ -7028,6 +7392,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpSessionSection,
 			items: []helpCardItem{
 				{command: "/new", action: "act:/new"},
+				{command: "/resume", action: "cmd:/resume"},
 				{command: "/list", action: "nav:/list"},
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
@@ -8666,6 +9031,241 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 			return err
 		}
 		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InjectPrompt injects a message into an active session as if it came from an
+// external user. The agent will process and respond to it. If sessionKey is
+// empty, the first active session is used. This is intended for external
+// triggers (file watchers, CI hooks) that need the agent to act on a prompt.
+func (e *Engine) InjectPrompt(sessionKey, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt is required")
+	}
+
+	if sessionKey == "" {
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session for --as-prompt")
+		}
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("platform %q not found for session key %q", platformName, sessionKey)
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "trigger",
+		UserName:   "trigger",
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+
+	// Retry with backoff — the session may be mid-turn when the trigger fires.
+	const maxAttempts = 30
+	for i := 0; i < maxAttempts; i++ {
+		if session.TryLock() {
+			go e.processInteractiveMessage(targetPlatform, msg, session)
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("session busy after %d seconds, prompt not delivered", maxAttempts*2)
+}
+
+// DispatchToChannel injects a prompt into this engine's interactive session
+// for the given channel, with full multi-workspace routing. The agent processes
+// the message and responds in the target channel naturally.
+//
+// This is the fire-and-forget counterpart to HandleRelay: instead of running a
+// synchronous relay session and returning the response, it feeds the message
+// through the same interactive pipeline that handles normal Slack messages.
+func (e *Engine) DispatchToChannel(platformName, channelID, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("dispatch: prompt is required")
+	}
+	if channelID == "" {
+		return fmt.Errorf("dispatch: channel is required")
+	}
+
+	// Find the platform
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		return fmt.Errorf("dispatch: platform %q not found", platformName)
+	}
+
+	// Reconstruct reply context for the target channel
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("dispatch: platform %q does not support reply context reconstruction", platformName)
+	}
+	sessionKey := platformName + ":" + channelID + ":dispatch"
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("dispatch: reconstruct reply context: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   platformName,
+		UserID:     "dispatch",
+		UserName:   "dispatch",
+		Content:    prompt,
+		ReplyCtx:   replyCtx,
+	}
+
+	// Resolve workspace agent for multi-workspace mode
+	agent := e.agent
+	sessions := e.sessions
+	interactiveKey := sessionKey
+	resolvedWorkspace := ""
+
+	if e.multiWorkspace {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			wsAgent, wsSessions, wsErr := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace))
+			if wsErr == nil {
+				agent = wsAgent
+				sessions = wsSessions
+				resolvedWorkspace = b.Workspace
+				interactiveKey = resolvedWorkspace + ":" + sessionKey
+			} else {
+				slog.Warn("dispatch: workspace agent creation failed, using default",
+					"channel", channelID, "err", wsErr)
+			}
+		}
+	}
+
+	session := sessions.GetOrCreateActive(sessionKey)
+
+	// Retry with backoff — the session may be mid-turn.
+	const maxAttempts = 30
+	for i := 0; i < maxAttempts; i++ {
+		if session.TryLock() {
+			slog.Info("dispatch: injecting prompt",
+				"channel", channelID, "workspace", resolvedWorkspace)
+			go e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, sessionKey)
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("dispatch: session busy after %d seconds", maxAttempts*2)
+}
+
+// PostToNewThread posts a message directly to a platform channel as a new
+// top-level message, without requiring or using an existing interactive session.
+// This is intended for automated notifications (e.g. file-watcher alerts) that
+// must not be threaded into an existing conversation.
+//
+// The session key is used only to identify the target channel / chat; the
+// platform's ReconstructReplyCtx always returns a channel-only context (no
+// thread timestamp), so the message lands top-level regardless of any active
+// sessions.
+func (e *Engine) PostToNewThread(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+	if message == "" && len(images) == 0 && len(files) == 0 {
+		return fmt.Errorf("message or attachment is required")
+	}
+	if sessionKey == "" {
+		// No session key provided — borrow one from any active session to resolve
+		// the target channel. PostToNewThread only uses the key for channel lookup
+		// (thread timestamps are stripped by ReconstructReplyCtx), so any session
+		// on the right platform works.
+		e.interactiveMu.Lock()
+		for key := range e.interactiveStates {
+			sessionKey = key
+			break
+		}
+		e.interactiveMu.Unlock()
+		if sessionKey == "" {
+			return fmt.Errorf("no active session and no session_key provided for --new-thread")
+		}
+	}
+	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	// Find the platform that recognises this session key.
+	var platform Platform
+	var replyCtx any
+	for _, p := range e.platforms {
+		rc, ok := p.(ReplyContextReconstructor)
+		if !ok {
+			continue
+		}
+		rctx, err := rc.ReconstructReplyCtx(sessionKey)
+		if err == nil {
+			platform = p
+			replyCtx = rctx
+			break
+		}
+	}
+	if platform == nil {
+		return fmt.Errorf("no platform found that can handle session key %q", sessionKey)
+	}
+
+	if len(images) > 0 {
+		if _, ok := platform.(ImageSender); !ok {
+			return fmt.Errorf("platform %s: %w", platform.Name(), ErrNotSupported)
+		}
+	}
+	if len(files) > 0 {
+		if _, ok := platform.(FileSender); !ok {
+			return fmt.Errorf("platform %s: %w", platform.Name(), ErrNotSupported)
+		}
+	}
+
+	if message != "" {
+		if err := platform.Send(e.ctx, replyCtx, message); err != nil {
+			return err
+		}
+	}
+	for _, img := range images {
+		if err := platform.(ImageSender).SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := platform.(FileSender).SendFile(e.ctx, replyCtx, file); err != nil {
 			return err
 		}
 	}
@@ -12453,7 +13053,7 @@ func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
 // HandleRelay processes a relay message synchronously: starts or resumes a
 // dedicated relay session, sends the message to the agent, and blocks until
 // the complete response is collected (or the relay context times out).
-func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
+func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, wsChannelKey, message string) (string, error) {
 	relaySessionKey := "relay:" + fromProject + ":" + chatID
 	session := e.sessions.GetOrCreateActive(relaySessionKey)
 
@@ -12474,20 +13074,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay
 	// timeout only controls how long we *wait* for the response.
-	agentSession, err := e.agent.StartSession(e.ctx, session.GetAgentSessionID())
+	agentSession, err := e.startRelaySession(ctx, e.agent, session, e.sessions, relaySessionKey, message)
 	if err != nil {
-		// Resume failed — fall back to a fresh session so the relay is not
-		// permanently broken by a corrupted/stale session ID.
-		if session.GetAgentSessionID() != "" {
-			slog.Warn("relay: session resume failed, trying fresh session",
-				"relay_key", relaySessionKey, "error", err)
-			session.SetAgentSessionID("", e.agent.Name())
-			e.sessions.Save()
-			agentSession, err = e.agent.StartSession(e.ctx, "")
-		}
-		if err != nil {
-			return "", fmt.Errorf("start relay session: %w", err)
-		}
+		return "", err
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
@@ -12500,11 +13089,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		}
 	}
 
-	if err := agentSession.Send(message, nil, nil); err != nil {
-		agentSession.Close()
-		return "", fmt.Errorf("send relay message: %w", err)
-	}
-
+	// sawNewContent tracks whether Claude has started processing our message
+	// (emitted at least one text or tool event). Since startRelaySession
+	// already handles stale EventResult detection for resumed sessions,
+	// any event reaching this loop is genuine.
 	var textParts []string
 	for event := range agentSession.Events() {
 		switch event.Type {
@@ -12587,6 +13175,125 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		return strings.Join(textParts, ""), nil
 	}
 	return "", fmt.Errorf("relay: agent process exited without response")
+}
+
+// startRelaySession starts a Claude session for relay, handling resume gracefully.
+//
+// When a previous session ID exists, it attempts --resume first. Resumed
+// sessions replay the prior turn's final EventResult; if the process exits
+// after only producing that stale result (no new assistant content), the
+// session is discarded and a fresh one is started with the message injected.
+func (e *Engine) startRelaySession(ctx context.Context, agent Agent, session *Session, sessions *SessionManager, relaySessionKey, message string) (AgentSession, error) {
+	existingID := session.GetAgentSessionID()
+	agentSession, err := agent.StartSession(ctx, existingID)
+	if err != nil && existingID != "" {
+		slog.Warn("relay: resume failed, falling back to fresh session",
+			"session_key", relaySessionKey, "agent_session_id", existingID, "err", err)
+		session.CompareAndSetAgentSessionID("", agent.Name())
+		agentSession, err = agent.StartSession(ctx, "")
+		existingID = "" // skip stale-result detection — we started fresh
+	}
+	if err != nil {
+		return nil, fmt.Errorf("start relay session: %w", err)
+	}
+
+	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), agent.Name()) {
+		sessions.Save()
+	}
+
+	if err := agentSession.Send(message, nil, nil); err != nil {
+		agentSession.Close()
+		return nil, fmt.Errorf("send relay message: %w", err)
+	}
+
+	// If we resumed an existing session, the Claude process may replay
+	// the prior turn's EventResult and exit before processing our new
+	// message. Wait briefly to see if actual content arrives; if only a
+	// stale result appears, start a fresh session.
+	if existingID != "" {
+		for event := range agentSession.Events() {
+			switch event.Type {
+			case EventText, EventToolResult:
+				// Real content for our turn — push it back and return this session.
+				// We can't un-read from a channel, so wrap in a prefixed session.
+				return newPrefixedAgentSession(agentSession, event), nil
+			case EventResult:
+				// Stale result from the resumed turn. Save the session ID,
+				// close this session, and fall through to start fresh.
+				if event.SessionID != "" {
+					session.SetAgentSessionID(event.SessionID, agent.Name())
+					sessions.Save()
+				}
+				slog.Info("relay: resumed session produced stale result, starting fresh",
+					"session_key", relaySessionKey, "stale_session_id", event.SessionID)
+				agentSession.Close()
+				goto freshSession
+			case EventError:
+				agentSession.Close()
+				if event.Error != nil {
+					return nil, event.Error
+				}
+				return nil, fmt.Errorf("agent error during relay resume")
+			case EventPermissionRequest:
+				_ = agentSession.RespondPermission(event.RequestID, PermissionResult{
+					Behavior:     "allow",
+					UpdatedInput: event.ToolInputRaw,
+				})
+			}
+		}
+		// Events channel closed without content — process exited.
+		agentSession.Close()
+		slog.Info("relay: resumed session exited without content, starting fresh",
+			"session_key", relaySessionKey)
+		goto freshSession
+	}
+
+	return agentSession, nil
+
+freshSession:
+	session.CompareAndSetAgentSessionID("", agent.Name())
+	agentSession, err = agent.StartSession(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("start fresh relay session: %w", err)
+	}
+	if session.CompareAndSetAgentSessionID(agentSession.CurrentSessionID(), agent.Name()) {
+		sessions.Save()
+	}
+	if err := agentSession.Send(message, nil, nil); err != nil {
+		agentSession.Close()
+		return nil, fmt.Errorf("send relay message (fresh): %w", err)
+	}
+	return agentSession, nil
+}
+
+// prefixedAgentSession wraps an AgentSession and prepends a buffered event
+// to the Events channel. Used when we've already consumed an event from
+// the channel during resume detection and need to replay it.
+type prefixedAgentSession struct {
+	AgentSession
+	prefixCh chan Event
+	merged   chan Event
+	once     sync.Once
+}
+
+func newPrefixedAgentSession(inner AgentSession, first Event) *prefixedAgentSession {
+	merged := make(chan Event, 64)
+	p := &prefixedAgentSession{
+		AgentSession: inner,
+		merged:       merged,
+	}
+	go func() {
+		merged <- first
+		for ev := range inner.Events() {
+			merged <- ev
+		}
+		close(merged)
+	}()
+	return p
+}
+
+func (p *prefixedAgentSession) Events() <-chan Event {
+	return p.merged
 }
 
 func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
@@ -12846,20 +13553,29 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 	}
 }
 
-// buildSenderPrompt prepends a sender identity header to content when
-// injectSender is enabled and userID is non-empty. When userName is available
-// it is included as sender_name so the agent can identify who sent the message
-// by display name (useful in shared channel sessions with multiple users).
-func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey string) string {
-	if !e.injectSender || userID == "" {
+// buildSenderPrompt prepends platform context and/or a sender identity header
+// to content. platformContext (e.g. Slack channel/thread metadata) is always
+// prepended when present. The sender header is only added when injectSender is
+// enabled and userID is non-empty. When userName is available it is included as
+// sender_name so the agent can identify who sent the message by display name.
+func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey, platformContext string) string {
+	var prefix string
+	if platformContext != "" {
+		prefix = platformContext + "\n"
+	}
+	if e.injectSender && userID != "" {
+		chatID := extractChannelID(sessionKey)
+		if userName != "" {
+			safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
+			prefix += fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n", userID, safeName, platform, chatID)
+		} else {
+			prefix += fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n", userID, platform, chatID)
+		}
+	}
+	if prefix == "" {
 		return content
 	}
-	chatID := extractChannelID(sessionKey)
-	if userName != "" {
-		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
-		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
-	}
-	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+	return prefix + content
 }
 
 func extractChannelID(sessionKey string) string {
