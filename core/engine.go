@@ -3718,9 +3718,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" && !isEllipsisOnly(event.Content) {
+				// Pre-compute silentHold transition including this chunk so the
+				// rich-card path doesn't leak a preview that gets recalled at
+				// end-of-stream when the text resolves to bare NO_REPLY (Lark
+				// renders the recall as "撤回了一条消息"). Both rich and legacy
+				// paths share this single transition; couldBeSilentPrefix is
+				// monotonically decreasing as segments grow, so the transition
+				// is held → released at most once per segment.
+				peekSegment := strings.Join(textParts[segmentStart:], "") + event.Content
+				prevHold := silentHold
+				silentHold = couldBeSilentPrefix(peekSegment)
+				releasedNow := prevHold && !silentHold
+
 				if len(textParts) == 0 {
 					if hasRichCard {
-						if cardMessageID == nil {
+						if cardMessageID == nil && !silentHold {
 							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
 							if starter, ok := p.(PreviewStarter); ok {
 								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
@@ -3731,40 +3743,73 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								}
 							}
 						}
-					} else {
+					} else if !silentHold {
 						sp.setStatus(CardStatusWorking)
 					}
 				}
 				textParts = append(textParts, event.Content)
 				partialText += event.Content
 				if hasRichCard {
-					if cardMessageID != nil && (time.Since(lastRichCardUpdate) > 1500*time.Millisecond || len(partialText)-lastRichCardLen > 30) {
-						card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
-						if updater, ok := p.(MessageUpdater); ok {
-							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
-								lastRichCardUpdate = time.Now()
-								lastRichCardLen = len(partialText)
-							} else {
-								slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
+					if !silentHold {
+						// Lazy creation: if we held during the first text events and
+						// only released this chunk, the initial-create branch above
+						// won't fire (textParts is non-empty by now). Build the card
+						// here using the accumulated partialText so the card emerges
+						// with the post-prefix content already in body.
+						if cardMessageID == nil {
+							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+							if starter, ok := p.(PreviewStarter); ok {
+								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+								if err != nil {
+									slog.Debug("rich card: failed to create deferred text card", "platform", p.Name(), "error", err)
+								} else {
+									cardMessageID = handle
+								}
+							}
+						}
+						// Throttle: cardkit-v1 streaming text path uses tighter limits (200ms / 20 chars)
+						// for smoother typewriter UX; full-card Patch fallback keeps the original 1500ms / 30 chars.
+						streamer, hasStreamer := p.(RichCardTextStreamer)
+						throttleDur := 1500 * time.Millisecond
+						throttleChars := 30
+						if hasStreamer && cardMessageID != nil {
+							throttleDur = 200 * time.Millisecond
+							throttleChars = 20
+						}
+						if cardMessageID != nil && (time.Since(lastRichCardUpdate) > throttleDur || len(partialText)-lastRichCardLen > throttleChars) {
+							// Prefer per-element streaming text update (cardkit-v1) when available;
+							// it engages Lark's native typewriter rendering. Falls back to
+							// full-card Patch on ErrNotSupported (handle without cardID) or any error.
+							streamed := false
+							if hasStreamer {
+								if err := streamer.StreamRichCardText(e.ctx, cardMessageID, partialText); err == nil {
+									lastRichCardUpdate = time.Now()
+									lastRichCardLen = len(partialText)
+									streamed = true
+								} else if !errors.Is(err, ErrNotSupported) {
+									slog.Debug("rich card: streaming text update failed, falling back to full Patch", "platform", p.Name(), "error", err)
+								}
+							}
+							if !streamed {
+								card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
+								if updater, ok := p.(MessageUpdater); ok {
+									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+										lastRichCardUpdate = time.Now()
+										lastRichCardLen = len(partialText)
+									} else {
+										slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
+									}
+								}
 							}
 						}
 					}
 				} else {
-					segmentText := strings.Join(textParts[segmentStart:], "")
-					if silentHold {
-						if !couldBeSilentPrefix(segmentText) {
-							silentHold = false
-							if sp.canPreview() {
-								sp.appendText(segmentText) // flush all held chunks at once
-							}
+					if !silentHold && sp.canPreview() {
+						if releasedNow {
+							sp.appendText(peekSegment) // flush all held chunks at once
+						} else {
+							sp.appendText(event.Content)
 						}
-					} else if couldBeSilentPrefix(segmentText) {
-						// Hold streaming until we know whether this segment is NO_REPLY.
-						// Safe because once segmentText is no longer a prefix of "NO_REPLY",
-						// it can never become one again — we only ever transition held→released once.
-						silentHold = true
-					} else if sp.canPreview() {
-						sp.appendText(event.Content)
 					}
 				}
 			}
@@ -3995,14 +4040,35 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isSilent {
 				sp.discard()
 				// Rich mode: cardMessageID is tracked independently of sp.previewMsgID,
-				// so sp.discard() doesn't reach it. Without this cleanup the rich card
-				// would stay frozen in "Working" / "Thinking" header state forever
-				// (no Done flip, no Patch). Delete the message so NO_REPLY truly leaves
-				// no trace.
+				// so sp.discard() doesn't reach it. Without explicit handling the rich
+				// card would stay frozen in "Working" / "Thinking" header state forever
+				// (no Done flip, no Patch).
+				//
+				// Determine the visible body to finalize the card with. partialText
+				// accumulates every EventText chunk this turn, so it captures any
+				// pre-NO_REPLY content the user already saw streaming (e.g. when the
+				// agent wrote "Hello\nNO_REPLY"). Strip the trailing NO_REPLY marker
+				// before rendering. If there is neither body nor tool history, the
+				// card has nothing visible worth keeping; delete to avoid an
+				// orphaned shell. Finalizing-in-place avoids the "撤回了一条消息"
+				// gray bar that DeletePreviewMessage would leave in Lark.
 				if hasRichCard && cardMessageID != nil {
-					if cleaner, ok := p.(PreviewCleaner); ok {
-						if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
-							slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
+					silentBody := partialText
+					if stripped, ok := stripTrailingSilent(partialText); ok {
+						silentBody = strings.TrimRight(stripped, " \t\r\n")
+					}
+					if silentBody != "" || len(toolSteps) > 0 {
+						card := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, silentBody, false, time.Since(turnStart))
+						if updater, ok := p.(MessageUpdater); ok {
+							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+								slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
+							}
+						}
+					} else {
+						if cleaner, ok := p.(PreviewCleaner); ok {
+							if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+								slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
+							}
 						}
 					}
 					cardMessageID = nil
@@ -4015,6 +4081,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, time.Since(turnStart))
 				if cardMessageID != nil {
+					// Forced final flush via cardkit-v1 streaming text update before
+					// flipping status to Done via full-card Patch. The throttle in the
+					// EventText path may have skipped the last <200ms / <20 chars; this
+					// catch-up keeps the typewriter rendering smooth all the way to the
+					// end. ErrNotSupported (no cardID) and any error are silent — the
+					// subsequent UpdateMessage will rewrite the body anyway.
+					if streamer, ok := p.(RichCardTextStreamer); ok {
+						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, parts[0]); err != nil && !errors.Is(err, ErrNotSupported) {
+							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
+						}
+					}
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
@@ -4176,6 +4253,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// it for the reply quote. Without this reassignment, msg2's
 				// reply would quote msg1's bubble.
 				replyCtx = queued.replyCtx
+				// Rich-mode per-turn state must reset too — otherwise EventText for
+				// the queued message would StreamRichCardText against the previous
+				// turn's cardID, overwriting that card's body with the new turn's
+				// content. Same risk for partialText/toolSteps leaking across turns.
+				cardMessageID = nil
+				toolSteps = nil
+				partialText = ""
+				lastRichCardUpdate = time.Time{}
+				lastRichCardLen = 0
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}

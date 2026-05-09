@@ -1763,6 +1763,329 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 	}
 }
 
+// stubRichCardSilentPlatform implements the full set of rich-card optional
+// interfaces (RichCardSupporter, PreviewStarter, MessageUpdater,
+// RichCardTextStreamer, PreviewCleaner) and tracks every call so tests can
+// assert that NO_REPLY in rich card mode leaves zero footprint.
+type stubRichCardSilentPlatform struct {
+	stubPlatformEngine
+	mu             sync.Mutex
+	previewStarts  []string
+	streamTexts    []string
+	updates        []string
+	deleteCount    int
+	nextHandleSeq  int
+}
+
+func (p *stubRichCardSilentPlatform) BuildRichCard(status CardStatus, _ string, steps []ToolStep, markdown string, _ bool, _ time.Duration) string {
+	return fmt.Sprintf("rich:status=%s steps=%d body=%q", status, len(steps), markdown)
+}
+
+func (p *stubRichCardSilentPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.previewStarts = append(p.previewStarts, content)
+	p.nextHandleSeq++
+	return fmt.Sprintf("handle-%d", p.nextHandleSeq), nil
+}
+
+func (p *stubRichCardSilentPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.updates = append(p.updates, content)
+	return nil
+}
+
+func (p *stubRichCardSilentPlatform) StreamRichCardText(_ context.Context, _ any, fullText string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.streamTexts = append(p.streamTexts, fullText)
+	return nil
+}
+
+func (p *stubRichCardSilentPlatform) DeletePreviewMessage(_ context.Context, _ any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deleteCount++
+	return nil
+}
+
+func (p *stubRichCardSilentPlatform) snapshot() (starts, streams, updates []string, deletes int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	starts = append(starts, p.previewStarts...)
+	streams = append(streams, p.streamTexts...)
+	updates = append(updates, p.updates...)
+	deletes = p.deleteCount
+	return
+}
+
+// runRichCardSilentScenario exercises processInteractiveEvents with rich
+// CardMode and the supplied display Mode, sending the given EventText chunks
+// followed by a terminal EventResult. It returns the call counts so each test
+// case can assert the no-trace invariant per (CardMode × Mode × chunk shape).
+func runRichCardSilentScenario(t *testing.T, mode string, chunks []string, finalContent string) (starts, streams, updates []string, deletes int) {
+	t.Helper()
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             mode,
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-silent-" + mode
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-silent-" + mode)
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-silent-" + mode,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	for _, chunk := range chunks {
+		agentSession.events <- Event{Type: EventText, Content: chunk}
+	}
+	agentSession.events <- Event{Type: EventResult, Content: finalContent, Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-silent-"+mode, time.Now(), nil, nil, state.replyCtx)
+	return p.snapshot()
+}
+
+// TestProcessInteractiveEvents_RichCardFull_NoReplySingleChunk asserts that a
+// single-chunk NO_REPLY response in rich card mode + display.mode=full leaves
+// zero trace: no preview card created, no streaming text update, no card
+// deletion. Regression for B021 — Lark would otherwise render the recall as
+// "撤回了一条消息".
+func TestProcessInteractiveEvents_RichCardFull_NoReplySingleChunk(t *testing.T) {
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "full", []string{"NO_REPLY"}, "NO_REPLY")
+	if len(starts) != 0 {
+		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+	}
+	if len(streams) != 0 {
+		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
+	}
+	if len(updates) != 0 {
+		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCardFull_NoReplyChunked asserts the same
+// no-trace invariant when the agent emits NO_REPLY across two text chunks
+// ("NO_R" + "EPLY"). The silentHold gate must hold across chunks until the
+// final segment proves it is no longer a NO_REPLY prefix (or stays one).
+func TestProcessInteractiveEvents_RichCardFull_NoReplyChunked(t *testing.T) {
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "full", []string{"NO_R", "EPLY"}, "NO_REPLY")
+	if len(starts) != 0 {
+		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+	}
+	if len(streams) != 0 {
+		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
+	}
+	if len(updates) != 0 {
+		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCardFull_PrefixThenContent verifies that a
+// stream which starts with a NO_REPLY prefix ("N") but continues into real
+// content ("ote that...") releases the silentHold and lazily creates the
+// preview card with the accumulated content already in the body. No recall.
+func TestProcessInteractiveEvents_RichCardFull_PrefixThenContent(t *testing.T) {
+	starts, _, _, deletes := runRichCardSilentScenario(t, "full", []string{"N", "ote that the answer is 42"}, "Note that the answer is 42")
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly 1 SendPreviewStart (lazy create after release), got %d: %v", len(starts), starts)
+	}
+	if !strings.Contains(starts[0], "Note that the answer is 42") {
+		t.Fatalf("lazy-created card should contain accumulated content, got %q", starts[0])
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCardQuiet_NoReplySingleChunk verifies the
+// no-trace invariant under display.mode=quiet (single-card append mode).
+// The rich path branches on CardMode regardless of display.mode, so the gate
+// must work uniformly across all three display modes.
+func TestProcessInteractiveEvents_RichCardQuiet_NoReplySingleChunk(t *testing.T) {
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "quiet", []string{"NO_REPLY"}, "NO_REPLY")
+	if len(starts) != 0 {
+		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+	}
+	if len(streams) != 0 {
+		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
+	}
+	if len(updates) != 0 {
+		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCardQuiet_PrefixThenContent verifies
+// prefix-then-content release behavior under display.mode=quiet.
+func TestProcessInteractiveEvents_RichCardQuiet_PrefixThenContent(t *testing.T) {
+	starts, _, _, deletes := runRichCardSilentScenario(t, "quiet", []string{"N", "ote that the answer is 42"}, "Note that the answer is 42")
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly 1 SendPreviewStart, got %d: %v", len(starts), starts)
+	}
+	if !strings.Contains(starts[0], "Note that the answer is 42") {
+		t.Fatalf("lazy-created card should contain accumulated content, got %q", starts[0])
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody verifies
+// that when the agent emits visible text and then a trailing NO_REPLY marker
+// (engine sees EventResult.Content = "NO_REPLY", the dominant case for
+// claudecode where Content is the final assistant block), the card finalizes
+// with the pre-NO_REPLY text preserved instead of being blanked. Without this
+// the silent path's finalize-to-Done would overwrite the already-streamed body
+// with empty string, making the user's just-seen content "disappear".
+func TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody(t *testing.T) {
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-text-then-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-text-then-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-text-then-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Hello world"}
+	agentSession.events <- Event{Type: EventText, Content: "\nNO_REPLY"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-text-then-noreply", time.Now(), nil, nil, state.replyCtx)
+	starts, _, updates, deletes := p.snapshot()
+
+	if len(starts) == 0 {
+		t.Fatalf("expected SendPreviewStart for the visible text chunk, got 0")
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+	if len(updates) == 0 {
+		t.Fatalf("expected at least one UpdateMessage (final Done finalize)")
+	}
+	last := updates[len(updates)-1]
+	if !strings.Contains(last, "Hello world") {
+		t.Fatalf("final card should preserve pre-NO_REPLY text, got %q", last)
+	}
+	if strings.Contains(last, "NO_REPLY") {
+		t.Fatalf("final card should not contain NO_REPLY marker, got %q", last)
+	}
+	if !strings.Contains(last, "status=done") {
+		t.Fatalf("final card should have status=done, got %q", last)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCard_ToolThenNoReply verifies that when a
+// turn issues tool calls (creating the rich card with visible tool steps) and
+// then resolves to NO_REPLY, the card is finalized to Done — not deleted.
+// Deleting would leave a "撤回了一条消息" gray bar matched up with already-
+// visible tool activity. This mirrors legacy + full mode where tool messages
+// remain visible even when the final reply is silent.
+func TestProcessInteractiveEvents_RichCard_ToolThenNoReply(t *testing.T) {
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-tool-then-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-tool-then-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-tool-then-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	code := 0
+	success := true
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi", ToolStatus: "completed", ToolExitCode: &code, ToolSuccess: &success}
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-tool-then-noreply", time.Now(), nil, nil, state.replyCtx)
+	starts, streams, updates, deletes := p.snapshot()
+
+	if len(starts) == 0 {
+		t.Fatalf("expected SendPreviewStart for tool card, got 0")
+	}
+	if len(streams) != 0 {
+		t.Fatalf("expected no StreamRichCardText (silentHold gates text path), got %d: %v", len(streams), streams)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage (tool card finalized in place), got %d", deletes)
+	}
+	if len(updates) == 0 {
+		t.Fatalf("expected at least one UpdateMessage (final Done finalize)")
+	}
+	last := updates[len(updates)-1]
+	if !strings.Contains(last, "status=done") {
+		t.Fatalf("final update should show status=done, got %q", last)
+	}
+	if strings.Contains(last, "NO_REPLY") {
+		t.Fatalf("finalize should not include NO_REPLY in body, got %q", last)
+	}
+}
+
+// TestProcessInteractiveEvents_RichCardCompact_NoReplySingleChunk verifies the
+// no-trace invariant under display.mode=compact.
+func TestProcessInteractiveEvents_RichCardCompact_NoReplySingleChunk(t *testing.T) {
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "compact", []string{"NO_REPLY"}, "NO_REPLY")
+	if len(starts) != 0 {
+		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+	}
+	if len(streams) != 0 {
+		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
+	}
+	if len(updates) != 0 {
+		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
 func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	prompt := AgentSystemPrompt()
 	if !strings.Contains(prompt, "cc-connect send --image") {
