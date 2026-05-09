@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -1158,6 +1159,135 @@ func TestBuildRichCard_SanitizesMarkdownForCardLimits(t *testing.T) {
 	}
 	if !strings.Contains(content, "![ok](img_v3_abc)") {
 		t.Fatalf("card markdown should preserve Feishu image keys, got %q", content)
+	}
+}
+
+func TestResolveRichCardMarkdownUploadsRemoteImages(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var (
+		mu   sync.Mutex
+		urls []string
+	)
+	p.richCardImageUploadFunc = func(_ context.Context, rawURL string) (string, error) {
+		mu.Lock()
+		urls = append(urls, rawURL)
+		mu.Unlock()
+		return "img_v3_uploaded", nil
+	}
+
+	input := strings.Join([]string{
+		"before",
+		"![chart](https://example.com/chart.png)",
+		"![existing](img_v3_existing)",
+		"![local](/tmp/chart.png)",
+		"![inline](data:image/png;base64,abc)",
+	}, "\n")
+
+	got := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	if !strings.Contains(got, "![chart](img_v3_uploaded)") {
+		t.Fatalf("remote image should be replaced with uploaded image key, got %q", got)
+	}
+	if !strings.Contains(got, "![existing](img_v3_existing)") {
+		t.Fatalf("existing Feishu image key should be preserved, got %q", got)
+	}
+	for _, blocked := range []string{"https://example.com/chart.png", "/tmp/chart.png", "data:image"} {
+		if strings.Contains(got, blocked) {
+			t.Fatalf("unsupported or unresolved image reference %q should be stripped, got %q", blocked, got)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(urls) != 1 || urls[0] != "https://example.com/chart.png" {
+		t.Fatalf("uploaded URLs = %v, want only remote chart URL", urls)
+	}
+}
+
+func TestResolveRichCardMarkdownStreamingStartsUploadWithoutWaiting(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	seenURL := make(chan string, 1)
+	var once sync.Once
+	p.richCardImageUploadFunc = func(_ context.Context, rawURL string) (string, error) {
+		once.Do(func() {
+			seenURL <- rawURL
+			close(started)
+		})
+		<-release
+		return "img_v3_chart", nil
+	}
+
+	input := "before ![chart](https://example.com/chart.png) after"
+	start := time.Now()
+	streaming := p.ResolveRichCardMarkdown(context.Background(), input, false)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("streaming resolve waited %s, want quick unresolved strip", elapsed)
+	}
+	if strings.Contains(streaming, "https://example.com/chart.png") || strings.Contains(streaming, "![chart]") {
+		t.Fatalf("streaming resolve should strip unresolved remote image, got %q", streaming)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("streaming resolve should start background upload")
+	}
+	if rawURL := <-seenURL; rawURL != "https://example.com/chart.png" {
+		t.Fatalf("upload URL = %q, want chart URL", rawURL)
+	}
+	close(release)
+
+	final := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	if !strings.Contains(final, "![chart](img_v3_chart)") {
+		t.Fatalf("final resolve should wait for uploaded image key, got %q", final)
+	}
+}
+
+func TestResolveRichCardMarkdownFailedImageIsNotRetried(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	p.richCardImageUploadFunc = func(_ context.Context, _ string) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return "", errors.New("upload failed")
+	}
+
+	input := "before ![chart](https://example.com/chart.png) after"
+	first := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	second := p.ResolveRichCardMarkdown(context.Background(), input, true)
+
+	for _, got := range []string{first, second} {
+		if strings.Contains(got, "https://example.com/chart.png") || strings.Contains(got, "![chart]") {
+			t.Fatalf("failed remote image should be stripped, got %q", got)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("upload calls = %d, want failed URL cached after first attempt", calls)
+	}
+}
+
+func TestRichCardImageBlocksPrivateAndReservedIPs(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"169.254.169.254",
+		"100.64.0.1",
+		"192.0.2.1",
+		"2001:db8::1",
+	}
+	for _, ip := range blocked {
+		if !isBlockedRichCardImageIP(net.ParseIP(ip)) {
+			t.Fatalf("IP %s should be blocked for rich-card image fetch", ip)
+		}
+	}
+	if isBlockedRichCardImageIP(net.ParseIP("8.8.8.8")) {
+		t.Fatal("public IP 8.8.8.8 should not be blocked")
 	}
 }
 

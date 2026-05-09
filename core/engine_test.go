@@ -1837,6 +1837,83 @@ func (p *stubRichCardSilentPlatform) snapshot() (starts, streams, updates []stri
 	return
 }
 
+type stubRichCardResolverPlatform struct {
+	*stubRichCardSilentPlatform
+	resolverMu sync.Mutex
+	calls      []bool
+}
+
+func (p *stubRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
+	p.resolverMu.Lock()
+	p.calls = append(p.calls, final)
+	p.resolverMu.Unlock()
+	return strings.ReplaceAll(markdown, "https://example.com/chart.png", "img_v3_chart")
+}
+
+func (p *stubRichCardResolverPlatform) resolverCallModes() []bool {
+	p.resolverMu.Lock()
+	defer p.resolverMu.Unlock()
+	out := make([]bool, len(p.calls))
+	copy(out, p.calls)
+	return out
+}
+
+func TestProcessInteractiveEvents_RichCardResolvesMarkdownImages(t *testing.T) {
+	p := &stubRichCardResolverPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-image-resolver"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-image-resolver")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-image-resolver",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	body := "see ![chart](https://example.com/chart.png)"
+	agentSession.events <- Event{Type: EventText, Content: body}
+	agentSession.events <- Event{Type: EventResult, Content: body, Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-image-resolver", time.Now(), nil, nil, state.replyCtx)
+	_, streams, updates, _ := p.snapshot()
+	rendered := strings.Join(append(streams, updates...), "\n")
+	if !strings.Contains(rendered, "![chart](img_v3_chart)") {
+		t.Fatalf("rich card output should contain resolved image key, got %q", rendered)
+	}
+	if strings.Contains(rendered, "https://example.com/chart.png") {
+		t.Fatalf("rich card output should not contain unresolved remote URL, got %q", rendered)
+	}
+	modes := p.resolverCallModes()
+	if len(modes) == 0 {
+		t.Fatalf("expected resolver to be called")
+	}
+	hasStreamingCall := false
+	hasFinalCall := false
+	for _, final := range modes {
+		if final {
+			hasFinalCall = true
+		} else {
+			hasStreamingCall = true
+		}
+	}
+	if !hasStreamingCall || !hasFinalCall {
+		t.Fatalf("resolver call final flags = %v, want both streaming=false and final=true calls", modes)
+	}
+}
+
 // runRichCardSilentScenario exercises processInteractiveEvents in rich
 // (Card 2.0) mode, sending the given EventText chunks followed by a terminal
 // EventResult. Returns call counts so each test case can assert the no-trace
@@ -6169,9 +6246,9 @@ func (s *controllableAgentSession) Close() error {
 
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
-	nextSession     AgentSession
-	listFn          func() ([]AgentSessionInfo, error)
-	startSessionFn  func(ctx context.Context, sessionID string) (AgentSession, error)
+	nextSession    AgentSession
+	listFn         func() ([]AgentSessionInfo, error)
+	startSessionFn func(ctx context.Context, sessionID string) (AgentSession, error)
 }
 
 func (a *controllableAgent) Name() string { return "controllable" }
