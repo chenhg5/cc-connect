@@ -4585,7 +4585,7 @@ var toolDescriptors = []toolDescriptor{
 		IconToken:       "command_outlined",
 		Title:           "Run command",
 		Sanitizer:       toolSanitizerCommand,
-		ParamKeys:       []string{"description", "command", "script"},
+		ParamKeys:       []string{"cmd", "command", "script", "description"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run|execute)\s+(?:command|script)?\s*(.+)$`)},
 	},
 	{
@@ -4785,7 +4785,63 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 	if desc != nil && desc.Title == "Read" && isSkillPathValue(cleanDetail) {
 		title = "Skill Read"
 	}
+	if desc != nil && desc.Title == "Run command" {
+		if commandTitle, commandIcon, ok := classifyCommandToolDetail(cleanDetail); ok {
+			title = commandTitle
+			icon = commandIcon
+		}
+	}
 	return toolDisplay{Title: title, IconToken: icon, Detail: cleanDetail}
+}
+
+func classifyCommandToolDetail(detail string) (title, icon string, ok bool) {
+	command := strings.ToLower(strings.TrimSpace(stripToolDisplayQuotes(detail)))
+	if command == "" {
+		return "", "", false
+	}
+	if strings.HasPrefix(command, "git ") || command == "git" {
+		return "Git", "code_outlined", true
+	}
+	if strings.HasPrefix(command, "gh ") || command == "gh" {
+		return "GitHub", "cloud_outlined", true
+	}
+	if strings.HasPrefix(command, "cc-connect ") || command == "cc-connect" {
+		return "cc-connect", "robot_outlined", true
+	}
+	if commandHasAnyPrefix(command, "go test", "npm test", "npm run test", "pnpm test", "yarn test", "pytest", "cargo test", "swift test", "xcodebuild test") {
+		return "Run tests", "list-check_outlined", true
+	}
+	if commandHasAnyPrefix(command, "make test", "go build", "make build", "npm run build", "pnpm build", "yarn build", "cargo build", "swift build", "xcodebuild build") {
+		return "Build", "codeblock_outlined", true
+	}
+	if commandHasAnyPrefix(command, "ps ", "kill ", "pkill ", "launchctl ", "lsof ") {
+		return "Inspect process", "computer_outlined", true
+	}
+	if commandHasAnyPrefix(command, "rg ", "grep ", "ag ", "ack ") || strings.Contains(command, " | grep ") || strings.Contains(command, " | rg ") {
+		return "Search text", "doc-search_outlined", true
+	}
+	if commandHasAnyPrefix(command, "ls ", "ls\n", "ls\t", "ls;", "ls &&", "stat ", "pwd", "cat ", "sed ", "awk ", "head ", "tail ", "wc ", "strings ", "find ") {
+		return "Inspect files", "file-link-text_outlined", true
+	}
+	if commandHasAnyPrefix(command, "curl ", "wget ", "ssh ", "scp ", "rsync ") {
+		return "Network", "cloud_outlined", true
+	}
+	if commandHasAnyPrefix(command, "cp ", "mv ", "rm ", "mkdir ", "rmdir ", "chmod ", "chown ", "touch ") {
+		return "File operation", "folder_outlined", true
+	}
+	if commandHasAnyPrefix(command, "sleep ", "osascript -e 'delay ", "osascript -e \"delay ") {
+		return "Wait", "alarm-clock_outlined", true
+	}
+	return "", "", false
+}
+
+func commandHasAnyPrefix(command string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(command, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
@@ -5202,7 +5258,7 @@ func richStepDisplayName(step core.ToolStep) string {
 	if step.Kind == core.ToolStepKindThinking {
 		return "Thinking"
 	}
-	return buildToolDisplay(step.Name, "").Title
+	return buildToolDisplay(step.Name, step.Summary).Title
 }
 
 func richStepBody(step core.ToolStep) string {
@@ -5328,7 +5384,7 @@ func richStepElement(step core.ToolStep) map[string]any {
 		elem["icon"] = map[string]any{"tag": "standard_icon", "token": reasoningToolIcon}
 		return elem
 	}
-	elem["icon"] = map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)}
+	elem["icon"] = map[string]any{"tag": "standard_icon", "token": buildToolDisplay(step.Name, step.Summary).IconToken}
 	return elem
 }
 
