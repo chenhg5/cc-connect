@@ -6274,7 +6274,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		_, sessions, _, err := e.commandContext(p, msg)
+		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
@@ -6284,7 +6284,8 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
+		displayName := e.currentSessionDisplayName(agent, sessions, agentID)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History)))
 		return
 	}
 
@@ -10283,14 +10284,39 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 // Navigable sub-cards (for in-place card updates)
 // ──────────────────────────────────────────────────────────────
 
+func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, agentID string) string {
+	if agentID == "" || agentID == e.i18n.T(MsgSessionNotStarted) {
+		return e.i18n.T(MsgUntitled)
+	}
+	displayName := sessions.GetSessionName(agentID)
+	if displayName != "" {
+		return displayName
+	}
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err == nil {
+		for _, as := range agentSessions {
+			if as.ID == agentID {
+				displayName = strings.ReplaceAll(as.Summary, "\n", " ")
+				displayName = strings.Join(strings.Fields(displayName), " ")
+				break
+			}
+		}
+	}
+	if displayName == "" {
+		return e.i18n.T(MsgUntitled)
+	}
+	return displayName
+}
+
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	_, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
+	displayName := e.currentSessionDisplayName(agent, sessions, agentID)
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History))
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).
