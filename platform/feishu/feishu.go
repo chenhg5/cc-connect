@@ -4424,8 +4424,8 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 // ═══════════════════════════════════════════════════════════════
 
 const (
-	defaultToolIcon      = "setting-inter_outlined"
-	reasoningToolIcon    = "report_outlined"
+	defaultToolIcon      = "app-default_outlined"
+	reasoningToolIcon    = "mindmap_outlined"
 	feishuCardTableLimit = 3
 )
 
@@ -4574,8 +4574,15 @@ var toolDescriptors = []toolDescriptor{
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+files(?:\s+by\s+pattern)?|glob)\s+(.+)$`)},
 	},
 	{
-		Aliases:         []string{"exec", "exec_command", "bash", "shell", "run_shell_command", "write_stdin", "command", "run"},
-		IconToken:       "setting_outlined",
+		Aliases:   []string{"write_stdin", "stdin", "command_input"},
+		IconToken: "keyboard_outlined",
+		Title:     "Command I/O",
+		Sanitizer: toolSanitizerCommand,
+		ParamKeys: []string{"chars"},
+	},
+	{
+		Aliases:         []string{"exec", "exec_command", "bash", "shell", "run_shell_command", "command", "run"},
+		IconToken:       "command_outlined",
 		Title:           "Run command",
 		Sanitizer:       toolSanitizerCommand,
 		ParamKeys:       []string{"description", "command", "script"},
@@ -4634,7 +4641,7 @@ var toolDescriptors = []toolDescriptor{
 	},
 	{
 		Aliases:   []string{"permissions", "permission"},
-		IconToken: "setting-inter_outlined",
+		IconToken: "safe-settings_outlined",
 		Title:     "Permissions",
 		Sanitizer: toolSanitizerGeneric,
 	},
