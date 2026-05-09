@@ -41,65 +41,228 @@ func TestStripAppMentionText(t *testing.T) {
 	}
 }
 
-func TestShouldHandleSlackMessageEventRequiresMentionOutsideDM(t *testing.T) {
+func TestStripSlackBotMentionText(t *testing.T) {
 	tests := []struct {
-		name string
-		ev   *slackevents.MessageEvent
-		want bool
+		name      string
+		text      string
+		botUserID string
+		want      string
 	}{
 		{
-			name: "dm message is handled",
-			ev:   &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", Text: "hello"},
-			want: true,
+			name:      "strips bot mention",
+			text:      "hey <@U0BOT123> run tests",
+			botUserID: "U0BOT123",
+			want:      "hey  run tests",
 		},
 		{
-			name: "assistant dm thread is handled",
-			ev:   &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", ThreadTimeStamp: "1710000000.000001", Text: "hello"},
-			want: true,
+			name:      "strips bot nick mention",
+			text:      "<@!U0BOT123> run tests",
+			botUserID: "U0BOT123",
+			want:      "run tests",
 		},
 		{
-			name: "channel message is ignored",
-			ev:   &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", Text: "hello"},
-			want: false,
+			name:      "keeps other user mention",
+			text:      "ask <@U0OTHER> about it",
+			botUserID: "U0BOT123",
+			want:      "ask <@U0OTHER> about it",
 		},
 		{
-			name: "channel thread reply is ignored",
-			ev:   &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", ThreadTimeStamp: "1710000000.000001", Text: "hello"},
-			want: false,
-		},
-		{
-			name: "private channel message is ignored",
-			ev:   &slackevents.MessageEvent{ChannelType: "group", Channel: "G123", Text: "hello"},
-			want: false,
-		},
-		{
-			name: "mpim message is ignored",
-			ev:   &slackevents.MessageEvent{ChannelType: "mpim", Channel: "G123", Text: "hello"},
-			want: false,
-		},
-		{
-			name: "empty channel type falls back to dm channel id",
-			ev:   &slackevents.MessageEvent{Channel: "D123", Text: "hello"},
-			want: true,
-		},
-		{
-			name: "empty channel type non-dm channel is ignored",
-			ev:   &slackevents.MessageEvent{Channel: "C123", Text: "hello"},
-			want: false,
-		},
-		{
-			name: "nil event is ignored",
-			ev:   nil,
-			want: false,
+			name:      "empty bot id keeps text",
+			text:      "<@U0BOT123> run tests",
+			botUserID: "",
+			want:      "<@U0BOT123> run tests",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldHandleSlackMessageEvent(tt.ev); got != tt.want {
+			if got := stripSlackBotMentionText(tt.text, tt.botUserID); got != tt.want {
+				t.Fatalf("stripSlackBotMentionText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRememberSlackEventDedupsChannelTimestamp(t *testing.T) {
+	p := &Platform{}
+	if !p.rememberSlackEvent("C123", "1710000000.000001") {
+		t.Fatal("first event should be remembered")
+	}
+	if p.rememberSlackEvent("C123", "1710000000.000001") {
+		t.Fatal("duplicate event should be rejected")
+	}
+	if !p.rememberSlackEvent("C123", "1710000000.000002") {
+		t.Fatal("different timestamp should be accepted")
+	}
+	if !p.rememberSlackEvent("G123", "1710000000.000001") {
+		t.Fatal("same timestamp in different channel should be accepted")
+	}
+}
+
+func TestShouldHandleSlackMessageEventMentionPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy slackMentionPolicy
+		ev     *slackevents.MessageEvent
+		want   bool
+	}{
+		{
+			name:   "dm message is handled with default policy",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", Text: "hello"},
+			want:   true,
+		},
+		{
+			name:   "assistant dm thread is handled with default policy",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{ChannelType: "im", Channel: "D123", ThreadTimeStamp: "1710000000.000001", Text: "hello"},
+			want:   true,
+		},
+		{
+			name:   "channel message is ignored by default",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", Text: "hello"},
+			want:   false,
+		},
+		{
+			name:   "channel thread reply is ignored by default",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", ThreadTimeStamp: "1710000000.000001", Text: "hello"},
+			want:   false,
+		},
+		{
+			name:   "private channel message is ignored by default",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{ChannelType: "group", Channel: "G123", Text: "hello"},
+			want:   false,
+		},
+		{
+			name:   "mpim message is ignored by default",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{ChannelType: "mpim", Channel: "G123", Text: "hello"},
+			want:   false,
+		},
+		{
+			name:   "empty channel type falls back to dm channel id",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{Channel: "D123", Text: "hello"},
+			want:   true,
+		},
+		{
+			name:   "empty channel type non-dm channel is ignored by default",
+			policy: defaultSlackMentionPolicy(),
+			ev:     &slackevents.MessageEvent{Channel: "C123", Text: "hello"},
+			want:   false,
+		},
+		{
+			name:   "global no-mention policy handles channel messages",
+			policy: slackMentionPolicy{requireMention: false},
+			ev:     &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", Text: "hello"},
+			want:   true,
+		},
+		{
+			name: "channel override can allow no-mention messages",
+			policy: slackMentionPolicy{
+				requireMention:         true,
+				requireMentionChannels: map[string]bool{"C123": false},
+			},
+			ev:   &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", Text: "hello"},
+			want: true,
+		},
+		{
+			name: "channel override can require mention when global allows",
+			policy: slackMentionPolicy{
+				requireMention:         false,
+				requireMentionChannels: map[string]bool{"C123": true},
+			},
+			ev:   &slackevents.MessageEvent{ChannelType: "channel", Channel: "C123", Text: "hello"},
+			want: false,
+		},
+		{
+			name: "thread override can allow no-mention replies",
+			policy: slackMentionPolicy{
+				requireMention:        true,
+				requireMentionThreads: map[string]bool{"C123:1710000000.000001": false},
+			},
+			ev: &slackevents.MessageEvent{
+				ChannelType:     "channel",
+				Channel:         "C123",
+				ThreadTimeStamp: "1710000000.000001",
+				Text:            "hello",
+			},
+			want: true,
+		},
+		{
+			name: "thread override wins over channel override",
+			policy: slackMentionPolicy{
+				requireMention:         true,
+				requireMentionChannels: map[string]bool{"C123": false},
+				requireMentionThreads:  map[string]bool{"C123:1710000000.000001": true},
+			},
+			ev: &slackevents.MessageEvent{
+				ChannelType:     "channel",
+				Channel:         "C123",
+				ThreadTimeStamp: "1710000000.000001",
+				Text:            "hello",
+			},
+			want: false,
+		},
+		{
+			name: "thread timestamp shorthand is accepted",
+			policy: slackMentionPolicy{
+				requireMention:        true,
+				requireMentionThreads: map[string]bool{"1710000000.000001": false},
+			},
+			ev: &slackevents.MessageEvent{
+				ChannelType:     "group",
+				Channel:         "G123",
+				ThreadTimeStamp: "1710000000.000001",
+				Text:            "hello",
+			},
+			want: true,
+		},
+		{
+			name:   "nil event is ignored",
+			policy: defaultSlackMentionPolicy(),
+			ev:     nil,
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldHandleSlackMessageEvent(tt.ev, tt.policy); got != tt.want {
 				t.Fatalf("shouldHandleSlackMessageEvent() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewSlackMentionPolicyFromOptions(t *testing.T) {
+	policy, err := newSlackMentionPolicy(map[string]any{
+		"require_mention": false,
+		"require_mention_channels": map[string]any{
+			"C123": true,
+			"G123": false,
+		},
+		"require_mention_threads": map[string]bool{
+			"C123:1710000000.000001": false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("newSlackMentionPolicy() error = %v", err)
+	}
+	if policy.requireMention {
+		t.Fatal("requireMention = true, want false")
+	}
+	if got := policy.requireMentionChannels["C123"]; !got {
+		t.Fatalf("channel override C123 = %v, want true", got)
+	}
+	if got := policy.requireMentionChannels["G123"]; got {
+		t.Fatalf("channel override G123 = %v, want false", got)
+	}
+	if got := policy.requireMentionThreads["C123:1710000000.000001"]; got {
+		t.Fatalf("thread override = %v, want false", got)
 	}
 }
 
