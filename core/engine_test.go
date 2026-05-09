@@ -1706,7 +1706,8 @@ func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
 		ToolMessages:     true,
-		Mode:             "rich",
+		Mode:             "full",
+		CardMode:         "rich",
 	})
 	sessionKey := "feishu:user-rich-thinking"
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -1745,7 +1746,8 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
 		ToolMessages:     true,
-		Mode:             "rich",
+		Mode:             "full",
+		CardMode:         "rich",
 	})
 	sessionKey := "feishu:user-rich-tool-result"
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -1846,7 +1848,8 @@ func runRichCardSilentScenario(t *testing.T, name string, chunks []string, final
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		Mode:             "rich",
+		Mode:             "full",
+		CardMode:         "rich",
 		ThinkingMessages: true,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
@@ -1942,7 +1945,8 @@ func TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody(t *test
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		Mode:             "rich",
+		Mode:             "full",
+		CardMode:         "rich",
 		ThinkingMessages: true,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
@@ -1998,7 +2002,8 @@ func TestProcessInteractiveEvents_RichCard_ToolThenNoReply(t *testing.T) {
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		Mode:             "rich",
+		Mode:             "full",
+		CardMode:         "rich",
 		ThinkingMessages: true,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
