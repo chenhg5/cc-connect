@@ -999,6 +999,8 @@ func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"pwd"}`},
 		{Kind: core.ToolStepKindTool, Name: "functions.write_stdin", Summary: `{"chars":"q"}`},
+		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"git status --short"}`},
+		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"ps aux | grep cc-connect"}`},
 		{Kind: core.ToolStepKindTool, Name: "apply_patch", Summary: "/tmp/file.go"},
 		{Kind: core.ToolStepKindTool, Name: "multi_tool_use.parallel", Summary: "3 tool calls"},
 		{Kind: core.ToolStepKindTool, Name: "tool_search_tool", Summary: "search available tools"},
@@ -1011,15 +1013,19 @@ func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
 		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
 	}
 	for _, want := range []string{
-		"Run command",
+		"Inspect files",
 		"Command I/O",
+		"Git",
+		"Inspect process",
 		"Edit",
 		"Run tools",
 		"Search tools",
 		"Update plan",
 		"Ask user",
-		"command_outlined",
+		"file-link-text_outlined",
 		"keyboard_outlined",
+		"code_outlined",
+		"computer_outlined",
 		"edit_outlined",
 		"list-check_outlined",
 		"search_outlined",
