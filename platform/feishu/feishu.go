@@ -5247,13 +5247,6 @@ func sanitizeCardMarkdownForCard(text string) string {
 	return sanitizeCardMarkdownSegmentsForCard([]string{text})[0]
 }
 
-func getToolIcon(toolName string) string {
-	if desc := resolveToolDescriptor(toolName); desc != nil && desc.IconToken != "" {
-		return desc.IconToken
-	}
-	return defaultToolIcon
-}
-
 func richStepDisplayName(step core.ToolStep) string {
 	if step.Kind == core.ToolStepKindThinking {
 		return "Thinking"
