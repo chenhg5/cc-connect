@@ -90,6 +90,16 @@ type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
 }
 
+// RichCardMarkdownResolver is an optional interface for platforms that need to
+// pre-process rich-card markdown before it is rendered or streamed.
+//
+// Feishu uses this to turn markdown image URLs into real uploaded image keys:
+// intermediate streaming frames may return quickly without waiting for uploads,
+// while final frames may wait briefly so the completed card can embed images.
+type RichCardMarkdownResolver interface {
+	ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string
+}
+
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {
