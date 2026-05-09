@@ -116,6 +116,84 @@ func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
 	}
 }
 
+func TestDetectFeishuFileMessageType(t *testing.T) {
+	tests := []struct {
+		name     string
+		mimeType string
+		fileName string
+		fileType string
+		msgType  string
+	}{
+		{
+			name:     "mp4 video",
+			mimeType: "video/mp4",
+			fileName: "demo.mp4",
+			fileType: larkim.FileTypeMp4,
+			msgType:  larkim.MsgTypeMedia,
+		},
+		{
+			name:     "opus audio",
+			mimeType: "audio/ogg",
+			fileName: "voice.ogg",
+			fileType: larkim.FileTypeOpus,
+			msgType:  larkim.MsgTypeAudio,
+		},
+		{
+			name:     "pdf file",
+			mimeType: "application/pdf",
+			fileName: "report.pdf",
+			fileType: larkim.FileTypePdf,
+			msgType:  larkim.MsgTypeFile,
+		},
+		{
+			name:     "unknown file",
+			mimeType: "application/octet-stream",
+			fileName: "payload.bin",
+			fileType: larkim.FileTypeStream,
+			msgType:  larkim.MsgTypeFile,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fileType := detectFeishuFileType(tt.mimeType, tt.fileName)
+			if fileType != tt.fileType {
+				t.Fatalf("detectFeishuFileType() = %q, want %q", fileType, tt.fileType)
+			}
+			if msgType := detectFeishuFileMessageType(fileType); msgType != tt.msgType {
+				t.Fatalf("detectFeishuFileMessageType() = %q, want %q", msgType, tt.msgType)
+			}
+		})
+	}
+}
+
+func TestBuildFeishuFileMessageContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		msgType string
+	}{
+		{name: "file", msgType: larkim.MsgTypeFile},
+		{name: "audio", msgType: larkim.MsgTypeAudio},
+		{name: "media", msgType: larkim.MsgTypeMedia},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content, err := buildFeishuFileMessageContent(tt.msgType, "file_v2_test")
+			if err != nil {
+				t.Fatalf("buildFeishuFileMessageContent() error = %v", err)
+			}
+			var got map[string]string
+			if err := json.Unmarshal([]byte(content), &got); err != nil {
+				t.Fatalf("content is not JSON: %v", err)
+			}
+			if got["file_key"] != "file_v2_test" {
+				t.Fatalf("file_key = %q, want file_v2_test", got["file_key"])
+			}
+		})
+	}
+}
+
 func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {

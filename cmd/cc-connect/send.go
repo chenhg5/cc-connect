@@ -73,6 +73,8 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	var useStdin bool
 	var imagePaths []string
 	var filePaths []string
+	var audioPaths []string
+	var videoPaths []string
 	var positional []string
 
 	for i := 0; i < len(args); i++ {
@@ -107,6 +109,18 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			filePaths = append(filePaths, args[i])
+		case "--audio":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--audio requires a path")
+			}
+			i++
+			audioPaths = append(audioPaths, args[i])
+		case "--video":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--video requires a path")
+			}
+			i++
+			videoPaths = append(videoPaths, args[i])
 		case "--stdin":
 			useStdin = true
 		case "--data-dir":
@@ -147,8 +161,17 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	if err != nil {
 		return req, "", err
 	}
+	audioFiles, err := loadTypedFileAttachments(audioPaths, "audio")
+	if err != nil {
+		return req, "", err
+	}
+	videoFiles, err := loadTypedFileAttachments(videoPaths, "video")
+	if err != nil {
+		return req, "", err
+	}
 	req.Images = images
-	req.Files = files
+	req.Files = append(files, audioFiles...)
+	req.Files = append(req.Files, videoFiles...)
 
 	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
 		return req, "", fmt.Errorf("message or attachment is required")
@@ -182,6 +205,44 @@ func loadFileAttachments(paths []string) ([]core.FileAttachment, error) {
 		files = append(files, core.FileAttachment{MimeType: mimeType, Data: data, FileName: fileName})
 	}
 	return files, nil
+}
+
+func loadTypedFileAttachments(paths []string, mediaType string) ([]core.FileAttachment, error) {
+	files := make([]core.FileAttachment, 0, len(paths))
+	for _, path := range paths {
+		data, fileName, mimeType, err := readAttachment(path)
+		if err != nil {
+			return nil, err
+		}
+		if !attachmentMatchesMediaType(mimeType, fileName, mediaType) {
+			return nil, fmt.Errorf("%s is not %s media (detected mime: %s)", path, mediaType, mimeType)
+		}
+		files = append(files, core.FileAttachment{MimeType: mimeType, Data: data, FileName: fileName})
+	}
+	return files, nil
+}
+
+func attachmentMatchesMediaType(mimeType, fileName, mediaType string) bool {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	switch mediaType {
+	case "audio":
+		if strings.HasPrefix(mimeType, "audio/") {
+			return true
+		}
+		switch ext {
+		case ".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav":
+			return true
+		}
+	case "video":
+		if strings.HasPrefix(mimeType, "video/") {
+			return true
+		}
+		switch ext {
+		case ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm":
+			return true
+		}
+	}
+	return false
 }
 
 const maxAttachmentSize = 50 << 20 // 50 MB
@@ -252,6 +313,8 @@ func printSendUsage() {
        cc-connect send [options] --stdin < file
        cc-connect send [options] --image <path>
        cc-connect send [options] --file <path>
+       cc-connect send [options] --audio <path>
+       cc-connect send [options] --video <path>
        echo "msg" | cc-connect send [options] --stdin
 
 Send a message or attachment to an active cc-connect session.
@@ -260,6 +323,8 @@ Options:
   -m, --message <text>     Message to send (preferred over positional args)
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
+      --audio <path>       Send an audio attachment (repeatable)
+      --video <path>       Send a video attachment (repeatable)
       --stdin              Read message from stdin (best for long/special-char messages)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
@@ -271,6 +336,8 @@ Examples:
   cc-connect send -m "Build completed successfully"
   cc-connect send --message "Chart generated" --image /tmp/chart.png
   cc-connect send --file /tmp/report.pdf
+  cc-connect send --video /tmp/demo.mp4
+  cc-connect send --audio /tmp/voice.opus
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)
