@@ -970,7 +970,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadSeparatesReasoningAndTools(t *testi
 	if panelContains(t, panels[1], "Inspecting event routing") {
 		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
 	}
-	if !panelContains(t, panels[0], "report_outlined") {
+	if !panelContains(t, panels[0], "mindmap_outlined") {
 		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
 	}
 }
@@ -1012,12 +1012,14 @@ func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Run command",
+		"Command I/O",
 		"Edit",
 		"Run tools",
 		"Search tools",
 		"Update plan",
 		"Ask user",
-		"setting_outlined",
+		"command_outlined",
+		"keyboard_outlined",
 		"edit_outlined",
 		"list-check_outlined",
 		"search_outlined",
@@ -1078,7 +1080,7 @@ func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 	if panelContains(t, panels[1], "Inspecting event routing") {
 		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
 	}
-	if !panelContains(t, panels[0], "report_outlined") {
+	if !panelContains(t, panels[0], "mindmap_outlined") {
 		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
 	}
 }
