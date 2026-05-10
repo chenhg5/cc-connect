@@ -674,13 +674,13 @@ func querySessionMessageCounts() map[string]int {
 
 func opencodeDBPath() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "opencode", "opencode-local.db")
+		return filepath.Join(xdg, "opencode", "opencode.db")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".local", "share", "opencode", "opencode-local.db")
+	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
 }
 
 func (a *Agent) GetSessionTitle(sessionID string) string {
