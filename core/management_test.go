@@ -306,29 +306,11 @@ func TestMgmt_ProjectPatch(t *testing.T) {
 func TestMgmt_Sessions(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 
-	s := e.sessions.GetOrCreateActive("user1")
-	s.Name = "local name"
-	s.SetAgentSessionID("agent-session-1", "test")
-	e.sessions.SetSessionName("agent-session-1", "custom name")
+	e.sessions.GetOrCreateActive("user1")
 
 	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
 	if !r.OK {
 		t.Fatalf("sessions list failed: %s", r.Error)
-	}
-	var listData struct {
-		Sessions []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"sessions"`
-	}
-	if err := json.Unmarshal(r.Data, &listData); err != nil {
-		t.Fatalf("unmarshal sessions list: %v", err)
-	}
-	if len(listData.Sessions) != 1 {
-		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
-	}
-	if listData.Sessions[0].Name != "custom name" {
-		t.Fatalf("session name = %q, want custom name", listData.Sessions[0].Name)
 	}
 
 	// Create a session via API
@@ -345,9 +327,6 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 
 	s := e.sessions.GetOrCreateActive("user1")
-	s.Name = "local detail"
-	s.SetAgentSessionID("agent-detail-1", "test")
-	e.sessions.SetSessionName("agent-detail-1", "custom detail")
 	s.AddHistory("user", "hello")
 	s.AddHistory("assistant", "hi there")
 
@@ -357,7 +336,6 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 
 	var data struct {
-		Name    string           `json:"name"`
 		History []map[string]any `json:"history"`
 	}
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -365,9 +343,6 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 	if len(data.History) != 2 {
 		t.Fatalf("expected 2 history entries, got %d", len(data.History))
-	}
-	if data.Name != "custom detail" {
-		t.Fatalf("session detail name = %q, want custom detail", data.Name)
 	}
 }
 

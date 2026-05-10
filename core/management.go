@@ -923,7 +923,6 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		stored := e.sessions.AllSessions()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
-			displayName := e.sessions.DisplayName(s)
 			s.mu.Lock()
 			histCount := len(s.History)
 			var lastMsg map[string]any
@@ -941,7 +940,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			}
 			info := map[string]any{
 				"id":            s.ID,
-				"name":          displayName,
+				"name":          s.Name,
 				"session_key":   idToKey[s.ID],
 				"agent_type":    s.AgentType,
 				"active":        activeIDs[s.ID],
@@ -1039,11 +1038,10 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 		_, live := e.interactiveStates[sessionKey]
 		e.interactiveMu.Unlock()
 
-		displayName := e.sessions.DisplayName(s)
 		s.mu.Lock()
 		data := map[string]any{
 			"id":               s.ID,
-			"name":             displayName,
+			"name":             s.Name,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
 			"agent_type":       s.AgentType,
