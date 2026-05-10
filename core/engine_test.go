@@ -3142,6 +3142,76 @@ func TestCmdCurrent_NotStartedSessionShowsUntitled(t *testing.T) {
 	}
 }
 
+type stubTitleAgent struct {
+	stubAgent
+	titles map[string]string
+}
+
+func (a *stubTitleAgent) GetSessionTitle(sessionID string) string {
+	if a.titles == nil {
+		return ""
+	}
+	return a.titles[sessionID]
+}
+
+func TestCmdCurrent_SessionTitleProviderFallback(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubTitleAgent{
+		titles: map[string]string{
+			"session-not-in-list": "Title from DB",
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-not-in-list", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Title from DB") {
+		t.Fatalf("current text = %q, want 'Title from DB' from SessionTitleProvider", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_SessionTitleProviderNotUsedWhenListMatches(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgentWithTitle{
+		stubTitleAgent: stubTitleAgent{
+			titles: map[string]string{
+				"session-abc": "DB Title (should not appear)",
+			},
+		},
+		sessions: []AgentSessionInfo{
+			{ID: "session-abc", Summary: "List Summary", MessageCount: 5},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "List Summary") {
+		t.Fatalf("current text = %q, want 'List Summary' from ListSessions", p.sent[0])
+	}
+}
+
+type stubListAgentWithTitle struct {
+	stubTitleAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *stubListAgentWithTitle) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
+}
+
 func TestCmdDelete_BatchCommaList(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{

@@ -674,11 +674,36 @@ func querySessionMessageCounts() map[string]int {
 
 func opencodeDBPath() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "opencode", "opencode.db")
+		return filepath.Join(xdg, "opencode", "opencode-local.db")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+	return filepath.Join(home, ".local", "share", "opencode", "opencode-local.db")
+}
+
+func (a *Agent) GetSessionTitle(sessionID string) string {
+	return querySessionTitle(sessionID)
+}
+
+func querySessionTitle(sessionID string) string {
+	dbPath := opencodeDBPath()
+	if dbPath == "" {
+		return ""
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return ""
+	}
+	out, err := exec.Command(sqlite3, dbPath,
+		"SELECT title FROM session WHERE id = ? LIMIT 1", sessionID).Output()
+	if err != nil {
+		return ""
+	}
+	title := strings.TrimSpace(string(out))
+	return title
 }

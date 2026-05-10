@@ -10303,6 +10303,11 @@ func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager
 		}
 	}
 	if displayName == "" {
+		if tp, ok := agent.(SessionTitleProvider); ok {
+			displayName = tp.GetSessionTitle(agentID)
+		}
+	}
+	if displayName == "" {
 		return e.i18n.T(MsgUntitled)
 	}
 	return displayName
