@@ -134,3 +134,178 @@ func TestAgent_SetModel(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+// ── handleEvent unit tests (old vs new qodercli format) ──
+
+func newTestSession() *qoderSession {
+	ctx, cancel := context.WithCancel(context.Background())
+	qs := &qoderSession{
+		events: make(chan core.Event, 64),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	qs.alive.Store(true)
+	return qs
+}
+
+func TestHandleAssistant_OldFormat(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	ev := &streamEvent{
+		Type:      "assistant",
+		SessionID: "old-session-1",
+		Message: &streamMessage{
+			Status:  "finished",
+			Content: []byte(`[{"type":"text","text":"hello old"}]`),
+		},
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		if got.Type != core.EventText || got.Content != "hello old" {
+			t.Errorf("got type=%s content=%q, want EventText/hello old", got.Type, got.Content)
+		}
+	default:
+		t.Error("expected a text event but channel was empty")
+	}
+}
+
+func TestHandleAssistant_NewFormat(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	ev := &streamEvent{
+		Type:      "assistant",
+		SessionID: "new-session-1",
+		Message: &streamMessage{
+			StopReason: "end_turn",
+			Content:    []byte(`[{"type":"text","text":"hello new"}]`),
+		},
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		if got.Type != core.EventText || got.Content != "hello new" {
+			t.Errorf("got type=%s content=%q, want EventText/hello new", got.Type, got.Content)
+		}
+	default:
+		t.Error("expected a text event but channel was empty")
+	}
+}
+
+func TestHandleAssistant_ToolUseStopReason(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	ev := &streamEvent{
+		Type: "assistant",
+		Message: &streamMessage{
+			StopReason: "tool_use",
+			Content:    []byte(`[{"type":"function","name":"Bash","input":"{\"command\":\"ls\"}"}]`),
+		},
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		if got.Type != core.EventToolUse || got.ToolName != "Bash" {
+			t.Errorf("got type=%s tool=%s, want EventToolUse/Bash", got.Type, got.ToolName)
+		}
+	default:
+		t.Error("expected a tool_use event but channel was empty")
+	}
+}
+
+func TestHandleAssistant_SkipsNonFinished(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	// Neither status="finished" nor stop_reason set — should be skipped
+	ev := &streamEvent{
+		Type: "assistant",
+		Message: &streamMessage{
+			Status:  "tool_calling",
+			Content: []byte(`[{"type":"text","text":"should be skipped"}]`),
+		},
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		t.Errorf("expected no event, got type=%s content=%q", got.Type, got.Content)
+	default:
+		// ok
+	}
+}
+
+func TestHandleResult_OldFormat(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	ev := &streamEvent{
+		Type:      "result",
+		SessionID: "old-session-1",
+		Message: &streamMessage{
+			Content: []byte(`[{"type":"text","text":"result old"}]`),
+		},
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		if got.Type != core.EventResult || got.Content != "result old" {
+			t.Errorf("got type=%s content=%q, want EventResult/result old", got.Type, got.Content)
+		}
+	default:
+		t.Error("expected a result event but channel was empty")
+	}
+}
+
+func TestHandleResult_NewFormat(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	// 0.2.x: message is nil, result text in top-level field
+	ev := &streamEvent{
+		Type:      "result",
+		SessionID: "new-session-1",
+		Result:    "result new",
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		if got.Type != core.EventResult || got.Content != "result new" {
+			t.Errorf("got type=%s content=%q, want EventResult/result new", got.Type, got.Content)
+		}
+	default:
+		t.Error("expected a result event but channel was empty")
+	}
+}
+
+func TestHandleResult_OldFormatTakesPriority(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	// If both message.content and top-level result exist, message.content wins
+	ev := &streamEvent{
+		Type:   "result",
+		Result: "fallback text",
+		Message: &streamMessage{
+			Content: []byte(`[{"type":"text","text":"primary text"}]`),
+		},
+	}
+	qs.handleEvent(ev)
+
+	select {
+	case got := <-qs.events:
+		if got.Content != "primary text" {
+			t.Errorf("got content=%q, want primary text", got.Content)
+		}
+	default:
+		t.Error("expected a result event but channel was empty")
+	}
+}
