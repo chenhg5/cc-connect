@@ -395,6 +395,16 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 	return sm.sessionNames[agentSessionID]
 }
 
+func (sm *SessionManager) displayNameForSession(s *Session) string {
+	if s == nil {
+		return ""
+	}
+	if name := sm.GetSessionName(s.GetAgentSessionID()); name != "" {
+		return name
+	}
+	return s.GetName()
+}
+
 // UpdateUserMeta updates the human-readable metadata for a session key.
 // Only non-empty fields are applied (merge behavior).
 func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) {

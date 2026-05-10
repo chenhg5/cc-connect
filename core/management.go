@@ -141,10 +141,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -908,68 +908,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 
 	switch r.Method {
 	case http.MethodGet:
-		activeKeys := make(map[string]string) // sessionKey → platform
-		e.interactiveMu.Lock()
-		for key, state := range e.interactiveStates {
-			pName := ""
-			if state.platform != nil {
-				pName = state.platform.Name()
-			}
-			activeKeys[key] = pName
-		}
-		e.interactiveMu.Unlock()
-
-		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := e.sessions.AllSessions()
-		sessions := make([]map[string]any, 0, len(stored))
-		for _, s := range stored {
-			s.mu.Lock()
-			histCount := len(s.History)
-			var lastMsg map[string]any
-			if histCount > 0 {
-				last := s.History[histCount-1]
-				preview := last.Content
-				if len(preview) > 200 {
-					preview = preview[:200]
-				}
-				lastMsg = map[string]any{
-					"role":      last.Role,
-					"content":   preview,
-					"timestamp": last.Timestamp,
-				}
-			}
-			info := map[string]any{
-				"id":            s.ID,
-				"name":          s.Name,
-				"session_key":   idToKey[s.ID],
-				"agent_type":    s.AgentType,
-				"active":        activeIDs[s.ID],
-				"history_count": histCount,
-				"created_at":    s.CreatedAt,
-				"updated_at":    s.UpdatedAt,
-				"last_message":  lastMsg,
-			}
-			s.mu.Unlock()
-
-			sessionKey := idToKey[s.ID]
-			_, live := activeKeys[sessionKey]
-			info["live"] = live
-			if p, ok := activeKeys[sessionKey]; ok {
-				info["platform"] = p
-			} else if len(sessionKey) > 0 {
-				parts := splitSessionKey(sessionKey)
-				if len(parts) > 0 {
-					info["platform"] = parts[0]
-				}
-			}
-
-			if meta := e.sessions.GetUserMeta(sessionKey); meta != nil {
-				info["user_name"] = meta.UserName
-				info["chat_name"] = meta.ChatName
-			}
-
-			sessions = append(sessions, info)
-		}
+		sessions, activeKeys := m.projectSessionList(e)
 
 		mgmtJSON(w, http.StatusOK, map[string]any{
 			"sessions":    sessions,
@@ -1006,12 +945,185 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 	}
 }
 
+func (m *ManagementServer) projectSessionList(e *Engine) ([]map[string]any, map[string]string) {
+	activeKeys := make(map[string]string) // sessionKey -> platform
+	e.interactiveMu.Lock()
+	for key, state := range e.interactiveStates {
+		pName := ""
+		if state.platform != nil {
+			pName = state.platform.Name()
+		}
+		activeKeys[key] = pName
+	}
+	e.interactiveMu.Unlock()
+
+	idToKey, activeIDs := e.sessions.SessionKeyMap()
+	stored := e.sessions.AllSessions()
+	byAgentID := make(map[string]*Session, len(stored))
+	var localOnly []*Session
+	for _, s := range stored {
+		agentID := s.GetAgentSessionID()
+		if agentID == "" {
+			localOnly = append(localOnly, s)
+			continue
+		}
+		if byAgentID[agentID] == nil {
+			byAgentID[agentID] = s
+		}
+	}
+
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	useAgentSessions := err == nil && len(agentSessions) > 0
+	if err != nil {
+		slog.Warn("management api: list agent sessions failed", "agent", e.agent.Name(), "error", err)
+		agentSessions = nil
+	}
+	agentSessions = e.applySessionFilter(agentSessions, e.sessions)
+	useAgentSessions = useAgentSessions && len(agentSessions) > 0
+
+	sessions := make([]map[string]any, 0, len(agentSessions)+len(localOnly))
+	if useAgentSessions {
+		for _, as := range agentSessions {
+			sessions = append(sessions, m.projectAgentSessionInfo(e, as, byAgentID[as.ID], idToKey, activeIDs, activeKeys))
+		}
+		return sessions, activeKeys
+	}
+
+	for _, s := range localOnly {
+		sessions = append(sessions, m.projectLocalSessionInfo(e, s, idToKey, activeIDs, activeKeys))
+	}
+	for _, s := range byAgentID {
+		sessions = append(sessions, m.projectLocalSessionInfo(e, s, idToKey, activeIDs, activeKeys))
+	}
+
+	return sessions, activeKeys
+}
+
+func (m *ManagementServer) projectAgentSessionInfo(e *Engine, agentSession AgentSessionInfo, local *Session, idToKey map[string]string, activeIDs map[string]bool, activeKeys map[string]string) map[string]any {
+	sessionKey := ""
+	internalID := agentSession.ID
+	active := false
+	agentType := e.agent.Name()
+	var lastMsg map[string]any
+	createdAt := agentSession.ModifiedAt
+	updatedAt := agentSession.ModifiedAt
+	historyCount := agentSession.MessageCount
+
+	if local != nil {
+		internalID = local.ID
+		sessionKey = idToKey[local.ID]
+		active = activeIDs[local.ID]
+		local.mu.Lock()
+		agentType = local.AgentType
+		if agentType == "" {
+			agentType = e.agent.Name()
+		}
+		if !local.CreatedAt.IsZero() {
+			createdAt = local.CreatedAt
+		}
+		if !local.UpdatedAt.IsZero() {
+			updatedAt = local.UpdatedAt
+		}
+		if len(local.History) > 0 {
+			lastMsg = historyPreview(local.History[len(local.History)-1])
+		}
+		local.mu.Unlock()
+	}
+
+	name := e.sessions.GetSessionName(agentSession.ID)
+	if name == "" {
+		name = cleanSessionSummary(agentSession.Summary)
+	}
+
+	info := map[string]any{
+		"id":               internalID,
+		"name":             name,
+		"session_key":      sessionKey,
+		"agent_session_id": agentSession.ID,
+		"agent_type":       agentType,
+		"active":           active,
+		"history_count":    historyCount,
+		"created_at":       createdAt,
+		"updated_at":       updatedAt,
+		"last_message":     lastMsg,
+		"native":           true,
+	}
+	m.addSessionPlatformFields(info, sessionKey, activeKeys, e)
+	return info
+}
+
+func (m *ManagementServer) projectLocalSessionInfo(e *Engine, s *Session, idToKey map[string]string, activeIDs map[string]bool, activeKeys map[string]string) map[string]any {
+	sessionKey := idToKey[s.ID]
+	displayName := e.sessions.displayNameForSession(s)
+	s.mu.Lock()
+	histCount := len(s.History)
+	var lastMsg map[string]any
+	if histCount > 0 {
+		lastMsg = historyPreview(s.History[histCount-1])
+	}
+	info := map[string]any{
+		"id":               s.ID,
+		"name":             displayName,
+		"session_key":      sessionKey,
+		"agent_session_id": s.AgentSessionID,
+		"agent_type":       s.AgentType,
+		"active":           activeIDs[s.ID],
+		"history_count":    histCount,
+		"created_at":       s.CreatedAt,
+		"updated_at":       s.UpdatedAt,
+		"last_message":     lastMsg,
+		"native":           false,
+	}
+	s.mu.Unlock()
+	m.addSessionPlatformFields(info, sessionKey, activeKeys, e)
+	return info
+}
+
+func (m *ManagementServer) addSessionPlatformFields(info map[string]any, sessionKey string, activeKeys map[string]string, e *Engine) {
+	_, live := activeKeys[sessionKey]
+	info["live"] = live
+	if p, ok := activeKeys[sessionKey]; ok {
+		info["platform"] = p
+	} else if len(sessionKey) > 0 {
+		parts := splitSessionKey(sessionKey)
+		if len(parts) > 0 {
+			info["platform"] = parts[0]
+		}
+	}
+
+	if meta := e.sessions.GetUserMeta(sessionKey); meta != nil {
+		info["user_name"] = meta.UserName
+		info["chat_name"] = meta.ChatName
+	}
+}
+
+func historyPreview(h HistoryEntry) map[string]any {
+	preview := h.Content
+	if len(preview) > 200 {
+		preview = preview[:200]
+	}
+	return map[string]any{
+		"role":      h.Role,
+		"content":   preview,
+		"timestamp": h.Timestamp,
+	}
+}
+
+func cleanSessionSummary(summary string) string {
+	name := strings.ReplaceAll(summary, "\n", " ")
+	name = strings.Join(strings.Fields(name), " ")
+	if name == "" {
+		return "(empty)"
+	}
+	return name
+}
+
 func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *http.Request, e *Engine, sessionID string) {
 	switch r.Method {
 	case http.MethodGet:
 		s := e.sessions.FindByID(sessionID)
 		if s == nil {
-			mgmtError(w, http.StatusNotFound, "session not found")
+			m.handleProjectNativeSessionDetail(w, r, e, sessionID)
 			return
 		}
 		histLimit := 50
@@ -1038,10 +1150,11 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 		_, live := e.interactiveStates[sessionKey]
 		e.interactiveMu.Unlock()
 
+		displayName := e.sessions.displayNameForSession(s)
 		s.mu.Lock()
 		data := map[string]any{
 			"id":               s.ID,
-			"name":             s.Name,
+			"name":             displayName,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
 			"agent_type":       s.AgentType,
@@ -1073,6 +1186,67 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 	default:
 		mgmtError(w, http.StatusMethodNotAllowed, "GET or DELETE only")
 	}
+}
+
+func (m *ManagementServer) handleProjectNativeSessionDetail(w http.ResponseWriter, r *http.Request, e *Engine, agentSessionID string) {
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		mgmtError(w, http.StatusInternalServerError, "list agent sessions: "+err.Error())
+		return
+	}
+	agentSessions = e.applySessionFilter(agentSessions, e.sessions)
+
+	var matched *AgentSessionInfo
+	for i := range agentSessions {
+		if agentSessions[i].ID == agentSessionID {
+			matched = &agentSessions[i]
+			break
+		}
+	}
+	if matched == nil {
+		mgmtError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	histLimit := 50
+	if v := r.URL.Query().Get("history_limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			histLimit = n
+		}
+	}
+	var hist []HistoryEntry
+	if hp, ok := e.agent.(HistoryProvider); ok {
+		if entries, err := hp.GetSessionHistory(e.ctx, agentSessionID, histLimit); err == nil {
+			hist = entries
+		}
+	}
+	histJSON := make([]map[string]any, len(hist))
+	for i, h := range hist {
+		histJSON[i] = map[string]any{
+			"role":      h.Role,
+			"content":   h.Content,
+			"timestamp": h.Timestamp,
+		}
+	}
+
+	name := e.sessions.GetSessionName(agentSessionID)
+	if name == "" {
+		name = cleanSessionSummary(matched.Summary)
+	}
+	mgmtJSON(w, http.StatusOK, map[string]any{
+		"id":               agentSessionID,
+		"name":             name,
+		"session_key":      "",
+		"agent_session_id": agentSessionID,
+		"agent_type":       e.agent.Name(),
+		"active":           false,
+		"live":             false,
+		"history_count":    matched.MessageCount,
+		"created_at":       matched.ModifiedAt,
+		"updated_at":       matched.ModifiedAt,
+		"history":          histJSON,
+		"native":           true,
+	})
 }
 
 func (m *ManagementServer) handleProjectSessionSwitch(w http.ResponseWriter, r *http.Request, e *Engine) {
@@ -1859,10 +2033,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

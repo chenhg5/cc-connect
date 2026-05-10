@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -33,6 +34,26 @@ func (a *deadlineAwareModelAgent) sawDeadline() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.hasDeadline
+}
+
+type managementListAgent struct {
+	stubAgent
+	sessions []AgentSessionInfo
+	history  map[string][]HistoryEntry
+}
+
+func (a *managementListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	out := make([]AgentSessionInfo, len(a.sessions))
+	copy(out, a.sessions)
+	return out, nil
+}
+
+func (a *managementListAgent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]HistoryEntry, error) {
+	entries := append([]HistoryEntry(nil), a.history[sessionID]...)
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
 }
 
 // testManagementServer creates a ManagementServer with a test engine and returns an httptest.Server.
@@ -343,6 +364,103 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 	if len(data.History) != 2 {
 		t.Fatalf("expected 2 history entries, got %d", len(data.History))
+	}
+}
+
+func TestMgmt_SessionsUsesAgentSessionsWithCustomNames(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+	agent := &managementListAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "agent-one", Summary: "first native summary", MessageCount: 2, ModifiedAt: time.Now()},
+		},
+	}
+	e.agent = agent
+
+	userKey := "telegram:chat:user"
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-one", "stub", "old first prompt")
+	s1.AddHistory("user", "first message")
+	s1.AddHistory("assistant", "first reply")
+	e.sessions.NewSession(userKey, "another internal title").SetAgentInfo("agent-two", "stub", "second internal prompt")
+	e.sessions.SetSessionName("agent-one", "Pinned native name")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var data struct {
+		Sessions []struct {
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			SessionKey     string `json:"session_key"`
+			AgentSessionID string `json:"agent_session_id"`
+			Native         bool   `json:"native"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal sessions: %v", err)
+	}
+	if len(data.Sessions) != 1 {
+		t.Fatalf("visible sessions = %d, want 1 native session without unmatched internal titles", len(data.Sessions))
+	}
+	if data.Sessions[0].ID != s1.ID {
+		t.Fatalf("first session id = %q, want internal id %q for switch/detail compatibility", data.Sessions[0].ID, s1.ID)
+	}
+	if data.Sessions[0].AgentSessionID != "agent-one" {
+		t.Fatalf("agent_session_id = %q, want agent-one", data.Sessions[0].AgentSessionID)
+	}
+	if data.Sessions[0].Name != "Pinned native name" {
+		t.Fatalf("name = %q, want custom session name", data.Sessions[0].Name)
+	}
+	if !data.Sessions[0].Native {
+		t.Fatal("first session should be marked native")
+	}
+}
+
+func TestMgmt_SessionDetailSupportsNativeOnlySession(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+	now := time.Now()
+	e.agent = &managementListAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "agent-native-only", Summary: "native summary", MessageCount: 2, ModifiedAt: now},
+		},
+		history: map[string][]HistoryEntry{
+			"agent-native-only": {
+				{Role: "user", Content: "hello", Timestamp: now},
+				{Role: "assistant", Content: "hi", Timestamp: now},
+			},
+		},
+	}
+	e.sessions.SetSessionName("agent-native-only", "Pinned native detail")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/agent-native-only", "tok")
+	if !r.OK {
+		t.Fatalf("native detail failed: %s", r.Error)
+	}
+	var data struct {
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		AgentSessionID string `json:"agent_session_id"`
+		Native         bool   `json:"native"`
+		History        []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal native detail: %v", err)
+	}
+	if data.ID != "agent-native-only" || data.AgentSessionID != "agent-native-only" {
+		t.Fatalf("native detail ids = id:%q agent:%q", data.ID, data.AgentSessionID)
+	}
+	if data.Name != "Pinned native detail" {
+		t.Fatalf("name = %q, want custom native detail name", data.Name)
+	}
+	if !data.Native {
+		t.Fatal("native detail should be marked native")
+	}
+	if len(data.History) != 2 {
+		t.Fatalf("history len = %d, want 2", len(data.History))
 	}
 }
 
