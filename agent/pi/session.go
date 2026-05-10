@@ -421,6 +421,12 @@ func cleanAttachments(workDir string) {
 
 // saveImagesToDisk saves image attachments to workDir/.cc-connect/attachments/
 // and returns the list of absolute file paths.
+//
+// img.FileName originates from IM upload metadata and is treated as
+// untrusted: directory components are stripped (both `/` and `\`, the
+// latter so Linux strips Windows-style paths too) before joining into
+// attachDir. Without this, FileName="../../escape.png" wrote to
+// workDir/escape.png — outside the intended attachments directory.
 func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
 	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
@@ -439,7 +445,7 @@ func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
 		case "image/webp":
 			ext = ".webp"
 		}
-		fname := img.FileName
+		fname := sanitizePiAttachmentName(img.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("image_%d_%d%s", time.Now().UnixMilli(), i, ext)
 		}
@@ -451,6 +457,21 @@ func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
 		paths = append(paths, fpath)
 	}
 	return paths
+}
+
+// sanitizePiAttachmentName reduces a user-supplied attachment filename to a
+// safe basename for joining into an attachment directory. Strips directory
+// components (handling both `/` and `\` so an attacker can't bypass via
+// Windows-style separators on Linux), and rejects parent / current-directory
+// references so the caller's empty-name fallback can substitute a generated
+// name. Mirrors core.SaveFilesToDisk's sanitization.
+func sanitizePiAttachmentName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
 }
 
 func truncStr(s string, maxRunes int) string {

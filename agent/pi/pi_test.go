@@ -363,6 +363,81 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 	}
 }
 
+// TestSaveImagesToDisk_RejectsPathTraversal is a regression test for a path
+// traversal vulnerability in saveImagesToDisk: the user-supplied
+// ImageAttachment.FileName (sourced from IM upload metadata) was passed
+// directly to filepath.Join, so a malicious uploader could escape the
+// attachments directory by using `../` segments. This mirrors the same
+// issue and fix in core.SaveFilesToDisk.
+func TestSaveImagesToDisk_RejectsPathTraversal(t *testing.T) {
+	workDir := t.TempDir()
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+
+	images := []core.ImageAttachment{
+		// Two levels up — escapes attachments/ and .cc-connect/.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "../../escape.png"},
+		// Three levels up — would land outside workDir entirely.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "../../../way-up.png"},
+		// Windows-style separators must also be stripped on Linux.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: `..\..\winescape.png`},
+		// Plain name still works.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "ok.png"},
+		// "." sanitizes to empty so the generated-name fallback kicks in,
+		// not a write to the attachments directory itself.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "."},
+	}
+
+	paths := saveImagesToDisk(workDir, images)
+
+	// Every returned path must live inside attachDir.
+	for _, p := range paths {
+		if !strings.HasPrefix(p, attachDir+string(filepath.Separator)) {
+			t.Errorf("saveImagesToDisk wrote outside attachments dir: %q (attachDir=%q)", p, attachDir)
+		}
+	}
+
+	// Walk workDir and assert no file exists outside attachDir.
+	if err := filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasPrefix(path, attachDir+string(filepath.Separator)) {
+			t.Errorf("found stray attachment outside attachments dir: %q", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	// Sanity: legitimate "ok.png" must still have been saved.
+	if _, err := os.Stat(filepath.Join(attachDir, "ok.png")); err != nil {
+		t.Errorf("legitimate ok.png not saved: %v", err)
+	}
+}
+
+func TestSanitizePiAttachmentName(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"image.png", "image.png"},
+		{"subdir/file.png", "file.png"},
+		{"../../escape.png", "escape.png"},
+		{`..\..\winescape.png`, "winescape.png"},
+		{"/etc/passwd", "passwd"},
+		{"..", ""},
+		{".", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got := sanitizePiAttachmentName(tt.in)
+			if got != tt.want {
+				t.Errorf("sanitizePiAttachmentName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // ── cleanAttachments ─────────────────────────────────────────
 
 func TestCleanAttachments(t *testing.T) {
