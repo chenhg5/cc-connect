@@ -399,6 +399,9 @@ func TestLooksLikeGitURL(t *testing.T) {
 func TestLooksLikeLocalDir(t *testing.T) {
 	valid := []string{
 		"/absolute/path",
+		"/root",
+		"/.cache",
+		"~",
 		"~/home/project",
 		"./relative",
 		"../parent",
@@ -417,6 +420,12 @@ func TestLooksLikeLocalDir(t *testing.T) {
 		"git@github.com:org/repo.git",
 		"ssh://git@github.com/org/repo",
 		"http://example.com",
+		"/new",
+		"/list",
+		"/dir",
+		"/help",
+		"/workspace bind my-project",
+		"/stop",
 	}
 	for _, s := range invalid {
 		if looksLikeLocalDir(s) {

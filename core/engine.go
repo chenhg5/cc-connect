@@ -4970,7 +4970,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				return false
 			}
 			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(dirPath))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, dirPath))
 			return true
 		}
 
@@ -13354,23 +13354,29 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 	content := strings.TrimSpace(msg.Content)
 
 	if !exists {
-		if strings.HasPrefix(content, "/") {
+		if strings.HasPrefix(content, "/") && !looksLikeLocalDir(content) {
 			return false
 		}
-		e.initFlowsMu.Lock()
-		e.initFlows[channelKey] = &workspaceInitFlow{
+		// Create the flow so that follow-up messages are handled.
+		flow = &workspaceInitFlow{
 			state:       "awaiting_url",
 			channelName: channelName,
 		}
+		e.initFlowsMu.Lock()
+		e.initFlows[channelKey] = flow
 		e.initFlowsMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
-		return true
+		// If the first message is already a path or URL, process it now;
+		// otherwise show the hint and wait for the next message.
+		if !looksLikeLocalDir(content) && !looksLikeGitURL(content) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
+			return true
+		}
 	}
 
 	// Slash commands always take priority over the init flow — let them
 	// pass through to handleCommand. Clean up the stale flow since the
 	// user is issuing explicit commands instead of following the clone guide.
-	if strings.HasPrefix(content, "/") {
+	if exists && strings.HasPrefix(content, "/") && !looksLikeLocalDir(content) {
 		e.initFlowsMu.Lock()
 		delete(e.initFlows, channelKey)
 		e.initFlowsMu.Unlock()
@@ -13396,8 +13402,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 			e.initFlowsMu.Lock()
 			delete(e.initFlows, channelKey)
 			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-				"Bound workspace `%s` to this channel. Ready.", dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, dirPath))
 			return true
 		}
 
@@ -13445,8 +13450,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 		delete(e.initFlows, channelKey)
 		e.initFlowsMu.Unlock()
 
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-			"Clone complete. Bound workspace `%s` to this channel. Ready.", flow.cloneTo))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, flow.cloneTo))
 		return true
 	}
 
@@ -13465,7 +13469,7 @@ func looksLikeGitURL(s string) bool {
 // paths that escape baseDir via ../ traversal.
 func resolveLocalDirPath(target, baseDir string) (string, error) {
 	dirPath := target
-	if strings.HasPrefix(dirPath, "~/") {
+	if dirPath == "~" || strings.HasPrefix(dirPath, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("cannot resolve home directory: %w", err)
@@ -13493,16 +13497,30 @@ func resolveLocalDirPath(target, baseDir string) (string, error) {
 
 // looksLikeLocalDir returns true if the string looks like a local directory
 // path (absolute path, home-relative, dot-relative, or a bare name that
-// doesn't look like a URL).
+// doesn't look like a URL). Slash commands like /dir are not local dirs.
 func looksLikeLocalDir(s string) bool {
 	if s == "" {
 		return false
 	}
-	return strings.HasPrefix(s, "/") ||
-		strings.HasPrefix(s, "~/") ||
-		strings.HasPrefix(s, "./") ||
-		strings.HasPrefix(s, "../") ||
-		(!strings.Contains(s, "://") && !strings.Contains(s, "@"))
+	if strings.Contains(s, "://") || strings.Contains(s, "@") {
+		return false
+	}
+	if strings.HasPrefix(s, "~/") || s == "~" || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
+		return true
+	}
+	// A single /word could be a slash command or an absolute path like /root.
+	// Check against known commands; if it matches, it's not a local dir.
+	if strings.HasPrefix(s, "/") {
+		name := strings.ToLower(strings.SplitN(s[1:], " ", 2)[0])
+		for _, c := range builtinCommands {
+			for _, n := range c.names {
+				if name == n {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func extractRepoName(url string) string {
