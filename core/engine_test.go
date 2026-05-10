@@ -3045,6 +3045,7 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	session.Name = "Focus"
 	session.SetAgentSessionID("session-123", "test")
+	e.sessions.SetSessionName("session-123", "Pinned Focus")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -3057,6 +3058,12 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "Pinned Focus") {
+		t.Fatalf("current text = %q, want custom session name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Focus") && !strings.Contains(p.sent[0], "Pinned Focus") {
+		t.Fatalf("current text = %q, should prefer custom session name", p.sent[0])
 	}
 }
 
