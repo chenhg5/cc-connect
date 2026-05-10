@@ -3087,6 +3087,7 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 	return sb.String()
 }
 
+
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
 // for the reader goroutine to exit. The reader is structured so its iterations
 // are short (blocking adapter calls like RespondPermission are offloaded), so
@@ -3429,8 +3430,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry  // track tool calls for card content
-	var cardThinkingText string        // latest thinking text
+	var cardToolCalls []cardToolEntry // track tool calls for card content
+	var cardThinkingText string       // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
@@ -6439,7 +6440,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), sessions.displayNameForSession(s), agentID, len(s.History)))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
 		return
 	}
 
@@ -10445,7 +10446,7 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), sessions.displayNameForSession(s), agentID, len(s.History))
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).

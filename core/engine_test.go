@@ -3060,27 +3060,6 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
-func TestCmdCurrent_UsesCustomSessionName(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentInfo("session-123", "test", "raw session title")
-	e.sessions.SetSessionName("session-123", "Pinned current name")
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "Pinned current name") {
-		t.Fatalf("current text = %q, want custom display name", p.sent[0])
-	}
-	if strings.Contains(p.sent[0], "raw session title") {
-		t.Fatalf("current text = %q, should not use raw session title", p.sent[0])
-	}
-}
-
 func TestCmdDelete_BatchCommaList(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
@@ -10892,9 +10871,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                               { return false }
+func (c *stubStreamingCard) Failed() bool                                { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
