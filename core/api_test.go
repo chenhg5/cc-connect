@@ -128,7 +128,7 @@ func TestHandleSend_EmptyProjectMultipleEnginesRequiresName(t *testing.T) {
 	}
 }
 
-func TestHandleCronRun_TriggersJob(t *testing.T) {
+func TestHandleCronExec_TriggersJob(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -163,9 +163,9 @@ func TestHandleCronRun_TriggersJob(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/cron/run", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/cron/exec", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
-	api.handleCronRun(rec, req)
+	api.handleCronExec(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -181,7 +181,7 @@ func TestHandleCronRun_TriggersJob(t *testing.T) {
 	t.Fatalf("timed out waiting for local api trigger, sent=%v", platform.getSent())
 }
 
-func TestHandleCronRun_ProjectMissingIsBadRequest(t *testing.T) {
+func TestHandleCronExec_ProjectMissingIsBadRequest(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -206,9 +206,9 @@ func TestHandleCronRun_ProjectMissingIsBadRequest(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/cron/run", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/cron/exec", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
-	api.handleCronRun(rec, req)
+	api.handleCronExec(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())

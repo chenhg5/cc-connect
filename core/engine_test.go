@@ -3025,8 +3025,8 @@ func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if strings.Contains(p.sent[0], "cc-connect 帮助") {
 		t.Fatalf("help text = %q, should not be card title fallback", p.sent[0])
 	}
-	if !strings.Contains(p.sent[0], "/cron [add|list|run|del|enable|disable]") {
-		t.Fatalf("help text = %q, want explicit cron run usage", p.sent[0])
+	if !strings.Contains(p.sent[0], "/cron [add|list|exec|del|enable|disable]") {
+		t.Fatalf("help text = %q, want explicit cron exec usage", p.sent[0])
 	}
 }
 
@@ -5500,7 +5500,7 @@ func TestHandleCardNav_HelpSwitchesTabs(t *testing.T) {
 	}
 }
 
-func TestHandleCardNav_HelpToolsShowsCronRunUsage(t *testing.T) {
+func TestHandleCardNav_HelpToolsShowsCronExecUsage(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 
 	card := e.handleCardNav("nav:/help tools", "test:user1")
@@ -5509,8 +5509,8 @@ func TestHandleCardNav_HelpToolsShowsCronRunUsage(t *testing.T) {
 	}
 	text := card.RenderText()
 
-	if !strings.Contains(text, "**/cron**  Manage scheduled tasks, arg: [add|list|run|del|enable|disable]") {
-		t.Fatalf("tools help text = %q, want explicit cron run usage", text)
+	if !strings.Contains(text, "**/cron**  Manage scheduled tasks, arg: [add|list|exec|del|enable|disable]") {
+		t.Fatalf("tools help text = %q, want explicit cron exec usage", text)
 	}
 }
 
@@ -6566,7 +6566,7 @@ func TestCmdCronSetup_NativeAgentSkips(t *testing.T) {
 	}
 }
 
-func TestCmdCronRun_UsageWhenMissingID(t *testing.T) {
+func TestCmdCronExec_UsageWhenMissingID(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	store, err := NewCronStore(t.TempDir())
@@ -6576,20 +6576,20 @@ func TestCmdCronRun_UsageWhenMissingID(t *testing.T) {
 	e.cronScheduler = NewCronScheduler(store)
 
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	e.cmdCron(p, msg, []string{"run"})
+	e.cmdCron(p, msg, []string{"exec"})
 
 	if len(p.sent) != 1 {
 		t.Fatalf("sent = %d, want 1", len(p.sent))
 	}
 	if strings.Contains(p.sent[0], "/cron add") {
-		t.Fatalf("reply = %q, want dedicated run usage instead of general cron help", p.sent[0])
+		t.Fatalf("reply = %q, want dedicated exec usage instead of general cron help", p.sent[0])
 	}
-	if !strings.Contains(p.sent[0], "/cron run <id>") {
-		t.Fatalf("reply = %q, want run command in usage", p.sent[0])
+	if !strings.Contains(p.sent[0], "/cron exec <id>") {
+		t.Fatalf("reply = %q, want exec command in usage", p.sent[0])
 	}
 }
 
-func TestCmdCronRun_TriggersJob(t *testing.T) {
+func TestCmdCronExec_TriggersJob(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -6636,7 +6636,7 @@ func TestCmdCronRun_TriggersJob(t *testing.T) {
 	t.Fatalf("timed out waiting for run output, sent=%v", platform.getSent())
 }
 
-func TestCmdCronRun_ProjectMissingReply(t *testing.T) {
+func TestCmdCronExec_ProjectMissingReply(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
