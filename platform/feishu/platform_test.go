@@ -1238,11 +1238,17 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 type mockRefreshPlatform struct {
 	*Platform
 	refreshCalled atomic.Int32
+	refreshDone   chan struct{}
 	refreshCard   func(ctx context.Context, sessionKey string, card *core.Card) error
+}
+
+func newMockRefreshPlatform(p *Platform) *mockRefreshPlatform {
+	return &mockRefreshPlatform{Platform: p, refreshDone: make(chan struct{})}
 }
 
 func (m *mockRefreshPlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
 	m.refreshCalled.Add(1)
+	close(m.refreshDone)
 	if m.refreshCard != nil {
 		return m.refreshCard(ctx, sessionKey, card)
 	}
@@ -1291,7 +1297,7 @@ func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
 	}
 	ip := platformAny.(*interactivePlatform)
 
-	mock := &mockRefreshPlatform{Platform: ip.Platform}
+	mock := newMockRefreshPlatform(ip.Platform)
 	ip.Platform.self = mock
 
 	handlerDone := make(chan struct{})
@@ -1325,9 +1331,9 @@ func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
 	}
 
 	select {
-	case <-handlerDone:
+	case <-mock.refreshDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("cardNavHandler should have completed")
+		t.Fatal("RefreshCard should have been called")
 	}
 
 	if got := mock.refreshCalled.Load(); got != 1 {
@@ -1342,7 +1348,7 @@ func TestCardAction_NavSlow_NilCard_NoRefresh(t *testing.T) {
 	}
 	ip := platformAny.(*interactivePlatform)
 
-	mock := &mockRefreshPlatform{Platform: ip.Platform}
+	mock := newMockRefreshPlatform(ip.Platform)
 	ip.Platform.self = mock
 
 	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
