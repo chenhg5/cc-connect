@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Language represents a supported language
 type Language string
@@ -14,8 +17,15 @@ const (
 	LangSpanish            Language = "es"
 )
 
-// I18n provides internationalized messages
+// I18n provides internationalized messages.
+//
+// All exported methods are safe to call from multiple goroutines: cc-connect
+// fans out platform message handlers concurrently, all of which can call
+// DetectAndSet (writes `detected`) and T / CurrentLang (read `lang`/`detected`)
+// at the same time. Without the mutex `go test -race` flags real data races
+// on the language fields.
 type I18n struct {
+	mu       sync.RWMutex
 	lang     Language
 	detected Language
 	saveFunc func(Language) error
@@ -26,6 +36,8 @@ func NewI18n(lang Language) *I18n {
 }
 
 func (i *I18n) SetSaveFunc(fn func(Language) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.saveFunc = fn
 }
 
@@ -76,21 +88,41 @@ func isSpanishHint(text string) bool {
 }
 
 func (i *I18n) DetectAndSet(text string) {
+	i.mu.RLock()
 	if i.lang != LangAuto {
+		i.mu.RUnlock()
 		return
 	}
+	currentDetected := i.detected
+	i.mu.RUnlock()
+
 	detected := DetectLanguage(text)
-	if i.detected != detected {
-		i.detected = detected
-		if i.saveFunc != nil {
-			if err := i.saveFunc(detected); err != nil {
-				fmt.Printf("failed to save language: %v\n", err)
-			}
+	if currentDetected == detected {
+		return
+	}
+
+	i.mu.Lock()
+	// Re-check under the write lock — another goroutine may have updated
+	// i.detected between our RUnlock above and the Lock here.
+	if i.lang != LangAuto || i.detected == detected {
+		i.mu.Unlock()
+		return
+	}
+	i.detected = detected
+	saveFunc := i.saveFunc
+	i.mu.Unlock()
+
+	if saveFunc != nil {
+		if err := saveFunc(detected); err != nil {
+			fmt.Printf("failed to save language: %v\n", err)
 		}
 	}
 }
 
 func (i *I18n) currentLang() Language {
+	// Caller holds either no lock (most public methods take RLock and call
+	// this) or RLock; this helper just reads the protected fields. All
+	// public methods that call currentLang() acquire i.mu.RLock first.
 	if i.lang == LangAuto {
 		if i.detected != "" {
 			return i.detected
@@ -101,16 +133,24 @@ func (i *I18n) currentLang() Language {
 }
 
 // CurrentLang returns the resolved language (exported for mode display).
-func (i *I18n) CurrentLang() Language { return i.currentLang() }
+func (i *I18n) CurrentLang() Language {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.currentLang()
+}
 
 // IsZhLike returns true for Simplified and Traditional Chinese.
 func (i *I18n) IsZhLike() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	l := i.currentLang()
 	return l == LangChinese || l == LangTraditionalChinese
 }
 
 // SetLang overrides the language (disabling auto-detect).
 func (i *I18n) SetLang(lang Language) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.lang = lang
 	i.detected = ""
 }
@@ -3898,7 +3938,9 @@ var messages = map[MsgKey]map[Language]string{
 }
 
 func (i *I18n) T(key MsgKey) string {
+	i.mu.RLock()
 	lang := i.currentLang()
+	i.mu.RUnlock()
 	if msg, ok := messages[key]; ok {
 		if translated, ok := msg[lang]; ok {
 			return translated
