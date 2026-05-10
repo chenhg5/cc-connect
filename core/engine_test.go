@@ -3043,8 +3043,8 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.Name = "Focus"
 	session.SetAgentSessionID("session-123", "test")
+	e.sessions.SetSessionName("session-123", "Focus")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -3055,9 +3055,161 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Current session") {
 		t.Fatalf("current text = %q, want legacy current session text", p.sent[0])
 	}
+	if !strings.Contains(p.sent[0], "Focus") {
+		t.Fatalf("current text = %q, want session name 'Focus'", p.sent[0])
+	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
 	}
+}
+
+func TestCmdCurrent_ShowsAgentSummaryWhenNoCustomName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-abc", Summary: "Fix the login bug", MessageCount: 5},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Fix the login bug") {
+		t.Fatalf("current text = %q, want agent summary 'Fix the login bug'", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_ShowsUntitledWhenNoNameOrSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-xyz", Summary: "", MessageCount: 0},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-xyz", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "(untitled)") {
+		t.Fatalf("current text = %q, want '(untitled)' fallback", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_CustomNameOverridesSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-override", Summary: "Agent summary", MessageCount: 3},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-override", "test")
+	e.sessions.SetSessionName("session-override", "MyCustomName")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "MyCustomName") {
+		t.Fatalf("current text = %q, want custom name 'MyCustomName'", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Agent summary") {
+		t.Fatalf("current text = %q, should not contain agent summary when custom name set", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_NotStartedSessionShowsUntitled(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "(untitled)") {
+		t.Fatalf("current text = %q, want '(untitled)' for not-started session", p.sent[0])
+	}
+}
+
+type stubTitleAgent struct {
+	stubAgent
+	titles map[string]string
+}
+
+func (a *stubTitleAgent) GetSessionTitle(sessionID string) string {
+	if a.titles == nil {
+		return ""
+	}
+	return a.titles[sessionID]
+}
+
+func TestCmdCurrent_SessionTitleProviderFallback(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubTitleAgent{
+		titles: map[string]string{
+			"session-not-in-list": "Title from DB",
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-not-in-list", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Title from DB") {
+		t.Fatalf("current text = %q, want 'Title from DB' from SessionTitleProvider", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_SessionTitleProviderNotUsedWhenListMatches(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgentWithTitle{
+		stubTitleAgent: stubTitleAgent{
+			titles: map[string]string{
+				"session-abc": "DB Title (should not appear)",
+			},
+		},
+		sessions: []AgentSessionInfo{
+			{ID: "session-abc", Summary: "List Summary", MessageCount: 5},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "List Summary") {
+		t.Fatalf("current text = %q, want 'List Summary' from ListSessions", p.sent[0])
+	}
+}
+
+type stubListAgentWithTitle struct {
+	stubTitleAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *stubListAgentWithTitle) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
 }
 
 func TestCmdDelete_BatchCommaList(t *testing.T) {

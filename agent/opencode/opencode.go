@@ -682,3 +682,29 @@ func opencodeDBPath() string {
 	}
 	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
 }
+
+func (a *Agent) GetSessionTitle(sessionID string) string {
+	return querySessionTitle(sessionID)
+}
+
+func querySessionTitle(sessionID string) string {
+	dbPath := opencodeDBPath()
+	if dbPath == "" {
+		return ""
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return ""
+	}
+	escaped := strings.ReplaceAll(sessionID, "'", "''")
+	query := fmt.Sprintf("SELECT title FROM session WHERE id = '%s' LIMIT 1", escaped)
+	out, err := exec.Command(sqlite3, dbPath, query).Output()
+	if err != nil {
+		return ""
+	}
+	title := strings.TrimSpace(string(out))
+	return title
+}

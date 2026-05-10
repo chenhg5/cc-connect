@@ -158,6 +158,7 @@ const (
 	MsgModeNotSupported          MsgKey = "mode_not_supported"
 	MsgSessionRestarting         MsgKey = "session_restarting"
 	MsgSessionNotStarted         MsgKey = "session_not_started"
+	MsgUntitled                  MsgKey = "untitled"
 	MsgLangChanged               MsgKey = "lang_changed"
 	MsgLangInvalid               MsgKey = "lang_invalid"
 	MsgLangCurrent               MsgKey = "lang_current"
@@ -853,6 +854,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "(新會話 — 尚未開始)",
 		LangJapanese:           "(新規 — まだ開始されていません)",
 		LangSpanish:            "(nuevo — aún no iniciado)",
+	},
+	MsgUntitled: {
+		LangEnglish:            "(untitled)",
+		LangChinese:            "(未命名)",
+		LangTraditionalChinese: "(未命名)",
+		LangJapanese:           "(無題)",
+		LangSpanish:            "(sin título)",
 	},
 	MsgLangChanged: {
 		LangEnglish:            "🌐 Language switched to **%s**.",

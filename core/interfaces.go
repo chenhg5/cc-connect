@@ -464,6 +464,10 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+type SessionTitleProvider interface {
+	GetSessionTitle(sessionID string) string
+}
+
 // WorkDirSwitcher is an optional interface for agents that support runtime
 // work directory switching. The change takes effect on the next session start;
 // the current running session is terminated automatically by the engine.
