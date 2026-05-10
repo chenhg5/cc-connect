@@ -69,7 +69,8 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
 	s.mux.HandleFunc("/cron/edit", s.handleCronEdit)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
-	s.mux.HandleFunc("/cron/run", s.handleCronRun)
+	s.mux.HandleFunc("/cron/exec", s.handleCronExec)
+	s.mux.HandleFunc("/cron/run", s.handleCronExec)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
@@ -361,7 +362,7 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *APIServer) handleCronRun(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleCronExec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return

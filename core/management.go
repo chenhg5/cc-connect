@@ -1605,7 +1605,7 @@ func (m *ManagementServer) handleCronByID(w http.ResponseWriter, r *http.Request
 		mgmtJSON(w, http.StatusOK, job)
 
 	case http.MethodPost:
-		if action != "run" {
+		if action != "exec" && action != "run" {
 			mgmtError(w, http.StatusNotFound, "unknown cron route")
 			return
 		}

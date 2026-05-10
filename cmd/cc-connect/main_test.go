@@ -322,13 +322,13 @@ func captureStderr(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-func TestPrintUsage_ListsCronRunCommand(t *testing.T) {
+func TestPrintUsage_ListsCronExecCommand(t *testing.T) {
 	out := captureStderr(t, printUsage)
 
 	if !strings.Contains(out, "Manage scheduled tasks") {
 		t.Fatalf("printUsage() output missing cron section:\n%s", out)
 	}
-	if !strings.Contains(out, "run              Trigger a scheduled task immediately") {
-		t.Fatalf("printUsage() output missing cron run command:\n%s", out)
+	if !strings.Contains(out, "exec             Trigger a scheduled task immediately") {
+		t.Fatalf("printUsage() output missing cron exec command:\n%s", out)
 	}
 }

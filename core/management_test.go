@@ -553,7 +553,7 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	}
 }
 
-func TestMgmt_CronRunByID(t *testing.T) {
+func TestMgmt_CronExecByID(t *testing.T) {
 	mgmt, ts, e := testManagementServer(t, "tok")
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
@@ -585,9 +585,9 @@ func TestMgmt_CronRunByID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/run", "tok", map[string]any{})
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
 	if !r.OK {
-		t.Fatalf("cron run failed: %s", r.Error)
+		t.Fatalf("cron exec failed: %s", r.Error)
 	}
 
 	var data map[string]any
@@ -604,14 +604,45 @@ func TestMgmt_CronRunByID(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(platform.getSent()) < 2 {
+		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
+	}
+
+	aliasJob := &CronJob{
+		ID:          "cron-run-alias-1",
+		Project:     "test-project",
+		SessionKey:  "discord:channel-2:user-2",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "hello alias",
+		Description: "Run alias now",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(aliasJob); err != nil {
+		t.Fatal(err)
+	}
+
+	e.agent = &resultAgent{session: newResultAgentSession("triggered from management alias")}
+	alias := mgmtPost(t, ts.URL+"/api/v1/cron/"+aliasJob.ID+"/run", "tok", map[string]any{})
+	if !alias.OK {
+		t.Fatalf("cron run compatibility alias failed: %s", alias.Error)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 4 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for triggered cron run, sent=%v", platform.getSent())
+	t.Fatalf("timed out waiting for triggered cron run alias, sent=%v", platform.getSent())
 }
 
-func TestMgmt_CronRunByID_RejectsExtraPathSegments(t *testing.T) {
+func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
 	mgmt, ts, e := testManagementServer(t, "tok")
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
@@ -634,7 +665,7 @@ func TestMgmt_CronRunByID_RejectsExtraPathSegments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/run/extra", "tok", map[string]any{})
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec/extra", "tok", map[string]any{})
 	if r.OK {
 		t.Fatal("expected extra cron path segment to be rejected")
 	}
@@ -643,7 +674,7 @@ func TestMgmt_CronRunByID_RejectsExtraPathSegments(t *testing.T) {
 	}
 }
 
-func TestMgmt_CronRunByID_ProjectMissingIsBadRequest(t *testing.T) {
+func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
 	mgmt, ts, e := testManagementServer(t, "tok")
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
@@ -666,9 +697,9 @@ func TestMgmt_CronRunByID_ProjectMissingIsBadRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/run", "tok", map[string]any{})
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
 	if r.OK {
-		t.Fatal("expected run to fail when project is missing")
+		t.Fatal("expected exec to fail when project is missing")
 	}
 	if !strings.Contains(r.Error, "project") {
 		t.Fatalf("error = %q, want project error", r.Error)
