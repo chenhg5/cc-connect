@@ -13483,7 +13483,7 @@ func resolveLocalDirPath(target, baseDir string) (string, error) {
 	if err != nil {
 		resolved = cleaned
 	}
-	if baseDir != "" && !filepath.IsAbs(target) {
+	if baseDir != "" && !filepath.IsAbs(target) && !strings.HasPrefix(target, "~") {
 		cleanBase := filepath.Clean(baseDir)
 		if evalBase, err := filepath.EvalSymlinks(cleanBase); err == nil {
 			cleanBase = evalBase
