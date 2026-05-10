@@ -699,8 +699,9 @@ func querySessionTitle(sessionID string) string {
 	if err != nil {
 		return ""
 	}
-	out, err := exec.Command(sqlite3, dbPath,
-		"SELECT title FROM session WHERE id = ? LIMIT 1", sessionID).Output()
+	escaped := strings.ReplaceAll(sessionID, "'", "''")
+	query := fmt.Sprintf("SELECT title FROM session WHERE id = '%s' LIMIT 1", escaped)
+	out, err := exec.Command(sqlite3, dbPath, query).Output()
 	if err != nil {
 		return ""
 	}
