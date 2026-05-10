@@ -471,6 +471,35 @@ func TestSessionMessage_TextContent(t *testing.T) {
 	}
 }
 
+func TestParseGeminiJSONLSession(t *testing.T) {
+	data := []byte(strings.Join([]string{
+		`{"sessionId":"66c97d5d-48a6-4386-937d-29dfbe5caaa8","projectHash":"abc","startTime":"2026-05-10T18:32:15.435Z","lastUpdated":"2026-05-10T18:32:15.435Z","kind":"main"}`,
+		`{"id":"u1","timestamp":"2026-05-10T18:32:16.508Z","type":"user","content":[{"text":"hello from jsonl"}]}`,
+		`{"$set":{"lastUpdated":"2026-05-10T18:32:23.150Z"}}`,
+		`{"id":"g1","timestamp":"2026-05-10T18:32:23.150Z","type":"gemini","content":"hi"}`,
+	}, "\n"))
+
+	sf, err := parseGeminiJSONLSession(data)
+	if err != nil {
+		t.Fatalf("parseGeminiJSONLSession() error = %v", err)
+	}
+	if sf.SessionID != "66c97d5d-48a6-4386-937d-29dfbe5caaa8" {
+		t.Fatalf("SessionID = %q", sf.SessionID)
+	}
+	if sf.Kind != "main" {
+		t.Fatalf("Kind = %q", sf.Kind)
+	}
+	if got := len(sf.Messages); got != 2 {
+		t.Fatalf("len(Messages) = %d", got)
+	}
+	if got := extractSessionSummary(sf); got != "hello from jsonl" {
+		t.Fatalf("summary = %q", got)
+	}
+	if sf.LastUpdated.Format(time.RFC3339) != "2026-05-10T18:32:23Z" {
+		t.Fatalf("LastUpdated = %s", sf.LastUpdated.Format(time.RFC3339))
+	}
+}
+
 func TestComputeLineDiff(t *testing.T) {
 	tests := []struct {
 		name string
