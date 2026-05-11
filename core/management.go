@@ -1222,6 +1222,7 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 	}
 	var body struct {
 		SessionKey string `json:"session_key"`
+		SessionID  string `json:"session_id"`
 		Message    string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1231,6 +1232,16 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 	if body.Message == "" {
 		mgmtError(w, http.StatusBadRequest, "message is required")
 		return
+	}
+	if body.SessionID != "" {
+		if body.SessionKey == "" {
+			mgmtError(w, http.StatusBadRequest, "session_key is required when session_id is provided")
+			return
+		}
+		if _, err := e.sessions.SwitchSessionForRouting(body.SessionKey, body.SessionID); err != nil {
+			mgmtError(w, http.StatusNotFound, err.Error())
+			return
+		}
 	}
 	if err := e.SendToSession(body.SessionKey, body.Message); err != nil {
 		mgmtError(w, http.StatusInternalServerError, err.Error())

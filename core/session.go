@@ -327,6 +327,32 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 	return nil, fmt.Errorf("session %q not found", target)
 }
 
+// SwitchSessionForRouting makes target active and restores a past native agent
+// session ID when the local session represents an older native conversation.
+func (sm *SessionManager) SwitchSessionForRouting(userKey, target string) (*Session, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s == nil {
+			continue
+		}
+		if s.ID != target && s.Name != target {
+			continue
+		}
+		sm.activeSession[userKey] = s.ID
+		s.mu.Lock()
+		if s.AgentSessionID == "" && len(s.PastAgentSessionIDs) > 0 {
+			s.AgentSessionID = s.PastAgentSessionIDs[len(s.PastAgentSessionIDs)-1]
+		}
+		s.mu.Unlock()
+		sm.saveLocked()
+		return s, nil
+	}
+	return nil, fmt.Errorf("session %q not found", target)
+}
+
 // SwitchToAgentSession finds or creates an internal session that maps to the
 // given agent session ID. If an existing session already references agentSID,
 // it becomes the active session. Otherwise a new session is created so the

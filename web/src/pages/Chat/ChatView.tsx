@@ -325,6 +325,9 @@ export default function ChatView() {
   const sessionKey = userPickedSession && currentSession?.session_key
     ? currentSession.session_key
     : webSessionKey;
+  const targetSessionId = userPickedSession && currentSession?.id
+    ? currentSession.id
+    : '';
   sessionKeyRef.current = sessionKey;
 
   // Load project sessions and auto-select latest
@@ -500,6 +503,7 @@ export default function ChatView() {
   const { status: bridgeStatus, sendMessage: bridgeSend, sendCardAction, sendPreviewAck } = useBridgeSocket({
     bridgeCfg,
     sessionKey,
+    sessionId: targetSessionId,
     projectName: projectName || '',
     onMessage: handleBridgeMessage,
   });
