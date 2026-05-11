@@ -113,6 +113,7 @@ type bridgeMessage struct {
 	Type       string            `json:"type"`
 	MsgID      string            `json:"msg_id"`
 	SessionKey string            `json:"session_key"`
+	SessionID  string            `json:"session_id,omitempty"`
 	UserID     string            `json:"user_id"`
 	UserName   string            `json:"user_name,omitempty"`
 	Content    string            `json:"content"`
@@ -126,6 +127,7 @@ type bridgeMessage struct {
 type bridgeCardAction struct {
 	Type       string `json:"type"`
 	SessionKey string `json:"session_key"`
+	SessionID  string `json:"session_id,omitempty"`
 	Action     string `json:"action"`
 	ReplyCtx   string `json:"reply_ctx"`
 	Project    string `json:"project,omitempty"`
@@ -948,6 +950,9 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		slog.Warn("bridge: no engine for session", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
 		return
 	}
+	if !a.switchTargetSession(ref, m.SessionKey, m.SessionID, m.ReplyCtx) {
+		return
+	}
 
 	msg := &Message{
 		SessionKey: m.SessionKey,
@@ -1011,6 +1016,9 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 
 	ref := a.server.resolveEngine(ca.SessionKey, ca.Project)
 	if ref == nil {
+		return
+	}
+	if !a.switchTargetSession(ref, ca.SessionKey, ca.SessionID, ca.ReplyCtx) {
 		return
 	}
 
@@ -1109,6 +1117,29 @@ func (a *bridgeAdapter) dispatchAsPermissionResponse(ref *bridgeEngineRef, sessi
 		IsPermissionResponse: true,
 	}
 	go ref.platform.handler(ref.platform, msg)
+}
+
+func (a *bridgeAdapter) switchTargetSession(ref *bridgeEngineRef, sessionKey, sessionID, replyCtx string) bool {
+	if sessionID == "" {
+		return true
+	}
+	if _, err := ref.engine.sessions.SwitchSessionForRouting(sessionKey, sessionID); err != nil {
+		slog.Warn("bridge: target session switch failed",
+			"platform", a.platform,
+			"session_key", sessionKey,
+			"session_id", sessionID,
+			"error", err,
+		)
+		_ = a.server.sendToAdapter(a.platform, map[string]any{
+			"type":        "error",
+			"code":        "session_not_found",
+			"message":     err.Error(),
+			"session_key": sessionKey,
+			"reply_ctx":   replyCtx,
+		})
+		return false
+	}
+	return true
 }
 
 func (a *bridgeAdapter) handlePreviewAck(raw json.RawMessage) {
