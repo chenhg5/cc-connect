@@ -21,6 +21,15 @@ type deadlineAwareModelAgent struct {
 	hasDeadline bool
 }
 
+type mgmtListAgent struct {
+	stubAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *mgmtListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
+}
+
 func (a *deadlineAwareModelAgent) AvailableModels(ctx context.Context) []ModelOption {
 	a.mu.Lock()
 	_, ok := ctx.Deadline()
@@ -320,6 +329,58 @@ func TestMgmt_Sessions(t *testing.T) {
 	})
 	if !r.OK {
 		t.Fatalf("create session failed: %s", r.Error)
+	}
+}
+
+func TestMgmt_Sessions_DisplayNamePriority(t *testing.T) {
+	agent := &mgmtListAgent{
+		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native title"}},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	s := e.sessions.GetOrCreateActive("user1")
+	s.Name = "local name"
+	s.SetAgentSessionID("agent-1", "stub")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			Name string `json:"name"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
+	}
+	if listData.Sessions[0].Name != "native title" {
+		t.Fatalf("session name = %q, want native title", listData.Sessions[0].Name)
+	}
+
+	e.sessions.SetSessionName("agent-1", "custom name")
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID, "tok")
+	if !r.OK {
+		t.Fatalf("session detail failed: %s", r.Error)
+	}
+	var detail struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(r.Data, &detail); err != nil {
+		t.Fatalf("unmarshal session detail: %v", err)
+	}
+	if detail.Name != "custom name" {
+		t.Fatalf("session detail name = %q, want custom name", detail.Name)
 	}
 }
 
