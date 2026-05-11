@@ -462,7 +462,7 @@ func (p *Platform) handleGoAway(goAway wpsGoAwayFrame) {
 	if goAway.Reason == "connection_replaced" {
 		slog.Warn("wps-xiezuo: connection replaced, stopping reconnect")
 		p.stopped = true
-		p.Stop()
+		_ = p.Stop()
 		return
 	}
 
