@@ -141,7 +141,7 @@ export default function Dashboard() {
             {recentSessions.map((sess) => (
               <Link
                 key={`${sess.project}-${sess.id}`}
-                to={`/chat/${sess.project}`}
+                to={`/chat/${sess.project}?session=${encodeURIComponent(sess.id)}`}
                 className="block p-4 rounded-xl border border-gray-200/80 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-accent/40 hover:shadow-md hover:shadow-accent/5 transition-all"
               >
                 <div className="flex items-center gap-2.5 mb-3">
