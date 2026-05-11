@@ -1,6 +1,7 @@
 package dingtalk
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,7 +9,23 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
 
 // ──────────────────────────────────────────────────────────────
 // Thread safety tests for token caching
@@ -58,7 +75,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:    "test_client",
+		clientID:     "test_client",
 		clientSecret: "test_secret",
 	}
 
@@ -136,6 +153,46 @@ func TestPlatform_AccessTokenFieldsExist(t *testing.T) {
 	}
 
 	t.Log("Platform token caching fields exist and are accessible")
+}
+
+func TestObserveInboundRobotCode_ReplacesClientIDFallback(t *testing.T) {
+	p := &Platform{
+		clientID:  "client-id",
+		robotCode: "client-id",
+	}
+
+	p.observeInboundRobotCode("real-robot-code")
+
+	if got := p.currentRobotCode(); got != "real-robot-code" {
+		t.Fatalf("currentRobotCode() = %q, want real-robot-code", got)
+	}
+}
+
+func TestObserveInboundRobotCode_ReplacesStaleExplicitRobotCode(t *testing.T) {
+	p := &Platform{
+		clientID:  "client-id",
+		robotCode: "stale-robot-code",
+	}
+
+	p.observeInboundRobotCode("real-robot-code")
+
+	if got := p.currentRobotCode(); got != "real-robot-code" {
+		t.Fatalf("currentRobotCode() = %q, want real-robot-code", got)
+	}
+}
+
+func TestObserveInboundRobotCode_PersistsLearnedCode(t *testing.T) {
+	statePath := dingtalkRobotCodeStatePath(t.TempDir(), "test-project")
+	p := &Platform{
+		robotCode:          "client-id",
+		robotCodeStatePath: statePath,
+	}
+
+	p.observeInboundRobotCode("real-robot-code")
+
+	if got := loadDingTalkRobotCode(statePath); got != "real-robot-code" {
+		t.Fatalf("loadDingTalkRobotCode() = %q, want real-robot-code", got)
+	}
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -355,6 +412,76 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 	}
 }
 
+type mediaSendCapture struct {
+	path string
+	body string
+}
+
+func newMediaSendTestPlatform(c *mediaSendCapture) *Platform {
+	return &Platform{
+		robotCode:   "robot-code",
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/media/upload") {
+				return jsonResponse(http.StatusOK, `{"errcode":0,"errmsg":"ok","media_id":"@media","type":"image"}`), nil
+			}
+			c.path = req.URL.Path
+			data, _ := io.ReadAll(req.Body)
+			c.body = string(data)
+			return jsonResponse(http.StatusOK, `{"processQueryKey":"ok"}`), nil
+		})},
+	}
+}
+
+func TestSendImage_GroupSessionUsesGroupAPI(t *testing.T) {
+	capture := &mediaSendCapture{}
+	p := newMediaSendTestPlatform(capture)
+
+	err := p.SendImage(context.Background(), replyContext{
+		conversationId: "cid-group",
+		senderStaffId:  "user-1",
+		isGroup:        true,
+		proactive:      true,
+	}, core.ImageAttachment{Data: []byte("image"), FileName: "test.png"})
+	if err != nil {
+		t.Fatalf("SendImage() error = %v", err)
+	}
+	if capture.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("send path = %q, want groupMessages/send", capture.path)
+	}
+	if !strings.Contains(capture.body, `"openConversationId":"cid-group"`) {
+		t.Fatalf("send body missing openConversationId: %s", capture.body)
+	}
+	if strings.Contains(capture.body, "userIds") {
+		t.Fatalf("group image send should not include userIds: %s", capture.body)
+	}
+}
+
+func TestSendImage_DirectSessionUsesOTOAPI(t *testing.T) {
+	capture := &mediaSendCapture{}
+	p := newMediaSendTestPlatform(capture)
+
+	err := p.SendImage(context.Background(), replyContext{
+		conversationId: "cid-direct",
+		senderStaffId:  "user-1",
+		isGroup:        false,
+		proactive:      true,
+	}, core.ImageAttachment{Data: []byte("image"), FileName: "test.png"})
+	if err != nil {
+		t.Fatalf("SendImage() error = %v", err)
+	}
+	if capture.path != "/v1.0/robot/oToMessages/batchSend" {
+		t.Fatalf("send path = %q, want oToMessages/batchSend", capture.path)
+	}
+	if !strings.Contains(capture.body, `"userIds":["user-1"]`) {
+		t.Fatalf("send body missing userIds: %s", capture.body)
+	}
+	if strings.Contains(capture.body, "openConversationId") {
+		t.Fatalf("direct image send should not include openConversationId: %s", capture.body)
+	}
+}
+
 // ──────────────────────────────────────────────────────────────
 // extractRichText tests (from main: richText message type support)
 // ──────────────────────────────────────────────────────────────
@@ -412,7 +539,7 @@ func TestExtractRichText(t *testing.T) {
 			want: "normal bold",
 		},
 		{
-			name: "mixed text and picture elements — pictures skipped",
+			name: "mixed text and picture elements — text extracted separately",
 			content: map[string]interface{}{
 				"richText": []interface{}{
 					map[string]interface{}{"text": "See image: "},
@@ -523,5 +650,35 @@ func TestGetAccessToken_NormalExpireIn_AppliesBuffer(t *testing.T) {
 	gotWindow := p.tokenExpiry.Sub(before)
 	if gotWindow < 100*time.Minute || gotWindow > 116*time.Minute {
 		t.Errorf("tokenExpiry window for expireIn=7200 = %v, want ~6900s (100-116min)", gotWindow)
+	}
+}
+
+func TestExtractDownloadCodes(t *testing.T) {
+	content := map[string]interface{}{
+		"richText": []interface{}{
+			map[string]interface{}{"text": "See image: "},
+			map[string]interface{}{"pictureDownloadCode": "pic-1"},
+			map[string]interface{}{"downloadCode": "pic-2"},
+			map[string]interface{}{"pictureDownloadCode": "pic-1"},
+		},
+	}
+
+	got := extractDownloadCodes(content)
+	want := []string{"pic-1", "pic-2"}
+	if len(got) != len(want) {
+		t.Fatalf("extractDownloadCodes() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("extractDownloadCodes() = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestExtractDownloadCodesFromJSON_QuotedPicture(t *testing.T) {
+	raw := json.RawMessage(`{"content":{"pictureDownloadCode":"quoted-pic"},"msgType":"picture"}`)
+	got := extractDownloadCodesFromJSON(raw)
+	if len(got) != 1 || got[0] != "quoted-pic" {
+		t.Fatalf("extractDownloadCodesFromJSON() = %#v, want [quoted-pic]", got)
 	}
 }

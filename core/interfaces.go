@@ -72,14 +72,15 @@ Your normal text responses are automatically delivered to the user — just repl
 ## Available tools
 
 ### Send generated images or files back to the user
-When you generate a local image or file that should be sent to the user, use:
+When you generate or reference a local image or file that should be sent to the user, do not run cc-connect send yourself. Instead, include a strict attachment block in your final reply:
 
-  cc-connect send --image /absolute/path/to/image.png
-  cc-connect send --file /absolute/path/to/report.pdf
-  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+` + "```cc-connect-attachments" + `
+image: /absolute/path/to/image.png
+file: /absolute/path/to/report.pdf
+` + "```" + `
 
-You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
-If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
+You may include multiple image: and file: lines. Paths must be absolute local file paths. The cc-connect gateway will remove this block before sending visible text and will deliver the attachments itself.
+Do not use normal Markdown links as a substitute when the user asked you to send the actual attachment.
 
 ### Scheduled tasks (cron)
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:

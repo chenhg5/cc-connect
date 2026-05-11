@@ -1057,6 +1057,41 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 }
 
+func TestProcessInteractiveEvents_SendsAttachmentDirectiveViaGateway(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	imgPath := filepath.Join(t.TempDir(), "chart.png")
+	if err := os.WriteFile(imgPath, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: "图片如下。\n\n```cc-connect-attachments\nimage: " + imgPath + "\n```", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != "图片如下。" {
+		t.Fatalf("sent text = %#v, want cleaned final reply only", got)
+	}
+	if len(p.images) != 1 {
+		t.Fatalf("sent images = %d, want 1", len(p.images))
+	}
+	if p.images[0].FileName != "chart.png" {
+		t.Fatalf("image filename = %q, want chart.png", p.images[0].FileName)
+	}
+	if string(p.images[0].Data[:4]) != string([]byte{0x89, 'P', 'N', 'G'}) {
+		t.Fatalf("image data prefix = %v", p.images[0].Data[:4])
+	}
+}
+
 func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -1765,11 +1800,14 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 
 func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	prompt := AgentSystemPrompt()
-	if !strings.Contains(prompt, "cc-connect send --image") {
-		t.Fatalf("prompt missing image send instructions: %q", prompt)
+	if !strings.Contains(prompt, "```cc-connect-attachments") {
+		t.Fatalf("prompt missing attachment block instructions: %q", prompt)
 	}
-	if !strings.Contains(prompt, "cc-connect send --file") {
-		t.Fatalf("prompt missing file send instructions: %q", prompt)
+	if !strings.Contains(prompt, "image: /absolute/path/to/image.png") {
+		t.Fatalf("prompt missing image directive instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "file: /absolute/path/to/report.pdf") {
+		t.Fatalf("prompt missing file directive instructions: %q", prompt)
 	}
 }
 
@@ -6371,7 +6409,7 @@ func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	if strings.Contains(string(content), "legacy instructions") {
 		t.Fatalf("legacy instructions should be refreshed, got %q", string(content))
 	}
-	if !strings.Contains(string(content), "cc-connect send --image") {
+	if !strings.Contains(string(content), "```cc-connect-attachments") {
 		t.Fatalf("expected refreshed attachment instructions, got %q", string(content))
 	}
 }

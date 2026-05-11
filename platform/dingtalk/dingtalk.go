@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,11 +29,11 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook  string
-	conversationId  string
-	senderStaffId   string
-	isGroup         bool
-	proactive       bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
+	sessionWebhook string
+	conversationId string
+	senderStaffId  string
+	isGroup        bool
+	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
 
 // richTextContent mirrors the full structure of the DingTalk "text" JSON field,
@@ -56,11 +58,18 @@ type downloadResponse struct {
 	DownloadUrl string `json:"downloadUrl"`
 }
 
+const (
+	dingTalkOTOMessageURL   = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+	dingTalkGroupMessageURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+)
+
 type Platform struct {
 	clientID              string
 	clientSecret          string
 	robotCode             string
-	agentID               int64    // Agent ID for work notifications API (numeric)
+	robotCodeMu           sync.RWMutex
+	robotCodeStatePath    string
+	agentID               int64 // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
@@ -84,6 +93,8 @@ func New(opts map[string]any) (core.Platform, error) {
 	clientSecret, _ := opts["client_secret"].(string)
 	robotCode, _ := opts["robot_code"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
+	dataDir, _ := opts["cc_data_dir"].(string)
+	project, _ := opts["cc_project"].(string)
 	core.CheckAllowFrom("dingtalk", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if clientID == "" || clientSecret == "" {
@@ -95,6 +106,10 @@ func New(opts map[string]any) (core.Platform, error) {
 	// Validate robot_code format (should not be empty after fallback)
 	if robotCode == "" {
 		return nil, fmt.Errorf("dingtalk: robot_code is required (or client_id)")
+	}
+	robotCodeStatePath := dingtalkRobotCodeStatePath(dataDir, project)
+	if saved := loadDingTalkRobotCode(robotCodeStatePath); saved != "" {
+		robotCode = saved
 	}
 
 	// agent_id is required for work notifications API (numeric type)
@@ -128,6 +143,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		clientID:              clientID,
 		clientSecret:          clientSecret,
 		robotCode:             robotCode,
+		robotCodeStatePath:    robotCodeStatePath,
 		agentID:               agentID,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
@@ -203,16 +219,76 @@ func (p *Platform) onRawMessage(rawJSON string) {
 	// Parse the full "text" object from raw JSON to recover isReplyMsg/repliedMsg.
 	// The SDK's BotCallbackDataTextModel only has Content string, losing these fields.
 	var envelope struct {
-		Text richTextContent `json:"text"`
+		Text      richTextContent `json:"text"`
+		RobotCode string          `json:"robotCode"`
 	}
 	if err := json.Unmarshal([]byte(rawJSON), &envelope); err != nil {
 		slog.Warn("dingtalk: failed to parse rich text content", "error", err)
 	}
+	p.observeInboundRobotCode(envelope.RobotCode)
 
-	p.onMessage(&data, &envelope.Text)
+	p.onMessage(&data, &envelope.Text, envelope.RobotCode)
 }
 
-func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richTextContent) {
+func (p *Platform) observeInboundRobotCode(robotCode string) {
+	robotCode = strings.TrimSpace(robotCode)
+	if robotCode == "" {
+		return
+	}
+
+	p.robotCodeMu.Lock()
+	changed := p.robotCode != robotCode
+	p.robotCode = robotCode
+	p.robotCodeMu.Unlock()
+	if changed {
+		p.saveRobotCode(robotCode)
+		slog.Info("dingtalk: robot_code learned from inbound callback")
+	}
+}
+
+func (p *Platform) currentRobotCode() string {
+	p.robotCodeMu.RLock()
+	defer p.robotCodeMu.RUnlock()
+	return p.robotCode
+}
+
+func (p *Platform) saveRobotCode(robotCode string) {
+	if p.robotCodeStatePath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p.robotCodeStatePath), 0o700); err != nil {
+		slog.Warn("dingtalk: save robot_code state mkdir failed", "error", err)
+		return
+	}
+	if err := os.WriteFile(p.robotCodeStatePath, []byte(robotCode+"\n"), 0o600); err != nil {
+		slog.Warn("dingtalk: save robot_code state failed", "error", err)
+	}
+}
+
+func dingtalkRobotCodeStatePath(dataDir, project string) string {
+	if strings.TrimSpace(dataDir) == "" {
+		return ""
+	}
+	project = strings.TrimSpace(project)
+	if project == "" {
+		project = "default"
+	}
+	project = strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(project)
+	return filepath.Join(dataDir, "platform_state", "dingtalk", project+".robot_code")
+}
+
+func loadDingTalkRobotCode(path string) string {
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richTextContent, inboundRobotCode string) {
 	slog.Debug("dingtalk: message received", "user", data.SenderNick, "msgtype", data.Msgtype)
 
 	if p.dedup.IsDuplicate(data.MsgId) {
@@ -247,15 +323,16 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 
 	// Handle audio messages
 	if data.Msgtype == "audio" {
-		p.handleAudioMessage(data, sessionKey)
+		p.handleAudioMessage(data, sessionKey, inboundRobotCode)
 		return
 	}
 
 	// Handle richText messages — extract plain text from rich content
 	if data.Msgtype == "richText" {
 		text := extractRichText(data.Content)
-		if text == "" {
-			slog.Debug("dingtalk: richText message with no extractable text", "msg_id", data.MsgId)
+		images := p.downloadImages(inboundRobotCode, extractDownloadCodes(data.Content))
+		if text == "" && len(images) == 0 {
+			slog.Debug("dingtalk: richText message with no extractable text or images", "msg_id", data.MsgId)
 			return
 		}
 		msg := &core.Message{
@@ -266,11 +343,14 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 			ChatName:   data.ConversationTitle,
 			Content:    text,
 			MessageID:  data.MsgId,
+			ChannelKey: data.ConversationId,
 			ReplyCtx: replyContext{
 				sessionWebhook: data.SessionWebhook,
 				conversationId: data.ConversationId,
 				senderStaffId:  data.SenderStaffId,
+				isGroup:        data.ConversationType == "2",
 			},
+			Images: images,
 		}
 		p.handler(p, msg)
 		return
@@ -278,7 +358,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 
 	// Handle image messages
 	if data.Msgtype == "image" {
-		p.handleImageMessage(data, sessionKey)
+		p.handleImageMessage(data, sessionKey, inboundRobotCode)
 		return
 	}
 
@@ -288,6 +368,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		slog.Debug("dingtalk: reply message detected", "msgType", richText.RepliedMsg.MsgType)
 		messageContent = p.formatReplyContent(richText, messageContent)
 	}
+	images := p.imagesFromRepliedMessage(inboundRobotCode, richText)
 
 	// Handle text messages (default)
 	msg := &core.Message{
@@ -300,11 +381,12 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
+		Images: images,
 	}
 
 	p.handler(p, msg)
@@ -312,7 +394,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 
 // extractRichText extracts plain text from a DingTalk richText content payload.
 // The expected structure is: {"richText": [{"text": "..."}, {"text": "...", "attrs": {...}}, ...]}
-// Non-text elements (e.g. pictureDownloadCode) are skipped.
+// Non-text elements are skipped here; image download codes are handled separately.
 func extractRichText(content interface{}) string {
 	m, ok := content.(map[string]interface{})
 	if !ok {
@@ -335,7 +417,47 @@ func extractRichText(content interface{}) string {
 	return strings.TrimSpace(b.String())
 }
 
-func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
+func extractDownloadCodes(v interface{}) []string {
+	var codes []string
+	seen := map[string]bool{}
+
+	var walk func(interface{})
+	walk = func(x interface{}) {
+		switch t := x.(type) {
+		case map[string]interface{}:
+			for _, key := range []string{"downloadCode", "pictureDownloadCode"} {
+				if code, ok := t[key].(string); ok && code != "" && !seen[code] {
+					seen[code] = true
+					codes = append(codes, code)
+				}
+			}
+			for _, value := range t {
+				walk(value)
+			}
+		case []interface{}:
+			for _, item := range t {
+				walk(item)
+			}
+		}
+	}
+
+	walk(v)
+	return codes
+}
+
+func extractDownloadCodesFromJSON(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		slog.Debug("dingtalk: failed to parse image download code payload", "error", err)
+		return nil
+	}
+	return extractDownloadCodes(v)
+}
+
+func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessionKey, inboundRobotCode string) {
 	slog.Debug("dingtalk: audio message received", "user", data.SenderNick)
 
 	// Parse audio content from the raw content
@@ -354,7 +476,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 	}
 
 	// Download audio file
-	audioBytes, mimeType, err := p.downloadAudio(downloadCode)
+	audioBytes, mimeType, err := p.downloadAudio(inboundRobotCode, downloadCode)
 	if err != nil {
 		slog.Error("dingtalk: failed to download audio", "error", err)
 		// Fallback to recognition text if available
@@ -368,12 +490,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				MessageID:  data.MsgId,
 				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
-					sessionWebhook:  data.SessionWebhook,
-					conversationId:  data.ConversationId,
-					senderStaffId:   data.SenderStaffId,
-					isGroup:         data.ConversationType == "2",
+					sessionWebhook: data.SessionWebhook,
+					conversationId: data.ConversationId,
+					senderStaffId:  data.SenderStaffId,
+					isGroup:        data.ConversationType == "2",
 				},
-				FromVoice:  true,
+				FromVoice: true,
 			}
 			p.handler(p, msg)
 		}
@@ -392,12 +514,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
-		FromVoice:  true,
+		FromVoice: true,
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -408,7 +530,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 	p.handler(p, msg)
 }
 
-func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
+func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessionKey, inboundRobotCode string) {
 	slog.Debug("dingtalk: image message received", "user", data.SenderNick)
 
 	// Parse image content from the raw content
@@ -424,42 +546,12 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		return
 	}
 
-	// Download image file using the same messageFiles/download API as audio
-	downloadURL, err := p.getDownloadURL(downloadCode)
-	if err != nil {
-		slog.Error("dingtalk: failed to get image download URL", "error", err)
-		return
-	}
-
-	resp, err := p.httpClient.Get(downloadURL)
+	img, err := p.downloadImage(inboundRobotCode, downloadCode)
 	if err != nil {
 		slog.Error("dingtalk: failed to download image", "error", err)
 		return
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("dingtalk: image download returned status", "status", resp.StatusCode)
-		return
-	}
-
-	const maxImageBytes = 25 * 1024 * 1024 // 25 MiB, same cap as other platforms
-	imgBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
-	if err != nil {
-		slog.Error("dingtalk: failed to read image data", "error", err)
-		return
-	}
-	if len(imgBytes) > maxImageBytes {
-		slog.Error("dingtalk: image too large, dropping", "size", len(imgBytes), "limit", maxImageBytes)
-		return
-	}
-
-	mimeType := resp.Header.Get("Content-Type")
-	if mimeType == "" {
-		mimeType = "image/png"
-	}
-
-	slog.Info("dingtalk: image downloaded successfully", "size", len(imgBytes), "mime", mimeType)
+	slog.Info("dingtalk: image downloaded successfully", "size", len(img.Data), "mime", img.MimeType)
 
 	msg := &core.Message{
 		SessionKey: sessionKey,
@@ -467,23 +559,91 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserID:     data.SenderStaffId,
 		UserName:   data.SenderNick,
 		MessageID:  data.MsgId,
+		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
-		Images: []core.ImageAttachment{{
-			MimeType: mimeType,
-			Data:     imgBytes,
-		}},
+		Images: []core.ImageAttachment{img},
 	}
 
 	p.handler(p, msg)
 }
 
-func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
+func (p *Platform) downloadImage(inboundRobotCode, downloadCode string) (core.ImageAttachment, error) {
+	downloadURL, err := p.getDownloadURL(inboundRobotCode, downloadCode)
+	if err != nil {
+		return core.ImageAttachment{}, fmt.Errorf("get download URL: %w", err)
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		return core.ImageAttachment{}, fmt.Errorf("http get: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return core.ImageAttachment{}, fmt.Errorf("download returned status %d", resp.StatusCode)
+	}
+
+	const maxImageBytes = 25 * 1024 * 1024 // 25 MiB, same cap as other platforms
+	imgBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
+	if err != nil {
+		return core.ImageAttachment{}, fmt.Errorf("read response: %w", err)
+	}
+	if len(imgBytes) > maxImageBytes {
+		return core.ImageAttachment{}, fmt.Errorf("image too large: size=%d limit=%d", len(imgBytes), maxImageBytes)
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	return core.ImageAttachment{
+		MimeType: mimeType,
+		Data:     imgBytes,
+	}, nil
+}
+
+func (p *Platform) downloadImages(inboundRobotCode string, downloadCodes []string) []core.ImageAttachment {
+	if len(downloadCodes) == 0 {
+		return nil
+	}
+	images := make([]core.ImageAttachment, 0, len(downloadCodes))
+	for _, code := range downloadCodes {
+		img, err := p.downloadImage(inboundRobotCode, code)
+		if err != nil {
+			slog.Error("dingtalk: failed to download rich image", "error", err)
+			continue
+		}
+		slog.Info("dingtalk: rich image downloaded successfully", "size", len(img.Data), "mime", img.MimeType)
+		images = append(images, img)
+	}
+	return images
+}
+
+func (p *Platform) imagesFromRepliedMessage(inboundRobotCode string, richText *richTextContent) []core.ImageAttachment {
+	if richText == nil || richText.RepliedMsg == nil {
+		return nil
+	}
+	msgType := richText.RepliedMsg.MsgType
+	if msgType != "picture" && msgType != "image" {
+		return nil
+	}
+	codes := extractDownloadCodesFromJSON(richText.RepliedMsg.Content)
+	if len(codes) == 0 {
+		slog.Debug("dingtalk: quoted image message has no download code", "msgType", msgType)
+		return nil
+	}
+	return p.downloadImages(inboundRobotCode, codes)
+}
+
+func (p *Platform) downloadAudio(inboundRobotCode, downloadCode string) ([]byte, string, error) {
 	// Get download URL
-	downloadURL, err := p.getDownloadURL(downloadCode)
+	downloadURL, err := p.getDownloadURL(inboundRobotCode, downloadCode)
 	if err != nil {
 		return nil, "", fmt.Errorf("get download URL: %w", err)
 	}
@@ -513,15 +673,20 @@ func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
 	return data, mimeType, nil
 }
 
-func (p *Platform) getDownloadURL(downloadCode string) (string, error) {
+func (p *Platform) getDownloadURL(inboundRobotCode, downloadCode string) (string, error) {
 	token, err := p.getAccessToken()
 	if err != nil {
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
+	robotCode := inboundRobotCode
+	if robotCode == "" {
+		robotCode = p.currentRobotCode()
+	}
+
 	reqBody := map[string]string{
 		"downloadCode": downloadCode,
-		"robotCode":    p.robotCode,
+		"robotCode":    robotCode,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -546,12 +711,17 @@ func (p *Platform) getDownloadURL(downloadCode string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("api returned status %d", resp.StatusCode)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
 	}
 
 	var result downloadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("api returned status %d body=%s", resp.StatusCode, string(respBody))
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 
@@ -688,6 +858,56 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
 }
 
+func (p *Platform) sendRobotMediaMessage(ctx context.Context, rc replyContext, operation, kind, msgKey string, msgParam map[string]string) error {
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("dingtalk: get access token: %w", err)
+	}
+
+	msgParamBytes, _ := json.Marshal(msgParam)
+	apiURL := dingTalkOTOMessageURL
+	requestBody := map[string]any{
+		"robotCode": p.currentRobotCode(),
+		"msgKey":    msgKey,
+		"msgParam":  string(msgParamBytes),
+	}
+	if rc.isGroup && rc.conversationId != "" {
+		apiURL = dingTalkGroupMessageURL
+		requestBody["openConversationId"] = rc.conversationId
+	} else if rc.senderStaffId != "" {
+		requestBody["userIds"] = []string{rc.senderStaffId}
+	} else {
+		return fmt.Errorf("dingtalk: %s requires conversationId (group) or senderStaffId (direct)", operation)
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal %s message: %w", kind, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create %s request: %w", kind, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send %s request: %w", kind, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	slog.Debug("dingtalk: "+kind+" message response", "api", apiURL, "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: send %s failed: status=%d, body=%s", kind, resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // SendImage uploads and sends an image via DingTalk oToMessages API.
 // Implements core.ImageSender.
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
@@ -708,47 +928,11 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 
 	slog.Debug("dingtalk: image uploaded", "media_id", mediaID, "size", len(img.Data))
 
-	token, err := p.getAccessToken()
-	if err != nil {
-		return fmt.Errorf("dingtalk: get access token: %w", err)
+	if err := p.sendRobotMediaMessage(ctx, rc, "SendImage", "image", "sampleImageMsg", map[string]string{"photoURL": mediaID}); err != nil {
+		return err
 	}
 
-	msgParamBytes, _ := json.Marshal(map[string]string{"photoURL": mediaID})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleImageMsg",
-		"msgParam":  string(msgParamBytes),
-	}
-
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return fmt.Errorf("dingtalk: marshal image message: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
-		bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("dingtalk: create image request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-acs-dingtalk-access-token", token)
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("dingtalk: send image request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: oToMessages image response", "status", resp.StatusCode, "body", string(respBody))
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: send image failed: status=%d, body=%s", resp.StatusCode, string(respBody))
-	}
-
-	slog.Info("dingtalk: image message sent", "media_id", mediaID, "user", rc.senderStaffId)
+	slog.Info("dingtalk: image message sent", "media_id", mediaID, "is_group", rc.isGroup, "conversation", rc.conversationId, "user", rc.senderStaffId)
 	return nil
 }
 
@@ -792,56 +976,20 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 	slog.Debug("dingtalk: file uploaded", "media_id", mediaID, "name", name, "size", len(file.Data))
 
-	token, err := p.getAccessToken()
-	if err != nil {
-		return fmt.Errorf("dingtalk: get access token: %w", err)
-	}
-
 	ext := ""
 	if idx := strings.LastIndex(name, "."); idx >= 0 {
 		ext = name[idx+1:]
 	}
 
-	msgParamBytes, _ := json.Marshal(map[string]string{
+	if err := p.sendRobotMediaMessage(ctx, rc, "SendFile", "file", "sampleFile", map[string]string{
 		"mediaId":  mediaID,
 		"fileName": name,
 		"fileType": ext,
-	})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleFile",
-		"msgParam":  string(msgParamBytes),
+	}); err != nil {
+		return err
 	}
 
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return fmt.Errorf("dingtalk: marshal file message: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
-		bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("dingtalk: create file request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-acs-dingtalk-access-token", token)
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("dingtalk: send file request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: oToMessages file response", "status", resp.StatusCode, "body", string(respBody))
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: send file failed: status=%d, body=%s", resp.StatusCode, string(respBody))
-	}
-
-	slog.Info("dingtalk: file message sent", "media_id", mediaID, "name", name, "user", rc.senderStaffId)
+	slog.Info("dingtalk: file message sent", "media_id", mediaID, "name", name, "is_group", rc.isGroup, "conversation", rc.conversationId, "user", rc.senderStaffId)
 	return nil
 }
 
@@ -931,7 +1079,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	// msgParam must be a JSON string, not an object
 	msgParamJSON := fmt.Sprintf(`{"mediaId":"%s","duration":"%d"}`, mediaID, durationMs)
 	requestBody := map[string]interface{}{
-		"robotCode": p.robotCode,
+		"robotCode": p.currentRobotCode(),
 		"userIds":   []string{rc.senderStaffId},
 		"msgKey":    "sampleAudio",
 		"msgParam":  msgParamJSON,
@@ -992,8 +1140,8 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	args := []string{
 		"-i", "pipe:0",
 		"-ar", "16000", // 16kHz sample rate for voice
-		"-ac", "1",     // mono
-		"-b:a", "64k",  // 64 kbps bitrate (voice quality)
+		"-ac", "1", // mono
+		"-b:a", "64k", // 64 kbps bitrate (voice quality)
 		"-f", "mp3",
 		"-y",
 		"pipe:1",
@@ -1181,7 +1329,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
 		msgParam, _ := json.Marshal(map[string]string{"text": content})
 		requestBody = map[string]any{
-			"robotCode":          p.robotCode,
+			"robotCode":          p.currentRobotCode(),
 			"openConversationId": rc.conversationId,
 			"msgKey":             "sampleMarkdown",
 			"msgParam":           string(msgParam),
@@ -1191,7 +1339,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
 		msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
 		requestBody = map[string]any{
-			"robotCode": p.robotCode,
+			"robotCode": p.currentRobotCode(),
 			"userIds":   []string{rc.senderStaffId},
 			"msgKey":    "sampleMarkdown",
 			"msgParam":  string(msgParam),
