@@ -3060,6 +3060,46 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_TargetSessionDoesNotChangeActive(t *testing.T) {
+	p := &stubPlatformEngine{n: "bridge"}
+	agentSession := newResultAgentSession("done")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	sessionKey := "bridge:web-admin:test"
+	active := e.sessions.GetOrCreateActive(sessionKey)
+	target := e.sessions.NewSession(sessionKey, "picked")
+	if _, err := e.sessions.SwitchSession(sessionKey, active.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey:      sessionKey,
+		TargetSessionID: target.ID,
+		Platform:        "bridge",
+		UserID:          "web-admin",
+		UserName:        "Web Admin",
+		Content:         "hello target",
+		ReplyCtx:        "ctx",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(target.GetHistory(1)) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if hist := target.GetHistory(2); len(hist) == 0 || hist[0].Content != "hello target" {
+		t.Fatalf("target history = %#v, want routed user message", hist)
+	}
+	if hist := active.GetHistory(1); len(hist) != 0 {
+		t.Fatalf("active history = %#v, should remain untouched", hist)
+	}
+	if current := e.sessions.GetOrCreateActive(sessionKey); current.ID != active.ID {
+		t.Fatalf("active session = %q, want unchanged %q", current.ID, active.ID)
+	}
+}
+
 func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
 	nativeSessions := []AgentSessionInfo{
 		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
@@ -10954,9 +10994,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                                { return false }
+func (c *stubStreamingCard) Failed() bool                               { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

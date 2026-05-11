@@ -327,6 +327,27 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 	return nil, fmt.Errorf("session %q not found", target)
 }
 
+// ResolveSessionForRouting returns target for one-message routing without
+// changing the active session for userKey.
+func (sm *SessionManager) ResolveSessionForRouting(userKey, target string) (*Session, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s == nil {
+			continue
+		}
+		if s.ID != target && s.Name != target {
+			continue
+		}
+		sm.restorePastAgentSessionLocked(s)
+		sm.saveLocked()
+		return s, nil
+	}
+	return nil, fmt.Errorf("session %q not found", target)
+}
+
 // SwitchSessionForRouting makes target active and restores a past native agent
 // session ID when the local session represents an older native conversation.
 func (sm *SessionManager) SwitchSessionForRouting(userKey, target string) (*Session, error) {
@@ -342,15 +363,22 @@ func (sm *SessionManager) SwitchSessionForRouting(userKey, target string) (*Sess
 			continue
 		}
 		sm.activeSession[userKey] = s.ID
-		s.mu.Lock()
-		if s.AgentSessionID == "" && len(s.PastAgentSessionIDs) > 0 {
-			s.AgentSessionID = s.PastAgentSessionIDs[len(s.PastAgentSessionIDs)-1]
-		}
-		s.mu.Unlock()
+		sm.restorePastAgentSessionLocked(s)
 		sm.saveLocked()
 		return s, nil
 	}
 	return nil, fmt.Errorf("session %q not found", target)
+}
+
+func (sm *SessionManager) restorePastAgentSessionLocked(s *Session) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AgentSessionID == "" && len(s.PastAgentSessionIDs) > 0 {
+		s.AgentSessionID = s.PastAgentSessionIDs[len(s.PastAgentSessionIDs)-1]
+	}
 }
 
 // SwitchToAgentSession finds or creates an internal session that maps to the

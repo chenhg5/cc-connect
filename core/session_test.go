@@ -130,6 +130,32 @@ func TestSessionManager_SwitchSessionForRoutingRestoresPastAgentSessionID(t *tes
 	}
 }
 
+func TestSessionManager_ResolveSessionForRoutingDoesNotChangeActive(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "bridge:web-admin:codex"
+	first := sm.GetOrCreateActive(userKey)
+	target := sm.NewSession(userKey, "past native")
+	target.PastAgentSessionIDs = []string{"thread-old"}
+	target.AgentType = "codex"
+	if _, err := sm.SwitchSession(userKey, first.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+
+	resolved, err := sm.ResolveSessionForRouting(userKey, target.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionForRouting: %v", err)
+	}
+	if resolved.ID != target.ID {
+		t.Fatalf("resolved ID = %q, want %q", resolved.ID, target.ID)
+	}
+	if active := sm.GetOrCreateActive(userKey); active.ID != first.ID {
+		t.Fatalf("active ID = %q, want unchanged %q", active.ID, first.ID)
+	}
+	if got := target.GetAgentSessionID(); got != "thread-old" {
+		t.Fatalf("agent session ID = %q, want restored past ID", got)
+	}
+}
+
 func TestSessionManager_ListSessions(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.NewSession("user1", "a")
