@@ -509,6 +509,19 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	return os.Remove(path)
 }
 
+// extractStringContent attempts to extract a plain string from a json.RawMessage.
+// Returns empty string if the raw message is not a JSON string.
+func extractStringContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -526,7 +539,7 @@ func scanSessionMeta(path string) (string, int) {
 		var entry struct {
 			Type    string `json:"type"`
 			Message struct {
-				Content string `json:"content"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
@@ -534,8 +547,10 @@ func scanSessionMeta(path string) (string, int) {
 		}
 		if entry.Type == "user" || entry.Type == "assistant" {
 			count++
-			if entry.Type == "user" && entry.Message.Content != "" {
-				summary = entry.Message.Content
+			if entry.Type == "user" {
+				if s := extractStringContent(entry.Message.Content); s != "" {
+					summary = s
+				}
 			}
 		}
 	}
