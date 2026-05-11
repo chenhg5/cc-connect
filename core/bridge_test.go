@@ -306,7 +306,7 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
-func TestBridge_MessageRoutingSwitchesTargetSession(t *testing.T) {
+func TestBridge_MessageRoutingTargetsSessionWithoutChangingActive(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
 	bp := bs.NewPlatform("test-proj")
@@ -325,6 +325,9 @@ func TestBridge_MessageRoutingSwitchesTargetSession(t *testing.T) {
 
 	gotCh := make(chan *Message, 1)
 	bp.handler = func(p Platform, msg *Message) {
+		if msg.TargetSessionID != second.ID {
+			t.Errorf("TargetSessionID = %q, want %q", msg.TargetSessionID, second.ID)
+		}
 		gotCh <- msg
 	}
 
@@ -352,8 +355,8 @@ func TestBridge_MessageRoutingSwitchesTargetSession(t *testing.T) {
 		t.Fatal("expected message to be dispatched")
 	}
 
-	if active := e.sessions.GetOrCreateActive(key); active.ID != second.ID {
-		t.Fatalf("active after message = %q, want target %q", active.ID, second.ID)
+	if active := e.sessions.GetOrCreateActive(key); active.ID != first.ID {
+		t.Fatalf("active after message = %q, want unchanged %q", active.ID, first.ID)
 	}
 }
 
