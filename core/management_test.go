@@ -418,7 +418,17 @@ func TestMgmt_Sessions_HidesShadowedPastSessions(t *testing.T) {
 }
 
 func TestMgmt_Sessions_DeduplicatesPastOnlySessions(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	agent := &mgmtListAgent{
+		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native past title"}},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
 
 	older := e.sessions.NewSession("user1", "old shell")
 	older.SetAgentSessionID("agent-1", "codex")
@@ -435,7 +445,8 @@ func TestMgmt_Sessions_DeduplicatesPastOnlySessions(t *testing.T) {
 	}
 	var listData struct {
 		Sessions []struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
 		} `json:"sessions"`
 	}
 	if err := json.Unmarshal(r.Data, &listData); err != nil {
@@ -446,6 +457,9 @@ func TestMgmt_Sessions_DeduplicatesPastOnlySessions(t *testing.T) {
 	}
 	if listData.Sessions[0].ID != newer.ID {
 		t.Fatalf("visible session = %q, want newer %q", listData.Sessions[0].ID, newer.ID)
+	}
+	if listData.Sessions[0].Name != "native past title" {
+		t.Fatalf("visible session name = %q, want native past title", listData.Sessions[0].Name)
 	}
 	if older.ID == newer.ID {
 		t.Fatal("test setup failed: older and newer IDs match")

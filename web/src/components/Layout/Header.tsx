@@ -53,16 +53,16 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
   const btnCls = cn(
     'p-2 rounded-lg transition-all duration-200',
-    'text-gray-500 dark:text-gray-400',
-    'hover:bg-gray-100/90 dark:hover:bg-white/[0.08] hover:text-gray-800 dark:hover:text-white',
+    'text-ink/55',
+    'hover:bg-ink/[0.06] hover:text-ink',
   );
 
   return (
     <header
       className={cn(
         'h-14 flex items-center justify-between gap-1 px-3 sm:px-4 shrink-0 relative z-20',
-        'border-b border-gray-200/80 dark:border-white/[0.08]',
-        'bg-white/70 backdrop-blur-xl dark:bg-[rgba(0,0,0,0.72)]',
+        'border-b border-black/[0.08] dark:border-white/[0.1]',
+        'bg-surface/72 backdrop-blur-xl',
       )}
     >
       <button type="button" onClick={onMenuClick} className={cn(btnCls, 'lg:hidden')} aria-label="Open navigation">
@@ -83,8 +83,8 @@ export default function Header({ onMenuClick }: HeaderProps) {
           {langOpen && (
             <div className={cn(
               'absolute right-0 top-full mt-1 w-36 rounded-xl py-1 z-50 overflow-hidden',
-              'bg-white/95 backdrop-blur-xl border border-gray-200/80 shadow-xl shadow-black/10',
-              'dark:bg-[rgba(0,0,0,0.88)] dark:border-white/[0.1] dark:shadow-black/40',
+              'bg-surface/95 backdrop-blur-xl border border-black/[0.08] shadow-xl shadow-black/10',
+              'dark:border-white/[0.1] dark:shadow-black/40',
             )}>
               {languages.map(l => (
                 <button
@@ -95,7 +95,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
                     'w-full text-left px-3 py-1.5 text-sm transition-colors',
                     i18n.language === l.code
                       ? 'text-accent font-medium bg-accent/10'
-                      : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-white/[0.06]',
+                      : 'text-ink/75 hover:bg-ink/[0.06]',
                   )}
                 >
                   {l.label}
@@ -115,8 +115,8 @@ export default function Header({ onMenuClick }: HeaderProps) {
           type="button"
           onClick={logout}
           className={cn(
-            'p-2 rounded-lg transition-all duration-200',
-            'text-gray-400 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400',
+          'p-2 rounded-lg transition-all duration-200',
+          'text-ink/45 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400',
           )}
           aria-label={t('login.logout')}
         >
