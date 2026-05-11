@@ -892,18 +892,19 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		slog.Warn("bridge: no engine for session", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
 		return
 	}
-	if !a.switchTargetSession(ref, m.SessionKey, m.SessionID, m.ReplyCtx) {
+	if !a.validateTargetSession(ref, m.SessionKey, m.SessionID, m.ReplyCtx) {
 		return
 	}
 
 	msg := &Message{
-		SessionKey: m.SessionKey,
-		Platform:   a.platform,
-		MessageID:  m.MsgID,
-		UserID:     m.UserID,
-		UserName:   m.UserName,
-		Content:    m.Content,
-		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
+		SessionKey:      m.SessionKey,
+		TargetSessionID: m.SessionID,
+		Platform:        a.platform,
+		MessageID:       m.MsgID,
+		UserID:          m.UserID,
+		UserName:        m.UserName,
+		Content:         m.Content,
+		ReplyCtx:        newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
 
 	for _, img := range m.Images {
@@ -960,7 +961,7 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 	if ref == nil {
 		return
 	}
-	if !a.switchTargetSession(ref, ca.SessionKey, ca.SessionID, ca.ReplyCtx) {
+	if !a.validateTargetSession(ref, ca.SessionKey, ca.SessionID, ca.ReplyCtx) {
 		return
 	}
 
@@ -977,20 +978,20 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 		default:
 			return
 		}
-		a.dispatchAsPermissionResponse(ref, ca.SessionKey, ca.ReplyCtx, responseText)
+		a.dispatchAsPermissionResponse(ref, ca.SessionKey, ca.SessionID, ca.ReplyCtx, responseText)
 		return
 	}
 
 	// askq: — AskUserQuestion answer; forward as a regular message
 	if strings.HasPrefix(ca.Action, "askq:") {
-		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, ca.Action)
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.SessionID, ca.ReplyCtx, ca.Action)
 		return
 	}
 
 	// cmd: — command shortcut from a card button; forward as a message
 	if strings.HasPrefix(ca.Action, "cmd:") {
 		cmdText := strings.TrimPrefix(ca.Action, "cmd:")
-		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, cmdText)
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.SessionID, ca.ReplyCtx, cmdText)
 		return
 	}
 
@@ -1019,17 +1020,18 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 
 // dispatchAsMessage converts a card action into a regular user message
 // and dispatches it to the engine's message handler.
-func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, replyCtx, content string) {
+func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, sessionID, replyCtx, content string) {
 	if ref.platform.handler == nil {
 		return
 	}
 	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   a.platform,
-		UserID:     "web-admin",
-		UserName:   "Web Admin",
-		Content:    content,
-		ReplyCtx:   newBridgeReplyCtx(a, sessionKey, replyCtx),
+		SessionKey:      sessionKey,
+		TargetSessionID: sessionID,
+		Platform:        a.platform,
+		UserID:          "web-admin",
+		UserName:        "Web Admin",
+		Content:         content,
+		ReplyCtx:        newBridgeReplyCtx(a, sessionKey, replyCtx),
 	}
 	go ref.platform.handler(ref.platform, msg)
 }
@@ -1040,12 +1042,13 @@ func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, repl
 // (e.g. user tapped an old "Allow" card after the session was reset) —
 // preventing the literal "allow"/"deny" string from reaching the agent's
 // prompt stream (issue #826).
-func (a *bridgeAdapter) dispatchAsPermissionResponse(ref *bridgeEngineRef, sessionKey, replyCtx, content string) {
+func (a *bridgeAdapter) dispatchAsPermissionResponse(ref *bridgeEngineRef, sessionKey, sessionID, replyCtx, content string) {
 	if ref.platform.handler == nil {
 		return
 	}
 	msg := &Message{
 		SessionKey:           sessionKey,
+		TargetSessionID:      sessionID,
 		Platform:             a.platform,
 		UserID:               "web-admin",
 		UserName:             "Web Admin",
@@ -1056,12 +1059,12 @@ func (a *bridgeAdapter) dispatchAsPermissionResponse(ref *bridgeEngineRef, sessi
 	go ref.platform.handler(ref.platform, msg)
 }
 
-func (a *bridgeAdapter) switchTargetSession(ref *bridgeEngineRef, sessionKey, sessionID, replyCtx string) bool {
+func (a *bridgeAdapter) validateTargetSession(ref *bridgeEngineRef, sessionKey, sessionID, replyCtx string) bool {
 	if sessionID == "" {
 		return true
 	}
-	if _, err := ref.engine.sessions.SwitchSessionForRouting(sessionKey, sessionID); err != nil {
-		slog.Warn("bridge: target session switch failed",
+	if _, err := ref.engine.sessions.ResolveSessionForRouting(sessionKey, sessionID); err != nil {
+		slog.Warn("bridge: target session validation failed",
 			"platform", a.platform,
 			"session_key", sessionKey,
 			"session_id", sessionID,
