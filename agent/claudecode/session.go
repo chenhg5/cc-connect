@@ -145,6 +145,12 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, cliBin, allArgs...)
 	cmd.Dir = workDir
+	// Put the child into its own process group so Close() can terminate the
+	// entire descendant tree (claude CLI → MCP server bridges → ...) with a
+	// single signal. Without this, killing only the direct child can leave
+	// MCP grandchildren (e.g. the Telegram bridge bun process) spinning at
+	// 100% CPU after their parent's stdio pipe closes.
+	prepareCmdForKill(cmd)
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
 	env := filterEnv(os.Environ(), "CLAUDECODE")
@@ -716,11 +722,10 @@ func (cs *claudeSession) Close() error {
 			"timeout", graceful)
 	}
 
-	// Phase 2: SIGTERM — gives the process a second chance to run
-	// cleanup handlers that respond to signals but not stdin EOF.
-	if cs.cmd != nil && cs.cmd.Process != nil {
-		_ = cs.cmd.Process.Signal(syscall.SIGTERM)
-	}
+	// Phase 2: SIGTERM the whole process group — gives the process and its
+	// descendants (e.g. MCP server bridges) a second chance to run cleanup
+	// handlers that respond to signals but not stdin EOF.
+	_ = signalProcessGroup(cs.cmd, syscall.SIGTERM)
 
 	select {
 	case <-cs.done:
@@ -730,11 +735,12 @@ func (cs *claudeSession) Close() error {
 		slog.Warn("claudeSession: SIGTERM timed out, sending SIGKILL")
 	}
 
-	// Phase 3: SIGKILL — last resort.
+	// Phase 3: SIGKILL the whole process group — last resort. Using a
+	// group-wide kill ensures grandchildren (Claude Code's MCP servers
+	// such as the Telegram bridge) are reaped along with the direct child;
+	// otherwise they can survive as orphans and spin at 100% CPU.
 	cs.cancel()
-	if cs.cmd != nil && cs.cmd.Process != nil {
-		_ = cs.cmd.Process.Kill()
-	}
+	_ = forceKillCmd(cs.cmd)
 	<-cs.done
 	return nil
 }
