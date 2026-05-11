@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -381,6 +382,73 @@ func TestMgmt_Sessions_DisplayNamePriority(t *testing.T) {
 	}
 	if detail.Name != "custom name" {
 		t.Fatalf("session detail name = %q, want custom name", detail.Name)
+	}
+}
+
+func TestMgmt_Sessions_HidesShadowedPastSessions(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	current := e.sessions.NewSession("user1", "native current")
+	current.SetAgentSessionID("agent-1", "codex")
+	shadow := e.sessions.NewSession("user1", "old local shell")
+	shadow.SetAgentSessionID("agent-1", "codex")
+	shadow.SetAgentSessionID("", "")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			ID string `json:"id"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
+	}
+	if listData.Sessions[0].ID != current.ID {
+		t.Fatalf("visible session = %q, want current %q", listData.Sessions[0].ID, current.ID)
+	}
+	if shadow.ID == current.ID {
+		t.Fatal("test setup failed: shadow and current IDs match")
+	}
+}
+
+func TestMgmt_Sessions_DeduplicatesPastOnlySessions(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	older := e.sessions.NewSession("user1", "old shell")
+	older.SetAgentSessionID("agent-1", "codex")
+	older.SetAgentSessionID("", "")
+	older.UpdatedAt = time.Now().Add(-time.Minute)
+	newer := e.sessions.NewSession("user1", "new shell")
+	newer.SetAgentSessionID("agent-1", "codex")
+	newer.SetAgentSessionID("", "")
+	newer.UpdatedAt = time.Now()
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			ID string `json:"id"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
+	}
+	if listData.Sessions[0].ID != newer.ID {
+		t.Fatalf("visible session = %q, want newer %q", listData.Sessions[0].ID, newer.ID)
+	}
+	if older.ID == newer.ID {
+		t.Fatal("test setup failed: older and newer IDs match")
 	}
 }
 
