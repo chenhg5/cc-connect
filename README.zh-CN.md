@@ -62,6 +62,7 @@ Telegram / agent session 修复：
 Web 控制台修复：
 
 - Web 控制台会话标题优先显示 `/name` 自定义名，其次显示原生 agent 标题/摘要，不再优先掉到本地 `Session.Name`。
+- Web 控制台会话标题会和 Telegram 会话命名同步，同一个对话在 TG 和控制台里显示同一个可读名称。
 - 概览页“最近会话”点击后会打开刚点击的那个 session，不再误跳到 current/latest session。
 - 隐藏和去重旧的本地 shadow session，并且 Web 控制台可以显示完整可见会话列表，不再只看到少数几个最近会话。
 - 手机端 Web 控制台改成汉堡按钮 + 侧边栏抽屉，不再把内容挤到一团。

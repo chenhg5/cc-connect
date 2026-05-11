@@ -62,6 +62,7 @@ Telegram / agent session fixes:
 Web console fixes:
 
 - Web console session names now prefer `/name` custom names, then native agent titles/summaries, instead of falling back to local `Session.Name`.
+- Web console session titles stay in sync with Telegram session names, so the same conversation has the same readable name in both places.
 - Dashboard recent-session cards open the exact clicked session instead of the current/latest session.
 - Stale local shadow sessions are hidden/deduplicated, and the Web console can show the full visible session list instead of only a few recent sessions.
 - Mobile Web console layout now uses a hamburger menu and slide-out sidebar instead of squeezing content.
