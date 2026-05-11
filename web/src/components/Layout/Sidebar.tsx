@@ -39,8 +39,8 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
     <aside
       className={cn(
         'h-screen flex flex-col border-r transition-all duration-300 ease-out',
-        'bg-white/90 backdrop-blur-xl border-gray-200/80',
-        'dark:bg-[rgba(10,10,12,0.94)] dark:backdrop-blur-xl dark:border-white/[0.08]',
+        'bg-surface/78 backdrop-blur-xl border-black/[0.08]',
+        'dark:bg-surface/78 dark:backdrop-blur-xl dark:border-white/[0.1]',
         collapsed ? 'lg:w-16' : 'lg:w-56',
         'w-72 max-w-[82vw]',
       )}
@@ -49,7 +49,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       <div
         className={cn(
           'flex items-center px-4 h-14 border-b transition-colors shrink-0',
-          'border-gray-200/80 dark:border-white/[0.08]',
+          'border-black/[0.08] dark:border-white/[0.1]',
           collapsed ? 'justify-center' : 'gap-0',
         )}
       >
@@ -84,8 +84,8 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               cn(
                 'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
                 isActive
-                  ? 'bg-accent/12 text-accent ring-1 ring-accent/25'
-                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.06] hover:text-gray-900 dark:hover:text-white',
+                  ? 'bg-accent/14 text-accent ring-1 ring-accent/30'
+                  : 'text-ink/70 hover:bg-ink/[0.06] hover:text-ink',
               )
             }
           >
@@ -96,13 +96,13 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       </nav>
 
       {/* Collapse toggle */}
-      <div className={cn('border-t p-2', 'border-gray-200/80 dark:border-white/[0.08]')}>
+      <div className={cn('border-t p-2', 'border-black/[0.08] dark:border-white/[0.1]')}>
         <button
           type="button"
           onClick={() => setCollapsed(!collapsed)}
           className={cn(
             'flex items-center justify-center w-full px-3 py-2 rounded-xl transition-colors duration-200',
-            'text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.06]',
+            'text-ink/45 hover:bg-ink/[0.06] hover:text-ink',
           )}
         >
           {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}

@@ -920,12 +920,23 @@ func (e *Engine) managementSessionDisplayName(s *Session, nativeNames map[string
 	if e == nil || e.sessions == nil || s == nil {
 		return ""
 	}
-	agentID := s.GetAgentSessionID()
+	s.mu.Lock()
+	agentID := s.AgentSessionID
+	pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+	s.mu.Unlock()
 	if agentID != "" {
 		if name := e.sessions.GetSessionName(agentID); name != "" {
 			return name
 		}
 		if name := nativeNames[agentID]; name != "" {
+			return name
+		}
+	}
+	for _, pastID := range pastIDs {
+		if name := e.sessions.GetSessionName(pastID); name != "" {
+			return name
+		}
+		if name := nativeNames[pastID]; name != "" {
 			return name
 		}
 	}

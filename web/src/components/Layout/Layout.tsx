@@ -12,8 +12,7 @@ export default function Layout() {
     <div
       className={cn(
         'flex h-screen overflow-hidden',
-        'bg-gradient-to-br from-gray-100 via-white to-gray-100',
-        'dark:from-gray-950 dark:via-[#0a0a0c] dark:to-gray-950',
+        'bg-[rgb(var(--color-surface))] text-[rgb(var(--color-ink))]',
       )}
     >
       <Sidebar mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />
