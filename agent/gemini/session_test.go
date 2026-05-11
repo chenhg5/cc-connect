@@ -105,6 +105,127 @@ func TestHandleMessage_DeltaEmitsEventTextImmediately(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_DeltaThoughtEmitsThinking(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type":  "message",
+		"role":  "assistant",
+		"delta": true,
+		"content": []any{
+			map[string]any{"type": "thought", "thought": "checking long context"},
+		},
+	})
+
+	events := drainEvents(gs.events, 50*time.Millisecond)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != core.EventThinking || events[0].Content != "checking long context" {
+		t.Fatalf("expected EventThinking, got %v %q", events[0].Type, events[0].Content)
+	}
+}
+
+func TestHandleMessage_MixedContentSeparatesThoughtFromText(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type":  "message",
+		"role":  "agent",
+		"delta": true,
+		"content": []any{
+			map[string]any{"type": "thought", "thought": "internal scratchpad"},
+			map[string]any{"type": "text", "text": "visible answer"},
+		},
+	})
+
+	events := drainEvents(gs.events, 50*time.Millisecond)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Type != core.EventThinking || events[0].Content != "internal scratchpad" {
+		t.Fatalf("event 0: expected EventThinking, got %v %q", events[0].Type, events[0].Content)
+	}
+	if events[1].Type != core.EventText || events[1].Content != "visible answer" {
+		t.Fatalf("event 1: expected EventText, got %v %q", events[1].Type, events[1].Content)
+	}
+}
+
+func TestHandleMessage_TopLevelThinkingDeltaDoesNotEmitText(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type":     "message",
+		"role":     "assistant",
+		"content":  "hidden chain",
+		"delta":    true,
+		"thinking": true,
+	})
+
+	events := drainEvents(gs.events, 50*time.Millisecond)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != core.EventThinking || events[0].Content != "hidden chain" {
+		t.Fatalf("expected EventThinking, got %v %q", events[0].Type, events[0].Content)
+	}
+}
+
+func TestHandleMessage_FalseThinkingFlagKeepsText(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type":     "message",
+		"role":     "assistant",
+		"content":  "visible text",
+		"delta":    true,
+		"thinking": "false",
+	})
+
+	events := drainEvents(gs.events, 50*time.Millisecond)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != core.EventText || events[0].Content != "visible text" {
+		t.Fatalf("expected EventText, got %v %q", events[0].Type, events[0].Content)
+	}
+}
+
+func TestHandleThinkingEvent(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type": "thinking",
+		"thought": map[string]any{
+			"subject":     "Plan",
+			"description": "inspect files",
+		},
+	})
+
+	events := drainEvents(gs.events, 50*time.Millisecond)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != core.EventThinking || events[0].Content != "Plan\ninspect files" {
+		t.Fatalf("expected EventThinking with subject and description, got %v %q", events[0].Type, events[0].Content)
+	}
+}
+
 func TestHandleMessage_NonDeltaBuffered(t *testing.T) {
 	gs := &geminiSession{
 		events: make(chan core.Event, 64),
