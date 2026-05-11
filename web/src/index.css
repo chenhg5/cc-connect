@@ -5,12 +5,16 @@
 @tailwind utilities;
 
 :root {
-  --color-accent: 22 163 74;
-  --color-accent-dim: 21 128 61;
+  --color-accent: 204 125 94;
+  --color-accent-dim: 178 99 73;
+  --color-surface: 249 249 247;
+  --color-ink: 45 45 43;
 }
 .dark {
-  --color-accent: 66 255 156;
-  --color-accent-dim: 43 200 122;
+  --color-accent: 204 125 94;
+  --color-accent-dim: 221 151 124;
+  --color-surface: 45 45 43;
+  --color-ink: 249 249 247;
 }
 
 body {
@@ -18,6 +22,36 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: rgb(var(--color-surface));
+  color: rgb(var(--color-ink));
+}
+
+.bg-white,
+.dark .dark\:bg-gray-800,
+.dark .dark\:bg-gray-900,
+.dark .dark\:bg-white\/\[0\.02\],
+.dark .dark\:bg-white\/\[0\.03\] {
+  background-color: rgb(var(--color-surface) / 0.72);
+}
+
+.border-gray-200,
+.border-gray-200\/80,
+.dark .dark\:border-gray-700,
+.dark .dark\:border-gray-800,
+.dark .dark\:border-white\/\[0\.06\],
+.dark .dark\:border-white\/\[0\.08\] {
+  border-color: rgb(var(--color-ink) / 0.1);
+}
+
+.text-gray-900,
+.dark .dark\:text-white {
+  color: rgb(var(--color-ink));
+}
+
+input,
+select,
+textarea {
+  color: rgb(var(--color-ink));
 }
 
 pre code.hljs {
