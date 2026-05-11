@@ -153,6 +153,15 @@ type appServerSession struct {
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
 	context   *core.ContextUsage
+
+	// messageID holds the platform message ID for the current turn.
+	messageID string
+
+	// chatID and senderID are parsed from the session key (CC_SESSION_KEY format)
+	// and injected via SetSessionKeyContext before each Send(). This ensures
+	// image forward routing works even when CC_SESSION_KEY is missing from extraEnv.
+	chatID   string
+	senderID string
 }
 
 const (
@@ -408,6 +417,19 @@ func (s *appServerSession) storeContextUsage(usage *core.ContextUsage) {
 	s.context = cloneContextUsage(usage)
 }
 
+// SetMessageContext implements core.MessageContextSetter.
+func (s *appServerSession) SetMessageContext(messageID string) {
+	s.messageID = messageID
+}
+
+// SetSessionKeyContext implements core.SessionKeyContextSetter. It parses the
+// session key to extract chatID/senderID for image forward routing.
+func (s *appServerSession) SetSessionKeyContext(sessionKey string) {
+	if strings.HasPrefix(sessionKey, "feishu:") || strings.HasPrefix(sessionKey, "lark:") {
+		s.chatID, s.senderID = parseSessionKey(sessionKey)
+	}
+}
+
 func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
@@ -421,6 +443,16 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	prompt, imagePaths, err := s.stageImages(prompt, images)
 	if err != nil {
 		return err
+	}
+
+	// Intercept: check if this message should be forwarded to generate-image service.
+	if tryForwardImageRequest(prompt, len(imagePaths) > 0, imagePaths, s.extraEnv, s.messageID, s.chatID, s.senderID) {
+		evt := core.Event{Type: core.EventResult, Done: true}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return nil
 	}
 
 	threadID := s.CurrentSessionID()

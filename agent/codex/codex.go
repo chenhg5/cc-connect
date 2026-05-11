@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -35,6 +36,7 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
+	codexRouter     codexRouterClient
 	cliBin          string   // CLI binary name, default "codex"
 	cliExtraArgs    []string // extra args parsed from cli_path after the binary
 	providers       []core.ProviderConfig
@@ -54,6 +56,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	codexRouterURL, _ := opts["codex_router_url"].(string)
+	codexRouterToken, _ := opts["codex_router_token"].(string)
+	codexRouterPurpose, _ := opts["codex_router_purpose"].(string)
+	codexRouterTTL := intFromOption(opts["codex_router_ttl_seconds"])
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 
@@ -86,10 +92,27 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
+		codexRouter:     codexRouterClient{URL: strings.TrimSpace(codexRouterURL), Token: strings.TrimSpace(codexRouterToken), Purpose: strings.TrimSpace(codexRouterPurpose), TTLSeconds: codexRouterTTL},
 		cliBin:          cliBin,
 		cliExtraArgs:    cliExtraArgs,
 		activeIdx:       -1,
 	}, nil
+}
+
+func intFromOption(v any) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(t))
+		return n
+	default:
+		return 0
+	}
 }
 
 func normalizeBackend(raw string) string {
@@ -337,6 +360,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
+	codexRouter := a.codexRouter
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
 	extraEnv := a.providerEnvLocked()
@@ -351,6 +375,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
+	var lease *codexRouterLease
+	if codexRouter.enabled() {
+		var err error
+		lease, err = codexRouter.lease(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		codexHome = lease.CodexHome
+		slog.Info("codex router: acquired lease", "lease_id", lease.LeaseID, "account", lease.AccountAlias, "codex_home", lease.CodexHome)
+	}
+
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
 			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
@@ -360,14 +395,26 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 	}
 
+	var session core.AgentSession
+	var err error
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+		session, err = newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+	} else {
+		if codexHome != "" {
+			extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+		}
+		session, err = newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 	}
-	if codexHome != "" {
-		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+	if err != nil {
+		if lease != nil {
+			_ = codexRouter.release(context.Background(), lease.LeaseID, "start_error")
+		}
+		return nil, err
 	}
-
-	return newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	if lease != nil {
+		return &codexRouterSession{AgentSession: session, router: codexRouter, leaseID: lease.LeaseID}, nil
+	}
+	return session, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

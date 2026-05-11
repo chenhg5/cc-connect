@@ -235,3 +235,22 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
 6. Optionally implement `AgentDoctorInfo` for `cc-connect doctor` support
 7. Add config example in `config.example.toml`
 8. Add unit tests
+
+## Agentic Engineering Discipline
+
+Apply these defaults when acting as a coding agent in this project. They reduce common LLM coding failures without overriding more specific project rules above.
+
+- Think before coding: state material assumptions before implementing. If a request has multiple plausible meanings and the wrong choice would create churn, ask instead of guessing. If there is a simpler path that still satisfies the goal, call it out.
+- Keep solutions small: implement the minimum behavior that solves the requested problem. Do not add speculative features, one-off abstractions, unnecessary configurability, or defensive handling for impossible states. If a change starts becoming broad, narrow it or explain why the breadth is required.
+- Make surgical edits: every changed line should trace back to the user request or to cleanup made necessary by your own change. Match the surrounding style. Mention unrelated issues you notice, but do not refactor, reformat, rename, or delete unrelated code unless asked.
+- Work from verifiable goals: convert tasks into concrete checks. For bug fixes, prefer a failing reproduction before the fix when practical. For behavior changes, update focused tests or fixtures with the implementation. For multi-step work, keep each step tied to a verification command or inspection.
+- Verify before handoff: run the most focused relevant tests or checks. If verification cannot be run, explain exactly why and provide the next best manual check.
+
+## CodeHouse Operations Rules
+
+- Before creating or deploying any new long-running service, check `/root/ports` and `/data/CodeHouse/PORTS.md`, then confirm the live listeners with `ss -ltnp` to avoid port conflicts.
+- Any deployed service must document operations in `README.md` under `## Operations` or in `DEPLOYMENT.md`.
+- Operations docs must include start, stop, restart, process manager, port, health check, logs, key environment variables, and update/restart procedure.
+- If systemd is used, document the service file path and the exact `systemctl` commands.
+- Do not treat a deployment as complete until the service is restarted/reloaded as needed and its health check or status check has been verified.
+

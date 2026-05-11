@@ -107,6 +107,7 @@ type Config struct {
 	Queue              QueueConfig             `toml:"queue"`
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
+	OSS                OSSConfig               `toml:"oss"`
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
@@ -155,6 +156,17 @@ type HookConfig struct {
 	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
 	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
 	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
+}
+
+// OSSConfig configures Alibaba Cloud OSS for image upload and local cleanup.
+type OSSConfig struct {
+	Enabled           bool   `toml:"enabled"`
+	Endpoint          string `toml:"endpoint"`
+	AccessKeyID       string `toml:"access_key_id"`
+	AccessKeySecret   string `toml:"access_key_secret"`
+	Bucket            string `toml:"bucket"`
+	URLPrefix         string `toml:"url_prefix"`          // public URL prefix
+	DeleteAfterUpload bool   `toml:"delete_after_upload"` // delete local file after successful upload
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
