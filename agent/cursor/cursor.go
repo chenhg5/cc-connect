@@ -193,6 +193,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	workDir := a.workDir
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -202,7 +203,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newCursorSession(ctx, cmd, a.workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
 }
 
 // ListSessions reads sessions from ~/.cursor/chats/<workspace_hash>/.

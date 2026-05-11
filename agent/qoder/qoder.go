@@ -105,10 +105,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	workDir := a.workDir
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
 
-	return newQoderSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
+	return newQoderSession(ctx, workDir, model, mode, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
