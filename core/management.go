@@ -552,7 +552,7 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := len(e.sessions.AllSessions())
+		sessCount := len(managementVisibleSessions(e.sessions.AllSessions()))
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -642,7 +642,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		allSessions := e.sessions.AllSessions()
+		allSessions := managementVisibleSessions(e.sessions.AllSessions())
 		sessCount := len(allSessions)
 
 		e.interactiveMu.Lock()
@@ -932,6 +932,67 @@ func (e *Engine) managementSessionDisplayName(s *Session, nativeNames map[string
 	return s.GetName()
 }
 
+func managementVisibleSessions(stored []*Session) []*Session {
+	currentAgentIDs := make(map[string]struct{})
+	latestPastOnly := make(map[string]*Session)
+	for _, s := range stored {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		agentID := s.AgentSessionID
+		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+		updatedAt := s.UpdatedAt
+		s.mu.Unlock()
+		if agentID != "" {
+			currentAgentIDs[agentID] = struct{}{}
+			continue
+		}
+		for _, pastID := range pastIDs {
+			if pastID == "" {
+				continue
+			}
+			if prev := latestPastOnly[pastID]; prev != nil {
+				prevUpdated := prev.GetUpdatedAt()
+				if !updatedAt.After(prevUpdated) {
+					continue
+				}
+			}
+			latestPastOnly[pastID] = s
+		}
+	}
+
+	visible := make([]*Session, 0, len(stored))
+	for _, s := range stored {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		agentID := s.AgentSessionID
+		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+		s.mu.Unlock()
+
+		if agentID == "" && len(pastIDs) > 0 {
+			shadowed := false
+			for _, pastID := range pastIDs {
+				if _, ok := currentAgentIDs[pastID]; ok {
+					shadowed = true
+					break
+				}
+				if latest := latestPastOnly[pastID]; latest != nil && latest != s {
+					shadowed = true
+					break
+				}
+			}
+			if shadowed {
+				continue
+			}
+		}
+		visible = append(visible, s)
+	}
+	return visible
+}
+
 func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
 	// sub-routes like /sessions/switch
 	if rest == "switch" {
@@ -957,7 +1018,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		e.interactiveMu.Unlock()
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := e.sessions.AllSessions()
+		stored := managementVisibleSessions(e.sessions.AllSessions())
 		nativeNames := e.managementSessionDisplayNames()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
