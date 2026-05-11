@@ -116,7 +116,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       <div className="hidden lg:block">{sidebar}</div>
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-ink/[0.07] dark:bg-black/25" onClick={onMobileClose} />
+          <div className="absolute inset-0 bg-transparent dark:bg-black/20" onClick={onMobileClose} />
           <div className="absolute inset-y-0 left-0 shadow-2xl shadow-black/25">
             {sidebar}
           </div>
