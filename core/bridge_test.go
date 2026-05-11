@@ -306,6 +306,99 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+func TestBridge_MessageRoutingSwitchesTargetSession(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+
+	key := "bridge:web-admin:test-proj"
+	first := e.sessions.GetOrCreateActive(key)
+	second := e.sessions.NewSession(key, "picked")
+	if _, err := e.sessions.SwitchSession(key, first.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+	if active := e.sessions.GetOrCreateActive(key); active.ID != first.ID {
+		t.Fatalf("active before message = %q, want %q", active.ID, first.ID)
+	}
+
+	gotCh := make(chan *Message, 1)
+	bp.handler = func(p Platform, msg *Message) {
+		gotCh <- msg
+	}
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text"})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m1",
+		"session_key": key,
+		"session_id":  second.ID,
+		"user_id":     "web-admin",
+		"user_name":   "Web Admin",
+		"content":     "hello selected session",
+		"reply_ctx":   key,
+		"project":     "test-proj",
+	})
+
+	select {
+	case msg := <-gotCh:
+		if msg.Content != "hello selected session" {
+			t.Fatalf("content = %q", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected message to be dispatched")
+	}
+
+	if active := e.sessions.GetOrCreateActive(key); active.ID != second.ID {
+		t.Fatalf("active after message = %q, want target %q", active.ID, second.ID)
+	}
+}
+
+func TestBridge_MessageRoutingRestoresPastTargetSession(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+
+	key := "bridge:web-admin:test-proj"
+	e.sessions.GetOrCreateActive(key)
+	past := e.sessions.NewSession(key, "picked old native")
+	past.PastAgentSessionIDs = []string{"thread-old"}
+	past.AgentType = "codex"
+
+	gotCh := make(chan *Message, 1)
+	bp.handler = func(p Platform, msg *Message) {
+		gotCh <- msg
+	}
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text"})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m1",
+		"session_key": key,
+		"session_id":  past.ID,
+		"user_id":     "web-admin",
+		"content":     "hello restored session",
+		"reply_ctx":   key,
+		"project":     "test-proj",
+	})
+
+	select {
+	case <-gotCh:
+	case <-time.After(time.Second):
+		t.Fatal("expected message to be dispatched")
+	}
+	if got := past.GetAgentSessionID(); got != "thread-old" {
+		t.Fatalf("agent session ID = %q, want restored past ID", got)
+	}
+}
+
 func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
