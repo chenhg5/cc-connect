@@ -39,9 +39,9 @@
   </a>
 </p>
 
-## 临时 Fork 分支：Web 控制台 Session 修复
+## 临时 Fork 分支：Session 与 Web 控制台修复
 
-这个 fork 里有一个临时预览分支，给等不及上游 PR 合并、急需 Web 控制台修复的用户先用：
+这个 fork 里有一个临时预览分支，给等不及上游 PR 合并、急需 session / Web 控制台修复的用户先用：
 
 ```bash
 git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan1115/cc-connect.git
@@ -51,11 +51,23 @@ git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan111
 
 这个分支改了什么：
 
+Telegram / agent session 修复：
+
+- 修复原生 session 发现逻辑，让 `/list` 能稳定列出 Codex 和 Gemini 会话。
+- 修复 `/switch`，可以成功切回 `/list` 中列出的原生会话。
+- 修复 `/current`，优先显示原生 session 标题/摘要，而不是本地占位名。
+- 修复 `/name`，自定义名称可以成功应用，并被 `/list`、`/current`、`/switch` 和 Web 控制台共同使用。
+- 统一 session 标题优先级，让 `/list`、`/current`、`/switch`、`/name` 和 Web 显示不再互相打架。
+
+Web 控制台修复：
+
 - Web 控制台会话标题优先显示 `/name` 自定义名，其次显示原生 agent 标题/摘要，不再优先掉到本地 `Session.Name`。
 - 概览页“最近会话”点击后会打开刚点击的那个 session，不再误跳到 current/latest session。
-- 隐藏和去重旧的本地 shadow session，让 Web 会话列表更接近 Telegram `/list`。
+- 隐藏和去重旧的本地 shadow session，并且 Web 控制台可以显示完整可见会话列表，不再只看到少数几个最近会话。
 - 手机端 Web 控制台改成汉堡按钮 + 侧边栏抽屉，不再把内容挤到一团。
 - Web 控制台主题换成更接近 Codex 桌面端的暖色配色（`#CC7D5E`、`#F9F9F7`、`#2D2D2B`）。
+
+感谢 OpenAI Codex 一起协助排查和实现这个临时 fork 分支，也感谢社区一起测试反馈。
 
 这是临时 fork 分支，不是上游官方 release。等相关修复合并到上游后，建议切回上游版本。
 
