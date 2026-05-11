@@ -32,7 +32,7 @@ function CopyButton({ code }: { code: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute top-2 right-2 p-1.5 rounded-md bg-gray-200/80 dark:bg-gray-700/80 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+      className="absolute top-2 right-2 p-1.5 rounded-md bg-surface/85 dark:bg-ink/10 hover:bg-accent/10 text-ink/55 hover:text-accent opacity-0 group-hover:opacity-100 transition-all z-10"
     >
       {copied ? <Check size={12} /> : <Copy size={12} />}
     </button>
@@ -46,12 +46,12 @@ function PreBlock({ children, ...props }: React.HTMLAttributes<HTMLPreElement>) 
   return (
     <div className="not-prose relative group my-4">
       {lang && (
-        <div className="absolute top-0 left-0 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800 rounded-tl-lg rounded-br-lg border-b border-r border-gray-200 dark:border-gray-700 font-mono">
+        <div className="absolute top-0 left-0 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-ink/45 bg-ink/[0.04] dark:bg-white/[0.05] rounded-tl-lg rounded-br-lg border-b border-r border-ink/10 dark:border-white/[0.08] font-mono">
           {lang}
         </div>
       )}
       <CopyButton code={code} />
-      <pre className="overflow-x-auto rounded-lg bg-[#fafafa] dark:bg-[#0d1117] border border-gray-200 dark:border-gray-700/60 p-4 pt-8 text-[13px] leading-[1.6] font-mono" {...props}>
+      <pre className="overflow-x-auto rounded-xl bg-ink/[0.035] dark:bg-black/30 border border-ink/10 dark:border-white/[0.08] p-4 pt-8 text-[13px] leading-[1.6] font-mono shadow-inner" {...props}>
         {children}
       </pre>
     </div>
@@ -61,7 +61,7 @@ function PreBlock({ children, ...props }: React.HTMLAttributes<HTMLPreElement>) 
 function InlineCode({ children, className, ...props }: React.HTMLAttributes<HTMLElement>) {
   if (className) return <code className={className} {...props}>{children}</code>;
   return (
-    <code className="px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-pink-600 dark:text-pink-400 text-[0.875em] font-mono border border-gray-200/60 dark:border-gray-700/40" {...props}>
+    <code className="px-1.5 py-0.5 rounded-md bg-accent/[0.08] text-accent text-[0.875em] font-mono border border-accent/15" {...props}>
       {children}
     </code>
   );
@@ -70,7 +70,7 @@ function InlineCode({ children, className, ...props }: React.HTMLAttributes<HTML
 function RenderMarkdown({ content }: { content: string }) {
   return (
     <div className={cn(
-      'prose max-w-none dark:prose-invert',
+      'prose max-w-none dark:prose-invert prose-sm sm:prose-base',
       'prose-headings:font-semibold prose-headings:tracking-tight',
       'prose-h1:text-xl prose-h1:mt-5 prose-h1:mb-3 prose-h1:pb-1.5 prose-h1:border-b prose-h1:border-gray-200 dark:prose-h1:border-gray-700',
       'prose-h2:text-lg prose-h2:mt-5 prose-h2:mb-2',
@@ -78,10 +78,10 @@ function RenderMarkdown({ content }: { content: string }) {
       'prose-p:my-2.5 prose-p:leading-relaxed',
       'prose-li:my-0.5', 'prose-ul:my-2 prose-ol:my-2',
       'prose-a:text-accent prose-a:no-underline hover:prose-a:underline',
-      'prose-strong:text-gray-900 dark:prose-strong:text-white prose-strong:font-semibold',
-      'prose-blockquote:border-l-[3px] prose-blockquote:border-accent/40 prose-blockquote:bg-accent/[0.03] prose-blockquote:rounded-r-lg prose-blockquote:py-0.5 prose-blockquote:px-4 prose-blockquote:my-3 prose-blockquote:not-italic prose-blockquote:text-gray-600 dark:prose-blockquote:text-gray-300',
-      'prose-hr:my-5 prose-hr:border-gray-200 dark:prose-hr:border-gray-700',
-      'prose-table:text-sm prose-th:bg-gray-50 dark:prose-th:bg-gray-800 prose-th:px-3 prose-th:py-2 prose-td:px-3 prose-td:py-2',
+      'prose-strong:text-ink dark:prose-strong:text-ink prose-strong:font-semibold',
+      'prose-blockquote:border-l-[3px] prose-blockquote:border-accent/40 prose-blockquote:bg-accent/[0.04] prose-blockquote:rounded-r-xl prose-blockquote:py-0.5 prose-blockquote:px-4 prose-blockquote:my-3 prose-blockquote:not-italic prose-blockquote:text-ink/70',
+      'prose-hr:my-5 prose-hr:border-ink/10 dark:prose-hr:border-white/[0.08]',
+      'prose-table:text-sm prose-th:bg-ink/[0.04] dark:prose-th:bg-white/[0.05] prose-th:px-3 prose-th:py-2 prose-td:px-3 prose-td:py-2',
       'prose-img:rounded-lg prose-img:shadow-sm',
     )}>
       <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ pre: PreBlock as any, code: InlineCode as any }}>
@@ -578,62 +578,62 @@ export default function ChatView() {
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] animate-fade-in">
+    <div className="flex flex-col h-[calc(100vh-8rem)] min-h-0 animate-fade-in rounded-3xl border border-ink/10 bg-surface/45 shadow-sm shadow-black/[0.03] dark:border-white/[0.08] dark:bg-black/[0.08] overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
-        <div className="flex items-center gap-3">
-          <Link to="/chat" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-            <ArrowLeft size={18} className="text-gray-400" />
+      <div className="flex items-center justify-between px-3 sm:px-4 py-3 border-b border-ink/10 dark:border-white/[0.08] bg-surface/80 backdrop-blur-xl shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <Link to="/chat" className="p-2 rounded-xl text-ink/45 hover:text-accent hover:bg-accent/10 transition-colors shrink-0">
+            <ArrowLeft size={18} />
           </Link>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{projectName}</h2>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <h2 className="text-base sm:text-lg font-semibold text-ink truncate">{projectName}</h2>
               <StatusBadge status={bridgeStatus} />
             </div>
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
-              className="flex items-center gap-1 text-xs text-gray-500 hover:text-accent transition-colors mt-0.5"
+              className="flex max-w-full items-center gap-1 text-xs text-ink/55 hover:text-accent transition-colors mt-0.5"
             >
-              <span>{userPickedSession && currentSession
+              <span className="truncate">{userPickedSession && currentSession
                 ? (currentSession.name || currentSession.id.slice(0, 8))
                 : t('chat.defaultSession')}</span>
-              <ChevronDown size={12} />
+              <ChevronDown size={12} className="shrink-0" />
             </button>
           </div>
         </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto py-6 space-y-5">
+      <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-5 sm:py-6 space-y-4 sm:space-y-5">
         {messages.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
-            <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+            <div className="w-16 h-16 rounded-3xl bg-accent/10 ring-1 ring-accent/15 flex items-center justify-center mb-4 shadow-sm shadow-accent/10">
               <Bot size={32} className="text-accent" />
             </div>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">{t('chat.emptyHint')}</p>
-            <p className="text-xs text-gray-400 dark:text-gray-500">{t('chat.slashHint')}</p>
+            <p className="text-sm font-medium text-ink/70 mb-1">{t('chat.emptyHint')}</p>
+            <p className="text-xs text-ink/45">{t('chat.slashHint')}</p>
           </div>
         )}
         {messages.map((msg) => {
           const isUser = msg.role === 'user';
           const isEmpty = !msg.content && !msg.card && !msg.buttons && !msg.imageUrl && !msg.fileName;
           return (
-            <div key={msg.id} className={cn('flex gap-3', isUser ? 'justify-end' : 'justify-start')}>
+            <div key={msg.id} className={cn('flex gap-2.5 sm:gap-3', isUser ? 'justify-end' : 'justify-start')}>
               {!isUser && (
-                <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0 mt-1">
+                <div className="w-8 h-8 rounded-xl bg-accent/10 ring-1 ring-accent/15 flex items-center justify-center shrink-0 mt-1">
                   <Bot size={16} className="text-accent" />
                 </div>
               )}
               <div className={cn(
-                'group/msg relative rounded-2xl px-5 py-3.5 text-sm',
+                'group/msg relative rounded-[1.35rem] px-4 sm:px-5 py-3 sm:py-3.5 text-sm leading-relaxed transition-shadow',
                 isUser
-                  ? 'max-w-[70%] bg-accent text-black rounded-br-md'
-                  : 'max-w-[85%] bg-white dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/60 text-gray-900 dark:text-gray-100 rounded-bl-md shadow-sm',
+                  ? 'max-w-[88%] sm:max-w-[70%] bg-accent text-[#1f1713] rounded-br-md shadow-sm shadow-accent/20'
+                  : 'max-w-[92%] sm:max-w-[85%] bg-surface/92 dark:bg-white/[0.045] border border-ink/10 dark:border-white/[0.08] text-ink rounded-bl-md shadow-sm shadow-black/[0.035]',
                 msg.streaming && 'animate-pulse-subtle',
               )}>
                 {isEmpty ? (
-                  <p className="text-xs text-gray-400 dark:text-gray-500 italic">{t('chat.unsupportedMessage', '[Unsupported message]')}</p>
+                  <p className="text-xs text-ink/45 italic">{t('chat.unsupportedMessage', '[Unsupported message]')}</p>
                 ) : msg.format === 'card' ? (
                   <CardBlock card={msg.card} onAction={handleCardAction} />
                 ) : msg.format === 'buttons' && msg.buttons ? (
@@ -643,7 +643,7 @@ export default function ChatView() {
                 ) : msg.format === 'file' && msg.fileName ? (
                   <FileBlock name={msg.fileName} size={msg.fileSize} />
                 ) : isUser ? (
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
+                  <div className="whitespace-pre-wrap break-words">{msg.content}</div>
                 ) : (
                   <RenderMarkdown content={msg.content} />
                 )}
@@ -655,8 +655,8 @@ export default function ChatView() {
                 )}
               </div>
               {isUser && (
-                <div className="w-8 h-8 rounded-lg bg-gray-200 dark:bg-gray-700 flex items-center justify-center shrink-0 mt-1">
-                  <User size={16} className="text-gray-500" />
+                <div className="w-8 h-8 rounded-xl bg-ink/[0.06] dark:bg-white/[0.08] flex items-center justify-center shrink-0 mt-1">
+                  <User size={16} className="text-ink/50" />
                 </div>
               )}
             </div>
@@ -664,14 +664,14 @@ export default function ChatView() {
         })}
         {typing && !messages.some(m => m.streaming) && (
           <div className="flex gap-3 justify-start">
-            <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0 mt-1">
+            <div className="w-8 h-8 rounded-xl bg-accent/10 ring-1 ring-accent/15 flex items-center justify-center shrink-0 mt-1">
               <Bot size={16} className="text-accent" />
             </div>
-            <div className="rounded-2xl px-5 py-3.5 text-sm bg-white dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/60 rounded-bl-md shadow-sm">
+            <div className="rounded-[1.35rem] px-5 py-3.5 text-sm bg-surface/92 dark:bg-white/[0.045] border border-ink/10 dark:border-white/[0.08] rounded-bl-md shadow-sm shadow-black/[0.035]">
               <div className="flex gap-1.5">
-                <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                <span className="w-2 h-2 bg-accent/55 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-2 h-2 bg-accent/55 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-2 h-2 bg-accent/55 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
               </div>
             </div>
           </div>
@@ -680,7 +680,7 @@ export default function ChatView() {
       </div>
 
       {/* Input area */}
-      <div className="border-t border-gray-200 dark:border-gray-800 pt-3 shrink-0">
+      <div className="border-t border-ink/10 dark:border-white/[0.08] bg-surface/80 backdrop-blur-xl p-3 sm:p-4 shrink-0">
         {canSend ? (
           <div className="relative flex items-end gap-2">
             {/* Command palette trigger */}
@@ -693,7 +693,7 @@ export default function ChatView() {
                   'p-3 rounded-xl transition-all duration-200',
                   cmdOpen
                     ? 'bg-accent/15 text-accent ring-1 ring-accent/30'
-                    : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/[0.06]',
+                    : 'text-ink/45 hover:text-accent hover:bg-accent/10',
                 )}
                 title={t('chat.commands')}
               >
@@ -714,7 +714,7 @@ export default function ChatView() {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={t('chat.inputPlaceholder')}
-                className="w-full px-4 py-3 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors placeholder:text-gray-400"
+                className="w-full px-4 py-3 text-sm rounded-2xl border border-ink/[0.12] dark:border-white/[0.1] bg-surface/90 dark:bg-white/[0.045] text-ink shadow-inner shadow-black/[0.025] focus:outline-none focus:ring-2 focus:ring-accent/35 focus:border-accent/70 transition-all placeholder:text-ink/[0.38]"
                 disabled={sending}
               />
             </div>
@@ -724,23 +724,23 @@ export default function ChatView() {
               type="button"
               onClick={handleSend}
               disabled={sending || !input.trim()}
-              className="p-3 rounded-xl bg-accent text-black hover:bg-accent-dim transition-colors disabled:opacity-50 flex items-center"
+              className="p-3 rounded-2xl bg-accent text-[#1f1713] hover:bg-accent-dim transition-all disabled:opacity-50 flex items-center shadow-sm shadow-accent/20 hover:shadow-md hover:shadow-accent/25"
             >
               {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
             </button>
           </div>
         ) : !bridgeCfg ? (
-          <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
+          <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-700 dark:text-amber-300 bg-amber-500/10 rounded-xl">
             <WifiOff size={14} />
             <span>{t('sessions.bridgeNotAvailable')}</span>
           </div>
         ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
-          <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
+          <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-700 dark:text-amber-300 bg-amber-500/10 rounded-xl">
             <WifiOff size={14} />
             <span>{t('sessions.bridgeDisconnected')}</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 px-4 py-3 text-sm text-gray-400 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
+          <div className="flex items-center gap-2 px-4 py-3 text-sm text-ink/45 bg-ink/[0.04] rounded-xl">
             <Loader2 size={14} className="animate-spin" />
             <span>{t('sessions.bridgeConnecting')}</span>
           </div>
