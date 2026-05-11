@@ -39,6 +39,26 @@
   </a>
 </p>
 
+## 临时 Fork 分支：Web 控制台 Session 修复
+
+这个 fork 里有一个临时预览分支，给等不及上游 PR 合并、急需 Web 控制台修复的用户先用：
+
+```bash
+git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan1115/cc-connect.git
+```
+
+分支：[`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511)
+
+这个分支改了什么：
+
+- Web 控制台会话标题优先显示 `/name` 自定义名，其次显示原生 agent 标题/摘要，不再优先掉到本地 `Session.Name`。
+- 概览页“最近会话”点击后会打开刚点击的那个 session，不再误跳到 current/latest session。
+- 隐藏和去重旧的本地 shadow session，让 Web 会话列表更接近 Telegram `/list`。
+- 手机端 Web 控制台改成汉堡按钮 + 侧边栏抽屉，不再把内容挤到一团。
+- Web 控制台主题换成更接近 Codex 桌面端的暖色配色（`#CC7D5E`、`#F9F9F7`、`#2D2D2B`）。
+
+这是临时 fork 分支，不是上游官方 release。等相关修复合并到上游后，建议切回上游版本。
+
 
 ## ❤️ 赞助
 
