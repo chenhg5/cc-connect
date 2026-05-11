@@ -11,7 +11,7 @@ export function Card({ children, className, hover }: CardProps) {
   return (
     <div
       className={cn(
-        'rounded-xl p-5 transition-all duration-200 animate-float-in',
+        'min-w-0 rounded-xl p-5 transition-all duration-200 animate-float-in',
         'bg-white/80 backdrop-blur-md border border-gray-200/90',
         'dark:bg-[rgba(0,0,0,0.55)] dark:backdrop-blur-xl dark:border-white/[0.08]',
         hover &&
@@ -33,12 +33,13 @@ interface StatCardProps {
 export function StatCard({ label, value, accent }: StatCardProps) {
   return (
     <Card hover>
-      <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+      <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide truncate">
         {label}
       </p>
       <p
+        title={String(value)}
         className={cn(
-          'text-2xl font-bold mt-1',
+          'mt-1 max-w-full text-xl sm:text-2xl font-bold leading-tight break-words [overflow-wrap:anywhere]',
           accent ? 'text-accent' : 'text-gray-900 dark:text-white'
         )}
       >
