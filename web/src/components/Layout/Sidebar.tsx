@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Plug,
   Puzzle,
+  X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -19,22 +20,29 @@ const navItems = [
   { key: 'projects', path: '/projects', icon: FolderKanban },
   { key: 'providers', path: '/providers', icon: Plug },
   { key: 'skills', path: '/skills', icon: Puzzle },
+  { key: 'sessions', path: '/sessions', icon: MessageSquare },
   { key: 'chat', path: '/chat', icon: MessageSquare },
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'system', path: '/system', icon: Settings },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
+}
+
+export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
 
-  return (
+  const sidebar = (
     <aside
       className={cn(
         'h-screen flex flex-col border-r transition-all duration-300 ease-out',
-        'bg-white/75 backdrop-blur-xl border-gray-200/80',
-        'dark:bg-[rgba(0,0,0,0.85)] dark:backdrop-blur-xl dark:border-white/[0.08]',
-        collapsed ? 'w-16' : 'w-56',
+        'bg-white/90 backdrop-blur-xl border-gray-200/80',
+        'dark:bg-[rgba(10,10,12,0.94)] dark:backdrop-blur-xl dark:border-white/[0.08]',
+        collapsed ? 'lg:w-16' : 'lg:w-56',
+        'w-72 max-w-[82vw]',
       )}
     >
       {/* Brand */}
@@ -54,6 +62,14 @@ export default function Sidebar() {
             CC<span className="text-accent">-</span>Connect
           </span>
         )}
+        <button
+          type="button"
+          onClick={onMobileClose}
+          className="ml-auto p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 dark:hover:bg-white/[0.06] lg:hidden"
+          aria-label="Close navigation"
+        >
+          <X size={18} />
+        </button>
       </div>
 
       {/* Navigation */}
@@ -63,6 +79,7 @@ export default function Sidebar() {
             key={key}
             to={path}
             end={path === '/'}
+            onClick={onMobileClose}
             className={({ isActive }) =>
               cn(
                 'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
@@ -92,5 +109,19 @@ export default function Sidebar() {
         </button>
       </div>
     </aside>
+  );
+
+  return (
+    <>
+      <div className="hidden lg:block">{sidebar}</div>
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-[2px]" onClick={onMobileClose} />
+          <div className="absolute inset-y-0 left-0 shadow-2xl shadow-black/25">
+            {sidebar}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
