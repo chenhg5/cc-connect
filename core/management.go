@@ -1155,7 +1155,7 @@ func (e *Engine) managementSessionDisplayNames() map[string]string {
 	if err != nil || len(agentSessions) == 0 {
 		return nil
 	}
-	agentSessions = e.applySessionFilter(agentSessions, e.sessions)
+	agentSessions = e.applySessionFilter(agentSessions, e.sessions, "")
 	if len(agentSessions) == 0 {
 		return nil
 	}
