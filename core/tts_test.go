@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -447,6 +450,63 @@ func TestPicoTTS_Synthesize_Integration(t *testing.T) {
 	}
 	if len(audio) == 0 {
 		t.Error("expected non-empty audio data")
+	}
+}
+
+// writeFakeTTSBinary creates a temp shell script that sleeps long enough to
+// outlive a normal test timeout. Used to verify that subprocess-based TTS
+// providers honor ctx cancellation by killing the spawned process.
+func writeFakeTTSBinary(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake TTS binary uses /bin/sh; not portable to windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-tts.sh")
+	script := "#!/bin/sh\nsleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tts script: %v", err)
+	}
+	return path
+}
+
+func TestEspeakTTS_HonorsContextCancellation(t *testing.T) {
+	fakePath := writeFakeTTSBinary(t)
+	tts := NewEspeakTTS(fakePath, "en")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: a correctly wired CommandContext kills immediately.
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got nil after %v", elapsed)
+	}
+	// 5s is generous: a fix using exec.CommandContext returns in well under a
+	// second; the bug (plain exec.Command) would wait the full 30s sleep.
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize ignored ctx cancellation, took %v (want < 5s); err=%v", elapsed, err)
+	}
+}
+
+func TestPicoTTS_HonorsContextCancellation(t *testing.T) {
+	fakePath := writeFakeTTSBinary(t)
+	tts := NewPicoTTS(fakePath, "en-US")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got nil after %v", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize ignored ctx cancellation, took %v (want < 5s); err=%v", elapsed, err)
 	}
 }
 
