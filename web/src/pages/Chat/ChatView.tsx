@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Send, User, Bot, Circle, WifiOff,
   Copy, Check, FileText, Image as ImageIcon, Loader2,
@@ -290,6 +290,8 @@ function MsgCopyButton({ text }: { text: string }) {
 export default function ChatView() {
   const { t } = useTranslation();
   const { name: projectName } = useParams<{ name: string }>();
+  const [searchParams] = useSearchParams();
+  const requestedSessionId = searchParams.get('session') || '';
 
   // Session state
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -341,9 +343,13 @@ export default function ChatView() {
       setSessions(sorted);
 
       if (sorted.length > 0) {
-        const latest = sorted[0];
-        const detail = await getSession(projectName, latest.id, 200);
+        const requested = requestedSessionId
+          ? sorted.find(s => s.id === requestedSessionId)
+          : undefined;
+        const selected = requested || sorted[0];
+        const detail = await getSession(projectName, selected.id, 200);
         setCurrentSession(detail);
+        setUserPickedSession(!!requested);
         if (detail.history) {
           setMessages(detail.history.map((h, i) => ({
             id: `hist-${i}`,
@@ -360,7 +366,7 @@ export default function ChatView() {
     } finally {
       setLoading(false);
     }
-  }, [projectName]);
+  }, [projectName, requestedSessionId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
