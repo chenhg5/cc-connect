@@ -39,6 +39,26 @@
   </a>
 </p>
 
+## Temporary Fork Branch: Web Console Session Fixes
+
+This fork carries a local preview branch for users who need the Web console fixes before they land upstream:
+
+```bash
+git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan1115/cc-connect.git
+```
+
+Branch: [`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511)
+
+What changed in this branch:
+
+- Web console session names now prefer `/name` custom names, then native agent titles/summaries, instead of falling back to local `Session.Name`.
+- Dashboard recent-session cards open the exact clicked session instead of the current/latest session.
+- Stale local shadow sessions are hidden/deduplicated so the Web list matches Telegram `/list` more closely.
+- Mobile Web console layout now uses a hamburger menu and slide-out sidebar instead of squeezing content.
+- The Web console theme uses a warmer Codex-style palette (`#CC7D5E`, `#F9F9F7`, `#2D2D2B`).
+
+This is a temporary fork branch, not an official upstream release. Please switch back to upstream once the relevant fixes are merged.
+
 
 ## ❤️ Sponsor
 
