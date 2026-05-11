@@ -168,15 +168,15 @@ export default function CommandResultPanel({ result, onClose, onCardAction }: Pr
   return (
     <>
       <div
-        className="fixed inset-0 bg-black/15 dark:bg-black/30 z-40 transition-opacity"
+        className="fixed inset-0 bg-transparent dark:bg-black/10 z-40 transition-opacity"
         onClick={onClose}
       />
 
       <div className={cn(
         'fixed top-0 right-0 h-full w-[400px] max-w-[90vw] z-50 flex flex-col',
         'translate-x-0 transition-transform duration-300 ease-out',
-        'bg-white dark:bg-[#111] border-l border-gray-200/80 dark:border-white/[0.06]',
-        'shadow-xl shadow-black/8 dark:shadow-black/40',
+        'bg-surface dark:bg-surface border-l border-ink/10 dark:border-white/[0.06]',
+        'shadow-xl shadow-black/[0.08] dark:shadow-black/40',
       )}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 h-14 border-b border-gray-100 dark:border-white/[0.06] shrink-0">
