@@ -84,7 +84,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               cn(
                 'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
                 isActive
-                  ? 'bg-accent/14 text-accent ring-1 ring-accent/30'
+                  ? 'bg-accent/[0.14] text-accent ring-1 ring-accent/30'
                   : 'text-ink/70 hover:bg-ink/[0.06] hover:text-ink',
               )
             }
@@ -116,7 +116,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       <div className="hidden lg:block">{sidebar}</div>
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-black/35 backdrop-blur-[2px]" onClick={onMobileClose} />
+          <div className="absolute inset-0 bg-ink/[0.07] dark:bg-black/25" onClick={onMobileClose} />
           <div className="absolute inset-y-0 left-0 shadow-2xl shadow-black/25">
             {sidebar}
           </div>
