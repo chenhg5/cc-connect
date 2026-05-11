@@ -13140,7 +13140,10 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	}
 	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+			workspace := normalizeWorkspacePath(b.Workspace)
+			interactiveKey := workspace + ":" + sessionKey
+			effectiveDir := e.resolveChannelWorkDir(workspace, interactiveKey)
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir); err == nil {
 				return wsAgent, wsSessions
 			}
 		}
