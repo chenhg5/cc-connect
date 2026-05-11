@@ -262,15 +262,16 @@ func (p *Platform) runConnection(ctx context.Context) error {
 
 	p.mu.Lock()
 	p.conn = conn
-	p.writeCh = make(chan any, 64)
+	writeCh := make(chan any, 64)
+	p.writeCh = writeCh
 	p.mu.Unlock()
 
 	defer func() {
 		p.mu.Lock()
 		p.conn = nil
-		close(p.writeCh)
 		p.writeCh = nil
 		p.mu.Unlock()
+		close(writeCh)
 		conn.Close()
 	}()
 
@@ -303,7 +304,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	// Start writer goroutine to serialize all WebSocket writes
 	writeCtx, writeCancel := context.WithCancel(ctx)
 	defer writeCancel()
-	go p.writeLoop(writeCtx, conn)
+	go p.writeLoop(writeCtx, conn, writeCh)
 
 	// Send client pings every 25s to keep the connection alive
 	go func() {
@@ -353,12 +354,12 @@ func (p *Platform) runConnection(ctx context.Context) error {
 
 // writeLoop serializes all WebSocket writes (ACK frames, pongs, pings, etc.) on a single goroutine.
 // gorilla/websocket requires all writes to be serialized.
-func (p *Platform) writeLoop(ctx context.Context, conn *websocket.Conn) {
+func (p *Platform) writeLoop(ctx context.Context, conn *websocket.Conn, writeCh chan any) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg, ok := <-p.writeCh:
+		case msg, ok := <-writeCh:
 			if !ok {
 				return
 			}
