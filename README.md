@@ -39,9 +39,9 @@
   </a>
 </p>
 
-## Temporary Fork Branch: Web Console Session Fixes
+## Temporary Fork Branch: Session and Web Console Fixes
 
-This fork carries a local preview branch for users who need the Web console fixes before they land upstream:
+This fork carries a local preview branch for users who need the session and Web console fixes before they land upstream:
 
 ```bash
 git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan1115/cc-connect.git
@@ -51,11 +51,23 @@ Branch: [`local/web-console-session-fix-20260511`](https://github.com/yanyan1115
 
 What changed in this branch:
 
+Telegram / agent session fixes:
+
+- Fixed native session discovery so `/list` can find Codex and Gemini sessions reliably.
+- Fixed `/switch` so users can switch back into listed native sessions successfully.
+- Fixed `/current` so it shows the native session title/summary instead of a local placeholder.
+- Fixed `/name` so custom names can be applied successfully and are respected by `/list`, `/current`, `/switch`, and the Web console.
+- Unified session-title priority so `/list`, `/current`, `/switch`, `/name`, and Web display names no longer fight each other.
+
+Web console fixes:
+
 - Web console session names now prefer `/name` custom names, then native agent titles/summaries, instead of falling back to local `Session.Name`.
 - Dashboard recent-session cards open the exact clicked session instead of the current/latest session.
-- Stale local shadow sessions are hidden/deduplicated so the Web list matches Telegram `/list` more closely.
+- Stale local shadow sessions are hidden/deduplicated, and the Web console can show the full visible session list instead of only a few recent sessions.
 - Mobile Web console layout now uses a hamburger menu and slide-out sidebar instead of squeezing content.
 - The Web console theme uses a warmer Codex-style palette (`#CC7D5E`, `#F9F9F7`, `#2D2D2B`).
+
+Thanks to OpenAI Codex for helping debug and implement this temporary fork branch together with the community.
 
 This is a temporary fork branch, not an official upstream release. Please switch back to upstream once the relevant fixes are merged.
 
