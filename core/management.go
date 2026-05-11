@@ -1147,6 +1147,43 @@ func validateWorkspacePath(baseDir, target string) (string, error) {
 
 // ── Session endpoints ─────────────────────────────────────────
 
+func (e *Engine) managementSessionDisplayNames() map[string]string {
+	if e == nil || e.agent == nil || e.sessions == nil {
+		return nil
+	}
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil || len(agentSessions) == 0 {
+		return nil
+	}
+	agentSessions = e.applySessionFilter(agentSessions, e.sessions)
+	if len(agentSessions) == 0 {
+		return nil
+	}
+	names := make(map[string]string, len(agentSessions))
+	for _, info := range agentSessions {
+		if summary := compactSessionDisplayName(info.Summary); summary != "" {
+			names[info.ID] = summary
+		}
+	}
+	return names
+}
+
+func (e *Engine) managementSessionDisplayName(s *Session, nativeNames map[string]string) string {
+	if e == nil || e.sessions == nil || s == nil {
+		return ""
+	}
+	agentID := s.GetAgentSessionID()
+	if agentID != "" {
+		if name := e.sessions.GetSessionName(agentID); name != "" {
+			return name
+		}
+		if name := nativeNames[agentID]; name != "" {
+			return name
+		}
+	}
+	return s.GetName()
+}
+
 func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
 	// sub-routes like /sessions/switch
 	if rest == "switch" {
@@ -1173,8 +1210,10 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
 		stored := e.sessions.AllSessions()
+		nativeNames := e.managementSessionDisplayNames()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
+			displayName := e.managementSessionDisplayName(s, nativeNames)
 			s.mu.Lock()
 			histCount := len(s.History)
 			var lastMsg map[string]any
@@ -1192,7 +1231,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			}
 			info := map[string]any{
 				"id":               s.ID,
-				"name":             s.Name,
+				"name":             displayName,
 				"session_key":      idToKey[s.ID],
 				"agent_session_id": s.AgentSessionID,
 				"agent_type":       s.AgentType,
@@ -1294,10 +1333,11 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 		_, live := e.interactiveStates[sessionKey]
 		e.interactiveMu.Unlock()
 
+		displayName := e.managementSessionDisplayName(s, e.managementSessionDisplayNames())
 		s.mu.Lock()
 		data := map[string]any{
 			"id":               s.ID,
-			"name":             s.Name,
+			"name":             displayName,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
 			"agent_type":       s.AgentType,
