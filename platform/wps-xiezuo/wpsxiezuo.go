@@ -143,12 +143,6 @@ type tokenResponse struct {
 	ExpiresIn   int64  `json:"expires_in"`
 }
 
-type tokenRequest struct {
-	GrantType    string `json:"grant_type"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-}
-
 // --- Reaction API ---
 
 type reactionRequest struct {
@@ -288,7 +282,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	const pingTimeout = 90 * time.Second
 	conn.SetPingHandler(func(appData string) error {
 		slog.Debug("wps-xiezuo: server ping received")
-		conn.SetReadDeadline(time.Now().Add(pingTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(pingTimeout))
 		p.mu.Lock()
 		ch := p.writeCh
 		p.mu.Unlock()
@@ -302,7 +296,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	})
 	conn.SetPongHandler(func(appData string) error {
 		slog.Debug("wps-xiezuo: server pong received")
-		conn.SetReadDeadline(time.Now().Add(pingTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(pingTimeout))
 		return nil
 	})
 
@@ -334,7 +328,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	}()
 
 	// Read deadline: 90s for PING timeout (matching Node.js SDK)
-	conn.SetReadDeadline(time.Now().Add(pingTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(pingTimeout))
 
 	// Read loop
 	for {
@@ -351,7 +345,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		slog.Info("wps-xiezuo: message received", "type", msgType, "len", len(raw), "data", string(raw))
 
 		// Reset deadline on successful read
-		conn.SetReadDeadline(time.Now().Add(pingTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(pingTimeout))
 
 		p.handleRawMessage(ctx, raw)
 	}

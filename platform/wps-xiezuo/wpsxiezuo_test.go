@@ -1289,9 +1289,10 @@ func TestWebSocketIntegration_ReceiveEvent(t *testing.T) {
 	appSecret := "ws-secret"
 
 	var up atomic.Int32
+	upgrader := websocket.Upgrader{}
 	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.Add(1)
-		conn, err := websocket.Upgrade(w, r, nil, 1024, 1024)
+		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
