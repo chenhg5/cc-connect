@@ -1004,6 +1004,29 @@ app_secret = "your-feishu-app-secret"
 # webhook_path   = "/webhook"          # default; must match the path in webhook_url
 # webhook_secret = "long-random-string"  # optional; checked via X-Webhook-Secret header or ?s= query
 
+# YOUZONE / 友空间 (uncomment to enable / 取消注释以启用)
+# Connection: YOUZONE getWss + WebSocket/xmpp; no public webhook URL.
+# 连接方式：YOUZONE getWss + WebSocket/xmpp；不需要公网 webhook URL。
+#
+# [[projects.platforms]]
+# type = "youzone"
+#
+# [projects.platforms.options]
+# base_url = "https://c2.yonyoucloud.com"     # optional; YOUZONE production default / 可选，YOUZONE 生产默认值
+# api_prefix = "/yonbip-ec-link"             # optional / 可选
+# robot_id = "your-youzone-robot-id"
+# access_token = "${YOUZONE_ACCESS_TOKEN}"   # BIP/YouZone yht_access_token
+# tenant_id = "${YOUZONE_TENANT_ID}"
+# allow_from = "*"                           # YOUZONE sender IDs, e.g. "user-1.esn.upesn"; "*" = all
+# websocket_protocols = "xmpp"
+# heartbeat_mode = "xmpp-whitespace"         # "xmpp-whitespace" or "ws-ping"
+# ping_interval = "25s"
+# reconnect_delays = "1s,3s,10s,30s"
+# # Optional robot discovery / 可选机器人发现
+# # machine_code = "your-machine-code"
+# # auto_create_robot = false
+# # robot_explain = "cc-connect"
+
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
 # 2. Enable Socket Mode (Settings > Socket Mode) / 开启 Socket Mode

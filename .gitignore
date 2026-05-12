@@ -71,6 +71,8 @@ web/dist/*
 # ============================================================================
 test/
 scripts/
+!scripts/
+!scripts/e2e-youzone-codex.sh
 tmp/
 temp/
 *.tmp
