@@ -4347,7 +4347,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// --- StreamingCard path ---
 			if streamCard != nil && !streamCard.Failed() {
-				sp.finish("") // cleanup preview (should be no-op if card was active)
+				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Build final card content with full response
 				finalContent := buildCardContent(cardThinkingText, cardToolCalls, fullResponse)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
