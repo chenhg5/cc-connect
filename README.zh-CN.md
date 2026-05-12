@@ -39,17 +39,37 @@
   </a>
 </p>
 
-## 临时 Fork 分支：Session 与 Web 控制台修复
+## 临时 Fork 分支：社区预览修复合集
 
-这个 fork 里有一个临时预览分支，给等不及上游 PR 合并、急需 session / Web 控制台修复的用户先用：
+这个 fork 里有一个临时预览分支，给等不及上游 PR 合并、急需 Telegram、Gemini CLI、session / Web 控制台修复的用户先用：
 
 ```bash
-git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan1115/cc-connect.git
+git clone -b local/community-preview-fixes-20260512 https://github.com/yanyan1115/cc-connect.git
 ```
 
-分支：[`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511)
+分支：[`local/community-preview-fixes-20260512`](https://github.com/yanyan1115/cc-connect/tree/local/community-preview-fixes-20260512)
+
+兼容分支：旧的预览分支 [`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511) 也会快进到同一组修复，之前分享出去的旧链接仍然可用。
 
 这个分支改了什么：
+
+Telegram 多图/图文修复：
+
+- 修复 Telegram media group 聚合，一次发送多张图片 + 一段文字时，会合并成 cc-connect 侧的一个 turn。
+- 合并后的 turn 会保留文字/caption，并把多张图片一起作为 `ImageAttachment` 转发，不再拆成一张图一条消息。
+- media group 聚合有时间边界，能收齐延迟到达的相册消息，同时不影响普通单图或文本消息。
+
+Gemini CLI + Telegram 修复：
+
+- 过滤 Gemini CLI 的 thinking/reasoning delta，避免通过 Telegram 发回正文。
+- 清理长上下文后可能出现的扁平化 Gemini thought markers，防止内部 reasoning 泄漏进 TG 消息正文。
+- 修复范围限定在 agent 输出过滤，不改变 Web 控制台渲染行为。
+
+Web 控制台 session routing 修复：
+
+- Web 控制台发送消息时会携带选中的 session id，因此 `/chat/<project>?session=<id>` 会发到选中的 session，而不是 current/latest session。
+- 进一步修复副作用：从非 current Web session 发送消息，不会再自动切换 Telegram `/current`。
+- Web 控制台选中历史原生 session 时，可以正确恢复并路由到对应 native session。
 
 Telegram / agent session 修复：
 
@@ -67,6 +87,12 @@ Web 控制台修复：
 - 隐藏和去重旧的本地 shadow session，并且 Web 控制台可以显示完整可见会话列表，不再只看到少数几个最近会话。
 - 手机端 Web 控制台改成汉堡按钮 + 侧边栏抽屉，不再把内容挤到一团。
 - Web 控制台主题换成更接近 Codex 桌面端的暖色配色（`#CC7D5E`、`#F9F9F7`、`#2D2D2B`）。
+
+当前预览分支 head：
+
+```text
+8cfd2aee fix: strip flattened gemini thought markers
+```
 
 感谢 OpenAI Codex 一起协助排查和实现这个临时 fork 分支，也感谢社区一起测试反馈。
 
