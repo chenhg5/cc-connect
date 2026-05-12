@@ -9135,8 +9135,12 @@ func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != sub {
-		t.Fatalf("expected %q, got %q", sub, got)
+	want, err := filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatalf("resolve expected path: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
