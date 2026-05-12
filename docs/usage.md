@@ -1016,7 +1016,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
+type = "feishu"  # or wps-xiezuo, dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # platform-specific options

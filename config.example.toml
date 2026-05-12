@@ -961,6 +961,25 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed staff IDs / 允许的员工 ID
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
+# WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
+# 1. Create a WPS Open Platform app and enable event WebSocket delivery
+#    创建 WPS 开放平台应用，并启用事件 WebSocket 推送
+# 2. Subscribe to app chat message events such as kso.app_chat.message
+#    订阅应用会话消息事件，如 kso.app_chat.message
+# 3. Fill in app_id and app_secret below
+#    填入下方 app_id 和 app_secret
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "wps-xiezuo"
+#
+# [projects.platforms.options]
+# app_id = "your-wps-xiezuo-app-id"
+# app_secret = "your-wps-xiezuo-app-secret"
+# allow_from = "*"             # Allowed WPS user IDs / 允许的 WPS 用户 ID
+# clean_reply = false          # Strip thinking/tool progress lines from replies / 过滤思考和工具进度行
+# base_url = "https://openapi.wps.cn"  # Optional API base URL override / 可选 API 基础地址覆盖
+
 # Telegram (uncomment to enable / 取消注释以启用)
 # 1. Message @BotFather on Telegram, send /newbot to create a bot
 #    在 Telegram 中找 @BotFather，发送 /newbot 创建机器人

@@ -40,8 +40,8 @@ type Platform struct {
 	handler     core.MessageHandler
 	cancel      context.CancelFunc
 	conn        *websocket.Conn
-	mu          sync.Mutex   // protects conn access
-	writeCh     chan any     // serializes all WebSocket writes (ACK, reactions, etc.)
+	mu          sync.Mutex // protects conn access
+	writeCh     chan any   // serializes all WebSocket writes (ACK, reactions, etc.)
 	dedup       core.MessageDedup
 	token       string
 	tokenExpire time.Time
@@ -91,11 +91,11 @@ type pingControl struct{}
 
 // wpsMessageData represents the decrypted message event data.
 type wpsMessageData struct {
-	Chat      wpsChatInfo   `json:"chat"`
-	CompanyID string        `json:"company_id"`
+	Chat      wpsChatInfo    `json:"chat"`
+	CompanyID string         `json:"company_id"`
 	Message   wpsMessageInfo `json:"message"`
-	SendTime  int64         `json:"send_time"`
-	Sender    wpsSenderInfo `json:"sender"`
+	SendTime  int64          `json:"send_time"`
+	Sender    wpsSenderInfo  `json:"sender"`
 }
 
 type wpsChatInfo struct {
@@ -117,8 +117,8 @@ type wpsSenderInfo struct {
 // --- Message create API ---
 
 type sendMessageRequest struct {
-	Type     string        `json:"type"`
-	Receiver receiverInfo  `json:"receiver"`
+	Type     string         `json:"type"`
+	Receiver receiverInfo   `json:"receiver"`
 	Content  messageContent `json:"content"`
 }
 
@@ -408,7 +408,7 @@ func (p *Platform) signWSHeader() (http.Header, error) {
 	header := http.Header{
 		"X-Kso-Date":          {dateStr},
 		"X-Kso-Authorization": {fmt.Sprintf("KSO-1 %s:%s", p.appID, signature)},
-		"X-Ack-Mode":         {"required"},
+		"X-Ack-Mode":          {"required"},
 	}
 
 	return header, nil
@@ -489,8 +489,8 @@ func (p *Platform) handleEvent(event wpsEventFrame) {
 		return
 	}
 
-	// Dispatch by topic+operation
-	slog.Info("wps-xiezuo: decrypted event", "topic", event.Topic, "operation", event.Operation, "data", string(plain))
+	// Dispatch by topic+operation. Avoid logging decrypted user content.
+	slog.Info("wps-xiezuo: decrypted event", "topic", event.Topic, "operation", event.Operation, "payload_bytes", len(plain))
 	switch {
 	case event.Topic == "kso.app_chat.message" && event.Operation == "create":
 		p.sendAck(event.Nonce, nil)
@@ -635,10 +635,11 @@ func (p *Platform) handleChatMessage(plain []byte) {
 		return
 	}
 
-	// Build session key — use sender ID for P2P so cc-connect groups by user
+	// Build session key. P2P sessions include both actual chat ID and sender ID:
+	// chat ID is needed for proactive sends, sender ID keeps the session user-scoped.
 	sessionKey := fmt.Sprintf("wps-xiezuo:%s:%s", msgData.CompanyID, msgData.Chat.ID)
 	if isP2P(msgData.Chat.Type) {
-		sessionKey = fmt.Sprintf("wps-xiezuo:%s:%s", msgData.CompanyID, msgData.Sender.ID)
+		sessionKey = fmt.Sprintf("wps-xiezuo:%s:%s:%s", msgData.CompanyID, msgData.Chat.ID, msgData.Sender.ID)
 	}
 
 	rctx := replyContext{
@@ -980,15 +981,22 @@ func (p *Platform) deleteReaction(ctx context.Context, rctx replyContext, reacti
 // --- Optional interface: ReplyContextReconstructor ---
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// Format: wps-xiezuo:{company_id}:{chat_id_or_user_id}
-	parts := strings.SplitN(sessionKey, ":", 3)
+	// Formats:
+	//   wps-xiezuo:{company_id}:{chat_id}             - group or legacy P2P
+	//   wps-xiezuo:{company_id}:{chat_id}:{sender_id} - P2P, user-scoped
+	parts := strings.SplitN(sessionKey, ":", 4)
 	if len(parts) < 3 || parts[0] != "wps-xiezuo" {
 		return nil, fmt.Errorf("wps-xiezuo: invalid session key %q", sessionKey)
 	}
-	return replyContext{
+	rc := replyContext{
 		ChatID:    parts[2],
 		CompanyID: parts[1],
-	}, nil
+	}
+	if len(parts) == 4 {
+		rc.ChatType = "p2p"
+		rc.SenderID = parts[3]
+	}
+	return rc, nil
 }
 
 // --- Optional interface: TypingIndicator ---
@@ -996,6 +1004,9 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
+		return func() {}
+	}
+	if rc.ChatID == "" || rc.MessageID == "" {
 		return func() {}
 	}
 	if err := p.addReaction(ctx, rc, "emoji_busy"); err != nil {
@@ -1009,6 +1020,9 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 func (p *Platform) AddDoneReaction(rctx any) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
+		return
+	}
+	if rc.ChatID == "" || rc.MessageID == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1041,8 +1055,8 @@ func cleanReplyContent(content string) string {
 // --- Compile-time interface assertions ---
 
 var (
-	_ core.Platform                    = (*Platform)(nil)
-	_ core.ReplyContextReconstructor   = (*Platform)(nil)
-	_ core.TypingIndicator            = (*Platform)(nil)
-	_ core.TypingIndicatorDone        = (*Platform)(nil)
+	_ core.Platform                  = (*Platform)(nil)
+	_ core.ReplyContextReconstructor = (*Platform)(nil)
+	_ core.TypingIndicator           = (*Platform)(nil)
+	_ core.TypingIndicatorDone       = (*Platform)(nil)
 )

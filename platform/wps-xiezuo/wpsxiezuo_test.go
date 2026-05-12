@@ -1,6 +1,7 @@
 package wpsxiezuo
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -168,6 +170,27 @@ func TestReconstructReplyCtx_Valid(t *testing.T) {
 	}
 	if rc.ChatID != "chat456" {
 		t.Fatalf("expected chat456, got %s", rc.ChatID)
+	}
+	if rc.CompanyID != "comp123" {
+		t.Fatalf("expected comp123, got %s", rc.CompanyID)
+	}
+}
+
+func TestReconstructReplyCtx_P2PWithSenderKeepsActualChatID(t *testing.T) {
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("wps-xiezuo:comp123:chat456:user789")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		t.Fatal("expected replyContext type")
+	}
+	if rc.ChatID != "chat456" {
+		t.Fatalf("expected chat456, got %s", rc.ChatID)
+	}
+	if rc.SenderID != "user789" {
+		t.Fatalf("expected user789, got %s", rc.SenderID)
 	}
 	if rc.CompanyID != "comp123" {
 		t.Fatalf("expected comp123, got %s", rc.CompanyID)
@@ -520,11 +543,18 @@ func TestHandleChatMessage_P2P(t *testing.T) {
 
 	select {
 	case received := <-ch:
-		if received.SessionKey != "wps-xiezuo:comp1:user1" {
-			t.Fatalf("expected session key wps-xiezuo:comp1:user1, got %s", received.SessionKey)
+		if received.SessionKey != "wps-xiezuo:comp1:group1:user1" {
+			t.Fatalf("expected session key wps-xiezuo:comp1:group1:user1, got %s", received.SessionKey)
 		}
 		if received.Content != "hello" {
 			t.Fatalf("expected content 'hello', got %q", received.Content)
+		}
+		rc, ok := received.ReplyCtx.(replyContext)
+		if !ok {
+			t.Fatal("expected replyContext")
+		}
+		if rc.ChatID != "group1" {
+			t.Fatalf("expected reply chat id group1, got %s", rc.ChatID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected message to be delivered")
@@ -791,6 +821,36 @@ func TestHandleEvent_BadSignature(t *testing.T) {
 	p.handleEvent(event)
 	if called {
 		t.Fatal("handler should not be called for invalid signature")
+	}
+}
+
+func TestHandleEvent_DoesNotLogDecryptedPayload(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	appID := "AK_LOG"
+	appSecret := "log-secret"
+	p := &Platform{
+		appID:     appID,
+		appSecret: appSecret,
+		handler:   func(_ core.Platform, msg *core.Message) {},
+		dedup:     core.MessageDedup{},
+	}
+
+	payload := map[string]any{
+		"chat":       map[string]any{"id": "chat_log", "type": "group"},
+		"company_id": "comp_log",
+		"message":    map[string]any{"id": "msg_log", "type": "text", "content": map[string]string{"type": "text", "content": "SECRET_LOG_PAYLOAD"}},
+		"sender":     map[string]any{"id": "u_log", "type": "user"},
+	}
+
+	event := encryptEventForTest(appID, appSecret, "kso.app_chat.message", "create", payload)
+	p.handleEvent(event)
+
+	if strings.Contains(buf.String(), "SECRET_LOG_PAYLOAD") {
+		t.Fatalf("decrypted payload should not be logged, got logs: %s", buf.String())
 	}
 }
 
@@ -1247,6 +1307,29 @@ func TestStartTyping(t *testing.T) {
 	}
 }
 
+func TestStartTyping_NoMessageID(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	plat, _ := New(map[string]any{
+		"app_id":     "id",
+		"app_secret": "secret",
+		"base_url":   srv.URL,
+	})
+	p := plat.(*Platform)
+
+	stop := p.StartTyping(context.Background(), replyContext{ChatID: "c"})
+	stop()
+
+	if calls.Load() != 0 {
+		t.Fatalf("expected no HTTP calls without message_id, got %d", calls.Load())
+	}
+}
+
 func TestAddDoneReaction(t *testing.T) {
 	var delCalled atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1277,6 +1360,28 @@ func TestAddDoneReaction(t *testing.T) {
 
 	if delCalled.Load() != 1 {
 		t.Fatalf("expected 1 delete reaction call, got %d", delCalled.Load())
+	}
+}
+
+func TestAddDoneReaction_NoMessageID(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	plat, _ := New(map[string]any{
+		"app_id":     "id",
+		"app_secret": "secret",
+		"base_url":   srv.URL,
+	})
+	p := plat.(*Platform)
+
+	p.AddDoneReaction(replyContext{ChatID: "c"})
+
+	if calls.Load() != 0 {
+		t.Fatalf("expected no HTTP calls without message_id, got %d", calls.Load())
 	}
 }
 
