@@ -39,17 +39,35 @@
   </a>
 </p>
 
-## Temporary Fork Branch: Session and Web Console Fixes
+## Temporary Fork Branch: Community Preview Fixes
 
-This fork carries a local preview branch for users who need the session and Web console fixes before they land upstream:
+This fork carries a local preview branch for users who need the latest Telegram, Gemini CLI, session, and Web console fixes before they land upstream:
 
 ```bash
-git clone -b local/web-console-session-fix-20260511 https://github.com/yanyan1115/cc-connect.git
+git clone -b local/community-preview-fixes-20260512 https://github.com/yanyan1115/cc-connect.git
 ```
 
-Branch: [`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511)
+Branch: [`local/community-preview-fixes-20260512`](https://github.com/yanyan1115/cc-connect/tree/local/community-preview-fixes-20260512)
 
 What changed in this branch:
+
+Telegram media fixes:
+
+- Fixed Telegram media-group handling so sending multiple images with one caption forms a single cc-connect turn.
+- The merged turn preserves the text/caption and forwards all images as `ImageAttachment`s together, instead of processing one image per message.
+- Media-group aggregation is bounded so delayed album parts are collected without blocking ordinary single-image or text messages.
+
+Gemini CLI on Telegram fixes:
+
+- Filtered Gemini CLI thinking/reasoning deltas before they are sent back through Telegram.
+- Stripped flattened Gemini thought markers that can appear after long-context turns, preventing internal reasoning from leaking into the Telegram message body.
+- The fix is scoped to agent output filtering and does not change Web console rendering behavior.
+
+Web console session routing fixes:
+
+- Web console sends now carry the selected session id, so messages from `/chat/<project>?session=<id>` go to the selected session instead of the current/latest session.
+- Follow-up routing keeps Telegram `/current` unchanged: sending from a non-current Web session no longer switches the Telegram active session.
+- Past native sessions selected in the Web console can be resumed correctly when routing a Web message.
 
 Telegram / agent session fixes:
 
@@ -67,6 +85,12 @@ Web console fixes:
 - Stale local shadow sessions are hidden/deduplicated, and the Web console can show the full visible session list instead of only a few recent sessions.
 - Mobile Web console layout now uses a hamburger menu and slide-out sidebar instead of squeezing content.
 - The Web console theme uses a warmer Codex-style palette (`#CC7D5E`, `#F9F9F7`, `#2D2D2B`).
+
+Current preview head:
+
+```text
+8cfd2aee fix: strip flattened gemini thought markers
+```
 
 Thanks to OpenAI Codex for helping debug and implement this temporary fork branch together with the community.
 
