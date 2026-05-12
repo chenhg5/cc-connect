@@ -554,6 +554,17 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 		}
 	}
 
+	// Validate enabled type up-front. Without this, a non-bool value (e.g. a
+	// JSON string "true" from a misbehaving API client) reaches updateJobField
+	// only after we've already removed the cron entry below, and store.Update
+	// then fails on the type mismatch — leaving the job marked Enabled in the
+	// store but never firing again until the daemon restarts.
+	if field == "enabled" {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("enabled must be a boolean")
+		}
+	}
+
 	// Check if reschedule is needed
 	needsReschedule := field == "cron_expr" || field == "enabled"
 
