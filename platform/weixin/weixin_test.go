@@ -3,6 +3,9 @@ package weixin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -62,6 +65,51 @@ func TestMediaOnlyItems(t *testing.T) {
 	}
 	if mediaOnlyItems([]messageItem{{Type: messageItemVoice, VoiceItem: &voiceItem{Text: "x"}}}) {
 		t.Fatal("voice with text is not media-only")
+	}
+}
+
+func TestCollectInboundMediaUsesCDNHTTPClient(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/download" {
+			t.Fatalf("path = %q, want /download", r.URL.Path)
+		}
+		if r.URL.Query().Get("encrypted_query_param") != "image-ref" {
+			t.Fatalf("encrypted_query_param = %q, want image-ref", r.URL.Query().Get("encrypted_query_param"))
+		}
+		_, _ = w.Write(png)
+	}))
+	defer server.Close()
+
+	p := &Platform{
+		cdnBaseURL: server.URL,
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("api client should not download media")
+		})},
+		cdnHttpClient: server.Client(),
+	}
+
+	images, files, audio := p.collectInboundMedia(context.Background(), []messageItem{{
+		Type: messageItemImage,
+		ImageItem: &imageItem{
+			Media: &cdnMedia{EncryptQueryParam: "image-ref"},
+		},
+	}})
+
+	if len(images) != 1 {
+		t.Fatalf("images len = %d, want 1", len(images))
+	}
+	if images[0].MimeType != "image/png" {
+		t.Fatalf("mime = %q, want image/png", images[0].MimeType)
+	}
+	if string(images[0].Data) != string(png) {
+		t.Fatalf("image data = %v, want %v", images[0].Data, png)
+	}
+	if len(files) != 0 {
+		t.Fatalf("files len = %d, want 0", len(files))
+	}
+	if audio != nil {
+		t.Fatalf("audio = %#v, want nil", audio)
 	}
 }
 
@@ -143,4 +191,10 @@ func containsStrHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
