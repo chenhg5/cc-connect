@@ -209,7 +209,12 @@ func (p *WSPlatform) runConnection() error {
 		// not guaranteed safe by the sync.Map contract.
 		var staleKeys []any
 		p.pendingAcks.Range(func(key, value any) bool {
-			notifyAckResult(value, wsAckResult{err: fmt.Errorf("wecom-ws: connection closed")})
+			if ch, ok := value.(chan wsAckResult); ok {
+				select {
+				case ch <- wsAckResult{err: fmt.Errorf("wecom-ws: connection closed")}:
+				default:
+				}
+			}
 			staleKeys = append(staleKeys, key)
 			return true
 		})
@@ -313,22 +318,12 @@ func (p *WSPlatform) dispatchAck(reqID string, result wsAckResult) {
 	if !ok {
 		return
 	}
-	if notifyAckResult(ch, result) {
+	resultCh, ok := ch.(chan wsAckResult)
+	if !ok {
+		slog.Warn("wecom-ws: unexpected ack channel type", "req_id", reqID)
 		return
 	}
-	slog.Warn("wecom-ws: unexpected ack channel type", "req_id", reqID)
-}
-
-func notifyAckResult(ch any, result wsAckResult) bool {
-	switch c := ch.(type) {
-	case chan wsAckResult:
-		c <- result
-		return true
-	case chan error:
-		c <- result.err
-		return true
-	}
-	return false
+	resultCh <- result
 }
 
 func (p *WSPlatform) heartbeat(ctx context.Context, conn *websocket.Conn) {

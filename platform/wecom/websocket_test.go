@@ -245,63 +245,50 @@ func TestWriteAndWaitAck_SuccessfulAck(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_1"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	// Simulate receiving ack in another goroutine
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- nil
-		}
+		p.dispatchAck(reqID, wsAckResult{})
 	}()
 
-	ctx := context.Background()
-	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil ack error, got %v", err)
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err != nil {
+			t.Fatalf("expected nil ack error, got %v", result.err)
 		}
-	case <-ctx.Done():
-		t.Fatal("context cancelled unexpectedly")
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for ack")
-	}
+	})
 }
 
 func TestWriteAndWaitAck_AckWithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_2"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	ackErr := fmt.Errorf("wecom-ws: ack error: errcode=40001 errmsg=invalid token")
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- ackErr
-		}
+		p.dispatchAck(reqID, wsAckResult{err: ackErr})
 	}()
 
-	select {
-	case err := <-ch:
-		if err == nil {
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err == nil {
 			t.Fatal("expected ack error, got nil")
 		}
-		if err.Error() != ackErr.Error() {
-			t.Fatalf("unexpected error: %v", err)
+		if result.err.Error() != ackErr.Error() {
+			t.Fatalf("unexpected error: %v", result.err)
 		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for ack")
-	}
+	})
 }
 
 func TestWriteAndWaitAck_Timeout(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_timeout"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	// Nobody sends ack → should timeout
@@ -325,7 +312,7 @@ func TestWriteAndWaitAck_ContextCancelled(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_cancel"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -355,7 +342,7 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_1"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 0
@@ -368,21 +355,18 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 
 	p.handleFrame(frame)
 
-	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil error for successful ack, got %v", err)
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err != nil {
+			t.Fatalf("expected nil error for successful ack, got %v", result.err)
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("ack not dispatched")
-	}
+	})
 }
 
 func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_2"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 40001
@@ -395,11 +379,19 @@ func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 
 	p.handleFrame(frame)
 
-	select {
-	case err := <-ch:
-		if err == nil {
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err == nil {
 			t.Fatal("expected error for failed ack, got nil")
 		}
+	})
+}
+
+func assertAckResult(t *testing.T, ch <-chan wsAckResult, check func(wsAckResult)) {
+	t.Helper()
+
+	select {
+	case result := <-ch:
+		check(result)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ack not dispatched")
 	}
