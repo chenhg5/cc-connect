@@ -149,6 +149,7 @@ type appServerSession struct {
 	stateMu     sync.Mutex
 	pendingMsgs []string
 	currentTurn string
+	interrupts  map[string][]chan error
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -177,6 +178,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		cancel:           cancel,
 		pending:          make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals: make(map[string]chan core.PermissionResult),
+		interrupts:       make(map[string][]chan error),
 	}
 	s.alive.Store(true)
 
@@ -471,6 +473,46 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	return nil
 }
 
+func (s *appServerSession) InterruptSession(ctx context.Context) error {
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+
+	waitCh := make(chan error, 1)
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	if strings.TrimSpace(turnID) == "" {
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server has no active turn to interrupt")
+	}
+	if s.interrupts == nil {
+		s.interrupts = make(map[string][]chan error)
+	}
+	existing := s.interrupts[turnID]
+	shouldRequest := len(existing) == 0
+	s.interrupts[turnID] = append(existing, waitCh)
+	s.stateMu.Unlock()
+	defer s.removeInterruptWaiter(turnID, waitCh)
+
+	if shouldRequest {
+		if err := s.requestWithContext(ctx, "turn/interrupt", map[string]any{
+			"threadId": threadID,
+			"turnId":   turnID,
+		}, nil, 0); err != nil {
+			s.rejectInterruptTurn(turnID, err)
+			return err
+		}
+	}
+
+	select {
+	case err := <-waitCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
 	if len(images) == 0 {
 		return prompt, nil, nil
@@ -676,6 +718,84 @@ func (s *appServerSession) rejectPendingApprovals(err error) {
 	}
 }
 
+func (s *appServerSession) removeInterruptWaiter(turnID string, waitCh chan error) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	waiters := s.interrupts[turnID]
+	if len(waiters) == 0 {
+		return
+	}
+	kept := waiters[:0]
+	for _, ch := range waiters {
+		if ch != waitCh {
+			kept = append(kept, ch)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.interrupts, turnID)
+		return
+	}
+	s.interrupts[turnID] = kept
+}
+
+func (s *appServerSession) takeInterruptWaiters(turnID string) []chan error {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.takeInterruptWaitersLocked(turnID)
+}
+
+// takeInterruptWaitersLocked returns and clears all waiters for turnID.
+// Caller must hold s.stateMu.
+func (s *appServerSession) takeInterruptWaitersLocked(turnID string) []chan error {
+	waiters := append([]chan error(nil), s.interrupts[turnID]...)
+	delete(s.interrupts, turnID)
+	return waiters
+}
+
+func (s *appServerSession) takeAllInterruptWaiters() []chan error {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	waiters := make([]chan error, 0)
+	for turnID, chans := range s.interrupts {
+		delete(s.interrupts, turnID)
+		waiters = append(waiters, chans...)
+	}
+	return waiters
+}
+
+func (s *appServerSession) rejectInterruptTurn(turnID string, err error) {
+	waiters := s.takeInterruptWaiters(turnID)
+	s.signalInterruptWaiters(waiters, err)
+}
+
+func (s *appServerSession) rejectInterrupts(err error) {
+	waiters := s.takeAllInterruptWaiters()
+	s.signalInterruptWaiters(waiters, err)
+}
+
+func (s *appServerSession) signalInterruptWaiters(waiters []chan error, err error) {
+	for _, ch := range waiters {
+		select {
+		case ch <- err:
+		default:
+		}
+	}
+}
+
+func interruptCompletionError(notif turnNotification) error {
+	switch notif.Turn.Status {
+	case "interrupted":
+		return nil
+	case "":
+		return fmt.Errorf("codex app-server interrupt finished without status")
+	default:
+		if notif.Turn.Error != nil && strings.TrimSpace(notif.Turn.Error.Message) != "" {
+			return fmt.Errorf("codex app-server interrupt ended with status %q: %s", notif.Turn.Status, notif.Turn.Error.Message)
+		}
+		return fmt.Errorf("codex app-server interrupt ended with status %q", notif.Turn.Status)
+	}
+}
+
 func (s *appServerSession) Events() <-chan core.Event {
 	return s.events
 }
@@ -727,6 +847,7 @@ func (s *appServerSession) Alive() bool {
 func (s *appServerSession) Close() error {
 	s.alive.Store(false)
 	s.cancel()
+	s.rejectInterrupts(io.EOF)
 
 	s.procMu.Lock()
 	if s.stdin != nil {
@@ -818,12 +939,14 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		s.alive.Store(false)
 		s.rejectPending(err)
 		s.rejectPendingApprovals(err)
+		s.rejectInterrupts(err)
 		return
 	}
 
 	s.alive.Store(false)
 	s.rejectPending(io.EOF)
 	s.rejectPendingApprovals(io.EOF)
+	s.rejectInterrupts(io.EOF)
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
@@ -863,6 +986,8 @@ func (s *appServerSession) waitLoop() {
 		err = io.EOF
 	}
 	s.rejectPending(err)
+	s.rejectPendingApprovals(err)
+	s.rejectInterrupts(err)
 }
 
 func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
@@ -913,7 +1038,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.completeTurn()
+			s.completeTurnNotification(notif)
 		}
 
 	case "thread/status/changed":
@@ -1307,6 +1432,27 @@ func (s *appServerSession) completeTurn() {
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 
+func (s *appServerSession) completeTurnNotification(notif turnNotification) {
+	s.stateMu.Lock()
+	waiters := s.takeInterruptWaitersLocked(notif.Turn.ID)
+
+	shouldComplete := s.currentTurn != ""
+	if notif.Turn.ID != "" && s.currentTurn != "" && s.currentTurn != notif.Turn.ID {
+		shouldComplete = false
+	}
+	if shouldComplete {
+		s.currentTurn = ""
+	}
+	s.stateMu.Unlock()
+
+	s.signalInterruptWaiters(waiters, interruptCompletionError(notif))
+	if !shouldComplete {
+		return
+	}
+	s.flushPendingAsText()
+	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
 func (s *appServerSession) flushPendingAsThinking() {
 	s.stateMu.Lock()
 	msgs := append([]string(nil), s.pendingMsgs...)
@@ -1365,6 +1511,19 @@ func (s *appServerSession) request(method string, params any, out any) error {
 }
 
 func (s *appServerSession) requestWithTimeout(method string, params any, out any, timeout time.Duration) error {
+	return s.requestWithContext(s.ctx, method, params, out, timeout)
+}
+
+func (s *appServerSession) requestWithContext(ctx context.Context, method string, params any, out any, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	id := s.nextID.Add(1)
 	ch := make(chan rpcResponseEnvelope, 1)
 
@@ -1402,11 +1561,14 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 		return nil
 	case <-s.ctx.Done():
 		return s.ctx.Err()
-	case <-time.After(timeout):
+	case <-ctx.Done():
 		s.pendingMu.Lock()
 		delete(s.pending, id)
 		s.pendingMu.Unlock()
-		return fmt.Errorf("%s timed out", method)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0 {
+			return fmt.Errorf("%s timed out", method)
+		}
+		return ctx.Err()
 	}
 }
 

@@ -85,6 +85,37 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+func waitForCondition(t *testing.T, timeout time.Duration, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
+func containsSubstring(items []string, needle string) bool {
+	for _, item := range items {
+		if strings.Contains(item, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func countSubstring(items []string, needle string) int {
+	count := 0
+	for _, item := range items {
+		if strings.Contains(item, needle) {
+			count++
+		}
+	}
+	return count
+}
+
 type recallCheckingPlatform struct {
 	stubPlatformEngine
 	recalled bool
@@ -1061,12 +1092,13 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
+	workDir := filepath.Join(homeDir, "codes", "cc-connect")
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
 			model:           "gpt-5.4",
 			reasoningEffort: "xhigh",
 		},
-		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+		workDir: workDir,
 		report: &UsageReport{
 			Buckets: []UsageBucket{{
 				Name: "Rate limit",
@@ -1099,7 +1131,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · " + compactReplyFooterPath(workDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1109,9 +1141,10 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
+	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
-		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+		workDir:            workDir,
 	}
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -1135,7 +1168,7 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · " + compactReplyFooterPath(workDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1145,9 +1178,10 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
+	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
-		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+		workDir:            workDir,
 	}
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -1176,7 +1210,7 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 		t.Fatal("sent = nil, want final reply")
 	}
 	final := sent[len(sent)-1]
-	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · " + compactReplyFooterPath(workDir) + "*"
 	if final != want {
 		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
 	}
@@ -1285,7 +1319,8 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	agentSession := newControllableSession("s-footer-runtime")
 	agentSession.model = "gpt-5.4"
 	agentSession.reasoningEffort = "xhigh"
-	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.workDir = sessionWorkDir
 	agentSession.report = &UsageReport{
 		Buckets: []UsageBucket{{
 			Name: "Rate limit",
@@ -1317,7 +1352,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · " + compactReplyFooterPath(sessionWorkDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -2545,6 +2580,100 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	}
 	if session.lastResult.Behavior != "allow" {
 		t.Fatalf("RespondPermission behavior = %q, want %q", session.lastResult.Behavior, "allow")
+	}
+}
+
+func TestHandlePendingPermission_InterruptModeFollowupCancelsToolPermission(t *testing.T) {
+	e := newTestEngine()
+	e.SetQueueMode("interrupt")
+	key := "test:user1"
+
+	pending := &pendingPermission{
+		RequestID: "req-interrupt",
+		ToolInput: map[string]any{"path": "/tmp/x"},
+		Resolved:  make(chan struct{}),
+	}
+	session := &recordingAgentSession{}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: session,
+		pending:      pending,
+	}
+	e.interactiveMu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+
+	if e.handlePendingPermission(p, msg, "please do this instead", "") {
+		t.Fatal("expected non-permission follow-up to continue into busy handling")
+	}
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	hasPending := state.pending != nil
+	state.mu.Unlock()
+	if hasPending {
+		t.Fatal("expected pending permission to be cleared")
+	}
+
+	select {
+	case <-pending.Resolved:
+	default:
+		t.Fatal("expected pending permission to be resolved")
+	}
+
+	if session.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", session.calls)
+	}
+	if session.lastID != "req-interrupt" {
+		t.Fatalf("RespondPermission id = %q, want req-interrupt", session.lastID)
+	}
+	if session.lastResult.Behavior != "deny" {
+		t.Fatalf("RespondPermission behavior = %q, want deny", session.lastResult.Behavior)
+	}
+	if !strings.Contains(session.lastResult.Message, "interrupted") {
+		t.Fatalf("RespondPermission message = %q, want interrupted reason", session.lastResult.Message)
+	}
+}
+
+func TestHandlePendingPermission_InterruptModeKeepsAskUserQuestionAnswer(t *testing.T) {
+	e := newTestEngine()
+	e.SetQueueMode("interrupt")
+	key := "test:user1"
+
+	pending := &pendingPermission{
+		RequestID: "ask-1",
+		ToolInput: map[string]any{"question": "Color?"},
+		Questions: []UserQuestion{{Question: "Color?"}},
+		Resolved:  make(chan struct{}),
+	}
+	session := &recordingAgentSession{}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: session,
+		pending:      pending,
+	}
+	e.interactiveMu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+
+	if !e.handlePendingPermission(p, msg, "blue", "") {
+		t.Fatal("expected AskUserQuestion answer to be handled")
+	}
+	if session.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", session.calls)
+	}
+	if session.lastResult.Behavior != "allow" {
+		t.Fatalf("RespondPermission behavior = %q, want allow", session.lastResult.Behavior)
+	}
+	answers, _ := session.lastResult.UpdatedInput["answers"].(map[string]any)
+	if answers["Color?"] != "blue" {
+		t.Fatalf("AskUserQuestion answer = %#v, want blue", answers)
 	}
 }
 
@@ -5849,10 +5978,11 @@ func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.co
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
 	s.alive = false
-	close(s.events)
 	select {
 	case <-s.closed:
+		return nil
 	default:
+		close(s.events)
 		close(s.closed)
 	}
 	return nil
@@ -6678,8 +6808,9 @@ func TestDrainEventsOpenChannel(t *testing.T) {
 // queuingAgentSession records Send calls and emits events via a controllable channel.
 type queuingAgentSession struct {
 	controllableAgentSession
-	sendCalls []string
-	sendMu    sync.Mutex
+	sendCalls  []string
+	sendMu     sync.Mutex
+	sendNotify chan struct{}
 }
 
 func newQueuingSession(id string) *queuingAgentSession {
@@ -6690,6 +6821,7 @@ func newQueuingSession(id string) *queuingAgentSession {
 			events:    make(chan Event, 16),
 			closed:    make(chan struct{}),
 		},
+		sendNotify: make(chan struct{}, 16),
 	}
 }
 
@@ -6697,6 +6829,76 @@ func (s *queuingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileA
 	s.sendMu.Lock()
 	s.sendCalls = append(s.sendCalls, prompt)
 	s.sendMu.Unlock()
+	select {
+	case s.sendNotify <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *queuingAgentSession) sendCount() int {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return len(s.sendCalls)
+}
+
+func (s *queuingAgentSession) waitForSendCount(t *testing.T, timeout time.Duration, want int) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		if s.sendCount() >= want {
+			return
+		}
+		select {
+		case <-s.sendNotify:
+		case <-timer.C:
+			t.Fatalf("sendCalls count = %d, want at least %d", s.sendCount(), want)
+		}
+	}
+}
+
+type interruptibleQueuingSession struct {
+	*queuingAgentSession
+	interruptMu    sync.Mutex
+	interruptCalls int
+}
+
+func newInterruptibleQueuingSession(id string) *interruptibleQueuingSession {
+	return &interruptibleQueuingSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *interruptibleQueuingSession) InterruptSession(_ context.Context) error {
+	s.interruptMu.Lock()
+	s.interruptCalls++
+	s.interruptMu.Unlock()
+	return nil
+}
+
+func (s *interruptibleQueuingSession) interruptCount() int {
+	s.interruptMu.Lock()
+	defer s.interruptMu.Unlock()
+	return s.interruptCalls
+}
+
+type permissionQueuingSession struct {
+	*queuingAgentSession
+	permMu     sync.Mutex
+	lastID     string
+	lastResult PermissionResult
+	calls      int
+}
+
+func newPermissionQueuingSession(id string) *permissionQueuingSession {
+	return &permissionQueuingSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *permissionQueuingSession) RespondPermission(id string, res PermissionResult) error {
+	s.permMu.Lock()
+	s.lastID = id
+	s.lastResult = res
+	s.calls++
+	s.permMu.Unlock()
 	return nil
 }
 
@@ -7050,6 +7252,133 @@ func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 	state.mu.Unlock()
 }
 
+func TestQueueMessageForBusySession_InterruptModeLatestWins(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newInterruptibleQueuingSession("qs-interrupt")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueMode("interrupt")
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession:   sess,
+		platform:       p,
+		replyCtx:       "ctx1",
+		turnGeneration: 1,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg1 := &Message{MessageID: "msg-1", SessionKey: key, Content: "first follow-up", ReplyCtx: "ctx-msg1"}
+	msg2 := &Message{MessageID: "msg-2", SessionKey: key, Content: "latest follow-up", ReplyCtx: "ctx-msg2"}
+
+	if !e.queueMessageForBusySession(p, msg1, key) {
+		t.Fatal("expected first follow-up to be handled")
+	}
+	if !e.queueMessageForBusySession(p, msg2, key) {
+		t.Fatal("expected second follow-up to be handled")
+	}
+	waitForCondition(t, time.Second, func() bool {
+		return sess.interruptCount() == 1
+	})
+
+	sent := p.getSent()
+	if len(sent) != 0 {
+		t.Fatalf("platform replies = %v, want no immediate queue-time acknowledgement in interrupt mode", sent)
+	}
+
+	sess.sendMu.Lock()
+	if len(sess.sendCalls) != 0 {
+		t.Fatalf("sendCalls = %v, want [] (deferred send)", sess.sendCalls)
+	}
+	sess.sendMu.Unlock()
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", len(state.pendingMessages))
+	}
+	if got := state.pendingMessages[0].content; got != "latest follow-up" {
+		t.Fatalf("latest pending content = %q, want %q", got, "latest follow-up")
+	}
+	if state.supersededGeneration == 0 {
+		t.Fatal("supersededGeneration = 0, want active turn generation")
+	}
+}
+
+func TestQueueMessageForBusySession_InterruptModeUsesSupersededInstantReply(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newInterruptibleQueuingSession("qs-interrupt-superseded")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueMode("interrupt")
+	e.SetInstantReply(InstantReplyCfg{
+		Enabled:    true,
+		Initial:    "initial ack",
+		Superseded: "superseded ack",
+		Queued:     "queued ack",
+	})
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession:   sess,
+		platform:       p,
+		replyCtx:       "ctx1",
+		turnGeneration: 1,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	if !e.queueMessageForBusySession(p, &Message{MessageID: "msg-1", SessionKey: key, Content: "follow-up", ReplyCtx: "ctx-msg1"}, key) {
+		t.Fatal("expected follow-up to be handled")
+	}
+
+	waitForCondition(t, time.Second, func() bool {
+		return containsSubstring(p.getSent(), "superseded ack")
+	})
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 {
+		t.Fatalf("pendingMessages len = %d, want 1", len(state.pendingMessages))
+	}
+	if !state.pendingMessages[0].ackSent {
+		t.Fatal("pending message ackSent = false, want true after superseded instant reply")
+	}
+}
+
+func TestQueueMessageForBusySession_FIFOUsesQueuedInstantReply(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-queued-instant")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Queued: "queued ack"})
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	if !e.queueMessageForBusySession(p, &Message{MessageID: "msg-1", SessionKey: key, Content: "queued follow-up", ReplyCtx: "ctx-msg1"}, key) {
+		t.Fatal("expected follow-up to be queued")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "queued ack" {
+		t.Fatalf("platform replies = %v, want queued ack", sent)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 || !state.pendingMessages[0].ackSent {
+		t.Fatalf("pendingMessages = %#v, want one acked queued message", state.pendingMessages)
+	}
+}
+
 func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("qs2")
@@ -7072,27 +7401,6 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	// Simulate the agent completing turn 1 then turn 2.
-	// Turn 2 events are pushed only after Send() is called for the queued
-	// message, matching real-world timing where the agent doesn't produce
-	// events for a turn until it receives the prompt on stdin.
-	go func() {
-		// Turn 1 result
-		sess.events <- Event{Type: EventText, Content: "response1"}
-		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
-		// Wait for the queued message's Send() call before pushing turn 2 events.
-		sess.sendMu.Lock()
-		for len(sess.sendCalls) == 0 {
-			sess.sendMu.Unlock()
-			time.Sleep(5 * time.Millisecond)
-			sess.sendMu.Lock()
-		}
-		sess.sendMu.Unlock()
-		// Turn 2 result (for the queued message)
-		sess.events <- Event{Type: EventText, Content: "response2"}
-		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
-	}()
-
 	session.AddHistory("user", "initial-msg")
 
 	sendDone := make(chan error, 1)
@@ -7104,6 +7412,15 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
 		close(done)
 	}()
+
+	// Turn 2 events are pushed only after Send() is called for the queued
+	// message, matching real-world timing where the agent does not produce
+	// events for a turn until it receives the prompt.
+	sess.events <- Event{Type: EventText, Content: "response1"}
+	sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+	sess.waitForSendCount(t, time.Second, 1)
+	sess.events <- Event{Type: EventText, Content: "response2"}
+	sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
 
 	select {
 	case <-done:
@@ -7141,6 +7458,291 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 	if len(userMsgs) < 2 {
 		t.Fatalf("user history entries = %d, want >= 2", len(userMsgs))
+	}
+}
+
+func TestProcessInteractiveEvents_InterruptModeSuppressesOldResultAndProcessesLatest(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-interrupt-drain")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueMode("interrupt")
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "instant-ack"})
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+
+	if !e.queueMessageForBusySession(p, &Message{
+		MessageID:  "msg2",
+		SessionKey: key,
+		Content:    "latest follow-up",
+		ReplyCtx:   "ctx-turn2",
+	}, key) {
+		t.Fatal("expected follow-up to be handled")
+	}
+
+	sess.events <- Event{Type: EventText, Content: "old partial after interrupt"}
+	sess.events <- Event{Type: EventResult, Content: "old final", Done: true}
+
+	sess.waitForSendCount(t, time.Second, 1)
+
+	sess.sendMu.Lock()
+	sendCalls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sendCalls) != 1 || !strings.Contains(sendCalls[0], "latest follow-up") {
+		t.Fatalf("sendCalls = %v, want one send for latest follow-up", sendCalls)
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "latest final", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	instantAckCount := 0
+	for _, content := range sent {
+		if strings.Contains(content, "old partial after interrupt") || strings.Contains(content, "old final") {
+			t.Fatalf("superseded output was sent: %v", sent)
+		}
+		if strings.Contains(content, "instant-ack") {
+			instantAckCount++
+		}
+	}
+	if instantAckCount != 2 {
+		t.Fatalf("instant acknowledgements = %d, want one ack per started turn; sent=%v", instantAckCount, sent)
+	}
+	if !containsSubstring(sent, "latest final") {
+		t.Fatalf("latest final response not sent: %v", sent)
+	}
+
+	history := session.GetHistory(100)
+	for _, h := range history {
+		if h.Role == "assistant" && strings.Contains(h.Content, "old final") {
+			t.Fatalf("superseded assistant response recorded in history: %#v", history)
+		}
+	}
+}
+
+func TestProcessInteractiveEvents_InterruptModeSkipsInitialAckWhenSupersededAckWasSent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-interrupt-ack-skip")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueMode("interrupt")
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Initial: "initial ack", Superseded: "superseded ack"})
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+
+	if !e.queueMessageForBusySession(p, &Message{
+		MessageID:  "msg2",
+		SessionKey: key,
+		Content:    "latest follow-up",
+		ReplyCtx:   "ctx-turn2",
+	}, key) {
+		t.Fatal("expected follow-up to be handled")
+	}
+	sess.events <- Event{Type: EventResult, Content: "old final", Done: true}
+	sess.waitForSendCount(t, time.Second, 1)
+	sess.events <- Event{Type: EventResult, Content: "latest final", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	if countSubstring(sent, "superseded ack") != 1 {
+		t.Fatalf("superseded ack count mismatch, sent=%v", sent)
+	}
+	if countSubstring(sent, "initial ack") != 1 {
+		t.Fatalf("initial ack should only be sent for original turn, sent=%v", sent)
+	}
+	if !containsSubstring(sent, "latest final") {
+		t.Fatalf("latest final response not sent: %v", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_InterruptPermissionRaceSuppressesOldResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newPermissionQueuingSession("qs-interrupt-perm")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueMode("interrupt")
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+
+	sess.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-1",
+		ToolName:     "Bash",
+		ToolInput:    "cat secret.txt",
+		ToolInputRaw: map[string]any{"cmd": "cat secret.txt"},
+	}
+
+	waitForCondition(t, time.Second, func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return state.pending != nil
+	})
+
+	e.handleMessage(p, &Message{
+		Platform:   "test",
+		MessageID:  "msg2",
+		SessionKey: key,
+		Content:    "please do this instead",
+		ReplyCtx:   "ctx-turn2",
+	})
+
+	sess.events <- Event{Type: EventResult, Content: "old final after permission", Done: true}
+
+	sess.waitForSendCount(t, time.Second, 1)
+
+	sess.events <- Event{Type: EventResult, Content: "latest final", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	for _, content := range sent {
+		if strings.Contains(content, "old final after permission") {
+			t.Fatalf("superseded permission output was sent: %v", sent)
+		}
+	}
+	if !containsSubstring(sent, "latest final") {
+		t.Fatalf("latest final response not sent: %v", sent)
+	}
+
+	sess.permMu.Lock()
+	calls := sess.calls
+	behavior := sess.lastResult.Behavior
+	msg := sess.lastResult.Message
+	sess.permMu.Unlock()
+	if calls != 1 || behavior != "deny" || !strings.Contains(msg, "interrupted") {
+		t.Fatalf("permission result calls=%d behavior=%q message=%q, want interrupted deny", calls, behavior, msg)
+	}
+}
+
+func TestProcessInteractiveEvents_InterruptModeChannelClosedSuppressesOldPartial(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-interrupt-close")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueMode("interrupt")
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+
+	if !e.queueMessageForBusySession(p, &Message{
+		MessageID:  "msg2",
+		SessionKey: key,
+		Content:    "latest follow-up",
+		ReplyCtx:   "ctx-turn2",
+	}, key) {
+		t.Fatal("expected follow-up to be handled")
+	}
+
+	sess.events <- Event{Type: EventText, Content: "old partial before close"}
+	close(sess.closed)
+	close(sess.events)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sent := p.getSent()
+	for _, content := range sent {
+		if strings.Contains(content, "old partial before close") {
+			t.Fatalf("superseded channel-closed partial was sent: %v", sent)
+		}
+	}
+
+	history := session.GetHistory(100)
+	for _, h := range history {
+		if h.Role == "assistant" && strings.Contains(h.Content, "old partial before close") {
+			t.Fatalf("superseded partial recorded in history: %#v", history)
+		}
 	}
 }
 
@@ -7206,21 +7808,6 @@ func TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx(t *testing.T) 
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	go func() {
-		// Turn 1 result — final reply should use ctx-turn1.
-		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
-		// Wait for the queued message's Send() before pushing turn 2.
-		sess.sendMu.Lock()
-		for len(sess.sendCalls) == 0 {
-			sess.sendMu.Unlock()
-			time.Sleep(5 * time.Millisecond)
-			sess.sendMu.Lock()
-		}
-		sess.sendMu.Unlock()
-		// Turn 2 result — final reply should use ctx-turn2.
-		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
-	}()
-
 	session.AddHistory("user", "initial-msg")
 	sendDone := make(chan error, 1)
 	sendDone <- nil
@@ -7230,6 +7817,12 @@ func TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx(t *testing.T) 
 		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, "ctx-turn1")
 		close(done)
 	}()
+
+	// Turn 1 final reply should use ctx-turn1.
+	sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+	sess.waitForSendCount(t, time.Second, 1)
+	// Turn 2 final reply should use ctx-turn2.
+	sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
 
 	select {
 	case <-done:
@@ -7284,23 +7877,14 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	// Push events so the drain completes.
-	go func() {
-		sess.sendMu.Lock()
-		for len(sess.sendCalls) == 0 {
-			sess.sendMu.Unlock()
-			time.Sleep(5 * time.Millisecond)
-			sess.sendMu.Lock()
-		}
-		sess.sendMu.Unlock()
-		sess.events <- Event{Type: EventResult, Content: "orphan-response", Done: true}
-	}()
-
 	done := make(chan struct{})
 	go func() {
 		e.drainOrphanedQueue(session, wsSessions, key, agent, "")
 		close(done)
 	}()
+
+	sess.waitForSendCount(t, time.Second, 1)
+	sess.events <- Event{Type: EventResult, Content: "orphan-response", Done: true}
 
 	select {
 	case <-done:
@@ -7633,6 +8217,38 @@ func TestQueueMessage_NilAgentSession_DuringStartup(t *testing.T) {
 		t.Fatalf("queued content = %q, want %q", state.pendingMessages[0].content, "queued during startup")
 	}
 	state.mu.Unlock()
+}
+
+func TestAdoptPendingFromPlaceholderCopiesSupersedeMarker(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	existing := &interactiveState{
+		platform:             p,
+		replyCtx:             "ctx-placeholder",
+		pendingMessages:      []queuedMessage{{content: "latest"}},
+		supersededGeneration: 1,
+		turnGeneration:       7,
+		eventsNeedResync:     true,
+	}
+	newState := &interactiveState{
+		platform:         p,
+		replyCtx:         "ctx-new",
+		eventsNeedResync: true,
+	}
+
+	adoptPendingFromPlaceholder(existing, newState)
+
+	if len(newState.pendingMessages) != 1 || newState.pendingMessages[0].content != "latest" {
+		t.Fatalf("newState pendingMessages = %#v, want latest pending message", newState.pendingMessages)
+	}
+	if newState.supersededGeneration != 1 {
+		t.Fatalf("newState supersededGeneration = %d, want 1", newState.supersededGeneration)
+	}
+	if newState.turnGeneration != 0 {
+		t.Fatalf("newState turnGeneration = %d, want 0 before foreground turn starts", newState.turnGeneration)
+	}
+	if len(existing.pendingMessages) != 0 {
+		t.Fatalf("existing pendingMessages len = %d, want 0 after adoption", len(existing.pendingMessages))
+	}
 }
 
 // --- 2. /compress flow ---
@@ -8672,6 +9288,10 @@ func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	got, err := resolveLocalDirPath("project", base)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	sub, err = filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
 	}
 	if got != sub {
 		t.Fatalf("expected %q, got %q", sub, got)
@@ -11342,6 +11962,29 @@ func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	sent := p.getSent()
 	if sent[0] != "🤔 Thinking..." {
 		t.Fatalf("first reply = %q, want instant reply '🤔 Thinking...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_InitialOverridesLegacyContent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "legacy ack", Initial: "initial ack"})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := waitForPlatformSend(p, 2, 2*time.Second)
+	if sent[0] != "initial ack" {
+		t.Fatalf("first reply = %q, want initial ack", sent[0])
 	}
 }
 

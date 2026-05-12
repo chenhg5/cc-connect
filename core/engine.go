@@ -28,6 +28,8 @@ import (
 const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
+const queueModeQueue = "queue"
+const queueModeInterrupt = "interrupt"
 
 const (
 	defaultThinkingMaxLen = 300
@@ -43,6 +45,8 @@ const (
 	slowAgentSend       = 2 * time.Second  // agentSession.Send
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
 )
+
+const nativeInterruptTimeout = 15 * time.Second
 
 const (
 	replyFooterUsageTimeout  = 1500 * time.Millisecond
@@ -152,8 +156,11 @@ type DisplayCfg struct {
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
 // is received, before the agent starts processing.
 type InstantReplyCfg struct {
-	Enabled bool
-	Content string // custom reply text; empty = use i18n MsgStarting default
+	Enabled    bool
+	Content    string // legacy alias for Initial; empty = use i18n MsgStarting default
+	Initial    string
+	Superseded string
+	Queued     string
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -222,6 +229,7 @@ type Engine struct {
 	relayManager      *RelayManager
 	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
+	queueMode         string
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
@@ -299,6 +307,7 @@ type queuedMessage struct {
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
 	channelKey    string // platform-provided channel identifier (preferred over sessionKey extraction)
+	ackSent       bool   // true when the arrival state was already acknowledged
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -314,6 +323,8 @@ type interactiveState struct {
 	stopped                bool
 	pending                *pendingPermission
 	pendingMessages        []queuedMessage // messages queued while session was busy
+	turnGeneration         uint64          // increments when a new foreground turn starts
+	supersededGeneration   uint64          // generation whose stale visible output should be suppressed
 	approveAll             bool            // when true, auto-approve all permission requests for this session
 	fromVoice              bool            // true if current turn originated from voice transcription
 	sideText               string
@@ -404,6 +415,18 @@ func (s *interactiveState) markStopped() {
 	close(s.stopCh)
 }
 
+// markCurrentTurnSupersededLocked marks the active generation as stale.
+// Caller must hold s.mu.
+func (s *interactiveState) markCurrentTurnSupersededLocked() {
+	if s.turnGeneration > 0 {
+		s.supersededGeneration = s.turnGeneration
+		return
+	}
+	// Startup placeholders may receive a busy follow-up before the foreground
+	// loop has assigned generation 1. Preserve that intent for adoption.
+	s.supersededGeneration = 1
+}
+
 // resolve safely closes the Resolved channel exactly once.
 func (pp *pendingPermission) resolve() {
 	pp.resolveOnce.Do(func() { close(pp.Resolved) })
@@ -431,6 +454,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		queueMode:             queueModeQueue,
 		showContextIndicator:  true,
 	}
 
@@ -953,6 +977,19 @@ func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 func (e *Engine) SetMaxQueuedMessages(n int) {
 	if n > 0 {
 		e.maxQueuedMessages = n
+	}
+}
+
+// SetQueueMode sets how messages are handled when a session is busy.
+// Supported values are "queue" (default FIFO) and "interrupt" (latest wins).
+func (e *Engine) SetQueueMode(mode string) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", queueModeQueue:
+		e.queueMode = queueModeQueue
+	case queueModeInterrupt:
+		e.queueMode = queueModeInterrupt
+	default:
+		e.queueMode = queueModeQueue
 	}
 }
 
@@ -2210,19 +2247,122 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return false
 	}
 
+	queued := queuedMessageFromMessage(p, msg)
+
+	state.mu.Lock()
+	if e.queueMode == queueModeInterrupt {
+		if content, ok := e.instantReplyContent(instantReplySuperseded); ok {
+			queued.ackSent = true
+			go e.send(p, msg.ReplyCtx, content)
+		}
+		agentSession := state.agentSession
+		// Only the first follow-up for the active generation needs a native
+		// interrupt. Later follow-ups replace the pending restart input without
+		// sending duplicate turn/interrupt requests for the same stale turn.
+		shouldInterrupt := state.turnGeneration > 0 && state.supersededGeneration != state.turnGeneration
+		state.pendingMessages = []queuedMessage{queued}
+		state.markCurrentTurnSupersededLocked()
+		state.mu.Unlock()
+		slog.Info("message superseded busy session",
+			"session", msg.SessionKey,
+			"user", msg.UserName,
+		)
+		if shouldInterrupt {
+			go e.interruptSupersededTurn(agentSession, msg.SessionKey)
+		}
+		return true
+	}
+
 	// Only queue metadata — do NOT send to agent stdin yet.
 	// The agent CLI may treat a mid-turn stdin message as part of the
 	// current turn, causing the event loop to hang waiting for a second
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
-	state.mu.Lock()
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		state.mu.Unlock()
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true // handled: queue-full reply sent
 	}
-	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+	queued.ackSent = true
+	state.pendingMessages = append(state.pendingMessages, queued)
+	queueDepth := len(state.pendingMessages)
+	state.mu.Unlock()
+
+	slog.Info("message queued for busy session",
+		"session", msg.SessionKey,
+		"user", msg.UserName,
+		"queue_depth", queueDepth,
+	)
+	e.reply(p, msg.ReplyCtx, e.queuedReplyContent())
+	return true
+}
+
+func (e *Engine) interruptSupersededTurn(agentSession AgentSession, sessionKey string) {
+	if agentSession == nil || !agentSession.Alive() {
+		return
+	}
+	interrupter, ok := agentSession.(SessionInterrupter)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, nativeInterruptTimeout)
+	defer cancel()
+	if err := interrupter.InterruptSession(ctx); err != nil {
+		slog.Debug("native interrupt failed for superseded turn", "session", sessionKey, "error", err)
+	}
+}
+
+func (e *Engine) sendInitialInstantReply(p Platform, replyCtx any, streamCard StreamingCard, alreadyAcked bool) {
+	if alreadyAcked || streamCard != nil {
+		return
+	}
+	replyContent, ok := e.instantReplyContent(instantReplyInitial)
+	if !ok {
+		return
+	}
+	e.send(p, replyCtx, replyContent)
+}
+
+type instantReplyKind string
+
+const (
+	instantReplyInitial    instantReplyKind = "initial"
+	instantReplySuperseded instantReplyKind = "superseded"
+)
+
+func (e *Engine) instantReplyContent(kind instantReplyKind) (string, bool) {
+	if !e.instantReply.Enabled {
+		return "", false
+	}
+	switch kind {
+	case instantReplyInitial:
+		if e.instantReply.Initial != "" {
+			return e.instantReply.Initial, true
+		}
+		if e.instantReply.Content != "" {
+			return e.instantReply.Content, true
+		}
+		return e.i18n.T(MsgStarting), true
+	case instantReplySuperseded:
+		if e.instantReply.Superseded != "" {
+			return e.instantReply.Superseded, true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+func (e *Engine) queuedReplyContent() string {
+	if e.instantReply.Enabled && e.instantReply.Queued != "" {
+		return e.instantReply.Queued
+	}
+	return e.i18n.T(MsgMessageQueued)
+}
+
+func queuedMessageFromMessage(p Platform, msg *Message) queuedMessage {
+	return queuedMessage{
 		messageID:     msg.MessageID,
 		platform:      p,
 		replyCtx:      msg.ReplyCtx,
@@ -2235,17 +2375,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
 		channelKey:    msg.ChannelKey,
-	})
-	queueDepth := len(state.pendingMessages)
-	state.mu.Unlock()
-
-	slog.Info("message queued for busy session",
-		"session", msg.SessionKey,
-		"user", msg.UserName,
-		"queue_depth", queueDepth,
-	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
-	return true
+	}
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
@@ -2445,6 +2575,20 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionDenied))
 	} else {
+		if e.queueMode == queueModeInterrupt {
+			state.mu.Lock()
+			state.markCurrentTurnSupersededLocked()
+			state.pending = nil
+			state.mu.Unlock()
+			if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
+				Behavior: "deny",
+				Message:  "Tool permission interrupted by a newer user message.",
+			}); err != nil {
+				slog.Error("failed to cancel interrupted permission", "error", err)
+			}
+			pending.resolve()
+			return false
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionHint))
 		return true
 	}
@@ -2830,6 +2974,9 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	if len(existing.pendingMessages) > 0 {
 		newState.pendingMessages = existing.pendingMessages
 		existing.pendingMessages = nil
+	}
+	if existing.supersededGeneration > 0 {
+		newState.supersededGeneration = existing.supersededGeneration
 	}
 	existing.mu.Unlock()
 }
@@ -3433,11 +3580,14 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+	var turnID uint64
+	state.mu.Lock()
 	if msgID != "" {
-		state.mu.Lock()
 		state.currentMessageID = msgID
-		state.mu.Unlock()
 	}
+	state.turnGeneration++
+	turnID = state.turnGeneration
+	state.mu.Unlock()
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
@@ -3502,20 +3652,120 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
+	var idleTimer *time.Timer
+	var idleCh <-chan time.Time
+
+	isCurrentTurnSuperseded := func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return turnID != 0 && state.supersededGeneration == turnID
+	}
+
+	startQueuedTurn := func() bool {
+		state.mu.Lock()
+		if len(state.pendingMessages) == 0 {
+			state.mu.Unlock()
+			return false
+		}
+		queued := state.pendingMessages[0]
+		state.pendingMessages = state.pendingMessages[1:]
+		remainingQueue := len(state.pendingMessages)
+		state.turnGeneration++
+		turnID = state.turnGeneration
+		state.platform = queued.platform
+		state.replyCtx = queued.replyCtx
+		state.currentMessageID = queued.messageID
+		state.fromVoice = queued.fromVoice
+		state.mu.Unlock()
+
+		if stopTyping != nil {
+			stopTyping()
+			stopTyping = nil
+		}
+		if ti, ok := queued.platform.(TypingIndicator); ok {
+			stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
+		}
+		doneReaction = nil
+
+		drainEvents(state.agentSession.Events())
+
+		if pendingSend != nil {
+			if err := <-pendingSend; err != nil {
+				slog.Debug("async send error before queued turn", "error", err)
+			}
+		}
+
+		queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+
+		nextSend := make(chan error, 1)
+		go func() {
+			nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+		}()
+		pendingSend = nextSend
+
+		e.i18n.DetectAndSet(queued.content)
+
+		msgID = queued.messageID
+		textParts = nil
+		segmentStart = 0
+		silentHold = false
+		toolCount = 0
+		toolSteps = nil
+		lastRichCardUpdate = time.Time{}
+		lastRichCardLen = 0
+		cardMessageID = nil
+		partialText = ""
+		triggerAutoCompress = false
+		turnStart = time.Now()
+		firstEventLogged = false
+		waitStart = time.Now()
+		replyCtx = queued.replyCtx
+		queuedRenderer := func(content string) string {
+			return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
+		}
+		sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+		cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+
+		streamCard = nil
+		cardToolCalls = nil
+		cardThinkingText = ""
+		cardAnswerText.Reset()
+
+		if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+			if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
+				slog.Warn("streaming card creation failed for queued turn", "error", err)
+			} else {
+				streamCard = sc
+			}
+		}
+
+		e.sendInitialInstantReply(queued.platform, queued.replyCtx, streamCard, queued.ackSent)
+
+		session.AddHistory("user", queued.content)
+
+		if idleTimer != nil {
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(e.eventIdleTimeout)
+		}
+
+		slog.Info("processing queued message",
+			"session", sessionKey,
+			"remaining_queue", remainingQueue,
+		)
+		return true
+	}
+
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
-		replyContent := e.instantReply.Content
-		if replyContent == "" {
-			replyContent = e.i18n.T(MsgStarting)
-		}
-		e.send(state.platform, state.replyCtx, replyContent)
-	}
+	e.sendInitialInstantReply(state.platform, state.replyCtx, streamCard, false)
 
 	// Idle timeout: 0 = disabled
-	var idleTimer *time.Timer
-	var idleCh <-chan time.Time
 	if e.eventIdleTimeout > 0 {
 		idleTimer = time.NewTimer(e.eventIdleTimeout)
 		defer idleTimer.Stop()
@@ -3613,6 +3863,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// Default "legacy" keeps upstream behavior for all platforms.
 		if e.display.CardMode != "rich" {
 			hasRichCard = false
+		}
+
+		if isCurrentTurnSuperseded() && event.Type != EventResult {
+			sp.discard()
+			doneReaction = nil
+			if event.Type == EventError {
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				if startQueuedTurn() {
+					continue
+				}
+				return
+			}
+			continue
 		}
 
 		switch event.Type {
@@ -4031,6 +4296,42 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			if isCurrentTurnSuperseded() {
+				sp.discard()
+				doneReaction = nil
+				if hasRichCard && cardMessageID != nil {
+					if cleaner, ok := p.(PreviewCleaner); ok {
+						if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+							slog.Debug("rich card: failed to delete superseded card", "platform", p.Name(), "error", err)
+						}
+					}
+					cardMessageID = nil
+				}
+				if state != nil && state.agentSession != nil {
+					if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
+						if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
+							pendingName := session.GetName()
+							if pendingName != "" && pendingName != "session" && pendingName != "default" {
+								sessions.SetSessionName(currentID, pendingName)
+							}
+						}
+						sessions.Save()
+					}
+				}
+				state.mu.Lock()
+				state.eventsNeedResync = false
+				state.mu.Unlock()
+				slog.Info("superseded turn result suppressed", "session", session.ID, "msg_id", msgID)
+				if startQueuedTurn() {
+					continue
+				}
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error after superseded EventResult", "error", err)
+					}
+				}
+				return
+			}
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
@@ -4303,116 +4604,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
-			state.mu.Lock()
-			if len(state.pendingMessages) > 0 {
-				queued := state.pendingMessages[0]
-				state.pendingMessages = state.pendingMessages[1:]
-				remainingQueue := len(state.pendingMessages)
-				state.platform = queued.platform
-				state.replyCtx = queued.replyCtx
-				state.currentMessageID = queued.messageID
-				state.fromVoice = queued.fromVoice
-				state.mu.Unlock()
-
-				// Stop the previous turn's typing indicator
-				if stopTyping != nil {
-					stopTyping()
-					stopTyping = nil
-				}
-				// Start a new typing indicator for the queued message's context
-				if ti, ok := queued.platform.(TypingIndicator); ok {
-					stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
-				}
-				// Agent continues working — don't add done reaction for this turn.
-				doneReaction = nil
-
-				// Drain stale events before starting the next turn. Between
-				// EventResult and Send(), the only buffered events would be
-				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
-
-				if pendingSend != nil {
-					if err := <-pendingSend; err != nil {
-						slog.Debug("async send error before queued turn", "error", err)
-					}
-				}
-
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
-
-				nextSend := make(chan error, 1)
-				go func() {
-					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
-				}()
-				pendingSend = nextSend
-
-				// Detect language now (deferred from queue time to avoid
-				// flipping locale while the previous turn is still running).
-				e.i18n.DetectAndSet(queued.content)
-
-				// Reset per-turn state for the next turn
-				msgID = queued.messageID
-				textParts = nil
-				segmentStart = 0
-				toolCount = 0
-				turnStart = time.Now()
-				firstEventLogged = false
-				waitStart = time.Now()
-				// Reassign the local replyCtx parameter to the queued message's
-				// trigger context. state.replyCtx was updated above, but the
-				// function-scope replyCtx is what gets passed to p.Send / p.Reply
-				// further down — and platforms derive the parent message_id from
-				// it for the reply quote. Without this reassignment, msg2's
-				// reply would quote msg1's bubble.
-				replyCtx = queued.replyCtx
-				queuedRenderer := func(content string) string {
-					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
-				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
-
-				// Reset streaming card state for the next turn
-				streamCard = nil
-				cardToolCalls = nil
-				cardThinkingText = ""
-				cardAnswerText.Reset()
-
-				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
-					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
-						slog.Warn("streaming card creation failed for queued turn", "error", err)
-					} else {
-						streamCard = sc
-					}
-				}
-
-				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
-					replyContent := e.instantReply.Content
-					if replyContent == "" {
-						replyContent = e.i18n.T(MsgStarting)
-					}
-					e.send(queued.platform, queued.replyCtx, replyContent)
-				}
-
-				session.AddHistory("user", queued.content)
-
-				if idleTimer != nil {
-					if !idleTimer.Stop() {
-						select {
-						case <-idleTimer.C:
-						default:
-						}
-					}
-					idleTimer.Reset(e.eventIdleTimeout)
-				}
-
-				slog.Info("processing queued message",
-					"session", sessionKey,
-					"remaining_queue", remainingQueue,
-				)
+			if startQueuedTurn() {
 				continue
 			}
-			state.mu.Unlock()
 
 			if pendingSend != nil {
 				if err := <-pendingSend; err != nil {
@@ -4477,13 +4671,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
+	superseded := isCurrentTurnSuperseded()
+	if superseded {
+		sp.discard()
+		doneReaction = nil
+	}
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
 
-	if len(textParts) > 0 {
+	if !superseded && len(textParts) > 0 {
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()

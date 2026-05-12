@@ -139,6 +139,15 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
+# Busy-session queue behavior.
+# 忙碌会话下的新消息处理方式。
+#
+# [queue]
+# max_depth = 5       # max FIFO backlog in queue mode / queue 模式下最大待处理消息数
+# mode = "queue"     # default FIFO queue / 默认 FIFO 排队
+# # mode = "interrupt" # latest busy follow-up supersedes stale output; uses native interrupt when available, no process kill
+#                      # 最新忙时补充消息替代旧的待处理补充；支持原生中断但不强杀后端进程
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
@@ -209,9 +218,11 @@ level = "info" # debug, info, warn, error
 # 已配置流式卡片的平台（如钉钉 AI Card）会自动跳过即时回复，因为卡片本身已提供处理指示。
 
 # [instant_reply]
-# enabled = false            # Enable/disable instant reply (default: false) / 启用/禁用即时确认回复（默认 false）
-# content = "🤔 Thinking..." # Custom reply text; empty = use i18n default ("⏳ Processing...")
-#                            # 自定义回复内容；留空则使用 i18n 默认值（"⏳ 处理中..."）
+# enabled = false
+# initial = "收到啦，我开始处理。"       # First message starts a turn immediately / 首条消息立即开始处理
+# superseded = "好的，我补充一下。"     # Busy message supersedes the active turn / 忙时消息打断并替代当前任务
+# queued = "收到，排在当前任务后处理。" # Busy message is queued behind the active turn / 忙时消息排队等待处理
+# content = "🤔 Thinking..."           # Legacy alias for initial / 旧配置，等同于 initial
 
 # =============================================================================
 # Rate Limiting / 速率限制

@@ -485,6 +485,83 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesQueueMode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	content := baseConfigTOML + `
+[queue]
+max_depth = 3
+mode = "interrupt"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Queue.Mode != "interrupt" {
+		t.Fatalf("Load() queue.mode = %q, want interrupt", cfg.Queue.Mode)
+	}
+	if cfg.Queue.MaxDepth == nil || *cfg.Queue.MaxDepth != 3 {
+		t.Fatalf("Load() queue.max_depth = %v, want 3", cfg.Queue.MaxDepth)
+	}
+}
+
+func TestLoad_ParsesInstantReplyStates(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	content := baseConfigTOML + `
+[instant_reply]
+enabled = true
+initial = "收到啦，我开始处理。"
+superseded = "好的，我补充一下。"
+queued = "收到，排在当前任务后处理。"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.InstantReply.Enabled == nil || !*cfg.InstantReply.Enabled {
+		t.Fatalf("Load() instant_reply.enabled = %v, want true", cfg.InstantReply.Enabled)
+	}
+	if cfg.InstantReply.Initial != "收到啦，我开始处理。" {
+		t.Fatalf("Load() instant_reply.initial = %q", cfg.InstantReply.Initial)
+	}
+	if cfg.InstantReply.Superseded != "好的，我补充一下。" {
+		t.Fatalf("Load() instant_reply.superseded = %q", cfg.InstantReply.Superseded)
+	}
+	if cfg.InstantReply.Queued != "收到，排在当前任务后处理。" {
+		t.Fatalf("Load() instant_reply.queued = %q", cfg.InstantReply.Queued)
+	}
+}
+
+func TestValidate_RejectsUnknownQueueMode(t *testing.T) {
+	cfg := Config{
+		Queue: QueueConfig{Mode: "steer"},
+		Projects: []ProjectConfig{
+			validProject("demo"),
+		},
+	}
+
+	err := cfg.validate()
+	if err == nil {
+		t.Fatal("validate() = nil, want queue.mode error")
+	}
+	if !strings.Contains(err.Error(), "queue.mode") {
+		t.Fatalf("validate() error = %q, want queue.mode", err.Error())
+	}
+}
+
 func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
 
 	root := t.TempDir()

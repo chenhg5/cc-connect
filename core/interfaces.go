@@ -155,6 +155,12 @@ type SystemPromptSupporter interface {
 	HasSystemPromptSupport() bool
 }
 
+// SessionInterrupter is an optional interface for agent sessions that can
+// interrupt the currently running turn without closing the whole session.
+type SessionInterrupter interface {
+	InterruptSession(ctx context.Context) error
+}
+
 // TypingIndicator is an optional interface for platforms that can show a
 // "processing" indicator (typing bubble, emoji reaction, etc.) while the
 // agent is working. StartTyping is called when processing begins and returns
