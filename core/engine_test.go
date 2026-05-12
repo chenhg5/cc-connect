@@ -8272,6 +8272,11 @@ func TestExtractChannelID(t *testing.T) {
 		{"a:bb:c:d", "bb"},
 		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
 		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
+		// 3-segment shared-session keys with single-char type tag — used by
+		// dingtalk/qq/qqbot when share_session_in_channel is enabled.
+		{"dingtalk:g:cidZZZ", "cidZZZ"},
+		{"qq:g:12345", "12345"},
+		{"qqbot:g:openid_abc", "openid_abc"},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -10782,6 +10787,8 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
 		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
+		{"three-segment with type tag (shared session)", "dingtalk:g:cidZZZ", "dingtalk", "cidZZZ", "dingtalk:cidZZZ", ""},
+		{"three-segment qq group", "qq:g:12345", "qq", "12345", "qq:12345", ""},
 	}
 
 	for _, tt := range tests {
