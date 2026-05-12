@@ -864,7 +864,10 @@ func (p *Platform) sendRobotMediaMessage(ctx context.Context, rc replyContext, o
 		return fmt.Errorf("dingtalk: get access token: %w", err)
 	}
 
-	msgParamBytes, _ := json.Marshal(msgParam)
+	msgParamBytes, err := json.Marshal(msgParam)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal %s msgParam: %w", kind, err)
+	}
 	apiURL := dingTalkOTOMessageURL
 	requestBody := map[string]any{
 		"robotCode": p.currentRobotCode(),
@@ -1326,8 +1329,11 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 
 	if rc.isGroup && rc.conversationId != "" {
 		// Group message via /v1.0/robot/groupMessages/send
-		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
-		msgParam, _ := json.Marshal(map[string]string{"text": content})
+		apiURL = dingTalkGroupMessageURL
+		msgParam, err := json.Marshal(map[string]string{"text": content})
+		if err != nil {
+			return fmt.Errorf("dingtalk: marshal proactive group msgParam: %w", err)
+		}
 		requestBody = map[string]any{
 			"robotCode":          p.currentRobotCode(),
 			"openConversationId": rc.conversationId,
@@ -1336,8 +1342,11 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 		}
 	} else if rc.senderStaffId != "" {
 		// Direct message via /v1.0/robot/oToMessages/batchSend
-		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
-		msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
+		apiURL = dingTalkOTOMessageURL
+		msgParam, err := json.Marshal(map[string]string{"title": "reply", "text": content})
+		if err != nil {
+			return fmt.Errorf("dingtalk: marshal proactive direct msgParam: %w", err)
+		}
 		requestBody = map[string]any{
 			"robotCode": p.currentRobotCode(),
 			"userIds":   []string{rc.senderStaffId},
