@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,6 +91,113 @@ func TestSplitByBytes_ReassemblesLargeContent(t *testing.T) {
 	}
 	if reassembled != s {
 		t.Fatalf("reassembled content does not match original (len %d vs %d)", len(reassembled), len(s))
+	}
+}
+
+func TestSplitByBytes_UsesNearestParagraphBoundaryAfterSeventyPercent(t *testing.T) {
+	early := strings.Repeat("甲", 15) + "\n\n"
+	near := strings.Repeat("乙", 10) + "\n\n"
+	tail := strings.Repeat("丙", 20)
+	parts := splitByBytes(early+near+tail, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != early+near {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_IgnoresParagraphBoundaryBeforeSeventyPercent(t *testing.T) {
+	early := strings.Repeat("甲", 12) + "\n\n"
+	tail := strings.Repeat("乙", 24)
+	parts := splitByBytes(early+tail, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == early {
+		t.Fatalf("should not split at an early paragraph boundary: %q", parts[0])
+	}
+	if strings.Join(parts, "") != early+tail {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_UsesLineBoundaryAfterEightyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 27) + "\n"
+	second := strings.Repeat("乙", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_UsesSentenceBoundaryAfterEightyFivePercent(t *testing.T) {
+	first := strings.Repeat("前", 28) + "。"
+	second := strings.Repeat("后", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_DoesNotSplitAtEnumerationComma(t *testing.T) {
+	first := strings.Repeat("甲", 15) + "、"
+	second := strings.Repeat("乙", 10)
+	parts := splitByBytes(first+second, 70)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == first {
+		t.Fatalf("should not split at enumeration comma: %q", parts[0])
+	}
+	if strings.Join(parts, "") != first+second {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_UsesSoftBoundaryOnlyAfterNinetyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 30) + "，"
+	second := strings.Repeat("乙", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_IgnoresSoftBoundaryBeforeNinetyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 20) + "，"
+	second := strings.Repeat("乙", 20)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == first {
+		t.Fatalf("should not split at an early soft boundary: %q", parts[0])
+	}
+	if strings.Join(parts, "") != first+second {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_FallsBackToHardCut(t *testing.T) {
+	input := strings.Repeat("甲", 10)
+	parts := splitByBytes(input, 10)
+	for _, part := range parts {
+		if len(part) > 10 {
+			t.Fatalf("chunk exceeds limit: %d > 10", len(part))
+		}
+	}
+	if strings.Join(parts, "") != input {
+		t.Fatalf("reassembled content does not match original: %v", parts)
 	}
 }
 
