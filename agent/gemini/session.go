@@ -41,6 +41,8 @@ type geminiSession struct {
 	pendingMsgs []string // buffered assistant messages awaiting classification
 }
 
+const geminiFlattenedThoughtMarker = "[Thought: true]"
+
 func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*geminiSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
@@ -326,20 +328,9 @@ func (gs *geminiSession) handleMessage(raw map[string]any) {
 		return
 	}
 
-	// Delta messages are incremental streaming fragments — emit immediately
-	// as EventText so engine's stream preview can update in real time.
-	// Non-delta messages (complete text) are buffered for later classification
-	// (thinking vs final text) based on what event follows.
-	delta, _ := raw["delta"].(bool)
-	if delta {
-		evt := core.Event{Type: core.EventText, Content: text}
-		select {
-		case gs.events <- evt:
-		case <-gs.ctx.Done():
-		}
-		return
-	}
-
+	// Gemini CLI can flatten thought parts into ordinary text and append
+	// "[Thought: true]" after each thought. Buffer text until a result/tool
+	// boundary so those markers cannot leak through streaming EventText.
 	gs.pendingMsgs = append(gs.pendingMsgs, text)
 }
 
@@ -453,6 +444,7 @@ func (gs *geminiSession) flushPendingAsThinking() {
 	}
 	text := strings.Join(gs.pendingMsgs, "")
 	gs.pendingMsgs = gs.pendingMsgs[:0]
+	text = stripGeminiFlattenedThoughts(text)
 	if text != "" {
 		evt := core.Event{Type: core.EventThinking, Content: text}
 		select {
@@ -468,6 +460,7 @@ func (gs *geminiSession) flushPendingAsText() {
 	}
 	text := strings.Join(gs.pendingMsgs, "")
 	gs.pendingMsgs = gs.pendingMsgs[:0]
+	text = stripGeminiFlattenedThoughts(text)
 	if text != "" {
 		evt := core.Event{Type: core.EventText, Content: text}
 		select {
@@ -475,6 +468,14 @@ func (gs *geminiSession) flushPendingAsText() {
 		case <-gs.ctx.Done():
 		}
 	}
+}
+
+func stripGeminiFlattenedThoughts(text string) string {
+	idx := strings.LastIndex(text, geminiFlattenedThoughtMarker)
+	if idx < 0 {
+		return text
+	}
+	return strings.TrimLeft(text[idx+len(geminiFlattenedThoughtMarker):], " \t\r\n")
 }
 
 func geminiMessageText(raw map[string]any) (text, thinking string) {
