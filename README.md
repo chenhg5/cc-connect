@@ -49,6 +49,8 @@ git clone -b local/community-preview-fixes-20260512 https://github.com/yanyan111
 
 Branch: [`local/community-preview-fixes-20260512`](https://github.com/yanyan1115/cc-connect/tree/local/community-preview-fixes-20260512)
 
+Compatibility branch: the older preview branch [`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511) is also fast-forwarded to the same fixes, so existing shared links keep working.
+
 What changed in this branch:
 
 Telegram media fixes:
