@@ -1716,3 +1716,41 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # token = "your-discord-bot-token"
+
+
+# =============================================================================
+# Project 9: Using yms-rca agent / 项目 9：使用 yms-rca agent
+# =============================================================================
+# Requires: yms-rca CLI installed and reachable as `yms-rca` (or set `cmd`).
+# 需要安装 yms-rca CLI，并保证 `yms-rca` 在 PATH（也可通过 cmd 指定绝对路径）。
+# Adapter runs `yms-rca rpc --no-color` and bridges Pi RPC JSONL events to
+# cc-connect. cc-connect 不会传 `--no-confirm`：所有 yolo / dontAsk 模式都通过
+# extension_ui_response 自动应答，保留 cc-connect 的审计日志。
+
+# [[projects]]
+# name = "my-yms-rca"
+#
+# [projects.agent]
+# type = "yms-rca"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/yms-rca"        # 子进程工作目录（也是附件落盘根目录）
+# cmd = "yms-rca"                      # CLI binary name (default: "yms-rca")
+# # provider 与 model 必须同时设置；只设 provider 会启动失败
+# # provider = "yonyou"
+# # model = "yonyou/MiniMax-M2.7-highspeed"
+# # thinking = "medium"                # off | minimal | low | medium | high | xhigh
+# # mode = "default"                   # default | dontAsk | bypassPermissions | yolo
+# # session_dir = ""                   # 自定义 session 文件目录
+# # offline = false                    # 启动时禁用网络
+# # confirm_timeout_secs = 300         # 高危确认超时（秒），到期自动 deny
+#
+# Note: cc-connect never passes `--no-confirm`. yolo / bypassPermissions /
+# dontAsk are realised by auto-answering extension_ui_response inside the
+# adapter so the decision is recorded in cc-connect logs.
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"

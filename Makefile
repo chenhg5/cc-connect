@@ -33,7 +33,7 @@ PLATFORMS := \
 #   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder
+ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder yms_rca
 ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max youzone
 ALL_EXTRAS    := web
 
@@ -42,20 +42,26 @@ COMMA := ,
 # Compute exclusion tags from AGENTS / PLATFORMS_INCLUDE / EXCLUDE variables
 _EXCLUDE_TAGS :=
 
+# Normalize agent / platform names so dashes in agent names (e.g. yms-rca)
+# match the underscore form used in build-tag tokens (no_yms_rca). Without
+# this, AGENTS=yms-rca silently emits no_yms_rca via filter-out and EXCLUDES
+# the adapter — the opposite of what the user asked for.
+_normalize = $(subst -,_,$(subst $(COMMA), ,$(1)))
+
 ifdef AGENTS
-  _WANTED_AGENTS := $(subst $(COMMA), ,$(AGENTS))
+  _WANTED_AGENTS := $(call _normalize,$(AGENTS))
   _EXCLUDE_AGENTS := $(filter-out $(_WANTED_AGENTS),$(ALL_AGENTS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_AGENTS))
 endif
 
 ifdef PLATFORMS_INCLUDE
-  _WANTED_PLATFORMS := $(subst $(COMMA), ,$(PLATFORMS_INCLUDE))
+  _WANTED_PLATFORMS := $(call _normalize,$(PLATFORMS_INCLUDE))
   _EXCLUDE_PLATFORMS := $(filter-out $(_WANTED_PLATFORMS),$(ALL_PLATFORMS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_PLATFORMS))
 endif
 
 ifdef EXCLUDE
-  _EXCLUDE_TAGS += $(addprefix no_,$(subst $(COMMA), ,$(EXCLUDE)))
+  _EXCLUDE_TAGS += $(addprefix no_,$(call _normalize,$(EXCLUDE)))
 endif
 
 ifdef NO_WEB
