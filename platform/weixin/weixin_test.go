@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBodyFromItemList_Text(t *testing.T) {
@@ -56,6 +58,76 @@ func TestSplitUTF8Empty(t *testing.T) {
 	parts := splitUTF8("", maxWeixinChunk)
 	if len(parts) != 1 || parts[0] != "" {
 		t.Fatalf("parts=%#v", parts)
+	}
+}
+
+func TestSplitUTF8UsesNearestParagraphBoundaryAfterSeventyPercent(t *testing.T) {
+	s := strings.Repeat("a", 80) + "\n\n" + strings.Repeat("b", 10) + "\n\n" + strings.Repeat("c", 60)
+
+	parts := splitUTF8(s, 100)
+
+	if parts[0] != strings.Repeat("a", 80)+"\n\n"+strings.Repeat("b", 10)+"\n\n" {
+		t.Fatalf("parts[0]=%q", parts[0])
+	}
+}
+
+func TestSplitUTF8IgnoresParagraphBoundaryBeforeSeventyPercent(t *testing.T) {
+	s := strings.Repeat("a", 40) + "\n\n" + strings.Repeat("b", 100)
+
+	parts := splitUTF8(s, 100)
+
+	if utf8.RuneCountInString(parts[0]) != 100 {
+		t.Fatalf("expected hard split at 100 runes, got %d in %q", utf8.RuneCountInString(parts[0]), parts[0])
+	}
+}
+
+func TestSplitUTF8UsesLineBoundaryAfterEightyPercent(t *testing.T) {
+	s := strings.Repeat("a", 82) + "\n" + strings.Repeat("b", 80)
+
+	parts := splitUTF8(s, 100)
+
+	if parts[0] != strings.Repeat("a", 82)+"\n" {
+		t.Fatalf("parts[0]=%q", parts[0])
+	}
+}
+
+func TestSplitUTF8UsesSentenceBoundaryAfterEightyFivePercent(t *testing.T) {
+	s := strings.Repeat("a", 86) + "。" + strings.Repeat("b", 80)
+
+	parts := splitUTF8(s, 100)
+
+	if parts[0] != strings.Repeat("a", 86)+"。" {
+		t.Fatalf("parts[0]=%q", parts[0])
+	}
+}
+
+func TestSplitUTF8DoesNotSplitAtEnumerationComma(t *testing.T) {
+	s := strings.Repeat("a", 92) + "、" + strings.Repeat("b", 80)
+
+	parts := splitUTF8(s, 100)
+
+	if utf8.RuneCountInString(parts[0]) != 100 {
+		t.Fatalf("expected hard split at 100 runes, got %d in %q", utf8.RuneCountInString(parts[0]), parts[0])
+	}
+}
+
+func TestSplitUTF8UsesSoftBoundaryOnlyAfterNinetyPercent(t *testing.T) {
+	s := strings.Repeat("a", 91) + "，" + strings.Repeat("b", 80)
+
+	parts := splitUTF8(s, 100)
+
+	if parts[0] != strings.Repeat("a", 91)+"，" {
+		t.Fatalf("parts[0]=%q", parts[0])
+	}
+}
+
+func TestSplitUTF8IgnoresSoftBoundaryBeforeNinetyPercent(t *testing.T) {
+	s := strings.Repeat("a", 70) + "，" + strings.Repeat("b", 100)
+
+	parts := splitUTF8(s, 100)
+
+	if utf8.RuneCountInString(parts[0]) != 100 {
+		t.Fatalf("expected hard split at 100 runes, got %d in %q", utf8.RuneCountInString(parts[0]), parts[0])
 	}
 }
 
