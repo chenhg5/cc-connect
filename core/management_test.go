@@ -1520,9 +1520,10 @@ func TestMgmt_CronPatch(t *testing.T) {
 
 	// Add a job
 	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
-		"project":   "test-project",
-		"cron_expr": "0 9 * * *",
-		"prompt":    "hello",
+		"project":     "test-project",
+		"session_key": "test:chan:user",
+		"cron_expr":   "0 9 * * *",
+		"prompt":      "hello",
 	})
 	if !r.OK {
 		t.Fatalf("cron add failed: %s", r.Error)

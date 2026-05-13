@@ -443,6 +443,42 @@ func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {
 	}
 }
 
+// TestCronScheduler_AddJob_EmptySessionKey verifies that AddJob refuses to
+// persist a job without a session_key. Without this guard, ExecuteCronJob
+// later fails at fire-time with `platform "" not found for session ""`,
+// leaving an unrunnable job lingering in the store.
+func TestCronScheduler_AddJob_EmptySessionKey(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		sessionKey string
+	}{
+		{"empty", ""},
+		{"whitespace", "   "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs := NewCronScheduler(store)
+			err = cs.AddJob(&CronJob{
+				ID: "j1", Project: "p", SessionKey: tt.sessionKey,
+				CronExpr: "0 6 * * *", Prompt: "hi",
+			})
+			if err == nil {
+				t.Fatalf("expected error for empty session_key, got nil")
+			}
+			if !strings.Contains(err.Error(), "session_key") {
+				t.Errorf("error %q should mention session_key", err.Error())
+			}
+			if jobs := store.List(); len(jobs) != 0 {
+				t.Errorf("store should be empty after rejected AddJob, got %d job(s)", len(jobs))
+			}
+		})
+	}
+}
+
 func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)

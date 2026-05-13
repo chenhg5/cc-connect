@@ -81,6 +81,15 @@ func NormalizeCronSessionMode(s string) string {
 }
 
 func validateCronJob(j *CronJob) error {
+	// SessionKey anchors the cron execution to a platform (ExecuteCronJob
+	// derives platformName from the prefix before ":"). Without it the job
+	// is persisted but fails at fire-time with the unhelpful
+	// `platform "" not found for session ""`. Reject it up front so the
+	// caller (management API, /cron/add, /cron edit) sees an immediate
+	// 400 instead of a job that silently never runs.
+	if strings.TrimSpace(j.SessionKey) == "" {
+		return fmt.Errorf("session_key is required")
+	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
