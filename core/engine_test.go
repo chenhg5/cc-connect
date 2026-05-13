@@ -3060,6 +3060,89 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+		{ID: "agent-other", Summary: "Other title", MessageCount: 2, ModifiedAt: time.Now()},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	session.AddHistory("user", "latest user message")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Native generated title") {
+		t.Fatalf("/current = %q, want native summary display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Name: latest user message") {
+		t.Fatalf("/current = %q, should not use local Session.Name when native summary exists", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("list sent messages = %d, want 1", len(p.sent))
+	}
+	if got := strings.Count(p.sent[0], "msgs"); got != len(nativeSessions) {
+		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
+	}
+}
+
+func TestCmdCurrent_CustomNameOverridesNativeSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+	}}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	e.sessions.SetSessionName("agent-current", "Pinned custom name")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Pinned custom name") {
+		t.Fatalf("/current = %q, want custom session name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Native generated title") {
+		t.Fatalf("/current = %q, custom name should override native summary", p.sent[0])
+	}
+}
+
+func TestRenderCurrentCard_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	e := NewEngine("test", &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native card title", MessageCount: 4, ModifiedAt: time.Now()},
+	}}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	text := p.repliedCards[0].RenderText()
+	if !strings.Contains(text, "Name: Native card title") {
+		t.Fatalf("current card = %q, want native summary display name", text)
+	}
+	if strings.Contains(text, "Name: latest user message") {
+		t.Fatalf("current card = %q, should not use local Session.Name when native summary exists", text)
+	}
+}
+
 func TestCmdDelete_BatchCommaList(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{

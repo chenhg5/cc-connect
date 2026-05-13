@@ -6430,21 +6430,50 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		_, sessions, _, err := e.commandContext(p, msg)
+		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
 		s := sessions.GetOrCreateActive(msg.SessionKey)
 		agentID := s.GetAgentSessionID()
+		displayName := e.currentSessionDisplayName(agent, sessions, s)
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History)))
 		return
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
+}
+
+func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, s *Session) string {
+	agentID := s.GetAgentSessionID()
+	if agentID != "" {
+		if name := sessions.GetSessionName(agentID); name != "" {
+			return name
+		}
+		if agent != nil {
+			agentSessions, err := agent.ListSessions(e.ctx)
+			if err == nil {
+				for _, info := range e.applySessionFilter(agentSessions, sessions) {
+					if info.ID == agentID {
+						if summary := compactSessionDisplayName(info.Summary); summary != "" {
+							return summary
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	return s.GetName()
+}
+
+func compactSessionDisplayName(name string) string {
+	name = strings.ReplaceAll(name, "\n", " ")
+	return strings.Join(strings.Fields(name), " ")
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
@@ -10440,13 +10469,14 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	_, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
+	displayName := e.currentSessionDisplayName(agent, sessions, s)
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History))
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).
