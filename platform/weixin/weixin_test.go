@@ -24,6 +24,42 @@ func TestBodyFromItemList_VoiceText(t *testing.T) {
 	}
 }
 
+// TestBodyFromItemList_EmptyTextFallsThroughToVoice covers the case where an
+// empty text item precedes a voice item with an ASR transcription. The legacy
+// behavior returned "" on the empty text and never reached the voice, which
+// caused dispatchInbound to drop the whole message (collectInboundMedia also
+// skips voice items whose Text is non-empty, so no audio attachment is
+// produced either).
+func TestBodyFromItemList_EmptyTextFallsThroughToVoice(t *testing.T) {
+	got := bodyFromItemList([]messageItem{
+		{Type: messageItemText, TextItem: &textItem{Text: "   "}},
+		{Type: messageItemVoice, VoiceItem: &voiceItem{Text: "voice text"}},
+	})
+	if got != "voice text" {
+		t.Fatalf("got %q, want voice transcription to win when prior text item is empty", got)
+	}
+}
+
+// TestBodyFromItemList_EmptyTextWithEmptyRef ensures the same fall-through
+// holds when the empty text item carries a ref message that also has nothing
+// to contribute. Previously the `if len(parts) == 0 { return text }` branch
+// returned "" and shadowed any later items.
+func TestBodyFromItemList_EmptyTextWithEmptyRefFallsThrough(t *testing.T) {
+	got := bodyFromItemList([]messageItem{
+		{
+			Type:     messageItemText,
+			TextItem: &textItem{Text: ""},
+			RefMsg: &refMessage{
+				MessageItem: &messageItem{Type: messageItemText, TextItem: &textItem{Text: ""}},
+			},
+		},
+		{Type: messageItemVoice, VoiceItem: &voiceItem{Text: "voice survives"}},
+	})
+	if got != "voice survives" {
+		t.Fatalf("got %q, want voice transcription to win", got)
+	}
+}
+
 func TestBodyFromItemList_Quote(t *testing.T) {
 	ref := &refMessage{
 		Title: "t",
