@@ -615,9 +615,17 @@ func (p *Platform) getAccessToken() (string, error) {
 		return "", fmt.Errorf("empty accessToken in response")
 	}
 
-	// Cache token with 5 minutes buffer before expiry
+	// Cache token with 5 minutes buffer before expiry.
+	// When the server omits expireIn (or sends 0/negative), fall back to the
+	// documented DingTalk default (7200s = 2h) — without this, tokenExpiry
+	// would land at time.Now() and every subsequent getAccessToken() would
+	// re-fetch a fresh token, hammering the access-token API.
 	p.accessToken = tokenResp.AccessToken
 	expiry := tokenResp.ExpireIn
+	if expiry <= 0 {
+		slog.Warn("dingtalk: missing/invalid expireIn in token response, defaulting to 7200s", "got", tokenResp.ExpireIn)
+		expiry = 7200
+	}
 	if expiry > 300 {
 		expiry -= 300 // 5 minute buffer
 	}

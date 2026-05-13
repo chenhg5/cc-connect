@@ -2,7 +2,9 @@ package dingtalk
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -436,5 +438,90 @@ func TestExtractRichText(t *testing.T) {
 				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Token expiry fallback when server returns missing/invalid expireIn
+// ──────────────────────────────────────────────────────────────
+
+// fakeAccessTokenRT serves a single canned /oauth2/accessToken response
+// regardless of the request URL — enough to exercise getAccessToken's
+// caching arithmetic without hitting the real DingTalk API.
+type fakeAccessTokenRT struct {
+	body string
+}
+
+func (f *fakeAccessTokenRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(f.body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestGetAccessToken_ZeroExpireIn_FallsBackToDefault(t *testing.T) {
+	p := &Platform{
+		clientID:     "test_client",
+		clientSecret: "test_secret",
+		httpClient: &http.Client{
+			Transport: &fakeAccessTokenRT{body: `{"accessToken":"tok-zero","expireIn":0}`},
+		},
+	}
+
+	before := time.Now()
+	tok, err := p.getAccessToken()
+	if err != nil {
+		t.Fatalf("getAccessToken() error = %v", err)
+	}
+	if tok != "tok-zero" {
+		t.Fatalf("token = %q, want %q", tok, "tok-zero")
+	}
+
+	// Without the fallback, tokenExpiry would land at "before" (now+0s), making
+	// time.Now().Before(tokenExpiry) immediately false — every subsequent call
+	// would re-fetch a token. Assert the cache window is meaningful (>= 1h).
+	gotWindow := p.tokenExpiry.Sub(before)
+	if gotWindow < time.Hour {
+		t.Errorf("tokenExpiry window = %v from response, want >= 1h (zero-expireIn should fall back, not cache for 0s)", gotWindow)
+	}
+}
+
+func TestGetAccessToken_NegativeExpireIn_FallsBackToDefault(t *testing.T) {
+	p := &Platform{
+		clientID:     "test_client",
+		clientSecret: "test_secret",
+		httpClient: &http.Client{
+			Transport: &fakeAccessTokenRT{body: `{"accessToken":"tok-neg","expireIn":-1}`},
+		},
+	}
+
+	before := time.Now()
+	if _, err := p.getAccessToken(); err != nil {
+		t.Fatalf("getAccessToken() error = %v", err)
+	}
+	if p.tokenExpiry.Sub(before) < time.Hour {
+		t.Errorf("tokenExpiry window for expireIn=-1 = %v, want >= 1h", p.tokenExpiry.Sub(before))
+	}
+}
+
+func TestGetAccessToken_NormalExpireIn_AppliesBuffer(t *testing.T) {
+	p := &Platform{
+		clientID:     "test_client",
+		clientSecret: "test_secret",
+		httpClient: &http.Client{
+			Transport: &fakeAccessTokenRT{body: `{"accessToken":"tok-7200","expireIn":7200}`},
+		},
+	}
+
+	before := time.Now()
+	if _, err := p.getAccessToken(); err != nil {
+		t.Fatalf("getAccessToken() error = %v", err)
+	}
+	// 7200 - 300 buffer = 6900s = 115min. Allow tolerance for elapsed time.
+	gotWindow := p.tokenExpiry.Sub(before)
+	if gotWindow < 100*time.Minute || gotWindow > 116*time.Minute {
+		t.Errorf("tokenExpiry window for expireIn=7200 = %v, want ~6900s (100-116min)", gotWindow)
 	}
 }
