@@ -42,6 +42,7 @@ type Platform struct {
 	agentID               int64    // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
+	cardTemplateID        string // AI Card template ID; empty = fallback to markdown
 	streamClient          *dingtalkClient.StreamClient
 	streamCtxCancel       context.CancelFunc
 	handler               core.MessageHandler
@@ -50,6 +51,49 @@ type Platform struct {
 	tokenMu               sync.Mutex
 	accessToken           string
 	tokenExpiry           time.Time
+
+	// AI Card state
+	streamingCardsMu sync.Mutex                        // protects streamingCards
+	streamingCards   map[string]map[string]string      // chat_id -> { out_track_id -> last_content }
+	doneEmojiFired   map[string]bool                   // chat_id -> fired (prevents double-fire)
+	lastMsgContext   map[string]*msgContext            // chat_id -> last inbound message context
+
+	// activeStreamingCard tracks the outTrackID of the current streaming card
+	// per conversation, so Reply/Send can update the same card that was
+	// created by compactProgressWriter or SendPreviewStart instead of
+	// spawning new cards.
+	activeCardMu     sync.Mutex
+	activeCardTrackID map[string]string // chat_id -> outTrackID
+
+	// streamPusherMu protects streamPushers map.
+	streamPushMu   sync.Mutex
+	streamPushers  map[string]*streamPusher // outTrackID -> pusher
+}
+
+// streamPusher gradually pushes content to a DingTalk AI Card in a
+// typewriter-style fashion. It runs a background goroutine that pushes
+// content in chunks at a fixed interval, and stops when stop() is called
+// or when the target content hasn't changed for a while.
+type streamPusher struct {
+	mu         sync.Mutex
+	platform   *Platform
+	outTrackID string
+	token      string
+	ctx        context.Context
+	cancel     context.CancelFunc
+
+	targetContent string // latest content to push
+	pushedUpTo    int    // how many runes have been pushed so far
+	lastPushAt    time.Time
+}
+
+// msgContext holds the latest inbound message info for a chat, used for AI Card
+// creation and emoji reactions.
+type msgContext struct {
+	conversationId  string
+	senderStaffId   string
+	messageId       string // inbound message ID
+	conversationType string // "1"=DM, "2"=group
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -59,6 +103,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("dingtalk", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	cardTemplateID, _ := opts["card_template_id"].(string)
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("dingtalk: client_id and client_secret are required")
 	}
@@ -89,7 +134,13 @@ func New(opts map[string]any) (core.Platform, error) {
 		agentID:               agentID,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		cardTemplateID:        cardTemplateID,
 		httpClient:            &http.Client{Timeout: 30 * time.Second},
+		streamingCards:        make(map[string]map[string]string),
+		doneEmojiFired:        make(map[string]bool),
+		lastMsgContext:        make(map[string]*msgContext),
+		activeCardTrackID:     make(map[string]string),
+		streamPushers:         make(map[string]*streamPusher),
 	}, nil
 }
 
@@ -167,6 +218,13 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 	} else {
 		sessionKey = fmt.Sprintf("dingtalk:%s:%s", data.ConversationId, data.SenderStaffId)
 	}
+
+	// Store message context for AI Card creation and emoji reactions
+	p.storeMsgContext(sessionKey, data)
+
+	// Reset done-emoji tracker for this chat so the new message
+	// gets its own Thinking->Done cycle.
+	p.resetDoneEmojiFired(sessionKey)
 
 	// Handle audio messages
 	if data.Msgtype == "audio" {
@@ -550,13 +608,70 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	content = preprocessDingTalkMarkdown(content)
 
-	title := content
-	if len(title) > 10 {
-		title = title[:10]
+	// Final reply strategy: 2 cards per conversation turn.
+	//   1) Process card: finalize the streaming "process" card that
+	//      accumulated all intermediate content (thinking, tools, etc.)
+	//      via the typewriter pusher. This closes it permanently.
+	//   2) Result card: create a new card with the final response
+	//      content (finalize=true), delivered as a single complete
+	//      message.
+	if p.cardTemplateID != "" {
+		if outTrackID := p.getActiveCard(rc.conversationId); outTrackID != "" {
+			// Stop the process card's stream pusher.
+			p.stopStreamPusher(outTrackID)
+			p.clearActiveCard(rc.conversationId)
+
+			// Finalize the process card with its last-pushed content
+			// so it becomes a permanent, non-editable message.
+			p.streamingCardsMu.Lock()
+			lastProcessContent := p.streamingCards[rc.conversationId][outTrackID]
+			delete(p.streamingCards, rc.conversationId)
+			p.streamingCardsMu.Unlock()
+
+			token, err := p.getAccessToken()
+			if err == nil && lastProcessContent != "" {
+				_ = p.streamCardContent(ctx, outTrackID, token, lastProcessContent, true)
+			}
+
+			// Create the result card with the final reply content.
+			mc := p.msgContextFor(rc.conversationId)
+			if mc == nil {
+				mc = &msgContext{
+					conversationId:   rc.conversationId,
+					senderStaffId:    rc.senderStaffId,
+					messageId:        rc.messageId,
+					conversationType: "1",
+				}
+			}
+			_, err = p.createAndStreamCard(ctx, mc, content, true)
+			if err == nil {
+				p.fireDoneReaction(rc.conversationId)
+				return nil
+			}
+			slog.Warn("dingtalk: result card failed, falling back to webhook", "error", err)
+		} else {
+			// No process card — create a standalone result card.
+			mc := p.msgContextFor(rc.conversationId)
+			if mc == nil {
+				mc = &msgContext{
+					conversationId:   rc.conversationId,
+					senderStaffId:    rc.senderStaffId,
+					messageId:        rc.messageId,
+					conversationType: "1",
+				}
+			}
+			_, err := p.createAndStreamCard(ctx, mc, content, true)
+			if err == nil {
+				p.fireDoneReaction(rc.conversationId)
+				return nil
+			}
+			slog.Warn("dingtalk: AI Card failed, falling back to webhook", "error", err)
+		}
 	}
+
 	payload := map[string]any{
 		"msgtype":  "markdown",
-		"markdown": map[string]string{"title": title, "text": content},
+		"markdown": map[string]string{"title": "reply", "text": content},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -581,7 +696,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
-// Send sends a new message (same as Reply for DingTalk)
+// Send sends a new message (same as Reply for DingTalk).
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
 }
