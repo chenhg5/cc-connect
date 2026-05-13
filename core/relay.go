@@ -290,12 +290,21 @@ func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, cont
 func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
 	// Format: "platform:chatID:userID"
 	// Relay session format: "relay:sourceProject:chatID"
-	parts := strings.SplitN(sessionKey, ":", 3)
+	// Some platforms (dingtalk, qq, qqbot) encode a single-char conversation
+	// type tag as an extra segment, e.g. "dingtalk:g:cidXXX", "qq:g:groupID",
+	// "qqbot:g:openid". For those, the real chatID is parts[2], not parts[1].
+	// Without this handling, every shared-session key on those platforms maps
+	// to chatID="g", so /bind bindings collide across different groups and
+	// relay routing leaks across chats.
+	parts := strings.SplitN(sessionKey, ":", 4)
 	if len(parts) < 2 {
 		return "", "", fmt.Errorf("invalid session key format: %q", sessionKey)
 	}
-	if parts[0] == "relay" && len(parts) == 3 {
+	if parts[0] == "relay" && len(parts) >= 3 {
 		// For relay sessions, chatID is the third part: "relay:sourceProject:chatID"
+		return parts[0], parts[2], nil
+	}
+	if len(parts) >= 3 && len(parts[1]) == 1 {
 		return parts[0], parts[2], nil
 	}
 	return parts[0], parts[1], nil
