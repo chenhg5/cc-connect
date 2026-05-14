@@ -70,6 +70,7 @@ type Platform struct {
 
 	mu           sync.RWMutex
 	handler      core.MessageHandler
+	ctx          context.Context
 	cancel       context.CancelFunc
 	stopping     bool
 	client       *http.Client // general API calls — httpTimeout
@@ -160,6 +161,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
 	p.cancel = cancel
 
 	// Verify token at startup
@@ -266,6 +268,20 @@ func (p *Platform) resubscribeLoop(ctx context.Context) {
 	}
 }
 
+// webhookCtx returns the parent context for an asynchronous webhook handler
+// goroutine. While the platform is running, it returns the same context that
+// Stop() cancels via p.cancel so in-flight handler work short-circuits on
+// shutdown. Before Start (or after a no-op New), it falls back to Background
+// so unit tests calling webhookHandler directly still get a usable ctx.
+func (p *Platform) webhookCtx() context.Context {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.ctx != nil {
+		return p.ctx
+	}
+	return context.Background()
+}
+
 // webhookHandler accepts a POST from MAX with a single update and routes it
 // through the same handleUpdate path used by long-polling.
 func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -303,17 +319,7 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	// MAX expects a fast 200 — process the update asynchronously so we
 	// never let agent latency back-pressure the delivery side.
 	go func() {
-		p.mu.RLock()
-		ctx := context.Background()
-		if p.cancel != nil {
-			// Use the platform's own cancellation context so a Stop() also
-			// short-circuits in-flight handler work.
-			ctx2, cancel := context.WithCancel(ctx)
-			_ = cancel
-			ctx = ctx2
-		}
-		p.mu.RUnlock()
-		p.handleUpdate(ctx, &upd)
+		p.handleUpdate(p.webhookCtx(), &upd)
 	}()
 	w.WriteHeader(http.StatusOK)
 }

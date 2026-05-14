@@ -847,6 +847,58 @@ func TestWebhookHandlerSecretMissing(t *testing.T) {
 	}
 }
 
+// TestWebhookCtx_FallsBackToBackgroundBeforeStart pins the contract that
+// webhookHandler can be exercised in unit tests before Start has run.
+func TestWebhookCtx_FallsBackToBackgroundBeforeStart(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t"})
+	pl := p.(*Platform)
+	ctx := pl.webhookCtx()
+	if ctx == nil {
+		t.Fatal("webhookCtx returned nil")
+	}
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("expected no deadline on Background fallback")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx.Err = %v, want nil", err)
+	}
+}
+
+// TestWebhookCtx_CanceledByStop pins the bug where the async webhook handler
+// goroutine derived a brand-new WithCancel from context.Background() and
+// discarded the cancel func, leaving in-flight handlers running after Stop().
+// With the fix, webhookCtx returns the same context that Stop()/p.cancel
+// cancels, so handlers short-circuit on shutdown.
+func TestWebhookCtx_CanceledByStop(t *testing.T) {
+	m := newMockAPI(t)
+	defer m.close()
+	p := newTestPlatform(t, m.server.URL)
+
+	if err := p.Start(func(_ core.Platform, _ *core.Message) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx := p.webhookCtx()
+	if ctx == nil {
+		t.Fatal("webhookCtx returned nil after Start")
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("webhookCtx already canceled before Stop")
+	default:
+	}
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+		// expected: Stop() must propagate to in-flight webhook handlers.
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhookCtx was not canceled after Stop")
+	}
+}
+
 func TestWebhookHandlerWrongMethod(t *testing.T) {
 	p, _ := New(map[string]any{"token": "t"})
 	pl := p.(*Platform)
