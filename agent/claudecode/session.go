@@ -61,6 +61,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
+		"--replay-user-messages",
 	}
 	if !disableVerbose {
 		innerArgs = append(innerArgs, "--verbose")
