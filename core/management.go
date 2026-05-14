@@ -552,7 +552,8 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := len(managementVisibleSessions(e.sessions.AllSessions()))
+		_, activeIDs := e.sessions.SessionKeyMap()
+		sessCount := len(managementVisibleSessions(e.sessions.AllSessions(), activeIDs))
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -642,7 +643,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		allSessions := managementVisibleSessions(e.sessions.AllSessions())
+		_, activeIDs := e.sessions.SessionKeyMap()
+		allSessions := managementVisibleSessions(e.sessions.AllSessions(), activeIDs)
 		sessCount := len(allSessions)
 
 		e.interactiveMu.Lock()
@@ -943,8 +945,9 @@ func (e *Engine) managementSessionDisplayName(s *Session, nativeNames map[string
 	return s.GetName()
 }
 
-func managementVisibleSessions(stored []*Session) []*Session {
+func managementVisibleSessions(stored []*Session, activeIDs map[string]bool) []*Session {
 	currentAgentIDs := make(map[string]struct{})
+	bestCurrentByAgentID := make(map[string]*Session)
 	latestPastOnly := make(map[string]*Session)
 	for _, s := range stored {
 		if s == nil {
@@ -957,6 +960,9 @@ func managementVisibleSessions(stored []*Session) []*Session {
 		s.mu.Unlock()
 		if agentID != "" {
 			currentAgentIDs[agentID] = struct{}{}
+			if managementPreferSession(s, bestCurrentByAgentID[agentID], activeIDs) {
+				bestCurrentByAgentID[agentID] = s
+			}
 			continue
 		}
 		for _, pastID := range pastIDs {
@@ -983,6 +989,11 @@ func managementVisibleSessions(stored []*Session) []*Session {
 		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
 		s.mu.Unlock()
 
+		if agentID != "" {
+			if best := bestCurrentByAgentID[agentID]; best != nil && best != s {
+				continue
+			}
+		}
 		if agentID == "" && len(pastIDs) > 0 {
 			shadowed := false
 			for _, pastID := range pastIDs {
@@ -1002,6 +1013,54 @@ func managementVisibleSessions(stored []*Session) []*Session {
 		visible = append(visible, s)
 	}
 	return visible
+}
+
+func managementPreferSession(candidate, current *Session, activeIDs map[string]bool) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	candidateActive := activeIDs != nil && activeIDs[candidate.ID]
+	currentActive := activeIDs != nil && activeIDs[current.ID]
+	if candidateActive != currentActive {
+		return candidateActive
+	}
+
+	candidate.mu.Lock()
+	candidateProject := candidate.Project != ""
+	candidateName := strings.TrimSpace(candidate.Name)
+	candidateHist := len(candidate.History)
+	candidateUpdated := candidate.UpdatedAt
+	candidate.mu.Unlock()
+
+	current.mu.Lock()
+	currentProject := current.Project != ""
+	currentName := strings.TrimSpace(current.Name)
+	currentHist := len(current.History)
+	currentUpdated := current.UpdatedAt
+	current.mu.Unlock()
+
+	if candidateProject != currentProject {
+		return candidateProject
+	}
+	if sessionNameLooksIntentional(candidateName) != sessionNameLooksIntentional(currentName) {
+		return sessionNameLooksIntentional(candidateName)
+	}
+	if candidateHist != currentHist {
+		return candidateHist > currentHist
+	}
+	return candidateUpdated.After(currentUpdated)
+}
+
+func sessionNameLooksIntentional(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "default", "new", "new chat", "new session":
+		return false
+	default:
+		return true
+	}
 }
 
 func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
@@ -1029,7 +1088,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		e.interactiveMu.Unlock()
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := managementVisibleSessions(e.sessions.AllSessions())
+		stored := managementVisibleSessions(e.sessions.AllSessions(), activeIDs)
 		nativeNames := e.managementSessionDisplayNames()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {

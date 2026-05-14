@@ -476,6 +476,39 @@ func TestMgmt_Sessions_HidesShadowedPastSessions(t *testing.T) {
 	}
 }
 
+func TestMgmt_Sessions_DeduplicatesCurrentAgentSessionsPrefersActive(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	ghost := e.sessions.GetOrCreateActive("user1")
+	ghost.Name = "first user prompt"
+	ghost.SetAgentSessionID("agent-1", "codex")
+	kept := e.sessions.NewSession("user1", "named session")
+	kept.SetAgentSessionID("agent-1", "codex")
+	if _, err := e.sessions.SwitchSession("user1", kept.ID); err != nil {
+		t.Fatalf("switch active: %v", err)
+	}
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1: %#v", len(listData.Sessions), listData.Sessions)
+	}
+	if listData.Sessions[0].ID != kept.ID {
+		t.Fatalf("visible session = %q, want active %q; ghost=%q", listData.Sessions[0].ID, kept.ID, ghost.ID)
+	}
+}
+
 func TestMgmt_Sessions_DeduplicatesPastOnlySessions(t *testing.T) {
 	agent := &mgmtListAgent{
 		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native past title"}},
