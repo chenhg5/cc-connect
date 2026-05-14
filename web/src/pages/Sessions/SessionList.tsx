@@ -136,6 +136,11 @@ export default function SessionList() {
                 {/* Bottom: badges + count */}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Badge>{s._project}</Badge>
+                  {s.project && (
+                    <Badge variant="warning" className="max-w-full truncate" title={s.project_work_dir || s.project}>
+                      {t('sessions.projectGroup', 'Group')}: {s.project}
+                    </Badge>
+                  )}
                   {s.platform && <Badge variant="info">{s.platform}</Badge>}
                   <span className="text-[10px] text-gray-400 ml-auto">{s.history_count} msgs</span>
                 </div>

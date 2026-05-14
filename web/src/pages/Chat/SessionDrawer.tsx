@@ -116,6 +116,11 @@ export default function SessionDrawer({ open, onClose, sessions, currentSessionI
                   )}
 
                   <div className="flex items-center gap-1.5 pl-5">
+                    {s.project && (
+                      <Badge variant="warning" className="text-[9px] px-1 py-0 max-w-[9rem] truncate" title={s.project_work_dir || s.project}>
+                        {t('sessions.projectGroup', 'Group')}: {s.project}
+                      </Badge>
+                    )}
                     {s.platform && <Badge variant="info" className="text-[9px] px-1 py-0">{s.platform}</Badge>}
                     <span className="text-[10px] text-gray-400 ml-auto">{s.history_count} msgs</span>
                   </div>

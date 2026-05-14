@@ -12,6 +12,8 @@ export interface Session {
   name: string;
   platform: string;
   agent_type: string;
+  project?: string;
+  project_work_dir?: string;
   active: boolean;
   live: boolean;
   created_at: string;
