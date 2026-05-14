@@ -266,8 +266,8 @@ type SpeechConfig struct {
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
 	Enabled    bool   `toml:"enabled"`
-	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak" | "pico" | "edge"
-	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh")
+	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
 	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
 	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
 	OpenAI     struct {
@@ -285,6 +285,11 @@ type TTSConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"minimax"`
+	Mimo struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"mimo"`
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.

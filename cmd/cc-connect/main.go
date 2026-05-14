@@ -641,6 +641,16 @@ func main() {
 				} else {
 					slog.Warn("tts: minimax provider enabled but api_key is empty")
 				}
+			case "mimo":
+				apiKey := cfg.TTS.Mimo.APIKey
+				baseURL := cfg.TTS.Mimo.BaseURL
+				model := cfg.TTS.Mimo.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewMimoTTS(apiKey, baseURL, model, nil)
+					ttsCfg.Provider = "mimo"
+				} else {
+					slog.Warn("tts: mimo provider enabled but api_key is empty")
+				}
 			case "espeak":
 				voice := cfg.TTS.Voice
 				if voice == "" {

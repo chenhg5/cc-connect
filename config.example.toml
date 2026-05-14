@@ -425,8 +425,8 @@ level = "info" # debug, info, warn, error
 
 # [tts]
 # enabled  = true
-# provider = "qwen"          # "qwen" | "openai" | "minimax"
-# voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等）
+# provider = "qwen"          # "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+# voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等；MiMo 支持：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）
 # tts_mode = "voice_only"    # "voice_only" (default) | "always"
 # max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
 #                            # 超过此长度则跳过 TTS；0 表示不限制
@@ -453,6 +453,15 @@ level = "info" # debug, info, warn, error
 # api_key  = "your-minimax-api-key"
 # base_url = ""              # optional: default "https://api.minimax.io" / 留空使用默认地址
 # model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
+#
+# # Alternative: Xiaomi MiMo-V2.5-TTS (OpenAI-compatible chat completions style)
+# # 备选：小米 MiMo-V2.5-TTS（OpenAI 兼容的 chat completions 风格）
+# # Docs: https://platform.xiaomimimo.com/#/docs/usage-guide/speech-synthesis
+# [tts.mimo]
+# api_key  = "your-mimo-api-key"
+# base_url = ""              # optional: default "https://api.xiaomimimo.com/v1" / 留空使用默认地址
+#                            # Token Plan 国内地址：https://token-plan-cn.xiaomimimo.com/v1
+# model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
 
 # =============================================================================
 # Daemon Mode / 守护进程模式
