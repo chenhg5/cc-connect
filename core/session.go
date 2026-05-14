@@ -495,6 +495,8 @@ func (sm *SessionManager) AgentSessionProject(userKey, agentSessionID string) (p
 	sm.mu.RLock()
 	ids := append([]string(nil), sm.userSessions[userKey]...)
 	sm.mu.RUnlock()
+
+	var fallbackProject, fallbackWorkDir string
 	for _, sid := range ids {
 		sm.mu.RLock()
 		s := sm.sessions[sid]
@@ -504,23 +506,49 @@ func (sm *SessionManager) AgentSessionProject(userKey, agentSessionID string) (p
 		}
 		s.mu.Lock()
 		matches := s.AgentSessionID == agentSessionID
-		if !matches {
-			for _, past := range s.PastAgentSessionIDs {
-				if past == agentSessionID {
-					matches = true
-					break
-				}
-			}
-		}
-		if matches {
+		if matches && s.Project != "" {
 			project, workDir = s.Project, s.ProjectWorkDir
 		}
+		if matches && fallbackProject == "" {
+			fallbackProject, fallbackWorkDir = s.Project, s.ProjectWorkDir
+		}
 		s.mu.Unlock()
-		if matches {
+		if project != "" {
 			return project, workDir
 		}
 	}
-	return "", ""
+
+	if fallbackProject != "" {
+		return fallbackProject, fallbackWorkDir
+	}
+
+	for _, sid := range ids {
+		sm.mu.RLock()
+		s := sm.sessions[sid]
+		sm.mu.RUnlock()
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		matches := false
+		for _, past := range s.PastAgentSessionIDs {
+			if past == agentSessionID {
+				matches = true
+				break
+			}
+		}
+		if matches && s.Project != "" {
+			project, workDir = s.Project, s.ProjectWorkDir
+		}
+		if matches && fallbackProject == "" {
+			fallbackProject, fallbackWorkDir = s.Project, s.ProjectWorkDir
+		}
+		s.mu.Unlock()
+		if project != "" {
+			return project, workDir
+		}
+	}
+	return fallbackProject, fallbackWorkDir
 }
 
 // UpdateUserMeta updates the human-readable metadata for a session key.

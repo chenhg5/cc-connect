@@ -234,6 +234,26 @@ func TestSessionManager_SessionProjectPersistence(t *testing.T) {
 	}
 }
 
+func TestSessionManager_AgentSessionProjectPrefersCurrentProjectOverPastID(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "telegram:chat:user"
+	old := sm.GetOrCreateActive(userKey)
+	old.SetAgentSessionID("agent-1", "codex")
+	old.SetAgentSessionID("", "codex")
+
+	current := sm.NewSession(userKey, "current")
+	current.SetAgentSessionID("agent-1", "codex")
+	if _, err := sm.SwitchSession(userKey, current.ID); err != nil {
+		t.Fatal(err)
+	}
+	sm.SetActiveSessionProject(userKey, "server-admin", "/work/server-admin")
+
+	project, workDir := sm.AgentSessionProject(userKey, "agent-1")
+	if project != "server-admin" || workDir != "/work/server-admin" {
+		t.Fatalf("project = %q/%q, want server-admin//work/server-admin", project, workDir)
+	}
+}
+
 func TestSessionManager_GetOrCreateActive_Persists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
