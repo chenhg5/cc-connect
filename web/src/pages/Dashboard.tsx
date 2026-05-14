@@ -17,7 +17,7 @@ export default function Dashboard() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [recentSessions, setRecentSessions] = useState<(Session & { project: string })[]>([]);
+  const [recentSessions, setRecentSessions] = useState<(Session & { _project: string })[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -33,11 +33,11 @@ export default function Dashboard() {
       const sessResults = await Promise.allSettled(
         projs.map(proj => listSessions(proj.name).then(r => ({ project: proj.name, sessions: r.sessions || [] })))
       );
-      const allSessions: (Session & { project: string })[] = [];
+      const allSessions: (Session & { _project: string })[] = [];
       for (const r of sessResults) {
         if (r.status === 'fulfilled') {
           for (const sess of r.value.sessions) {
-            allSessions.push({ ...sess, project: r.value.project });
+            allSessions.push({ ...sess, _project: r.value.project });
           }
         }
       }
@@ -141,8 +141,8 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
             {recentSessions.map((sess) => (
               <Link
-                key={`${sess.project}-${sess.id}`}
-                to={`/chat/${sess.project}?session=${encodeURIComponent(sess.id)}`}
+                key={`${sess._project}-${sess.id}`}
+                to={`/chat/${sess._project}?session=${encodeURIComponent(sess.id)}`}
                 className="block p-4 rounded-xl border border-gray-200/80 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-accent/40 hover:shadow-md hover:shadow-accent/5 transition-all"
               >
                 <div className="flex items-center gap-2.5 mb-3">
@@ -151,7 +151,14 @@ export default function Dashboard() {
                     {sess.name || sess.id}
                   </p>
                 </div>
-                <Badge className="text-xs mb-2">{sess.project}</Badge>
+                <div className="flex flex-wrap gap-1 mb-2">
+                  <Badge className="text-xs">{sess._project}</Badge>
+                  {sess.project && (
+                    <Badge variant="warning" className="text-xs max-w-full truncate" title={sess.project_work_dir || sess.project}>
+                      {t('sessions.projectGroup', 'Group')}: {sess.project}
+                    </Badge>
+                  )}
+                </div>
                 {sess.last_message && (
                   <p className="text-xs text-gray-400 truncate mb-2">
                     {sess.last_message.content.slice(0, 60)}

@@ -457,6 +457,11 @@ export default function SessionChat() {
             </div>
             <div className="flex items-center gap-2 mt-0.5">
               <Badge>{project}</Badge>
+              {session?.project && (
+                <Badge variant="warning" title={session.project_work_dir || session.project}>
+                  {t('sessions.projectGroup', 'Group')}: {session.project}
+                </Badge>
+              )}
               {session?.platform && <Badge variant="info">{session.platform}</Badge>}
               <span className="text-xs text-gray-500">{session?.session_key}</span>
             </div>
