@@ -34,8 +34,8 @@ type Platform struct {
 }
 
 func New(opts map[string]any) (core.Platform, error) {
-	wsURL, _        := opts["ws_url"].(string)
-	clientID, _     := opts["client_id"].(string)
+	wsURL, _ := opts["ws_url"].(string)
+	clientID, _ := opts["client_id"].(string)
 	clientSecret, _ := opts["client_secret"].(string)
 	botID := int64FromOpt(opts["bot_id"])
 
@@ -130,7 +130,31 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 	if !ok {
 		return fmt.Errorf("daxiangbridge: invalid reply context type %T", replyCtx)
 	}
+	p.streamSeq.Delete(rc.requestID)
 	p.client.Send(buildFinalReplyFrame(rc.requestID, rc.sessionID, content))
+	return nil
+}
+
+func (p *Platform) FinalizePreview(ctx context.Context, previewHandle any, finalText string) error {
+	rc, ok := previewHandle.(replyContext)
+	if !ok {
+		return fmt.Errorf("daxiangbridge: invalid preview handle type %T", previewHandle)
+	}
+	p.streamSeq.Delete(rc.requestID)
+	p.client.Send(buildEndFrame(rc.requestID, rc.sessionID, finalText))
+	return nil
+}
+
+func (p *Platform) KeepPreviewOnFinish() bool {
+	return true
+}
+
+func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
+	rc, ok := previewHandle.(replyContext)
+	if !ok {
+		return fmt.Errorf("daxiangbridge: invalid preview handle type %T", previewHandle)
+	}
+	p.streamSeq.Delete(rc.requestID)
 	return nil
 }
 
