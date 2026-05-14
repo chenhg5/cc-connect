@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -30,6 +31,10 @@ func (s *session) handleEvent(raw map[string]any) {
 	case "agent_end":
 		s.handleAgentEnd(raw)
 	case "turn_end":
+		if turnEndToolCalls(raw) > 0 {
+			slog.Debug("yms-rca: tool turn ended; waiting for summary turn")
+			return
+		}
 		// turn_end fires only for agent-runtime turns (LLM calls). Slash
 		// commands like /debug-rpc-confirm DO NOT emit turn_end — pi-rpc's
 		// docs are explicit that turn_end is "Turn completes (includes
@@ -47,6 +52,20 @@ func (s *session) handleEvent(raw map[string]any) {
 	default:
 		slog.Debug("yms-rca: unhandled event", "type", t)
 	}
+}
+
+func turnEndToolCalls(raw map[string]any) int {
+	if v, ok := numAny(raw["toolCallsInTurn"]); ok {
+		return v
+	}
+	data, _ := raw["data"].(map[string]any)
+	if data == nil {
+		return 0
+	}
+	if v, ok := numAny(data["toolCallsInTurn"]); ok {
+		return v
+	}
+	return 0
 }
 
 // handleResponse handles `response command=...` frames.
@@ -263,6 +282,7 @@ func (s *session) handleMessageEnd(raw map[string]any) {
 		clean := collapseBlankLines(stripANSI(text))
 		switch customType {
 		case "yms-command":
+			clean = s.adaptCommandTextForPlatform(clean)
 			if display && clean != "" {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			}
@@ -455,6 +475,14 @@ func (s *session) currentMode() string {
 	s.confirmMu.Lock()
 	defer s.confirmMu.Unlock()
 	return s.mode
+}
+
+func (s *session) adaptCommandTextForPlatform(text string) string {
+	platform, _ := s.currentPromptPlatform.Load().(string)
+	if strings.EqualFold(platform, "youzone") {
+		return stripKeyboardKeysFromYMSHelp(text)
+	}
+	return text
 }
 
 // ── tool de-dup ────────────────────────────────────────────

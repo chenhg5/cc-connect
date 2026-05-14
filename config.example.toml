@@ -1795,12 +1795,13 @@ app_secret = "your-feishu-app-secret"
 #   export IUAPYYS_MCP_TOKEN=<real token>
 #   cc-connect daemon install --force      # captures env into service file
 #
-# `cc-connect daemon install` writes the captured value into the launchd
-# plist / systemd unit / Windows task script. These files are created at
-# mode 0600 (owner-only); they will still be readable by anything running
-# as the same OS user. To opt out and inject the token via Keychain /
-# secret-tool / EnvironmentFile= instead, pass `--no-capture-secrets` to
-# `daemon install`, or set CC_DAEMON_NO_CAPTURE_SECRETS=1.
+# `cc-connect daemon install` also captures config.toml `${ENV}` placeholders
+# such as `${YOUZONE_ACCESS_TOKEN}` and writes captured values into the launchd
+# plist / systemd unit / Windows task script. These files are created at mode
+# 0600 (owner-only); they will still be readable by anything running as the
+# same OS user. To opt out and inject tokens via Keychain / secret-tool /
+# EnvironmentFile= instead, pass `--no-capture-secrets` to `daemon install`, or
+# set CC_DAEMON_NO_CAPTURE_SECRETS=1.
 #
 # Adding a NEW yms-rca profile after install requires re-running
 # `cc-connect daemon install --force` so the new mcp.token_env name gets

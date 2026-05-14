@@ -79,6 +79,10 @@ type session struct {
 	// sent via Send. Used to detect stale response/prompt acks from a
 	// prior turn — a late ack must not influence the current turn's state.
 	currentPromptID atomic.Value // string
+	// currentPromptPlatform is learned from the optional cc-connect sender
+	// header. It lets yms-rca adapt command text for IM surfaces without
+	// involving core in platform-specific branches.
+	currentPromptPlatform atomic.Value // string
 
 	// confirm bridge
 	confirmMu      sync.Mutex
@@ -156,6 +160,9 @@ func newSession(parent context.Context, snap *Agent, resumeFile string, extraEnv
 		seenToolUse:    make(map[string]struct{}),
 		seenToolDone:   make(map[string]struct{}),
 	}
+	if platform := parsePlatformFromSessionEnv(extraEnv); platform != "" {
+		s.currentPromptPlatform.Store(platform)
+	}
 	s.enc = json.NewEncoder(stdinPipe)
 	s.enc.SetEscapeHTML(false)
 	s.alive.Store(true)
@@ -205,6 +212,9 @@ func (s *session) Alive() bool { return s.alive.Load() }
 func (s *session) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return errors.New("yms-rca: session closed")
+	}
+	if platform := parseCCConnectPromptPlatform(prompt); platform != "" {
+		s.currentPromptPlatform.Store(platform)
 	}
 	// Validate /connect <target> BEFORE the busy CAS so we don't have to
 	// release it on the error path. The check is read-only.

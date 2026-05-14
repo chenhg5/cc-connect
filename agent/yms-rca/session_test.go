@@ -75,6 +75,15 @@ func newTestSession(t *testing.T, mode string) (*session, *mockEncoder) {
 	return s, enc
 }
 
+func TestParsePlatformFromSessionEnv(t *testing.T) {
+	if got := parsePlatformFromSessionEnv([]string{"CC_PROJECT=p", "CC_SESSION_KEY=youzone:conv:user"}); got != "youzone" {
+		t.Fatalf("platform = %q, want youzone", got)
+	}
+	if got := parsePlatformFromSessionEnv([]string{"CC_SESSION_KEY=plain"}); got != "" {
+		t.Fatalf("platform = %q, want empty for malformed session key", got)
+	}
+}
+
 // drainOnce waits up to d for one event matching the filter.
 func waitFor(t *testing.T, s *session, d time.Duration, pred func(core.Event) bool) (core.Event, bool) {
 	t.Helper()

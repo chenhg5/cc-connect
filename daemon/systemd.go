@@ -61,8 +61,9 @@ func (m *systemdManager) Install(cfg Config) error {
 	}
 
 	unit := m.buildUnit(cfg)
-	// 0600: unit file may contain captured secret values (yms-rca
-	// mcp.token_env vars). For system-level units (/etc/systemd/system/)
+	// 0600: unit file may contain captured secret values (config.toml ${ENV}
+	// placeholders and yms-rca mcp.token_env vars). For system-level units
+	// (/etc/systemd/system/)
 	// the file is owned by root and remains readable by root only; for
 	// user-level units under ~/.config/systemd/user it remains owner-only.
 	// WriteFile only applies perm on create, so Chmod afterwards is

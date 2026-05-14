@@ -438,8 +438,9 @@ Install flags:
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation
-  --no-capture-secrets  Do not capture yms-rca profile mcp.token_env values
-                        into the service file. Also enabled by setting
+  --no-capture-secrets  Do not capture config.toml ${ENV} placeholders or
+                        yms-rca profile mcp.token_env values into the service
+                        file. Also enabled by setting
                         CC_DAEMON_NO_CAPTURE_SECRETS=1 in the environment.
 
 Restart flags:

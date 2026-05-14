@@ -266,6 +266,81 @@ func TestHandleEvent_CustomYmsCommandStrips(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_YouZoneHelpOmitsKeyboardKeys(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	if err := s.Send("[cc-connect sender_id=user-1 platform=youzone chat_id=conv-1]\n/help", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	help := strings.Join([]string{
+		"yms-rca - YMS Root Cause Analysis Agent",
+		"",
+		"Commands:",
+		"/help           Show this help",
+		"",
+		"Shortcuts:",
+		"!   Run shell command",
+		"#[tool]  Invoke diagnostic tool",
+		"",
+		"Keys:",
+		"Ctrl+C x2  Exit session",
+		"Esc        Abort current tool execution",
+	}, "\n")
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"display":    true,
+			"customType": "yms-command",
+			"content":    []any{map[string]any{"text": help}},
+		},
+	})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	if len(evts) == 0 || evts[0].Type != core.EventText {
+		t.Fatalf("got %+v", evts)
+	}
+	if strings.Contains(evts[0].Content, "\nKeys:") || strings.Contains(evts[0].Content, "Ctrl+C") || strings.Contains(evts[0].Content, "Esc") {
+		t.Fatalf("YouZone help should omit keyboard-only keys, got:\n%s", evts[0].Content)
+	}
+	if !strings.Contains(evts[0].Content, "\nShortcuts:") || !strings.Contains(evts[0].Content, "!   Run shell command") || !strings.Contains(evts[0].Content, "#[tool]") {
+		t.Fatalf("YouZone help should keep text shortcuts, got:\n%s", evts[0].Content)
+	}
+}
+
+func TestHandleEvent_NonYouZoneHelpKeepsKeyboardKeys(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	if err := s.Send("[cc-connect sender_id=user-1 platform=feishu chat_id=conv-1]\n/help", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	help := strings.Join([]string{
+		"yms-rca - YMS Root Cause Analysis Agent",
+		"",
+		"Commands:",
+		"/help           Show this help",
+		"",
+		"Shortcuts:",
+		"!   Run shell command",
+		"",
+		"Keys:",
+		"Esc        Abort current tool execution",
+	}, "\n")
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"display":    true,
+			"customType": "yms-command",
+			"content":    []any{map[string]any{"text": help}},
+		},
+	})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	if len(evts) == 0 || evts[0].Type != core.EventText {
+		t.Fatalf("got %+v", evts)
+	}
+	if !strings.Contains(evts[0].Content, "\nKeys:") || !strings.Contains(evts[0].Content, "Esc") {
+		t.Fatalf("non-YouZone help should keep keyboard keys, got:\n%s", evts[0].Content)
+	}
+}
+
 func TestHandleEvent_NotifyError(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.handleEvent(map[string]any{
@@ -692,6 +767,65 @@ func TestHandleEvent_LLMTurn_AgentEndBeatsResponsePrompt(t *testing.T) {
 	}
 	if s.busy.Load() {
 		t.Error("busy not cleared")
+	}
+}
+
+func TestHandleEvent_ToolTurnEndDoesNotFinalizeBeforeSummaryTurn(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 1.0},
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("tool turn finalized before summary turn: %+v", evts)
+		}
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared after tool turn; next user message could race the summary turn")
+	}
+	if s.turnResultEmitted.Load() {
+		t.Fatal("tool turn consumed result latch before summary turn")
+	}
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "集群有 5 个节点。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 0.0},
+	})
+
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	var idxText, idxResult = -1, -1
+	for i, e := range evts {
+		if e.Type == core.EventText {
+			idxText = i
+		}
+		if e.Type == core.EventResult && e.Done {
+			idxResult = i
+		}
+	}
+	if idxText < 0 {
+		t.Fatalf("missing summary text: %+v", evts)
+	}
+	if idxResult < 0 {
+		t.Fatalf("missing final EventResult after summary turn: %+v", evts)
+	}
+	if idxText > idxResult {
+		t.Fatalf("summary text arrived after EventResult: %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Fatal("busy not cleared after summary turn")
 	}
 }
 
