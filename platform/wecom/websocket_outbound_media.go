@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -37,6 +38,29 @@ func (p *WSPlatform) SendImage(ctx context.Context, rctx any, img core.ImageAtta
 	}
 	if err := p.sendWSMediaMessage(ctx, rc.chatID, "image", mediaID); err != nil {
 		return fmt.Errorf("wecom-ws: send image: %w", err)
+	}
+	return nil
+}
+
+// SendFile uploads and sends a file through the WeCom AI Bot WebSocket API.
+func (p *WSPlatform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: SendFile: invalid reply context type %T", rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("wecom-ws: chatID is empty, cannot send file")
+	}
+	if len(file.Data) == 0 {
+		return fmt.Errorf("wecom-ws: file data is empty")
+	}
+
+	mediaID, err := p.uploadWSMedia(ctx, "file", wsFileName(file), file.Data)
+	if err != nil {
+		return fmt.Errorf("wecom-ws: send file: %w", err)
+	}
+	if err := p.sendWSMediaMessage(ctx, rc.chatID, "file", mediaID); err != nil {
+		return fmt.Errorf("wecom-ws: send file: %w", err)
 	}
 	return nil
 }
@@ -155,4 +179,14 @@ func wsImageFileName(img core.ImageAttachment) string {
 	}
 }
 
+func wsFileName(file core.FileAttachment) string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(file.FileName), "\\", "/")
+	name := path.Base(normalized)
+	if name != "" && name != "." && name != ".." && name != "/" {
+		return name
+	}
+	return "file"
+}
+
 var _ core.ImageSender = (*WSPlatform)(nil)
+var _ core.FileSender = (*WSPlatform)(nil)
