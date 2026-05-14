@@ -1060,6 +1060,10 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 				"updated_at":    s.UpdatedAt,
 				"last_message":  lastMsg,
 			}
+			if s.Project != "" {
+				info["project"] = s.Project
+				info["project_work_dir"] = s.ProjectWorkDir
+			}
 			s.mu.Unlock()
 
 			sessionKey := idToKey[s.ID]
@@ -1163,6 +1167,10 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			"created_at":       s.CreatedAt,
 			"updated_at":       s.UpdatedAt,
 			"history":          histJSON,
+		}
+		if s.Project != "" {
+			data["project"] = s.Project
+			data["project_work_dir"] = s.ProjectWorkDir
 		}
 		s.mu.Unlock()
 

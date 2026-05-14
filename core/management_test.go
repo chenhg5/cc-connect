@@ -333,6 +333,65 @@ func TestMgmt_Sessions(t *testing.T) {
 	}
 }
 
+func TestMgmt_Sessions_ProjectMetadataReadonlyPayload(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	grouped := e.sessions.GetOrCreateActive("telegram:chat:user")
+	grouped.Name = "grouped session"
+	grouped.SetAgentSessionID("agent-grouped", "codex")
+	e.sessions.SetActiveSessionProject("telegram:chat:user", "cc-connect-fix", "/work/cc-connect-fix")
+	ungrouped := e.sessions.NewSession("telegram:chat:user", "ungrouped session")
+	ungrouped.SetAgentSessionID("agent-ungrouped", "codex")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+
+	var listData struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 2 {
+		t.Fatalf("sessions len = %d, want 2", len(listData.Sessions))
+	}
+
+	byID := make(map[string]map[string]any, len(listData.Sessions))
+	for _, s := range listData.Sessions {
+		id, _ := s["id"].(string)
+		byID[id] = s
+	}
+	if got := byID[grouped.ID]["project"]; got != "cc-connect-fix" {
+		t.Fatalf("grouped list project = %#v, want cc-connect-fix", got)
+	}
+	if got := byID[grouped.ID]["project_work_dir"]; got != "/work/cc-connect-fix" {
+		t.Fatalf("grouped list project_work_dir = %#v, want /work/cc-connect-fix", got)
+	}
+	if _, ok := byID[ungrouped.ID]["project"]; ok {
+		t.Fatalf("ungrouped list payload should omit project: %#v", byID[ungrouped.ID])
+	}
+	if _, ok := byID[ungrouped.ID]["project_work_dir"]; ok {
+		t.Fatalf("ungrouped list payload should omit project_work_dir: %#v", byID[ungrouped.ID])
+	}
+
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+grouped.ID, "tok")
+	if !r.OK {
+		t.Fatalf("session detail failed: %s", r.Error)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(r.Data, &detail); err != nil {
+		t.Fatalf("unmarshal session detail: %v", err)
+	}
+	if got := detail["project"]; got != "cc-connect-fix" {
+		t.Fatalf("detail project = %#v, want cc-connect-fix", got)
+	}
+	if got := detail["project_work_dir"]; got != "/work/cc-connect-fix" {
+		t.Fatalf("detail project_work_dir = %#v, want /work/cc-connect-fix", got)
+	}
+}
+
 func TestMgmt_Sessions_DisplayNamePriority(t *testing.T) {
 	agent := &mgmtListAgent{
 		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native title"}},
