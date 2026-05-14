@@ -347,7 +347,13 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 		apiBase = strings.TrimRight(req.APIURL, "/")
 	}
 
-	u, _ := url.Parse(apiBase + "/")
+	u, err := url.Parse(apiBase + "/")
+	if err != nil {
+		// Mirror handleSetupWeixinBegin: an invalid api_url should be a 400,
+		// not a nil-pointer panic on the next line.
+		mgmtError(w, http.StatusBadRequest, "invalid api_url")
+		return
+	}
 	u = u.JoinPath("ilink", "bot", "get_qrcode_status")
 	q := u.Query()
 	q.Set("qrcode", req.QRKey)
