@@ -636,7 +636,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, thinkingExplicit, toolExplicit bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
 		projDisp = proj.Display
@@ -691,16 +691,15 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		return f(projDisp)
 	}
 
-	thinkingMessages = pickBool(
-		getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages }),
-		cfg.Display.ThinkingMessages,
-		thinkingDefault,
-	)
-	toolMessages = pickBool(
-		getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages }),
-		cfg.Display.ToolMessages,
-		toolDefault,
-	)
+	projThinking := getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages })
+	projTool := getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages })
+
+	thinkingMessages = pickBool(projThinking, cfg.Display.ThinkingMessages, thinkingDefault)
+	toolMessages = pickBool(projTool, cfg.Display.ToolMessages, toolDefault)
+
+	// Mark as explicitly set when project-level or global config specifies the value.
+	thinkingExplicit = projThinking != nil || cfg.Display.ThinkingMessages != nil
+	toolExplicit = projTool != nil || cfg.Display.ToolMessages != nil
 	thinkingMaxLen = pickInt(
 		getProjInt(func(d *DisplayConfig) *int { return d.ThinkingMaxLen }),
 		cfg.Display.ThinkingMaxLen,

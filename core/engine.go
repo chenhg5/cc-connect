@@ -147,6 +147,12 @@ type DisplayCfg struct {
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
+
+	// ThinkingExplicit/ToolExplicit indicate the value was set explicitly
+	// in the config (project-level or global), not derived from the mode.
+	// When true, mode changes (via /quiet toggle) preserve the explicit value.
+	ThinkingExplicit bool
+	ToolExplicit     bool
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -7876,11 +7882,19 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	e.display.Mode = newMode
 	switch newMode {
 	case "compact", "quiet":
-		e.display.ThinkingMessages = false
-		e.display.ToolMessages = false
+		if !e.display.ThinkingExplicit {
+			e.display.ThinkingMessages = false
+		}
+		if !e.display.ToolExplicit {
+			e.display.ToolMessages = false
+		}
 	default:
-		e.display.ThinkingMessages = true
-		e.display.ToolMessages = true
+		if !e.display.ThinkingExplicit {
+			e.display.ThinkingMessages = true
+		}
+		if !e.display.ToolExplicit {
+			e.display.ToolMessages = true
+		}
 	}
 
 	if e.displaySaveFunc != nil {
@@ -11814,12 +11828,20 @@ func (e *Engine) configItems() []configItem {
 				switch v {
 				case "full":
 					e.display.Mode = "full"
-					e.display.ThinkingMessages = true
-					e.display.ToolMessages = true
+					if !e.display.ThinkingExplicit {
+						e.display.ThinkingMessages = true
+					}
+					if !e.display.ToolExplicit {
+						e.display.ToolMessages = true
+					}
 				case "compact", "quiet":
 					e.display.Mode = v
-					e.display.ThinkingMessages = false
-					e.display.ToolMessages = false
+					if !e.display.ThinkingExplicit {
+						e.display.ThinkingMessages = false
+					}
+					if !e.display.ToolExplicit {
+						e.display.ToolMessages = false
+					}
 				default:
 					return fmt.Errorf("must be full, compact, or quiet")
 				}
@@ -11844,6 +11866,7 @@ func (e *Engine) configItems() []configItem {
 					return fmt.Errorf("invalid boolean: %s", v)
 				}
 				e.display.ThinkingMessages = b
+				e.display.ThinkingExplicit = true
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, &b, nil, nil, nil)
 				}
@@ -11885,6 +11908,7 @@ func (e *Engine) configItems() []configItem {
 					return fmt.Errorf("invalid boolean: %s", v)
 				}
 				e.display.ToolMessages = b
+				e.display.ToolExplicit = true
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, nil, nil, &b)
 				}

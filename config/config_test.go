@@ -299,7 +299,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -412,7 +412,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
@@ -424,6 +424,60 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 			}
 			if toolMaxLen != tt.wantToolMaxLen {
 				t.Errorf("ToolMaxLen = %d, want %d", toolMaxLen, tt.wantToolMaxLen)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplay_ExplicitFlags(t *testing.T) {
+	tru := true
+	fals := false
+
+	tests := []struct {
+		name            string
+		cfg             Config
+		proj            ProjectConfig
+		wantTMExplicit  bool
+		wantToolExplicit bool
+	}{
+		{
+			name: "project thinking_messages=false is explicit",
+			cfg:  Config{},
+			proj: ProjectConfig{Display: &DisplayConfig{ThinkingMessages: &fals}},
+			wantTMExplicit:   true,
+			wantToolExplicit: false,
+		},
+		{
+			name: "global thinking_messages=true is explicit",
+			cfg:  Config{Display: DisplayConfig{ThinkingMessages: &tru}},
+			proj: ProjectConfig{},
+			wantTMExplicit:   true,
+			wantToolExplicit: false,
+		},
+		{
+			name: "neither set is not explicit",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			wantTMExplicit:   false,
+			wantToolExplicit: false,
+		},
+		{
+			name: "both project and global tool_messages set",
+			cfg:  Config{Display: DisplayConfig{ToolMessages: &tru}},
+			proj: ProjectConfig{Display: &DisplayConfig{ToolMessages: &fals}},
+			wantTMExplicit:   false,
+			wantToolExplicit: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, _, tmExplicit, toolExplicit := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if tmExplicit != tt.wantTMExplicit {
+				t.Errorf("ThinkingExplicit = %v, want %v", tmExplicit, tt.wantTMExplicit)
+			}
+			if toolExplicit != tt.wantToolExplicit {
+				t.Errorf("ToolExplicit = %v, want %v", toolExplicit, tt.wantToolExplicit)
 			}
 		})
 	}
