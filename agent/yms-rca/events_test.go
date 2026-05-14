@@ -522,6 +522,63 @@ func TestHandleEvent_SlashCommandTurnTerminates(t *testing.T) {
 	}
 }
 
+// Regression: current yms-rca can emit the slash-command message_end before
+// the prompt response ack. The turn should not finalize until both have
+// arrived, but it must finalize once the later ack arrives.
+func TestHandleEvent_SlashCommandTurnTerminatesWhenMessageEndBeatsPromptAck(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+	s.promptAcked.Store(false)
+	s.currentPromptID.Store("cc-1")
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"display":    true,
+			"customType": "yms-command",
+			"content":    []any{map[string]any{"text": "help output"}},
+		},
+	})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var gotText, gotResult bool
+	for _, e := range evts {
+		if e.Type == core.EventText && e.Content == "help output" {
+			gotText = true
+		}
+		if e.Type == core.EventResult {
+			gotResult = true
+		}
+	}
+	if !gotText {
+		t.Fatalf("missing slash-command EventText before ack: %+v", evts)
+	}
+	if gotResult {
+		t.Fatalf("EventResult emitted before prompt ack: %+v", evts)
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared before prompt ack")
+	}
+
+	s.handleEvent(map[string]any{
+		"type": "response", "command": "prompt", "id": "cc-1", "success": true,
+	})
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	gotResult = false
+	for _, e := range evts {
+		if e.Type == core.EventResult && e.Done {
+			gotResult = true
+		}
+	}
+	if !gotResult {
+		t.Fatalf("missing EventResult after prompt ack: %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Fatal("busy not cleared after prompt ack")
+	}
+}
+
 // Regression for code-review HIGH (round 2): if busy were cleared on
 // response/prompt success=true, a concurrent Send could pass the CAS
 // between the ack and the trailing message_end, resetting promptAcked

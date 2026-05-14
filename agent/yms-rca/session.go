@@ -60,10 +60,15 @@ type session struct {
 	turnResultEmitted atomic.Bool
 	// promptAcked is set when pi-rpc emits `response command=prompt` for the
 	// current prompt. For slash commands (no agent_end / turn_end), this is
-	// the cue that the very next `message_end role=custom customType=yms-command`
-	// is the slash command's terminal result — we emit EventText then Result.
-	// Reset by Send.
+	// paired with slashCommandEnded so either RPC event order can finalize
+	// the turn after the terminal yms-command text has been emitted. Reset by
+	// Send.
 	promptAcked atomic.Bool
+	// slashCommandEnded is set when the current turn receives the terminal
+	// `message_end role=custom customType=yms-command`. yms-rca can emit this
+	// before or after response/prompt, so slash-command finalization waits for
+	// both latches.
+	slashCommandEnded atomic.Bool
 
 	sessionID    atomic.Value // string
 	contextUsage atomic.Pointer[core.ContextUsage]
@@ -211,6 +216,7 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	// promptAcked flag so the slash-command terminator path is armed fresh.
 	s.turnResultEmitted.Store(false)
 	s.promptAcked.Store(false)
+	s.slashCommandEnded.Store(false)
 
 	// On any error after CAS we must release busy.
 	released := false

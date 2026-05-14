@@ -351,11 +351,12 @@ type ProjectConfig struct {
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
 	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
 	// (model/reasoning/usage/workdir, when available) to assistant replies.
-	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
-	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	ReplyFooter         *bool        `toml:"reply_footer,omitempty"`
+	InjectSender        *bool        `toml:"inject_sender,omitempty"`        // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands    []string     `toml:"disabled_commands,omitempty"`    // commands to disable for this project (e.g. ["restart", "upgrade"])
+	PassthroughCommands []string     `toml:"passthrough_commands,omitempty"` // slash commands to forward to the agent after disabled/admin policy checks; "*" = all slash commands
+	AdminFrom           string       `toml:"admin_from,omitempty"`           // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users               *UsersConfig `toml:"users,omitempty"`                // per-user role config; nil = legacy behavior
 	// WorkspaceIdleTimeoutMinsLegacy is the deprecated per-project form of
 	// the workspace idle reaper timeout. New configs should set the top-level
 	// Config.WorkspaceIdleTimeoutMins instead. When the top-level field is

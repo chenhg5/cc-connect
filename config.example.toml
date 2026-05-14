@@ -631,6 +631,8 @@ name = "my-backend"
 #                                   # 不在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
+# passthrough_commands = ["help", "model"]            # Forward selected slash commands to the agent after disabled/admin checks
+# passthrough_commands = ["*"]                        # Forward all slash commands after disabled/admin checks
 #
 # filter_external_sessions: when true, /list /switch /delete only show sessions
 # created by cc-connect, hiding sessions from direct CLI usage in the same work_dir.

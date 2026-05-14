@@ -69,8 +69,8 @@ func (s *session) handleResponse(raw map[string]any) {
 	case "prompt":
 		// `response command=prompt` is pi-rpc's "prompt handler returned"
 		// signal. For LLM turns it fires AFTER agent_end (which already
-		// finalized the turn). For slash commands it fires BEFORE the
-		// trailing `message_end` carrying the result text.
+		// finalized the turn). For slash commands it can arrive before or
+		// after the terminal `message_end` carrying the result text.
 		//
 		// Stale-ack guard: pi-rpc echoes back the id we sent in the prompt
 		// frame. A late ack carrying a prior turn's id must not touch the
@@ -114,7 +114,16 @@ func (s *session) handleResponse(raw map[string]any) {
 		// message_end customType=yms-command will not fire as terminator
 		// because turnResultEmitted is already true).
 		s.promptAcked.Store(true)
+		s.maybeFinalizeSlashCommandTurn()
 	}
+}
+
+func (s *session) maybeFinalizeSlashCommandTurn() {
+	if !s.promptAcked.Load() || !s.slashCommandEnded.Load() {
+		return
+	}
+	s.maybeEmitTurnResult(nil)
+	s.busy.Store(false)
 }
 
 func (s *session) updateContextUsage(data map[string]any) {
@@ -251,34 +260,31 @@ func (s *session) handleMessageEnd(raw map[string]any) {
 		if text == "" {
 			text = asString(msg, "text", "")
 		}
-		if text == "" {
-			return
-		}
 		clean := collapseBlankLines(stripANSI(text))
 		switch customType {
 		case "yms-command":
-			if display {
+			if display && clean != "" {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			}
-			// Slash-command terminator: pi-rpc emits `response command=prompt`
-			// BEFORE this final message_end. handleResponse sets promptAcked
-			// (but does NOT clear busy or emit Result, to avoid a race with
-			// a concurrent Send). Now that the trailing text has been
-			// delivered to the engine, finalize the turn: emit Result via
-			// the latch and clear busy. The latch ensures LLM turns
-			// (finalized by agent_end before response/prompt arrives) don't
-			// double-emit; for those, this branch is a no-op.
-			if s.promptAcked.Load() {
-				s.maybeEmitTurnResult(nil)
-				s.busy.Store(false)
-			}
+			// Slash-command terminator: yms-rca may emit this message_end
+			// before or after response/prompt. Finalize only after both the
+			// terminal text and prompt ack are observed so the engine receives
+			// EventText before EventResult without reopening the Send race.
+			s.slashCommandEnded.Store(true)
+			s.maybeFinalizeSlashCommandTurn()
 		case "yms-rca.env-switch":
+			if clean == "" {
+				return
+			}
 			if display {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			} else {
 				s.emit(core.Event{Type: core.EventThinking, Content: clean})
 			}
 		default:
+			if clean == "" {
+				return
+			}
 			if display {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			} else {

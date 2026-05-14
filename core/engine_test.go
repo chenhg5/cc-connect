@@ -1919,6 +1919,153 @@ func TestResolveDisabledCmds_Specific(t *testing.T) {
 	}
 }
 
+func TestEngine_PassthroughCommandsWildcard(t *testing.T) {
+	e := newTestEngine()
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	for _, raw := range []string{"/help", "/model", "/status", "/compact"} {
+		p.clearSent()
+		if handled := e.handleCommand(p, msg, raw); handled {
+			t.Fatalf("handleCommand(%q) handled command, want passthrough", raw)
+		}
+		if sent := p.getSent(); len(sent) != 0 {
+			t.Fatalf("handleCommand(%q) sent %v, want no cc-connect reply", raw, sent)
+		}
+	}
+}
+
+func TestEngine_PassthroughCommands_NormalizesHyphenUnderscoreForCustomCommands(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy-prod", "deploy prod", "deploy prod prompt", "", "", "test")
+	e.SetPassthroughCommands([]string{"deploy-prod"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/deploy_prod"); handled {
+		t.Fatal("Telegram-style underscore command should pass through when hyphenated command is configured")
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no cc-connect reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommands_NormalizesHyphenUnderscoreForSkills(t *testing.T) {
+	e := newTestEngine()
+	skillRoot := t.TempDir()
+	skillDir := filepath.Join(skillRoot, "deploy-prod")
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("Deploy prod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.skills.SetDirs([]string{skillRoot})
+	e.SetPassthroughCommands([]string{"deploy-prod"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/deploy_prod"); handled {
+		t.Fatal("Telegram-style underscore skill should pass through when hyphenated skill is configured")
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no cc-connect reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassDisabledBuiltin(t *testing.T) {
+	e := newTestEngine()
+	e.SetDisabledCommands([]string{"restart"})
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/restart"); !handled {
+		t.Fatal("disabled builtin should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || (!strings.Contains(sent[0], "disabled") && !strings.Contains(sent[0], "禁用")) {
+		t.Fatalf("expected disabled reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassAdminBuiltin(t *testing.T) {
+	e := newTestEngine()
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/shell echo hi"); !handled {
+		t.Fatal("privileged builtin should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassAdminSubcommand(t *testing.T) {
+	e := newTestEngine()
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/commands addexec deploy echo hi"); !handled {
+		t.Fatal("privileged subcommand should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassAdminCustomExecCommand(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy", "deploy command", "", "echo deploying", "", "test")
+	e.SetPassthroughCommands([]string{"*"})
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/deploy"); !handled {
+		t.Fatal("custom exec command should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "admin") {
+		t.Fatalf("expected admin required reply, got %v", sent)
+	}
+}
+
+func TestEngine_PassthroughCommandsWildcard_DoesNotBypassRoleDisabledCustomCommand(t *testing.T) {
+	e := newTestEngine()
+	e.commands.Add("deploy", "deploy command", "deploy it", "", "", "test")
+	e.SetPassthroughCommands([]string{"*"})
+
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"deploy"}},
+	})
+	e.SetUserRoles(urm)
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "test:user1", Platform: "test", UserID: "u1", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/deploy"); !handled {
+		t.Fatal("role-disabled custom command should be handled by cc-connect, got passthrough")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || (!strings.Contains(sent[0], "disabled") && !strings.Contains(sent[0], "禁用")) {
+		t.Fatalf("expected disabled reply, got %v", sent)
+	}
+}
+
 func TestResolveDisabledCmds_Empty(t *testing.T) {
 	m1 := resolveDisabledCmds(nil)
 	if len(m1) != 0 {
@@ -10871,9 +11018,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                                { return false }
+func (c *stubStreamingCard) Failed() bool                               { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

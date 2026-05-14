@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1499,6 +1500,20 @@ func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesPassthroughCommands(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithPassthroughCommandsFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := cfg.Projects[0].PassthroughCommands
+	want := []string{"*"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("passthrough_commands = %v, want %v", got, want)
+	}
+}
+
 func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithNegativeResetOnIdleFixture)
 
@@ -1893,6 +1908,24 @@ const projectWithResetOnIdleFixture = `
 [[projects]]
 name = "beta"
 reset_on_idle_mins = 60
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithPassthroughCommandsFixture = `
+[[projects]]
+name = "beta"
+passthrough_commands = ["*"]
 
 [projects.agent]
 type = "codex"
