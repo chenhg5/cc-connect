@@ -208,6 +208,32 @@ func TestSessionManager_Persistence(t *testing.T) {
 	}
 }
 
+func TestSessionManager_SessionProjectPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	userKey := "telegram:chat:user"
+
+	sm1 := NewSessionManager(path)
+	s := sm1.GetOrCreateActive(userKey)
+	s.SetAgentSessionID("agent-1", "codex")
+	projectDir := filepath.Join(dir, "cc-connect-fix")
+	sm1.SetActiveSessionProject(userKey, "cc-connect-fix", projectDir)
+
+	sm2 := NewSessionManager(path)
+	list := sm2.ListSessions(userKey)
+	if len(list) != 1 {
+		t.Fatalf("sessions after reload = %d, want 1", len(list))
+	}
+	project, workDir := sm2.SessionProject(list[0].ID)
+	if project != "cc-connect-fix" || workDir != projectDir {
+		t.Fatalf("project = %q/%q, want cc-connect-fix/%q", project, workDir, projectDir)
+	}
+	project, workDir = sm2.AgentSessionProject(userKey, "agent-1")
+	if project != "cc-connect-fix" || workDir != projectDir {
+		t.Fatalf("agent project = %q/%q, want cc-connect-fix/%q", project, workDir, projectDir)
+	}
+}
+
 func TestSessionManager_GetOrCreateActive_Persists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")

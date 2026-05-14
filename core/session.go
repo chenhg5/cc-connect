@@ -20,6 +20,8 @@ type Session struct {
 	Name                string         `json:"name"`
 	AgentSessionID      string         `json:"agent_session_id"`
 	AgentType           string         `json:"agent_type,omitempty"`
+	Project             string         `json:"project,omitempty"`
+	ProjectWorkDir      string         `json:"project_work_dir,omitempty"`
 	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
 	History             []HistoryEntry `json:"history"`
 	CreatedAt           time.Time      `json:"created_at"`
@@ -449,6 +451,78 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 	return sm.sessionNames[agentSessionID]
 }
 
+// SetActiveSessionProject assigns the current local session to a display project.
+// It intentionally does not alter the agent's native workdir; project grouping is
+// cc-connect metadata so native session listing remains stable across cwd filters.
+func (sm *SessionManager) SetActiveSessionProject(userKey, project, workDir string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	var s *Session
+	if sid, ok := sm.activeSession[userKey]; ok {
+		s = sm.sessions[sid]
+	}
+	if s == nil {
+		s = sm.createLocked(userKey, "default")
+	}
+	s.mu.Lock()
+	s.Project = project
+	s.ProjectWorkDir = workDir
+	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	sm.saveLocked()
+	return s
+}
+
+// SessionProject returns the project metadata for a local session.
+func (sm *SessionManager) SessionProject(sessionID string) (project, workDir string) {
+	sm.mu.RLock()
+	s := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+	if s == nil {
+		return "", ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Project, s.ProjectWorkDir
+}
+
+// AgentSessionProject returns project metadata for the local session that owns
+// the given native agent session ID, scoped to the current user/session key.
+func (sm *SessionManager) AgentSessionProject(userKey, agentSessionID string) (project, workDir string) {
+	if agentSessionID == "" {
+		return "", ""
+	}
+	sm.mu.RLock()
+	ids := append([]string(nil), sm.userSessions[userKey]...)
+	sm.mu.RUnlock()
+	for _, sid := range ids {
+		sm.mu.RLock()
+		s := sm.sessions[sid]
+		sm.mu.RUnlock()
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		matches := s.AgentSessionID == agentSessionID
+		if !matches {
+			for _, past := range s.PastAgentSessionIDs {
+				if past == agentSessionID {
+					matches = true
+					break
+				}
+			}
+		}
+		if matches {
+			project, workDir = s.Project, s.ProjectWorkDir
+		}
+		s.mu.Unlock()
+		if matches {
+			return project, workDir
+		}
+	}
+	return "", ""
+}
+
 // UpdateUserMeta updates the human-readable metadata for a session key.
 // Only non-empty fields are applied (merge behavior).
 func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) {
@@ -629,6 +703,8 @@ func (sm *SessionManager) saveLocked() {
 			Name:                s.Name,
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
+			Project:             s.Project,
+			ProjectWorkDir:      s.ProjectWorkDir,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,

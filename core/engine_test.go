@@ -3038,6 +3038,105 @@ func TestCmdList_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdProject_AssignsMetadataAndDoesNotSwitchAgentWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	baseDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: baseDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir(baseDir)
+	msg := &Message{SessionKey: "telegram:chat:user", ReplyCtx: "ctx"}
+
+	e.cmdProject(p, msg, []string{"cc-connect-fix"})
+
+	projectDir := filepath.Join(baseDir, "cc-connect-fix")
+	if _, err := os.Stat(projectDir); err != nil {
+		t.Fatalf("project dir was not created: %v", err)
+	}
+	if got := agent.GetWorkDir(); got != baseDir {
+		t.Fatalf("agent workdir = %q, want unchanged %q", got, baseDir)
+	}
+	active := e.sessions.GetOrCreateActive(msg.SessionKey)
+	project, workDir := e.sessions.SessionProject(active.ID)
+	if project != "cc-connect-fix" || workDir != projectDir {
+		t.Fatalf("project metadata = %q/%q, want cc-connect-fix/%q", project, workDir, projectDir)
+	}
+}
+
+func TestCmdList_ProjectGroupsAndNumberSelection(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "agent-c", Summary: "Ungrouped", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	projectDir := filepath.Join(t.TempDir(), "cc-connect-fix")
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("agent-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", projectDir)
+	s2 := e.sessions.NewSession(userKey, "second")
+	s2.SetAgentSessionID("agent-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", projectDir)
+	if _, err := e.sessions.SwitchSession(userKey, s1.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx", Content: "/list"}
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "📁 cc-connect-fix (2 sessions)") {
+		t.Fatalf("/list did not show grouped project:\n%s", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "Ungrouped") {
+		t.Fatalf("/list did not keep ungrouped native session:\n%s", p.sent[0])
+	}
+
+	p.clearSent()
+	e.handleMessage(p, &Message{SessionKey: userKey, ReplyCtx: "ctx", Content: "1"})
+	if len(p.sent) != 1 {
+		t.Fatalf("expand sent = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Grouped one") || !strings.Contains(p.sent[0], "Grouped two") {
+		t.Fatalf("expanded project missing sessions:\n%s", p.sent[0])
+	}
+
+	p.clearSent()
+	e.handleMessage(p, &Message{SessionKey: userKey, ReplyCtx: "ctx", Content: "2"})
+	active := e.sessions.GetOrCreateActive(userKey)
+	if got := active.GetAgentSessionID(); got != "agent-b" {
+		t.Fatalf("active agent session = %q, want agent-b", got)
+	}
+}
+
+func TestCmdList_ProjectGroupsKeepSwitchFlatIndexCompatible(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Ungrouped", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("agent-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", filepath.Join(t.TempDir(), "cc-connect-fix"))
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"2"})
+
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "agent-b" {
+		t.Fatalf("/switch flat index active = %q, want agent-b", got)
+	}
+}
+
 func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
