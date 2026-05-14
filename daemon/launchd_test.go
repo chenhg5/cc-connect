@@ -232,6 +232,238 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	}
 }
 
+func TestBuildPlist_IncludesEnvExtraSorted(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc/cc",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra: map[string]string{
+			"NO_PROXY":           "yonyoucloud.com,yyuap.com",
+			"IUAPYYS_MCP_TOKEN":  "tok",
+			"HTTPS_PROXY":        "http://1.2.3.4:8080",
+		},
+	}
+	xml := buildPlist(cfg)
+	// Sorted order: HTTPS_PROXY, IUAPYYS_MCP_TOKEN, NO_PROXY.
+	wantOrder := []string{
+		"<key>HTTPS_PROXY</key>",
+		"<key>IUAPYYS_MCP_TOKEN</key>",
+		"<key>NO_PROXY</key>",
+	}
+	lastIdx := -1
+	for _, k := range wantOrder {
+		idx := strings.Index(xml, k)
+		if idx < 0 {
+			t.Fatalf("plist missing %s; xml=%s", k, xml)
+		}
+		if idx < lastIdx {
+			t.Fatalf("plist EnvExtra keys not in sorted order; first offender %s; xml=%s", k, xml)
+		}
+		lastIdx = idx
+	}
+	if !strings.Contains(xml, "<string>tok</string>") {
+		t.Fatalf("value missing for IUAPYYS_MCP_TOKEN; xml=%s", xml)
+	}
+}
+
+func TestBuildPlist_RejectsInvalidEnvName(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/x", WorkDir: "/y", LogFile: "/l", LogMaxSize: 1, EnvPATH: "/p",
+		EnvExtra: map[string]string{
+			"FOO BAR": "v",
+			"1FOO":    "v",
+			"OK":      "fine",
+		},
+	}
+	xml := buildPlist(cfg)
+	if strings.Contains(xml, "FOO BAR") || strings.Contains(xml, "1FOO") {
+		t.Fatalf("invalid env names leaked into plist: %s", xml)
+	}
+	if !strings.Contains(xml, "<key>OK</key>") {
+		t.Fatalf("OK should remain: %s", xml)
+	}
+}
+
+func TestBuildPlist_EscapesXMLInValue(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/x", WorkDir: "/y", LogFile: "/l", LogMaxSize: 1, EnvPATH: "/p",
+		EnvExtra: map[string]string{
+			"TRICKY": `a<b&c"d'e`,
+		},
+	}
+	xml := buildPlist(cfg)
+	// Must not contain raw <, & in TRICKY value.
+	idx := strings.Index(xml, "<key>TRICKY</key>")
+	if idx < 0 {
+		t.Fatalf("TRICKY missing: %s", xml)
+	}
+	// Take a slice starting after <key>TRICKY</key>; the next <string>...</string>
+	// must contain only entity-escaped specials.
+	tail := xml[idx:]
+	endStr := strings.Index(tail, "</string>")
+	if endStr < 0 {
+		t.Fatalf("malformed plist: %s", xml)
+	}
+	chunk := tail[:endStr]
+	for _, bad := range []string{"a<b", "b&c"} {
+		if strings.Contains(chunk, bad) {
+			t.Errorf("value not escaped: %s", chunk)
+		}
+	}
+	if !strings.Contains(chunk, "&lt;") {
+		t.Errorf("< not escaped: %s", chunk)
+	}
+	if !strings.Contains(chunk, "&amp;") {
+		t.Errorf("& not escaped: %s", chunk)
+	}
+}
+
+func TestBuildPlist_SkipsEmptyValuesAndTemplateOwnedKeys(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/x", WorkDir: "/y", LogFile: "/l", LogMaxSize: 1, EnvPATH: "/expected-path",
+		EnvExtra: map[string]string{
+			"EMPTY":           "",
+			"PATH":            "/should-not-override",
+			"CC_LOG_FILE":     "/should-not-override",
+			"CC_LOG_MAX_SIZE": "999999",
+			"REAL":            "ok",
+		},
+	}
+	xml := buildPlist(cfg)
+	if strings.Contains(xml, "<key>EMPTY</key>") {
+		t.Errorf("empty value should be skipped: %s", xml)
+	}
+	if strings.Contains(xml, "/should-not-override") {
+		t.Errorf("template-owned key was overridden: %s", xml)
+	}
+	if !strings.Contains(xml, "<string>/expected-path</string>") {
+		t.Errorf("expected template PATH preserved: %s", xml)
+	}
+	if !strings.Contains(xml, "<key>REAL</key>") {
+		t.Errorf("REAL key missing: %s", xml)
+	}
+}
+
+func TestInstallLaunchd_WritesPlistAt0600(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	mgr := &launchdManager{}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    filepath.Join(t.TempDir(), "cc.log"),
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"NO_PROXY": "yonyoucloud.com"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(launchdPlistPath())
+	if err != nil {
+		t.Fatalf("stat plist: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("plist mode = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestInstallLaunchd_TightensExistingPlistFrom0644 covers the upgrade
+// path: a user from an earlier cc-connect version may already have a
+// 0644 plist on disk; os.WriteFile would truncate-in-place and *keep*
+// the old permissions, leaving captured token values world-readable.
+// Install must explicitly tighten the existing file to 0600.
+func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Seed a legacy 0644 plist as a prior cc-connect version would have left it.
+	if err := os.WriteFile(plistPath, []byte("<plist>old</plist>\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy plist: %v", err)
+	}
+	if info, _ := os.Stat(plistPath); info.Mode().Perm() != 0o644 {
+		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	mgr := &launchdManager{}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    filepath.Join(t.TempDir(), "cc.log"),
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"IUAPYYS_MCP_TOKEN": "captured"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(plistPath)
+	if err != nil {
+		t.Fatalf("stat after Install: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestLaunchdUninstall_RemovesPlist guards against captured-secret
+// residue: a `cc-connect daemon install` may have baked an
+// IUAPYYS_MCP_TOKEN value into the plist; uninstall must delete the
+// file, not just bootout the service.
+func TestLaunchdUninstall_RemovesPlist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte("<plist>fake</plist>\n"), 0o600); err != nil {
+		t.Fatalf("seed plist: %v", err)
+	}
+
+	mgr := &launchdManager{}
+	if err := mgr.Uninstall(); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Fatalf("plist must be removed after Uninstall; stat err=%v", err)
+	}
+}
+
+func TestLaunchdUninstall_IdempotentWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	mgr := &launchdManager{}
+	if err := mgr.Uninstall(); err != nil {
+		t.Fatalf("Uninstall on absent install must be a no-op: %v", err)
+	}
+}
+
 func containsCall(calls []string, want string) bool {
 	for _, call := range calls {
 		if call == want {

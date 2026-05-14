@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 func init() {
@@ -36,6 +37,10 @@ type Agent struct {
 	sessionFile    string
 	offline        bool
 	confirmTimeout time.Duration
+	// connectionsDir overrides the directory used to discover yms-rca
+	// connection profiles for mcp.token_env validation. Empty = default
+	// (~/.yms-rca/connections).
+	connectionsDir string
 
 	mu         sync.Mutex
 	sessionEnv []string
@@ -53,6 +58,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		sessionFile:    getString(opts, "session_file", ""),
 		offline:        getBool(opts, "offline", false),
 		confirmTimeout: time.Duration(getInt(opts, "confirm_timeout_secs", 300)) * time.Second,
+		connectionsDir: getString(opts, "connections_dir", ""),
 	}
 	if a.provider != "" && a.model == "" {
 		return nil, fmt.Errorf("yms-rca: provider %q requires model to be set", a.provider)
@@ -60,7 +66,87 @@ func New(opts map[string]any) (core.Agent, error) {
 	if _, err := exec.LookPath(a.cmd); err != nil {
 		return nil, fmt.Errorf("yms-rca: %q not found in PATH", a.cmd)
 	}
+	// Warn-not-block: surface missing token_env per profile so the operator
+	// can see ahead of /connect <name> which profiles will degrade. We don't
+	// abort start-up here — only a /connect to a specific connection should
+	// be hard-validated (in Send()) — because a profile the user isn't
+	// going to use today shouldn't block all sessions.
+	a.warnMissingProfileTokenEnvs()
 	return a, nil
+}
+
+// validateConnectionTokenEnv ensures that the env-var declared by the
+// target connection profile's mcp.token_env is present and non-empty in
+// cc-connect's process environment. Returns a structured error otherwise
+// so cc-connect can surface diagnostic text to the user without spawning
+// any subprocess work.
+//
+// Behaviour when the profile cannot be located or has no token_env:
+//
+//   - profile not found in connections dir → nil (yms-rca itself will
+//     handle the missing-connection error path; this validator is not
+//     authoritative about whether the connection exists, only about
+//     whether the env it declares is satisfied).
+//   - profile exists but token_env is empty → nil (no env required).
+//   - profile exists, token_env declared, env var unset/empty → error.
+//   - profile exists, token_env invalid env-name → error (rejects names
+//     that would never be readable from os.LookupEnv anyway).
+func (a *Agent) validateConnectionTokenEnv(target string) error {
+	dir := a.effectiveConnectionsDir()
+	if dir == "" {
+		return nil
+	}
+	envName, profile, err := ymsprofile.ReadTokenEnv(dir, target)
+	if err != nil {
+		// Read/parse failure — let yms-rca surface the underlying issue.
+		slog.Warn("yms-rca: profile read failed during connect validation",
+			"target", target, "err", err)
+		return nil
+	}
+	if profile == "" || envName == "" {
+		return nil
+	}
+	if !ymsprofile.IsValidEnvName(envName) {
+		return fmt.Errorf("yms-rca: connection %q profile %s declares invalid env name %q; fix the profile's mcp.token_env",
+			target, profile, envName)
+	}
+	if v, ok := os.LookupEnv(envName); !ok || v == "" {
+		return fmt.Errorf("yms-rca: connection %q needs env %s (declared in profile %s) but it is not set in cc-connect's process environment; re-run `cc-connect daemon install --force` after exporting it, or set it in your service manager",
+			target, envName, profile)
+	}
+	return nil
+}
+
+// effectiveConnectionsDir returns the resolved yms-rca connections dir.
+func (a *Agent) effectiveConnectionsDir() string {
+	if a.connectionsDir != "" {
+		return a.connectionsDir
+	}
+	return ymsprofile.DefaultConnectionsDir()
+}
+
+// warnMissingProfileTokenEnvs scans all yms-rca connection profiles and
+// emits a per-profile slog.Warn when the env-var it declares in
+// mcp.token_env is not set in cc-connect's process environment. Token
+// values are never logged.
+func (a *Agent) warnMissingProfileTokenEnvs() {
+	dir := a.effectiveConnectionsDir()
+	if dir == "" {
+		return
+	}
+	entries, err := ymsprofile.DiscoverConnectionTokenEnvNames(dir)
+	if err != nil {
+		// Surface as warn (profile parse warnings or dir-missing); do not
+		// abort. dir-missing on a fresh install is expected.
+		slog.Warn("yms-rca: profile discovery had warnings", "dir", dir, "err", err)
+	}
+	for _, e := range entries {
+		if v, ok := os.LookupEnv(e.EnvName); !ok || v == "" {
+			slog.Warn("yms-rca: connection profile needs env which is not set in cc-connect process environment",
+				"profile", e.ProfileFile,
+				"env", e.EnvName)
+		}
+	}
 }
 
 func normalizeMode(raw string) string {
@@ -102,6 +188,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		sessionFile:    a.sessionFile,
 		offline:        a.offline,
 		confirmTimeout: a.confirmTimeout,
+		connectionsDir: a.connectionsDir,
 	}
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
@@ -251,6 +338,7 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		"session_file":         a.sessionFile,
 		"offline":              a.offline,
 		"confirm_timeout_secs": int(a.confirmTimeout / time.Second),
+		"connections_dir":      a.connectionsDir,
 	}
 }
 

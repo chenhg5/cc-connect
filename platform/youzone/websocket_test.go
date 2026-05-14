@@ -11,6 +11,30 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// TestNewWebSocketDialerDisablesProxy locks in the direct-connect
+// semantic for YouZone WebSocket dialing. If a future change replaces
+// the explicit Proxy: nil with websocket.DefaultDialer (which uses
+// http.ProxyFromEnvironment), this test fails — preventing a regression
+// where the long-lived ws connection silently starts going through the
+// user's HTTPS proxy.
+func TestNewWebSocketDialerDisablesProxy(t *testing.T) {
+	cfg := config{
+		pingInterval:       time.Hour,
+		heartbeatMode:      heartbeatWSPing,
+		websocketProtocols: []string{"v10.stomp"},
+	}
+	d := newWebSocketDialer(cfg)
+	if d.Proxy != nil {
+		t.Fatalf("WebSocket dialer must have Proxy=nil for direct connection; got %T", d.Proxy)
+	}
+	if d.HandshakeTimeout != 15*time.Second {
+		t.Errorf("HandshakeTimeout = %v, want 15s", d.HandshakeTimeout)
+	}
+	if len(d.Subprotocols) != 1 || d.Subprotocols[0] != "v10.stomp" {
+		t.Errorf("Subprotocols = %+v", d.Subprotocols)
+	}
+}
+
 // TestRunWebSocketReturnsOnContextCancel guards the Stop()/reload path: gorilla's
 // conn.ReadMessage() ignores context cancellation, so runWebSocket must close the
 // socket itself when the context is cancelled, otherwise the read goroutine and

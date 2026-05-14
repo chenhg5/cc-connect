@@ -3,9 +3,12 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 const (
@@ -20,6 +23,16 @@ type Config struct {
 	LogMaxSize int64
 	EnvPATH    string            // capture user's PATH so agents are accessible
 	EnvExtra   map[string]string // selected environment variables needed by the service runtime
+	// NoCaptureSecrets, when true, restricts the install-time env capture to
+	// proxy-related variables only and skips yms-rca profile-derived
+	// mcp.token_env names. Operators who'd rather inject secrets via
+	// keychain / `secret-tool` / EnvironmentFile= set this to keep token
+	// values out of the service manager files on disk.
+	NoCaptureSecrets bool
+	// ConnectionsDir overrides the yms-rca connections directory scanned at
+	// install time to discover mcp.token_env names. Empty = default
+	// (~/.yms-rca/connections).
+	ConnectionsDir string
 }
 
 type Status struct {
@@ -130,21 +143,63 @@ func Resolve(cfg *Config) error {
 		cfg.EnvPATH = os.Getenv("PATH")
 	}
 	if len(cfg.EnvExtra) == 0 {
-		cfg.EnvExtra = captureDaemonEnv()
+		cfg.EnvExtra = captureDaemonEnv(cfg.NoCaptureSecrets, cfg.ConnectionsDir)
 	}
 	return nil
 }
 
-func captureDaemonEnv() map[string]string {
-	keys := []string{
+// captureDaemonEnv builds the EnvExtra map that gets baked into the
+// installed service file. The proxy allowlist is always included; the
+// yms-rca profile-derived mcp.token_env names are included unless the
+// caller opts out via NoCaptureSecrets.
+//
+// Token values are *read* from os.LookupEnv to populate the result map,
+// but never logged. Missing variables are silently skipped — the
+// agent/yms-rca New() warn path handles per-profile user diagnostics.
+func captureDaemonEnv(noCaptureSecrets bool, connectionsDir string) map[string]string {
+	env := make(map[string]string)
+	proxyKeys := []string{
 		"http_proxy", "https_proxy", "no_proxy",
 		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 		"all_proxy", "ALL_PROXY",
 	}
-	env := make(map[string]string, len(keys))
-	for _, key := range keys {
+	for _, key := range proxyKeys {
 		if value := os.Getenv(key); value != "" {
 			env[key] = value
+		}
+	}
+
+	if noCaptureSecrets {
+		return env
+	}
+
+	dir := connectionsDir
+	if dir == "" {
+		dir = ymsprofile.DefaultConnectionsDir()
+	}
+	if dir == "" {
+		return env
+	}
+	entries, err := ymsprofile.DiscoverConnectionTokenEnvNames(dir)
+	if err != nil {
+		// Discovery warnings (invalid env names, parse errors, or
+		// dir-missing) are non-fatal: do not block install. The
+		// agent/yms-rca New() startup will also surface profile-level
+		// warnings at runtime.
+		slog.Warn("daemon: yms-rca profile discovery had warnings",
+			"dir", dir, "err", err)
+	}
+	for _, e := range entries {
+		// envNameRegexp inside ymsprofile already filters invalid names;
+		// double-check belt-and-suspenders because daemon files render
+		// these as keys into systemd/launchd/PowerShell.
+		if !ymsprofile.IsValidEnvName(e.EnvName) {
+			slog.Warn("daemon: dropping invalid env name from profile",
+				"profile", e.ProfileFile, "env", e.EnvName)
+			continue
+		}
+		if v, ok := os.LookupEnv(e.EnvName); ok && v != "" {
+			env[e.EnvName] = v
 		}
 	}
 	return env

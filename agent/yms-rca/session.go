@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/chenhg5/cc-connect/ymsprofile"
 )
 
 // errWriteTimeout is returned by writeFrameWithTimeout when the underlying
@@ -122,10 +123,7 @@ func newSession(parent context.Context, snap *Agent, resumeFile string, extraEnv
 
 	c := exec.CommandContext(ctx, snap.cmd, args...)
 	c.Dir = snap.workDir
-
-	extra := append([]string{}, extraEnv...)
-	extra = append(extra, "NO_COLOR=1", "FORCE_COLOR=0")
-	c.Env = core.MergeEnv(os.Environ(), extra)
+	c.Env = buildSessionEnv(extraEnv)
 
 	stdinPipe, err := c.StdinPipe()
 	if err != nil {
@@ -207,6 +205,13 @@ func (s *session) Alive() bool { return s.alive.Load() }
 func (s *session) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return errors.New("yms-rca: session closed")
+	}
+	// Validate /connect <target> BEFORE the busy CAS so we don't have to
+	// release it on the error path. The check is read-only.
+	if target, ok := ymsprofile.ParseConnectTarget(prompt); ok {
+		if err := s.cfg.validateConnectionTokenEnv(target); err != nil {
+			return err
+		}
 	}
 	if !s.busy.CompareAndSwap(false, true) {
 		return errors.New("yms-rca: previous turn still running")
@@ -748,3 +753,18 @@ func buildArgs(a *Agent, resumeFile string) []string {
 
 // stdBase64Encode is split out to keep import list tidy in this file.
 // (Implemented in rpc.go to share with image / file plumbing if needed.)
+
+// buildSessionEnv constructs the environment passed to the yms-rca rpc
+// subprocess. It inherits cc-connect's process environment so that
+// secrets declared by yms-rca connection profiles via mcp.token_env
+// (e.g. IUAPYYS_MCP_TOKEN) reach the child without per-project config,
+// then layers in the session-specific extras plus NO_COLOR / FORCE_COLOR
+// so the JSONL stream is never poisoned by ANSI sequences.
+//
+// Order matters: NO_COLOR / FORCE_COLOR are appended after extraEnv so
+// they remain authoritative if a caller tries to override them.
+func buildSessionEnv(extraEnv []string) []string {
+	extra := append([]string{}, extraEnv...)
+	extra = append(extra, "NO_COLOR=1", "FORCE_COLOR=0")
+	return core.MergeEnv(os.Environ(), extra)
+}

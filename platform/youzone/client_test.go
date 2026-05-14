@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 func TestClientListRobotsUsesYOUZONEHeadersAndPath(t *testing.T) {
@@ -126,6 +129,86 @@ func TestClientSendMessageUsesYOUZONEUniversalMessagePayload(t *testing.T) {
 		if _, present := payload[k]; present {
 			t.Fatalf("payload unexpectedly contains target field %q: %#v", k, payload)
 		}
+	}
+}
+
+// TestYouZoneDomainsBypassProxyFromEnvironment locks in the contract that
+// the operator can opt YouZone/YonyouCloud out of the local HTTPS proxy
+// by setting NO_PROXY in the daemon environment, while keeping the rest
+// of the world reachable via the proxy. We don't use t.Setenv +
+// http.ProxyFromEnvironment because net/http caches the env once via
+// sync.Once and a parallel test or earlier code could have already
+// captured a stale view; httpproxy.Config is stateless and a faithful
+// reflection of what http.ProxyFromEnvironment computes internally.
+func TestYouZoneDomainsBypassProxyFromEnvironment(t *testing.T) {
+	cfg := &httpproxy.Config{
+		HTTPSProxy: "http://127.0.0.1:10818",
+		HTTPProxy:  "http://127.0.0.1:10818",
+		NoProxy:    "yonyoucloud.com,yyuap.com,localhost,127.0.0.1,::1",
+	}
+	proxyFunc := cfg.ProxyFunc()
+
+	bypassCases := []string{
+		"https://c2.yonyoucloud.com/yonbip-ec-link/claw-robot/client/sendMessage",
+		"https://yonyoucloud.com/foo",
+		"https://iuapyys.yyuap.com/mcp",
+		"http://example.yyuap.com",
+	}
+	for _, raw := range bypassCases {
+		u, _ := url.Parse(raw)
+		got, err := proxyFunc(u)
+		if err != nil {
+			t.Fatalf("proxyFunc(%s) err=%v", raw, err)
+		}
+		if got != nil {
+			t.Errorf("%s should bypass proxy, got %s", raw, got)
+		}
+	}
+
+	viaProxyCases := []string{
+		"https://example.com/anything",
+		"https://api.github.com/repos",
+	}
+	for _, raw := range viaProxyCases {
+		u, _ := url.Parse(raw)
+		got, err := proxyFunc(u)
+		if err != nil {
+			t.Fatalf("proxyFunc(%s) err=%v", raw, err)
+		}
+		if got == nil {
+			t.Errorf("%s should go through proxy, got direct", raw)
+		}
+	}
+}
+
+// TestNewYouZonePlatformUsesDefaultTransport locks in that the production
+// constructor does not replace http.DefaultTransport — that's the only
+// way Go's http.ProxyFromEnvironment hooks remain active, and therefore
+// the only way NO_PROXY in the daemon env can opt YouZone out of the
+// HTTPS proxy at runtime.
+func TestNewYouZonePlatformUsesDefaultTransport(t *testing.T) {
+	p, err := New(map[string]any{
+		"base_url":     "https://example.test",
+		"access_token": "tok",
+		"tenant_id":    "tenant",
+		"robot_id":     "robot-1",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	plat, ok := p.(*Platform)
+	if !ok {
+		t.Fatalf("unexpected type %T", p)
+	}
+	if plat.client == nil {
+		t.Fatal("client must not be nil")
+	}
+	if plat.client.httpClient == nil {
+		t.Fatal("httpClient must not be nil")
+	}
+	if plat.client.httpClient.Transport != nil {
+		t.Fatalf("client.http.Transport = %T, want nil so http.DefaultTransport (with ProxyFromEnvironment) is used",
+			plat.client.httpClient.Transport)
 	}
 }
 

@@ -45,11 +45,21 @@ func (p *Platform) connectLoop(ctx context.Context) {
 	}
 }
 
-func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string) error {
-	dialer := websocket.Dialer{
+// newWebSocketDialer builds the gorilla websocket dialer for YouZone
+// connections. We pin Proxy: nil so the long-lived ws connection always
+// goes direct, regardless of the user's HTTP/HTTPS proxy env. HTTP-side
+// requests (sendMessage, getWss, listRobots) continue to honor
+// http.ProxyFromEnvironment via the default transport — see client.go.
+func newWebSocketDialer(cfg config) websocket.Dialer {
+	return websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
-		Subprotocols:     p.cfg.websocketProtocols,
+		Subprotocols:     cfg.websocketProtocols,
+		Proxy:            nil,
 	}
+}
+
+func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string) error {
+	dialer := newWebSocketDialer(p.cfg)
 	header := http.Header{}
 	header.Set("User-Agent", "cc-connect-youzone/0.1")
 	conn, _, err := dialer.DialContext(ctx, wss, header)

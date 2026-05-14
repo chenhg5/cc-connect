@@ -1028,6 +1028,23 @@ app_secret = "your-feishu-app-secret"
 # # machine_code = "your-machine-code"
 # # auto_create_robot = false
 # # robot_explain = "cc-connect"
+#
+# ── Proxy / NO_PROXY guidance ────────────────────────────────────────────────
+# YouZone HTTP requests (sendMessage / getWss / listRobots) use Go's default
+# transport and therefore honour HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars.
+# If cc-connect runs in an environment with a global HTTPS proxy (e.g.
+# 127.0.0.1:10818) and the proxy can't reach c2.yonyoucloud.com, requests
+# will fail with "proxyconnect tcp ... connection refused" or TLS handshake
+# timeouts. Opt YouZone/YonyouCloud out of the proxy by adding their suffixes
+# to NO_PROXY (keep any pre-existing entries such as localhost/127.0.0.1):
+#
+#   export NO_PROXY=yonyoucloud.com,yyuap.com,localhost,127.0.0.1,::1
+#   export no_proxy="$NO_PROXY"
+#
+# Under daemon-managed cc-connect, `cc-connect daemon install` captures these
+# vars from the launching shell and bakes them into the launchd plist /
+# systemd unit / Windows task script. The persistent WebSocket connection
+# itself is always direct (Proxy: nil) regardless of env.
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
@@ -1746,10 +1763,48 @@ app_secret = "your-feishu-app-secret"
 # # session_dir = ""                   # 自定义 session 文件目录
 # # offline = false                    # 启动时禁用网络
 # # confirm_timeout_secs = 300         # 高危确认超时（秒），到期自动 deny
+# # connections_dir = ""               # 覆盖 ~/.yms-rca/connections 用于 mcp.token_env 检查
 #
 # Note: cc-connect never passes `--no-confirm`. yolo / bypassPermissions /
 # dontAsk are realised by auto-answering extension_ui_response inside the
 # adapter so the decision is recorded in cc-connect logs.
+#
+# ── MCP token environment / mcp.token_env 环境变量 ───────────────────────────
+#
+# yms-rca connection profiles (default `~/.yms-rca/connections/<name>.yaml`)
+# declare an MCP token by *name* via `mcp.token_env`, not by value:
+#
+#   mcp:
+#     endpoint: http://iuapyys.yyuap.com/mcp
+#     token_env: IUAPYYS_MCP_TOKEN
+#
+# The actual token must live in cc-connect's PROCESS environment so it gets
+# inherited by `yms-rca rpc`. cc-connect does NOT add a project-level token
+# field — that would duplicate state and risk falling out of sync with the
+# yms-rca profile.
+#
+# On startup, the adapter scans every yms-rca connection profile and emits a
+# slog.Warn per profile whose declared env-var is unset (the start-up itself
+# is NOT blocked). When a user sends `/connect <name>`, the adapter does a
+# hard pre-check of just that target's `mcp.token_env`: if missing it
+# returns a structured error before spawning any RPC, so the user sees a
+# clear diagnostic instead of a silent MCP degradation.
+#
+# To make the env visible to a daemon-installed cc-connect:
+#
+#   export IUAPYYS_MCP_TOKEN=<real token>
+#   cc-connect daemon install --force      # captures env into service file
+#
+# `cc-connect daemon install` writes the captured value into the launchd
+# plist / systemd unit / Windows task script. These files are created at
+# mode 0600 (owner-only); they will still be readable by anything running
+# as the same OS user. To opt out and inject the token via Keychain /
+# secret-tool / EnvironmentFile= instead, pass `--no-capture-secrets` to
+# `daemon install`, or set CC_DAEMON_NO_CAPTURE_SECRETS=1.
+#
+# Adding a NEW yms-rca profile after install requires re-running
+# `cc-connect daemon install --force` so the new mcp.token_env name gets
+# captured. `cc-connect daemon restart` does NOT regenerate service files.
 #
 # [[projects.platforms]]
 # type = "telegram"
