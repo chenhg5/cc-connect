@@ -3116,7 +3116,7 @@ func TestCmdList_ProjectGroupsAndNumberSelection(t *testing.T) {
 	}
 }
 
-func TestCmdList_ProjectGroupsKeepSwitchFlatIndexCompatible(t *testing.T) {
+func TestCmdSwitch_ProjectGroupsUseVisibleListIndex(t *testing.T) {
 	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
 	nativeSessions := []AgentSessionInfo{
 		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
@@ -3133,7 +3133,65 @@ func TestCmdList_ProjectGroupsKeepSwitchFlatIndexCompatible(t *testing.T) {
 	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"2"})
 
 	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "agent-b" {
-		t.Fatalf("/switch flat index active = %q, want agent-b", got)
+		t.Fatalf("/switch visible index active = %q, want agent-b", got)
+	}
+}
+
+func TestCmdSwitch_ProjectGroupRowDoesNotUseStaleFlatIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Ungrouped", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangChinese)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("agent-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", filepath.Join(t.TempDir(), "cc-connect-fix"))
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "回复项目序号可展开项目") {
+		t.Fatalf("/list grouped reply = %#v, want Chinese hint", p.sent)
+	}
+	p.clearSent()
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"1"})
+
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "agent-a" {
+		t.Fatalf("active agent session = %q, want unchanged agent-a", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "第 1 项是项目分组") {
+		t.Fatalf("/switch project row reply = %#v, want Chinese project-row hint", p.sent)
+	}
+}
+
+func TestCmdProject_ChineseCopyAndMenuDescription(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	baseDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: baseDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetBaseWorkDir(baseDir)
+	msg := &Message{SessionKey: "telegram:chat:user", ReplyCtx: "ctx"}
+
+	e.cmdProject(p, msg, nil)
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "当前会话尚未归属项目") {
+		t.Fatalf("/project empty reply = %#v, want Chinese text", p.sent)
+	}
+	p.clearSent()
+	e.cmdProject(p, msg, []string{"cc-connect-fix"})
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "已加入项目") {
+		t.Fatalf("/project set reply = %#v, want Chinese text", p.sent)
+	}
+
+	var projectDesc string
+	for _, cmd := range e.GetAllCommands() {
+		if cmd.Command == "project" {
+			projectDesc = cmd.Description
+			break
+		}
+	}
+	if !strings.Contains(projectDesc, "查看/设置当前会话所属项目") {
+		t.Fatalf("project command description = %q, want localized project description", projectDesc)
 	}
 }
 

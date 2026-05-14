@@ -5254,28 +5254,101 @@ func (e *Engine) cmdProject(p Platform, msg *Message, args []string) {
 		project, workDir := sessions.SessionProject(active.ID)
 		if project == "" {
 			base := e.projectBaseWorkDir(agent, msg)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Current session is not assigned to a project.\nWorkdir: `%s`", base))
+			e.reply(p, msg.ReplyCtx, e.projectUnassignedText(base))
 			return
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Current project: **%s**\nWorkdir: `%s`", project, workDir))
+		e.reply(p, msg.ReplyCtx, e.projectCurrentText(project, workDir))
 		return
 	}
 
 	project := strings.TrimSpace(strings.Join(args, " "))
 	dirName := safeProjectDirName(project)
 	if project == "" || dirName == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /project <name>")
+		e.reply(p, msg.ReplyCtx, e.projectUsageText())
 		return
 	}
 	base := e.projectBaseWorkDir(agent, msg)
 	workDir := filepath.Join(base, dirName)
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to create project directory: %v", err))
+		e.reply(p, msg.ReplyCtx, e.projectCreateDirErrorText(err))
 		return
 	}
 	sessions.SetActiveSessionProject(msg.SessionKey, project, workDir)
 	e.clearListSelection(msg.SessionKey)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf("Project set: **%s**\nDirectory: `%s`\nNative session cwd was not changed; /list will keep the existing Codex sessions visible.", project, workDir))
+	e.reply(p, msg.ReplyCtx, e.projectSetText(project, workDir))
+}
+
+func (e *Engine) projectUsageText() string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese, LangTraditionalChinese:
+		return "用法：/project <项目名>"
+	case LangJapanese:
+		return "使い方: /project <プロジェクト名>"
+	case LangSpanish:
+		return "Uso: /project <proyecto>"
+	default:
+		return "Usage: /project <name>"
+	}
+}
+
+func (e *Engine) projectUnassignedText(base string) string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return fmt.Sprintf("当前会话尚未归属项目。\n工作目录：`%s`", base)
+	case LangTraditionalChinese:
+		return fmt.Sprintf("目前會話尚未歸屬專案。\n工作目錄：`%s`", base)
+	case LangJapanese:
+		return fmt.Sprintf("現在のセッションはプロジェクト未所属です。\n作業ディレクトリ: `%s`", base)
+	case LangSpanish:
+		return fmt.Sprintf("La sesión actual no pertenece a ningún proyecto.\nDirectorio de trabajo: `%s`", base)
+	default:
+		return fmt.Sprintf("Current session is not assigned to a project.\nWorkdir: `%s`", base)
+	}
+}
+
+func (e *Engine) projectCurrentText(project, workDir string) string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return fmt.Sprintf("当前项目：**%s**\n工作目录：`%s`", project, workDir)
+	case LangTraditionalChinese:
+		return fmt.Sprintf("目前專案：**%s**\n工作目錄：`%s`", project, workDir)
+	case LangJapanese:
+		return fmt.Sprintf("現在のプロジェクト: **%s**\n作業ディレクトリ: `%s`", project, workDir)
+	case LangSpanish:
+		return fmt.Sprintf("Proyecto actual: **%s**\nDirectorio de trabajo: `%s`", project, workDir)
+	default:
+		return fmt.Sprintf("Current project: **%s**\nWorkdir: `%s`", project, workDir)
+	}
+}
+
+func (e *Engine) projectCreateDirErrorText(err error) string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return fmt.Sprintf("创建项目目录失败：%v", err)
+	case LangTraditionalChinese:
+		return fmt.Sprintf("建立專案目錄失敗：%v", err)
+	case LangJapanese:
+		return fmt.Sprintf("プロジェクトディレクトリを作成できませんでした: %v", err)
+	case LangSpanish:
+		return fmt.Sprintf("No se pudo crear el directorio del proyecto: %v", err)
+	default:
+		return fmt.Sprintf("Failed to create project directory: %v", err)
+	}
+}
+
+func (e *Engine) projectSetText(project, workDir string) string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return fmt.Sprintf("已加入项目：**%s**\n目录：`%s`\n未改变 Codex native session 的 cwd，/list 会继续显示原有会话。", project, workDir)
+	case LangTraditionalChinese:
+		return fmt.Sprintf("已加入專案：**%s**\n目錄：`%s`\n未改變 Codex native session 的 cwd，/list 會繼續顯示原有會話。", project, workDir)
+	case LangJapanese:
+		return fmt.Sprintf("プロジェクトを設定しました: **%s**\nディレクトリ: `%s`\nCodex native session の cwd は変更していないため、/list は既存セッションを引き続き表示します。", project, workDir)
+	case LangSpanish:
+		return fmt.Sprintf("Proyecto asignado: **%s**\nDirectorio: `%s`\nNo se cambió el cwd nativo de Codex; /list seguirá mostrando las sesiones existentes.", project, workDir)
+	default:
+		return fmt.Sprintf("Project set: **%s**\nDirectory: `%s`\nNative session cwd was not changed; /list will keep the existing Codex sessions visible.", project, workDir)
+	}
 }
 
 func (e *Engine) projectBaseWorkDir(agent Agent, msg *Message) string {
@@ -5430,7 +5503,7 @@ func (e *Engine) renderGroupedListText(agent Agent, sessions *SessionManager, se
 				marker, i+1, v.DisplayName, v.Info.MessageCount, v.Info.ModifiedAt.Format("01-02 15:04")))
 		}
 	}
-	sb.WriteString("\nReply with a project number to expand it, or an ungrouped session number to switch.")
+	sb.WriteString("\n" + e.listGroupHintText())
 	return sb.String()
 }
 
@@ -5449,8 +5522,53 @@ func (e *Engine) renderProjectListText(sessions *SessionManager, sessionKey stri
 		sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 			marker, i+1, entry.DisplayName, entry.Info.MessageCount, entry.Info.ModifiedAt.Format("01-02 15:04")))
 	}
-	sb.WriteString("\nReply with a session number to switch.")
+	sb.WriteString("\n" + e.listProjectHintText())
 	return sb.String()
+}
+
+func (e *Engine) listGroupHintText() string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return "回复项目序号可展开项目；回复未分组会话序号可直接切换。"
+	case LangTraditionalChinese:
+		return "回覆專案序號可展開專案；回覆未分組會話序號可直接切換。"
+	case LangJapanese:
+		return "プロジェクト番号で展開、未分類セッション番号で直接切り替えできます。"
+	case LangSpanish:
+		return "Responde con el número de un proyecto para expandirlo, o con el de una sesión sin grupo para cambiar."
+	default:
+		return "Reply with a project number to expand it, or an ungrouped session number to switch."
+	}
+}
+
+func (e *Engine) listProjectHintText() string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return "回复会话序号可切换到该会话。"
+	case LangTraditionalChinese:
+		return "回覆會話序號可切換到該會話。"
+	case LangJapanese:
+		return "セッション番号でそのセッションに切り替えます。"
+	case LangSpanish:
+		return "Responde con el número de sesión para cambiar a ella."
+	default:
+		return "Reply with a session number to switch."
+	}
+}
+
+func (e *Engine) listProjectRowSwitchText(index int) string {
+	switch e.i18n.CurrentLang() {
+	case LangChinese:
+		return fmt.Sprintf("第 %d 项是项目分组。请直接回复 `%d` 展开项目，再选择里面的会话。", index, index)
+	case LangTraditionalChinese:
+		return fmt.Sprintf("第 %d 項是專案分組。請直接回覆 `%d` 展開專案，再選擇裡面的會話。", index, index)
+	case LangJapanese:
+		return fmt.Sprintf("%d 番はプロジェクトグループです。`%d` と返信して展開し、その中のセッションを選んでください。", index, index)
+	case LangSpanish:
+		return fmt.Sprintf("El elemento %d es un grupo de proyecto. Responde `%d` para expandirlo y luego elige una sesión.", index, index)
+	default:
+		return fmt.Sprintf("Item %d is a project group. Reply with `%d` to expand it, then choose a session inside.", index, index)
+	}
 }
 
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
@@ -5573,6 +5691,17 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
+	if matched, replyText, handled := e.matchSessionFromListSelection(msg.SessionKey, query, sessions, agentSessions); handled {
+		if matched == nil {
+			if replyText != "" {
+				e.reply(p, msg.ReplyCtx, replyText)
+			}
+			return
+		}
+		e.switchToListEntry(p, msg, agent, sessions, interactiveKey, listSessionEntry{Info: *matched})
+		return
+	}
+
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
@@ -5597,6 +5726,44 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	}
 	e.reply(p, msg.ReplyCtx,
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
+}
+
+func (e *Engine) matchSessionFromListSelection(sessionKey, query string, sessions *SessionManager, agentSessions []AgentSessionInfo) (*AgentSessionInfo, string, bool) {
+	idx, err := strconv.Atoi(strings.TrimSpace(query))
+	if err != nil || idx < 1 {
+		return nil, "", false
+	}
+	state := e.getListSelection(sessionKey)
+	if state == nil {
+		return nil, "", false
+	}
+	view := e.buildListGroupedView(sessions, sessionKey, agentSessions)
+	if len(view.Entries) == 0 {
+		return nil, "", false
+	}
+	switch state.mode {
+	case listSelectionProject:
+		group, ok := view.ProjectByName[state.project]
+		if !ok || idx > len(group.Entries) {
+			return nil, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx), true
+		}
+		matched := group.Entries[idx-1].Info
+		return &matched, "", true
+	default:
+		rows := e.groupedListTopRows(view)
+		if idx > len(rows) {
+			return nil, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx), true
+		}
+		switch row := rows[idx-1].(type) {
+		case listProjectGroup:
+			return nil, e.listProjectRowSwitchText(idx), true
+		case listSessionEntry:
+			matched := row.Info
+			return &matched, "", true
+		default:
+			return nil, "", false
+		}
+	}
 }
 
 func (e *Engine) handleListSelectionInput(p Platform, msg *Message, content string) bool {
@@ -10808,7 +10975,7 @@ func (e *Engine) renderGroupedListCard(agent Agent, sessions *SessionManager, se
 		navBtns = append(navBtns, e.cardNextButton(fmt.Sprintf("nav:/list %d", page+1)))
 	}
 	cb.Buttons(navBtns...)
-	cb.Note("Reply with a project number to expand it, or an ungrouped session number to switch.")
+	cb.Note(e.listGroupHintText())
 	return cb.Build()
 }
 
@@ -10844,7 +11011,7 @@ func (e *Engine) renderProjectListCard(sessionKey, project string) *Card {
 		)
 	}
 	cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "nav:/list 1"))
-	cb.Note("Reply with a session number to switch.")
+	cb.Note(e.listProjectHintText())
 	e.setListSelection(sessionKey, &listSelectionState{mode: listSelectionProject, project: group.Name})
 	return cb.Build()
 }
