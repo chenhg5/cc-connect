@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type Platform struct {
 	token     string
 	project   string
 	agentType string
+	cwd       string
 
 	mu       sync.RWMutex
 	conn     *websocket.Conn
@@ -48,11 +50,19 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	project, _ := opts["project"].(string)
 	agentType, _ := opts["agent_type"].(string)
+	cwd, _ := opts["work_dir"].(string)
+	if cwd == "" {
+		cwd, _ = opts["cwd"].(string)
+	}
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	return &Platform{
 		serverURL: server,
 		token:     token,
 		project:   project,
 		agentType: agentType,
+		cwd:       cwd,
 	}, nil
 }
 
@@ -228,6 +238,7 @@ func (p *Platform) connect(ctx context.Context) error {
 		"version":    1,
 		"project":    p.project,
 		"agent_type": p.agentType,
+		"cwd":        p.cwd,
 	}
 	if err := conn.WriteJSON(hello); err != nil {
 		conn.Close()
