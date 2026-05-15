@@ -7755,7 +7755,6 @@ const listSelectionTTL = 10 * time.Minute
 
 type listSessionEntry struct {
 	Info           AgentSessionInfo
-	FlatIndex      int
 	DisplayName    string
 	Project        string
 	ProjectWorkDir string
@@ -7921,7 +7920,7 @@ func safeProjectDirName(name string) string {
 func (e *Engine) buildListGroupedView(sessions *SessionManager, sessionKey string, agentSessions []AgentSessionInfo) listGroupedView {
 	view := listGroupedView{ProjectByName: make(map[string]listProjectGroup)}
 	projectOrder := make([]string, 0)
-	for i, s := range agentSessions {
+	for _, s := range agentSessions {
 		displayName := sessions.GetSessionName(s.ID)
 		if displayName != "" {
 			displayName = "📌 " + displayName
@@ -7937,7 +7936,6 @@ func (e *Engine) buildListGroupedView(sessions *SessionManager, sessionKey strin
 		project, workDir := sessions.AgentSessionProject(sessionKey, s.ID)
 		entry := listSessionEntry{
 			Info:           s,
-			FlatIndex:      i + 1,
 			DisplayName:    displayName,
 			Project:        project,
 			ProjectWorkDir: workDir,
@@ -8270,22 +8268,19 @@ func (e *Engine) matchSessionFromListSelection(sessionKey, query string, session
 		return nil, "", false
 	}
 	state := e.getListSelection(sessionKey)
-	if state == nil {
-		return nil, "", false
-	}
 	view := e.buildListGroupedView(sessions, sessionKey, agentSessions)
 	if len(view.Entries) == 0 {
 		return nil, "", false
 	}
-	switch state.mode {
-	case listSelectionProject:
+	if state != nil && state.mode == listSelectionProject {
 		group, ok := view.ProjectByName[state.project]
 		if !ok || idx > len(group.Entries) {
 			return nil, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx), true
 		}
 		matched := group.Entries[idx-1].Info
 		return &matched, "", true
-	default:
+	}
+	if view.HasProjects() {
 		rows := e.groupedListTopRows(view)
 		if idx > len(rows) {
 			return nil, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx), true
@@ -8300,6 +8295,7 @@ func (e *Engine) matchSessionFromListSelection(sessionKey, query string, session
 			return nil, "", false
 		}
 	}
+	return nil, "", false
 }
 
 func (e *Engine) handleListSelectionInput(p Platform, msg *Message, content string) bool {
@@ -14593,7 +14589,7 @@ func (e *Engine) renderGroupedListCard(agent Agent, sessions *SessionManager, se
 				e.i18n.Tf(MsgListItem, marker, rowNumber, row.DisplayName, row.Info.MessageCount, row.Info.ModifiedAt.Format("01-02 15:04")),
 				fmt.Sprintf("#%d", rowNumber),
 				btnType,
-				fmt.Sprintf("act:/switch %d", row.FlatIndex),
+				fmt.Sprintf("act:/switch %d", rowNumber),
 			)
 		}
 	}
@@ -14639,7 +14635,7 @@ func (e *Engine) renderProjectListCard(sessionKey, project string) *Card {
 			e.i18n.Tf(MsgListItem, marker, i+1, entry.DisplayName, entry.Info.MessageCount, entry.Info.ModifiedAt.Format("01-02 15:04")),
 			fmt.Sprintf("#%d", i+1),
 			btnType,
-			fmt.Sprintf("act:/switch %d", entry.FlatIndex),
+			fmt.Sprintf("act:/switch %d", i+1),
 		)
 	}
 	cb.Buttons(DefaultBtn(e.i18n.T(MsgCardBack), "nav:/list 1"))
