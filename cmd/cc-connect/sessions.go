@@ -121,6 +121,45 @@ func resolveDataDir(flagValue string) string {
 	return ".cc-connect"
 }
 
+// sessionFileHashLen is the length of the hex-encoded work_dir hash the
+// engine writes into session file names — sha256 truncated to 4 bytes,
+// rendered as 8 hex chars (see sessionStorePath in main.go and the
+// "_ws_<hash>" path in core/engine.go).
+const sessionFileHashLen = 8
+
+// extractProjectFromFilename derives the project name from a session
+// file name. The engine writes sessions under one of four naming
+// schemes (see matchesProject in session_id.go):
+//
+//   - <project>.json                — no work_dir
+//   - <project>_<8hex>.json         — single work_dir
+//   - <project>_ws_<8hex>.json      — multi-workspace
+//   - <project>.sessions.json       — legacy
+//
+// Strip the trailing 8-hex hash / "_ws_<8hex>" / ".sessions" so the
+// returned project name matches the user-facing project identifier
+// used by `cc-connect sessions show <project>:<session_id>`. The
+// strict 8-hex length (rather than any-length hex) avoids
+// misclassifying user-chosen project names whose last segment after
+// "_" happens to be valid hex (e.g. "project_a", "foo_dead").
+func extractProjectFromFilename(filename string) string {
+	base := strings.TrimSuffix(filename, ".json")
+	if strings.HasSuffix(base, ".sessions") {
+		return strings.TrimSuffix(base, ".sessions")
+	}
+	if idx := strings.LastIndex(base, "_"); idx >= 0 {
+		suffix := base[idx+1:]
+		if len(suffix) == sessionFileHashLen && isHex(suffix) {
+			stripped := base[:idx]
+			if strings.HasSuffix(stripped, "_ws") {
+				stripped = strings.TrimSuffix(stripped, "_ws")
+			}
+			return stripped
+		}
+	}
+	return base
+}
+
 func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 	sessionsDir := filepath.Join(dataDir, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
@@ -137,7 +176,7 @@ func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 			continue
 		}
 
-		project := strings.TrimSuffix(entry.Name(), ".json")
+		project := extractProjectFromFilename(entry.Name())
 		filePath := filepath.Join(sessionsDir, entry.Name())
 
 		data, err := os.ReadFile(filePath)
