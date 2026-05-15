@@ -346,6 +346,45 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 }
 
+// TestMgmt_SessionsConcurrentNameWriteAndList pins the bug where the
+// POST /sessions handler wrote s.Name = body.Name directly without
+// holding s.mu, while the GET handler reads s.Name through s.mu.Lock().
+// Run with -race to detect the data race; with the production fix
+// the test stays clean.
+func TestMgmt_SessionsConcurrentNameWriteAndList(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	// Pre-create the session so both handlers operate on the same instance.
+	e.sessions.GetOrCreateActive("user1")
+
+	listURL := ts.URL + "/api/v1/projects/test-project/sessions"
+	postURL := listURL
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := "a"
+			if i%2 == 0 {
+				name = "b"
+			}
+			_ = mgmtPost(t, postURL, "tok", map[string]string{
+				"session_key": "user1",
+				"name":        name,
+			})
+		}(i)
+	}
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = mgmtGet(t, listURL, "tok")
+		}()
+	}
+	wg.Wait()
+}
+
 func TestMgmt_SessionDelete(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 
