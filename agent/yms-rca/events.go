@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -282,7 +281,6 @@ func (s *session) handleMessageEnd(raw map[string]any) {
 		clean := collapseBlankLines(stripANSI(text))
 		switch customType {
 		case "yms-command":
-			clean = s.adaptCommandTextForPlatform(clean)
 			if display && clean != "" {
 				s.emit(core.Event{Type: core.EventText, Content: clean})
 			}
@@ -475,14 +473,6 @@ func (s *session) currentMode() string {
 	s.confirmMu.Lock()
 	defer s.confirmMu.Unlock()
 	return s.mode
-}
-
-func (s *session) adaptCommandTextForPlatform(text string) string {
-	platform, _ := s.currentPromptPlatform.Load().(string)
-	if strings.EqualFold(platform, "youzone") {
-		return stripKeyboardKeysFromYMSHelp(text)
-	}
-	return text
 }
 
 // ── tool de-dup ────────────────────────────────────────────

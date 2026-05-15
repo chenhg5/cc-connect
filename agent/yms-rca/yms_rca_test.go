@@ -293,6 +293,91 @@ func TestAgent_Accessors(t *testing.T) {
 	}
 }
 
+func TestAgent_SetSessionEnvDefaultsYMSRCASurfaceToChat(t *testing.T) {
+	unsetEnvForTest(t, "YMS_RCA_SURFACE")
+	a, err := New(map[string]any{"cmd": "/bin/sh", "work_dir": "/tmp/x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	agent := a.(*Agent)
+	agent.SetSessionEnv([]string{
+		"CC_PROJECT=demo",
+		"CC_SESSION_KEY=youzone:conv:user",
+	})
+	agent.mu.Lock()
+	extraEnv := append([]string(nil), agent.sessionEnv...)
+	agent.mu.Unlock()
+	env := buildSessionEnv(extraEnv)
+	if got := envValue(env, "YMS_RCA_SURFACE"); got != "chat" {
+		t.Fatalf("YMS_RCA_SURFACE = %q, want chat", got)
+	}
+}
+
+func TestAgent_SetSessionEnvKeepsExplicitYMSRCASurface(t *testing.T) {
+	a, err := New(map[string]any{"cmd": "/bin/sh", "work_dir": "/tmp/x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	agent := a.(*Agent)
+	agent.SetSessionEnv([]string{
+		"CC_PROJECT=demo",
+		"YMS_RCA_SURFACE=terminal",
+	})
+	agent.mu.Lock()
+	extraEnv := append([]string(nil), agent.sessionEnv...)
+	agent.mu.Unlock()
+	env := buildSessionEnv(extraEnv)
+	if got := envValue(env, "YMS_RCA_SURFACE"); got != "terminal" {
+		t.Fatalf("YMS_RCA_SURFACE = %q, want terminal", got)
+	}
+}
+
+func TestAgent_SetSessionEnvPreservesProcessYMSRCASurfaceWhenBuildingSessionEnv(t *testing.T) {
+	t.Setenv("YMS_RCA_SURFACE", "terminal")
+	a, err := New(map[string]any{"cmd": "/bin/sh", "work_dir": "/tmp/x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	agent := a.(*Agent)
+	agent.SetSessionEnv([]string{
+		"CC_PROJECT=demo",
+		"CC_SESSION_KEY=youzone:conv:user",
+	})
+	agent.mu.Lock()
+	extraEnv := append([]string(nil), agent.sessionEnv...)
+	agent.mu.Unlock()
+
+	env := buildSessionEnv(extraEnv)
+	if got := envValue(env, "YMS_RCA_SURFACE"); got != "terminal" {
+		t.Fatalf("YMS_RCA_SURFACE = %q, want terminal", got)
+	}
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	oldValue, hadOldValue := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if hadOldValue {
+			_ = os.Setenv(key, oldValue)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return ""
+}
+
 // Regression for code-review MEDIUM: yms-rca has many constructor-only
 // fields (cmd, provider, thinking, session_dir, offline,
 // confirm_timeout_secs). Without WorkspaceAgentOptions, the engine would

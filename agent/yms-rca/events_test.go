@@ -266,7 +266,7 @@ func TestHandleEvent_CustomYmsCommandStrips(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_YouZoneHelpOmitsKeyboardKeys(t *testing.T) {
+func TestHandleEvent_YouZoneHelpDoesNotRewriteCommandText(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	if err := s.Send("[cc-connect sender_id=user-1 platform=youzone chat_id=conv-1]\n/help", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -298,15 +298,12 @@ func TestHandleEvent_YouZoneHelpOmitsKeyboardKeys(t *testing.T) {
 	if len(evts) == 0 || evts[0].Type != core.EventText {
 		t.Fatalf("got %+v", evts)
 	}
-	if strings.Contains(evts[0].Content, "\nKeys:") || strings.Contains(evts[0].Content, "Ctrl+C") || strings.Contains(evts[0].Content, "Esc") {
-		t.Fatalf("YouZone help should omit keyboard-only keys, got:\n%s", evts[0].Content)
-	}
-	if !strings.Contains(evts[0].Content, "\nShortcuts:") || !strings.Contains(evts[0].Content, "!   Run shell command") || !strings.Contains(evts[0].Content, "#[tool]") {
-		t.Fatalf("YouZone help should keep text shortcuts, got:\n%s", evts[0].Content)
+	if evts[0].Content != help {
+		t.Fatalf("YouZone yms-command text should not be rewritten by cc-connect.\nwant:\n%s\ngot:\n%s", help, evts[0].Content)
 	}
 }
 
-func TestHandleEvent_NonYouZoneHelpKeepsKeyboardKeys(t *testing.T) {
+func TestHandleEvent_NonYouZoneHelpDoesNotRewriteCommandText(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	if err := s.Send("[cc-connect sender_id=user-1 platform=feishu chat_id=conv-1]\n/help", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -336,8 +333,8 @@ func TestHandleEvent_NonYouZoneHelpKeepsKeyboardKeys(t *testing.T) {
 	if len(evts) == 0 || evts[0].Type != core.EventText {
 		t.Fatalf("got %+v", evts)
 	}
-	if !strings.Contains(evts[0].Content, "\nKeys:") || !strings.Contains(evts[0].Content, "Esc") {
-		t.Fatalf("non-YouZone help should keep keyboard keys, got:\n%s", evts[0].Content)
+	if evts[0].Content != help {
+		t.Fatalf("non-YouZone yms-command text should not be rewritten by cc-connect.\nwant:\n%s\ngot:\n%s", help, evts[0].Content)
 	}
 }
 
