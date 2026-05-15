@@ -365,6 +365,7 @@ cc-connect update --pre     # 含预发布版本
 | 微博 | [docs/weibo.md](docs/weibo.md) | WebSocket | 不需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
 | 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink） | 不需要 |
+| 大象 Bridge | [docs/daxiang.md](docs/daxiang.md) | WebSocket | 取决于 bridge 部署 |
 | QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
 
 

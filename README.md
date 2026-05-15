@@ -365,6 +365,7 @@ cc-connect update --pre     # Include pre-releases
 | Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
 | Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
+| Daxiang Bridge | [docs/daxiang.md](docs/daxiang.md) | WebSocket | Depends on bridge deployment |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
 
 
