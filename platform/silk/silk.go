@@ -516,7 +516,8 @@ var (
 	modelAliasLineRe = regexp.MustCompile(`^(>\s*)?\d+\.\s+(\S+)\s+-\s+(\S+)\s*$`)
 	// Regular lines use em-dash " — " only before optional description.
 	modelLineRe      = regexp.MustCompile(`^(>\s*)?\d+\.\s+(.+?)(?:\s*—\s*(.+))?\s*$`)
-	modelCurrentRe   = regexp.MustCompile(`(?:Current model|当前模型|當前模型|現在のモデル):\s*(\S+)`)
+	// Require a real model id (letter-first); skip "(未设置...)" / "(not set...)" default lines.
+	modelCurrentRe = regexp.MustCompile(`(?:Current model|当前模型|當前模型|現在のモデル):\s*([a-zA-Z][a-zA-Z0-9._\[\]-]*)`)
 )
 
 func parseModelResponse(text string) (current string, models []map[string]string) {
