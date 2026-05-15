@@ -727,7 +727,10 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 
 	isGroupChat := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
 	threadID := 0
-	if msg.Chat.IsForum || !isGroupChat {
+	// IsForum is not reliably present in the Chat object embedded in a CallbackQuery
+	// message. Use MessageThreadID directly: non-zero means we're in a forum topic,
+	// zero means a regular group (no topic isolation needed).
+	if !isGroupChat || msg.MessageThreadID != 0 {
 		threadID = msg.MessageThreadID
 	}
 	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
