@@ -1416,6 +1416,46 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Using tmux / 使用 tmux (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: tmux — https://github.com/tmux/tmux
+# Attaches to a named tmux session and routes messages as shell commands.
+# Output is captured by polling capture-pane; done is detected via shell prompt.
+#
+# [[projects]]
+# name = "my-tmux-project"
+#
+# [projects.agent]
+# type = "tmux"
+#
+# [projects.agent.options]
+# session = "mywork"           # tmux session name (required)
+# pane = "0"                   # pane target within the session (default: "0")
+# work_dir = "/path/to/dir"    # working directory when auto-creating the session
+# auto_create = true           # create session if it doesn't exist (default: true)
+# shell = ""                   # shell to use when creating a new session (default: system default)
+# init_command = ""            # command to run once when a NEW session is created (e.g. "claude")
+# startup_wait_ms = 2000       # milliseconds to wait after init_command before accepting messages (default: 2000 when init_command is set)
+# prompt_pattern = '[\$#>%]\s*$'  # regex to detect shell prompt = command done (default shown)
+# poll_interval_ms = 200       # output poll interval in milliseconds (default: 200)
+#
+# --- Running Claude Code inside tmux ---
+# Set init_command to start claude automatically; adjust prompt_pattern to match
+# Claude Code's input prompt ("> ") rather than a shell prompt:
+#
+# session = "claude-work"
+# work_dir = "/path/to/project"
+# init_command = "claude --dangerously-skip-permissions"
+# startup_wait_ms = 3000
+# prompt_pattern = '>\s*$'
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: OpenCode CLI — https://github.com/opencode-ai/opencode

@@ -2668,11 +2668,14 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create a new agent instance with this workspace's work_dir
 	opts := make(map[string]any)
+	// Let the agent seed its own base options (e.g. tmux session name)
 	if snapshotter, ok := e.agent.(WorkspaceAgentOptionSnapshotter); ok {
 		for k, v := range snapshotter.WorkspaceAgentOptions() {
 			opts[k] = v
 		}
 	}
+
+	// workspace-specific overrides always win
 	opts["work_dir"] = workspace
 
 	// Copy model from original agent if possible
