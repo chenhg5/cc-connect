@@ -605,6 +605,7 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # name = "claude-multi"
 # mode = "multi-workspace"
+# skip_git = true # skip bind git repo, create a dir directly
 # base_dir = "~/workspace"
 # workspace_init_allow_local_paths = true  # Optional: allow /workspace init <local-dir>; default false keeps init git-URL only
 #
@@ -1070,6 +1071,9 @@ app_secret = "your-feishu-app-secret"
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
 # group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
+# group_reply_all_guilds = ""  # Comma-separated guild IDs where group_reply_all is active (overrides group_reply_all)
+#                              # e.g. "123456789012345678,987654321098765432"; takes precedence over group_reply_all
+#                              # 逗号分隔的服务器 ID，仅在这些服务器无需 @ 也响应（优先于 group_reply_all）
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话

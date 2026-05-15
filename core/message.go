@@ -165,6 +165,7 @@ type Message struct {
 	Platform     string
 	MessageID    string // platform message ID for tracing
 	Recalled     bool   // true for platform message recall/delete events targeting MessageID
+	ChannelID    string
 	UserID       string
 	UserName     string
 	ChatName     string // human-readable chat/group name (optional)

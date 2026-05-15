@@ -319,6 +319,9 @@ func main() {
 					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
 				}
 			}
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
