@@ -1057,6 +1057,137 @@ func TestHandleMessageSinglePhotoDispatchesImmediately(t *testing.T) {
 	}
 }
 
+func TestHandleMessageStickerDispatchesMCPTextOnly(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	p := &Platform{
+		token:         "token",
+		httpClient:    &http.Client{},
+		groupReplyAll: true,
+	}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg
+	}
+	stubBot := newStubTelegramBot()
+	p.bot = stubBot
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), &models.Message{
+		ID:   22,
+		Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate},
+		Sticker: &models.Sticker{
+			FileID:       "sticker-file-id",
+			FileUniqueID: "sticker-unique-id",
+			Emoji:        "\U0001f608",
+		},
+	})
+
+	select {
+	case got := <-handled:
+		if !strings.Contains(got.Content, "[Telegram sticker]") {
+			t.Fatalf("Content = %q, want sticker marker", got.Content)
+		}
+		if !strings.Contains(got.Content, "emoji: \U0001f608") {
+			t.Fatalf("Content = %q, want emoji", got.Content)
+		}
+		if !strings.Contains(got.Content, "file_id: sticker-file-id") {
+			t.Fatalf("Content = %q, want file_id", got.Content)
+		}
+		if strings.Contains(got.Content, "sticker-unique-id") {
+			t.Fatalf("Content = %q, must not contain file_unique_id", got.Content)
+		}
+		if !strings.Contains(got.Content, "download_sticker(file_id, emoji)") {
+			t.Fatalf("Content = %q, want MCP tool hint", got.Content)
+		}
+		if len(got.Images) != 0 {
+			t.Fatalf("Images len = %d, want 0", len(got.Images))
+		}
+		if len(got.Files) != 0 {
+			t.Fatalf("Files len = %d, want 0", len(got.Files))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sticker message not handled")
+	}
+
+	if calls := stubBot.GetFileCallCount(); calls != 0 {
+		t.Fatalf("GetFile calls = %d, want 0", calls)
+	}
+}
+
+func TestHandleMessageStickerWithoutEmojiDispatchesFileID(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	p := &Platform{
+		token:         "token",
+		httpClient:    &http.Client{},
+		groupReplyAll: true,
+	}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg
+	}
+	p.bot = newStubTelegramBot()
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), &models.Message{
+		ID:   23,
+		Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate},
+		Sticker: &models.Sticker{
+			FileID: "sticker-file-id",
+		},
+	})
+
+	select {
+	case got := <-handled:
+		if !strings.Contains(got.Content, "[Telegram sticker]") {
+			t.Fatalf("Content = %q, want sticker marker", got.Content)
+		}
+		if !strings.Contains(got.Content, "emoji: \n") {
+			t.Fatalf("Content = %q, want empty emoji field", got.Content)
+		}
+		if !strings.Contains(got.Content, "file_id: sticker-file-id") {
+			t.Fatalf("Content = %q, want file_id", got.Content)
+		}
+		if len(got.Images) != 0 {
+			t.Fatalf("Images len = %d, want 0", len(got.Images))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sticker message not handled")
+	}
+}
+
+func TestHandleMessageGroupStickerRequiresDirection(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	p := &Platform{
+		token:         "token",
+		httpClient:    &http.Client{},
+		groupReplyAll: false,
+	}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg
+	}
+	p.bot = newStubTelegramBot()
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), &models.Message{
+		ID:   24,
+		Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{ID: 100, Type: models.ChatTypeGroup, Title: "group"},
+		Sticker: &models.Sticker{
+			FileID: "sticker-file-id",
+			Emoji:  "\U0001f608",
+		},
+	})
+
+	select {
+	case got := <-handled:
+		t.Fatalf("unexpected sticker dispatch without direction: %+v", got)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
 func TestHandleMessageMediaGroupsDoNotMix(t *testing.T) {
 	handled := make(chan *core.Message, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
