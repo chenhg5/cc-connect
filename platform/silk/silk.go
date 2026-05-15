@@ -510,10 +510,13 @@ func parseModeResponse(text string) (current string, modes []map[string]string) 
 // engine's /model text response.
 // Header: "当前模型: model_name" or "Current model: model_name"
 // Lines: "> 1. model_name — description" (current) or "  1. model_name — desc"
-// Alias: "> 1. alias - model_name"
+// Alias: "> 1. alias - model_name" (ASCII hyphen with spaces, not em-dash)
 var (
-	modelLineRe    = regexp.MustCompile(`^(>\s*)?\d+\.\s+(\S+?)(?:\s*[-—]\s*(.+?))?\s*$`)
-	modelCurrentRe = regexp.MustCompile(`(?:Current model|当前模型|當前模型|現在のモデル):\s*([a-zA-Z]\S+)`)
+	// Alias lines use " - " between short label and full model id.
+	modelAliasLineRe = regexp.MustCompile(`^(>\s*)?\d+\.\s+(\S+)\s+-\s+(\S+)\s*$`)
+	// Regular lines use em-dash " — " only before optional description.
+	modelLineRe      = regexp.MustCompile(`^(>\s*)?\d+\.\s+(.+?)(?:\s*—\s*(.+))?\s*$`)
+	modelCurrentRe   = regexp.MustCompile(`(?:Current model|当前模型|當前模型|現在のモデル):\s*(\S+)`)
 )
 
 func parseModelResponse(text string) (current string, models []map[string]string) {
@@ -524,14 +527,24 @@ func parseModelResponse(text string) (current string, models []map[string]string
 		line = strings.TrimSpace(line)
 		if m := modelCurrentRe.FindStringSubmatch(line); m != nil {
 			current = m[1]
-		}
-		m := modelLineRe.FindStringSubmatch(line)
-		if m == nil {
 			continue
 		}
-		isCurrent := strings.TrimSpace(m[1]) == ">"
-		name := m[2]
-		desc := strings.TrimSpace(m[3])
+		var isCurrent bool
+		var name, desc string
+		if m := modelAliasLineRe.FindStringSubmatch(line); m != nil {
+			isCurrent = strings.TrimSpace(m[1]) == ">"
+			name = m[3]
+			desc = m[2] // alias as short description
+		} else if m := modelLineRe.FindStringSubmatch(line); m != nil {
+			isCurrent = strings.TrimSpace(m[1]) == ">"
+			name = strings.TrimSpace(m[2])
+			desc = strings.TrimSpace(m[3])
+		} else {
+			continue
+		}
+		if name == "" {
+			continue
+		}
 		models = append(models, map[string]string{"name": name, "desc": desc})
 		if isCurrent && current == "" {
 			current = name
