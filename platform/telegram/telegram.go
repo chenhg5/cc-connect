@@ -408,6 +408,18 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 	botName := p.botUsername()
 
+	if msg.Sticker != nil {
+		p.dispatchMessage(&core.Message{
+			SessionKey: sessionKey, Platform: "telegram",
+			UserID: userID, UserName: userName, ChatName: chatName,
+			Content:    formatStickerMCPContent(msg.Sticker),
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			ReplyCtx:   rctx,
+		}, msg)
+		return
+	}
+
 	if len(msg.Photo) > 0 {
 		best := msg.Photo[len(msg.Photo)-1]
 		imgData, err := p.downloadFile(best.FileID)
@@ -745,6 +757,18 @@ func stripBotMention(text, botName string) string {
 	}
 	text = strings.ReplaceAll(text, "@"+botName, "")
 	return strings.TrimSpace(text)
+}
+
+func formatStickerMCPContent(sticker *models.Sticker) string {
+	if sticker == nil {
+		return "[Telegram sticker]\nemoji: \nfile_id: \nUse the sticker MCP tool download_sticker(file_id, emoji) to view it as an image."
+	}
+
+	return fmt.Sprintf(
+		"[Telegram sticker]\nemoji: %s\nfile_id: %s\nUse the sticker MCP tool download_sticker(file_id, emoji) to view it as an image.",
+		strings.TrimSpace(sticker.Emoji),
+		strings.TrimSpace(sticker.FileID),
+	)
 }
 
 func (p *Platform) getNewBot() botFactory {
