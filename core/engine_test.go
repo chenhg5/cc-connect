@@ -3165,6 +3165,154 @@ func TestCmdSwitch_ProjectGroupRowDoesNotUseStaleFlatIndex(t *testing.T) {
 	}
 }
 
+func TestCmdSwitch_UsesGroupedVisibleIndexAfterName(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "group-1a", Summary: "Group 1 A", MessageCount: 3, ModifiedAt: now},
+		{ID: "group-1b", Summary: "Group 1 B", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "group-2a", Summary: "Group 2 A", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+		{ID: "group-2b", Summary: "Group 2 B", MessageCount: 6, ModifiedAt: now.Add(-3 * time.Minute)},
+		{ID: "group-3a", Summary: "Group 3 A", MessageCount: 7, ModifiedAt: now.Add(-4 * time.Minute)},
+		{ID: "group-3b", Summary: "Group 3 B", MessageCount: 8, ModifiedAt: now.Add(-5 * time.Minute)},
+		{ID: "group-4a", Summary: "Group 4 A", MessageCount: 9, ModifiedAt: now.Add(-6 * time.Minute)},
+		{ID: "group-5a", Summary: "Group 5 A", MessageCount: 10, ModifiedAt: now.Add(-7 * time.Minute)},
+		{ID: "group-6a", Summary: "Group 6 A", MessageCount: 11, ModifiedAt: now.Add(-8 * time.Minute)},
+		{ID: "ungrouped-a", Summary: "Sticker handling research", MessageCount: 23, ModifiedAt: now.Add(-9 * time.Minute)},
+		{ID: "ungrouped-b", Summary: "Server project groups sync", MessageCount: 75, ModifiedAt: now.Add(-10 * time.Minute)},
+		{ID: "ungrouped-c", Summary: "Restore cc-connect server", MessageCount: 29, ModifiedAt: now.Add(-11 * time.Minute)},
+		{ID: "ungrouped-d", Summary: "Clean local ghost sessions", MessageCount: 18, ModifiedAt: now.Add(-12 * time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	projectDir := t.TempDir()
+
+	for _, item := range []struct {
+		id      string
+		project string
+	}{
+		{"group-1a", "Project 1"}, {"group-1b", "Project 1"},
+		{"group-2a", "Project 2"}, {"group-2b", "Project 2"},
+		{"group-3a", "Project 3"}, {"group-3b", "Project 3"},
+		{"group-4a", "Project 4"},
+		{"group-5a", "Project 5"},
+		{"group-6a", "Project 6"},
+	} {
+		s := e.sessions.NewSession(userKey, "")
+		s.SetAgentSessionID(item.id, "stub")
+		if _, err := e.sessions.SwitchSession(userKey, s.ID); err != nil {
+			t.Fatal(err)
+		}
+		e.sessions.SetActiveSessionProject(userKey, item.project, filepath.Join(projectDir, item.project))
+	}
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"7"})
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped-a" {
+		t.Fatalf("/switch 7 active = %q, want ungrouped-a", got)
+	}
+
+	e.cmdName(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"TG贴纸处理"})
+	e.cmdCurrent(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"})
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped-a" {
+		t.Fatalf("/current flow active = %q, want ungrouped-a", got)
+	}
+
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"10"})
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped-d" {
+		t.Fatalf("/switch 10 active = %q, want grouped visible row 10 ungrouped-d", got)
+	}
+}
+
+func TestCmdSwitch_ProjectGroupsUseVisibleIndexWithoutRecentListState(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "group-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "group-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "ungrouped", Summary: "Ungrouped visible row", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("group-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	s2 := e.sessions.NewSession(userKey, "")
+	s2.SetAgentSessionID("group-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	if _, err := e.sessions.SwitchSession(userKey, active.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"2"})
+
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped" {
+		t.Fatalf("/switch 2 without list state active = %q, want ungrouped", got)
+	}
+}
+
+func TestRenderGroupedListCard_UsesVisibleSwitchIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "group-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "group-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "ungrouped", Summary: "Ungrouped visible row", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{&stubPlatformEngine{n: "card"}}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("group-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	s2 := e.sessions.NewSession(userKey, "")
+	s2.SetAgentSessionID("group-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+
+	card, err := e.renderListCard(userKey, 1)
+	if err != nil {
+		t.Fatalf("renderListCard: %v", err)
+	}
+	if _, ok := findCardAction(card, "act:/switch 2"); !ok {
+		t.Fatalf("grouped list card should switch ungrouped visible row 2; card:\n%s", card.RenderText())
+	}
+	if _, ok := findCardAction(card, "act:/switch 3"); ok {
+		t.Fatalf("grouped list card should not use flat index 3 for visible row 2; card:\n%s", card.RenderText())
+	}
+}
+
+func TestRenderProjectListCard_UsesProjectVisibleSwitchIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "ungrouped", Summary: "Ungrouped first", MessageCount: 5, ModifiedAt: now},
+		{ID: "group-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "group-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{&stubPlatformEngine{n: "card"}}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("group-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	s2 := e.sessions.NewSession(userKey, "")
+	s2.SetAgentSessionID("group-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+
+	card := e.renderProjectListCard(userKey, "Project")
+	if _, ok := findCardAction(card, "act:/switch 2"); !ok {
+		t.Fatalf("project list card should switch project visible row 2; card:\n%s", card.RenderText())
+	}
+	if _, ok := findCardAction(card, "act:/switch 3"); ok {
+		t.Fatalf("project list card should not use flat index 3 for project row 2; card:\n%s", card.RenderText())
+	}
+}
+
 func TestCmdProject_ChineseCopyAndMenuDescription(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	baseDir := t.TempDir()
