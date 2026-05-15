@@ -6,8 +6,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -712,13 +714,17 @@ func (p *Platform) Stop() error {
 // --- Crypto helpers ---
 
 // verifySignature checks SHA1(sort(token, timestamp, nonce, encrypt)).
+// The comparison uses subtle.ConstantTimeCompare to match the
+// constant-time credential check pattern used by core/webhook.go,
+// core/bridge.go, core/management.go, and platform/max — wecom was
+// the only signature path doing a plain string equality.
 func (p *Platform) verifySignature(expected, timestamp, nonce, encrypt string) bool {
 	parts := []string{p.token, timestamp, nonce, encrypt}
 	sort.Strings(parts)
 	h := sha1.New()
 	h.Write([]byte(strings.Join(parts, "")))
-	got := fmt.Sprintf("%x", h.Sum(nil))
-	return got == expected
+	got := hex.EncodeToString(h.Sum(nil))
+	return subtle.ConstantTimeCompare([]byte(got), []byte(expected)) == 1
 }
 
 // decodeAESKey converts the 43-char Base64 EncodingAESKey to 32 bytes.
