@@ -25,10 +25,11 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook  string
-	conversationId  string
-	senderStaffId   string
-	messageId       string // inbound message ID for emotion reactions
+	sessionWebhook string
+	conversationId string
+	senderStaffId  string
+	messageId      string   // inbound message ID for emotion reactions
+	mentionIDs     []string // non-empty = enable @mention with text type highlighting
 }
 
 type downloadResponse struct {
@@ -252,6 +253,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 				conversationId: data.ConversationId,
 				senderStaffId:  data.SenderStaffId,
 				messageId:      data.MsgId,
+				mentionIDs:     buildMentionIDs(data.ConversationType, data.SenderStaffId, data.Content),
 			},
 		}
 		p.handler(p, msg)
@@ -278,6 +280,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
 			messageId:       data.MsgId,
+			mentionIDs:      buildMentionIDs(data.ConversationType, data.SenderStaffId, data.Content),
 		},
 	}
 
@@ -307,6 +310,67 @@ func extractRichText(content interface{}) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// extractMentionUIDs parses @mention user IDs from DingTalk richText content.
+// In DingTalk group chats, when a user @mentions someone, the richText element
+// contains attrs with a "uid" field holding the target user's staff ID.
+// Example: {"text":"@曾彬","attrs":{"uid":"staff456"}}
+func extractMentionUIDs(content interface{}) []string {
+	m, ok := content.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	parts, ok := m["richText"].([]interface{})
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var ids []string
+	for _, part := range parts {
+		item, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		attrs, ok := item["attrs"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		uid, ok := attrs["uid"].(string)
+		if !ok || uid == "" {
+			continue
+		}
+		if seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		ids = append(ids, uid)
+	}
+	return ids
+}
+
+// buildMentionIDs returns the user IDs to @mention in a group chat reply.
+// Includes the sender and any users explicitly @mentioned in the message.
+// Returns nil for DMs where @highlighting is unnecessary.
+func buildMentionIDs(conversationType, senderStaffID string, content interface{}) []string {
+	if conversationType != "2" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var ids []string
+	// Always include the sender.
+	if senderStaffID != "" && !seen[senderStaffID] {
+		seen[senderStaffID] = true
+		ids = append(ids, senderStaffID)
+	}
+	// Extract @mentioned users from richText content.
+	for _, uid := range extractMentionUIDs(content) {
+		if uid != "" && !seen[uid] {
+			seen[uid] = true
+			ids = append(ids, uid)
+		}
+	}
+	return ids
 }
 
 func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
@@ -615,6 +679,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	//   2) Result card: create a new card with the final response
 	//      content (finalize=true), delivered as a single complete
 	//      message.
+	// Process card finalization: always close the streaming process card
+	// if one exists, regardless of whether we'll create a result card or
+	// use webhook text for the final reply.
 	if p.cardTemplateID != "" {
 		if outTrackID := p.getActiveCard(rc.conversationId); outTrackID != "" {
 			// Stop the process card's stream pusher.
@@ -633,65 +700,120 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 				_ = p.streamCardContent(ctx, outTrackID, token, lastProcessContent, true)
 			}
 
-			// Create the result card with the final reply content.
-			mc := p.msgContextFor(rc.conversationId)
-			if mc == nil {
-				mc = &msgContext{
-					conversationId:   rc.conversationId,
-					senderStaffId:    rc.senderStaffId,
-					messageId:        rc.messageId,
-					conversationType: "1",
+			// Result card: only create AI Card when @mention is not needed.
+			// AI Cards do not support @highlighting, so in group chats
+			// we fall through to webhook text for the final reply.
+			if len(rc.mentionIDs) == 0 {
+				mc := p.msgContextFor(rc.conversationId)
+				if mc == nil {
+					mc = &msgContext{
+						conversationId:   rc.conversationId,
+						senderStaffId:    rc.senderStaffId,
+						messageId:        rc.messageId,
+						conversationType: "1",
+					}
 				}
+				_, err = p.createAndStreamCard(ctx, mc, content, true)
+				if err == nil {
+					p.fireDoneReaction(rc.conversationId)
+					return nil
+				}
+				slog.Warn("dingtalk: result card failed, falling back to webhook", "error", err)
 			}
-			_, err = p.createAndStreamCard(ctx, mc, content, true)
-			if err == nil {
-				p.fireDoneReaction(rc.conversationId)
-				return nil
-			}
-			slog.Warn("dingtalk: result card failed, falling back to webhook", "error", err)
 		} else {
-			// No process card — create a standalone result card.
-			mc := p.msgContextFor(rc.conversationId)
-			if mc == nil {
-				mc = &msgContext{
-					conversationId:   rc.conversationId,
-					senderStaffId:    rc.senderStaffId,
-					messageId:        rc.messageId,
-					conversationType: "1",
+			// No process card — create a standalone result card, but
+			// only when @mention is not needed.
+			if len(rc.mentionIDs) == 0 {
+				mc := p.msgContextFor(rc.conversationId)
+				if mc == nil {
+					mc = &msgContext{
+						conversationId:   rc.conversationId,
+						senderStaffId:    rc.senderStaffId,
+						messageId:        rc.messageId,
+						conversationType: "1",
+					}
 				}
+				_, err := p.createAndStreamCard(ctx, mc, content, true)
+				if err == nil {
+					p.fireDoneReaction(rc.conversationId)
+					return nil
+				}
+				slog.Warn("dingtalk: AI Card failed, falling back to webhook", "error", err)
 			}
-			_, err := p.createAndStreamCard(ctx, mc, content, true)
-			if err == nil {
-				p.fireDoneReaction(rc.conversationId)
-				return nil
-			}
-			slog.Warn("dingtalk: AI Card failed, falling back to webhook", "error", err)
 		}
 	}
 
-	payload := map[string]any{
-		"msgtype":  "markdown",
-		"markdown": map[string]string{"title": "reply", "text": content},
+	// Build webhook payload. When the final reply carries the
+	// END_OF_CONVERSATION marker, send two messages:
+	//   1) A text message with @mention for notification.
+	//   2) The actual content as markdown (marker stripped).
+	// All other messages (progress updates, intermediate replies) use
+	// markdown without @mention.
+	var payload map[string]any
+	// Check if the last 100 chars contain a marker that warrants @mention.
+	tail := content
+	if len(tail) > 100 {
+		tail = tail[len(tail)-100:]
 	}
+	atMarker := ""
+	if strings.Contains(tail, "END_OF_CONVERSATION") {
+		atMarker = "END_OF_CONVERSATION"
+	} else if strings.Contains(tail, "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有") {
+		atMarker = "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有"
+	}
+	if len(rc.mentionIDs) > 0 && atMarker != "" {
+		// Strip the marker for the markdown content.
+		markdownContent := strings.Replace(content, atMarker, "", 1)
+		markdownContent = strings.TrimSpace(markdownContent)
+
+		// 1. Send a standalone text message for @mention notification.
+		var mentionText strings.Builder
+		for _, id := range rc.mentionIDs {
+			mentionText.WriteString(" @" + id)
+		}
+		mentionPayload := map[string]any{
+			"msgtype": "text",
+			"text":    map[string]string{"content": mentionText.String()},
+			"at": map[string]any{
+				"atMobiles": []string{},
+				"atUserIds": rc.mentionIDs,
+				"isAtAll":   false,
+			},
+		}
+		_ = p.sendWebhookMessage(ctx, rc.sessionWebhook, mentionPayload)
+
+		// 2. Send the actual content as markdown.
+		payload = map[string]any{
+			"msgtype":  "markdown",
+			"markdown": map[string]string{"title": "reply", "text": markdownContent},
+		}
+	} else {
+		payload = map[string]any{
+			"msgtype":  "markdown",
+			"markdown": map[string]string{"title": "reply", "text": content},
+		}
+	}
+	return p.sendWebhookMessage(ctx, rc.sessionWebhook, payload)
+}
+
+// sendWebhookMessage marshals and POSTs a payload to the DingTalk session webhook.
+func (p *Platform) sendWebhookMessage(ctx context.Context, webhook string, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("dingtalk: marshal reply: %w", err)
+		return fmt.Errorf("dingtalk: marshal payload: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("dingtalk: send reply: %w", err)
+		return fmt.Errorf("dingtalk: send message: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
+		return fmt.Errorf("dingtalk: webhook returned status %d", resp.StatusCode)
 	}
 	return nil
 }

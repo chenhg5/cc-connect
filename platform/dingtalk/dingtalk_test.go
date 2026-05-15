@@ -216,3 +216,140 @@ func TestExtractRichText(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractMentionUIDs(t *testing.T) {
+	tests := []struct {
+		name    string
+		content interface{}
+		want    []string
+	}{
+		{
+			name:    "nil content",
+			content: nil,
+			want:    nil,
+		},
+		{
+			name:    "non-map content",
+			content: "not a map",
+			want:    nil,
+		},
+		{
+			name: "single @mention",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "@曾彬", "attrs": map[string]interface{}{"uid": "staff123"}},
+				},
+			},
+			want: []string{"staff123"},
+		},
+		{
+			name: "multiple @mentions",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "@张三", "attrs": map[string]interface{}{"uid": "staff001"}},
+					map[string]interface{}{"text": " hello "},
+					map[string]interface{}{"text": "@李四", "attrs": map[string]interface{}{"uid": "staff002"}},
+				},
+			},
+			want: []string{"staff001", "staff002"},
+		},
+		{
+			name: "duplicate @mentions deduplicated",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "@张三", "attrs": map[string]interface{}{"uid": "staff001"}},
+					map[string]interface{}{"text": "@张三", "attrs": map[string]interface{}{"uid": "staff001"}},
+				},
+			},
+			want: []string{"staff001"},
+		},
+		{
+			name: "text without @mention ignored",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "plain text"},
+				},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractMentionUIDs(tt.content)
+			if len(got) != len(tt.want) {
+				t.Errorf("extractMentionUIDs() len = %d, want %d, got = %v, want = %v",
+					len(got), len(tt.want), got, tt.want)
+				return
+			}
+			for i, id := range got {
+				if id != tt.want[i] {
+					t.Errorf("extractMentionUIDs()[%d] = %q, want %q", i, id, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestBuildMentionIDs(t *testing.T) {
+	tests := []struct {
+		name             string
+		conversationType string
+		senderStaffID    string
+		content          interface{}
+		want             []string
+	}{
+		{
+			name:             "DM returns nil",
+			conversationType: "1",
+			senderStaffID:    "staff001",
+			content:          nil,
+			want:             nil,
+		},
+		{
+			name:             "group chat with sender only",
+			conversationType: "2",
+			senderStaffID:    "staff001",
+			content:          map[string]interface{}{"text": map[string]interface{}{"content": "hello"}},
+			want:             []string{"staff001"},
+		},
+		{
+			name:             "group chat with sender and @mentions",
+			conversationType: "2",
+			senderStaffID:    "staff001",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "@张三", "attrs": map[string]interface{}{"uid": "staff002"}},
+				},
+			},
+			want: []string{"staff001", "staff002"},
+		},
+		{
+			name:             "group chat sender same as @mention deduplicated",
+			conversationType: "2",
+			senderStaffID:    "staff001",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "@自己", "attrs": map[string]interface{}{"uid": "staff001"}},
+				},
+			},
+			want: []string{"staff001"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildMentionIDs(tt.conversationType, tt.senderStaffID, tt.content)
+			if len(got) != len(tt.want) {
+				t.Errorf("buildMentionIDs() len = %d, want %d, got = %v, want = %v",
+					len(got), len(tt.want), got, tt.want)
+				return
+			}
+			for i, id := range got {
+				if id != tt.want[i] {
+					t.Errorf("buildMentionIDs()[%d] = %q, want %q", i, id, tt.want[i])
+				}
+			}
+		})
+	}
+}
