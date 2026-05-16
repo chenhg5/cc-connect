@@ -91,6 +91,65 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	}
 }
 
+// TestHandleRelay_UnblocksWhenAgentGoesSilent pins the bug where the
+// event loop used `for event := range agentSession.Events()`, so the
+// goroutine parked on the receive even after the relay context had
+// timed out. If the agent went silent (stuck tool call, slow upstream,
+// hung subprocess), the relay caller waited indefinitely past the
+// configured timeout. With the fix the loop selects on ctx.Done()
+// alongside the event channel, so a silent agent no longer blocks the
+// relay from returning. The agent process is left running by design;
+// drainRelaySession finishes the turn in the background.
+func TestHandleRelay_UnblocksWhenAgentGoesSilent(t *testing.T) {
+	e := newTestEngine()
+	session := newControllableSession("relay-session")
+	e.agent = &controllableAgent{nextSession: session}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	type relayResult struct {
+		resp string
+		err  error
+	}
+	done := make(chan relayResult, 1)
+	go func() {
+		resp, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+		done <- relayResult{resp: resp, err: err}
+	}()
+
+	// Emit a single text event before going completely silent. We do
+	// NOT send any event after the timeout — the production bug was
+	// exactly that the relay would hang waiting for one.
+	session.events <- Event{Type: EventText, Content: "partial response"}
+
+	// The relay must return within a generous bound: the underlying
+	// ctx deadline is 20ms, so HandleRelay should observe ctx.Done()
+	// within a few hundred ms even with scheduler jitter. Without the
+	// fix the goroutine parks on the channel receive forever.
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("HandleRelay() error = %v, want nil", got.err)
+		}
+		if got.resp != "partial response" {
+			t.Fatalf("HandleRelay() response = %q, want %q", got.resp, "partial response")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleRelay did not return after relay timeout while agent was silent")
+	}
+
+	// Unblock the background drain goroutine so it can close the
+	// session cleanly. (The drain has its own select-on-events; we
+	// still need to send something for it to consume.)
+	session.events <- Event{Type: EventResult, Content: "done"}
+	select {
+	case <-session.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background drain goroutine did not close the session")
+	}
+}
+
 func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	e := newTestEngine()
 	session := newControllableSession("relay-session")

@@ -12662,7 +12662,40 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	}
 
 	var textParts []string
-	for event := range agentSession.Events() {
+	events := agentSession.Events()
+	for {
+		// Use select so a timed-out relay context unblocks even when the
+		// agent has gone silent. Without this, `for event := range
+		// events` would park here past the relay deadline if the agent
+		// is stuck on a tool call, waiting on user input, or otherwise
+		// not emitting events — the relay caller would hang well beyond
+		// the configured relay timeout.
+		var (
+			event Event
+			ok    bool
+		)
+		select {
+		case event, ok = <-events:
+			if !ok {
+				// Event channel closed without EventResult.
+				agentSession.Close()
+				if ctx.Err() != nil {
+					return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+				}
+				if len(textParts) > 0 {
+					return strings.Join(textParts, ""), nil
+				}
+				return "", fmt.Errorf("relay: agent process exited without response")
+			}
+		case <-ctx.Done():
+			// Relay timed out (or was cancelled by the caller). Let the
+			// agent finish its turn in the background so the session
+			// state is saved cleanly and the session remains resumable
+			// for the next relay call.
+			go e.drainRelaySession(agentSession, session, relaySessionKey)
+			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+		}
+
 		switch event.Type {
 		case EventText:
 			if event.Content != "" {
@@ -12724,25 +12757,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			})
 		}
 		if ctx.Err() != nil {
-			// Relay timed out. Let the agent finish its turn in the
-			// background so the session state is saved cleanly and the
-			// session remains resumable for the next relay call.
+			// Relay timed out while we were processing this event. Same
+			// drain path as the select case above.
 			go e.drainRelaySession(agentSession, session, relaySessionKey)
 			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 	}
-
-	// Event channel closed without EventResult.
-	agentSession.Close()
-
-	if ctx.Err() != nil {
-		return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
-	}
-
-	if len(textParts) > 0 {
-		return strings.Join(textParts, ""), nil
-	}
-	return "", fmt.Errorf("relay: agent process exited without response")
 }
 
 func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
