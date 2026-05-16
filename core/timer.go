@@ -457,16 +457,28 @@ func ParseDelayOrTime(s string) (time.Time, error) {
 	}
 
 	// Try ISO time formats
-	layouts := []string{
-		time.RFC3339,
-		"2006-01-02T15:04:05",
-		"2006-01-02T15:04",
-		"2006-01-02 15:04:05",
-		"2006-01-02 15:04",
+	// RFC3339 includes timezone (e.g. "2026-05-15T14:00:00+08:00"),
+	// so it's parsed directly. The other layouts have no timezone
+	// and are interpreted in the system's local timezone.
+	layouts := []struct {
+		layout string
+		local  bool
+	}{
+		{time.RFC3339, false},
+		{"2006-01-02T15:04:05", true},
+		{"2006-01-02T15:04", true},
+		{"2006-01-02 15:04:05", true},
+		{"2006-01-02 15:04", true},
 	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
+	for _, l := range layouts {
+		if l.local {
+			if t, err := time.ParseInLocation(l.layout, s, time.Local); err == nil {
+				return t, nil
+			}
+		} else {
+			if t, err := time.Parse(l.layout, s); err == nil {
+				return t, nil
+			}
 		}
 	}
 

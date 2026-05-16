@@ -77,6 +77,30 @@ func TestParseDelayOrTime_Absolute(t *testing.T) {
 	}
 }
 
+func TestParseDelayOrTime_LocalTimezone(t *testing.T) {
+	// When no timezone is specified, should use system local timezone
+	got, err := ParseDelayOrTime("2026-05-15T14:00")
+	if err != nil {
+		t.Fatalf("ParseDelayOrTime: %v", err)
+	}
+	if got.Location() != time.Local {
+		t.Errorf("expected local timezone %v, got %v", time.Local, got.Location())
+	}
+	if got.Hour() != 14 || got.Minute() != 0 {
+		t.Errorf("expected 14:00 local, got %02d:%02d", got.Hour(), got.Minute())
+	}
+
+	// With explicit timezone, should use that timezone
+	got2, err := ParseDelayOrTime("2026-05-15T14:00:00+08:00")
+	if err != nil {
+		t.Fatalf("ParseDelayOrTime: %v", err)
+	}
+	_, offset := got2.Zone()
+	if offset != 8*3600 {
+		t.Errorf("expected +08:00 offset (%d), got %d", 8*3600, offset)
+	}
+}
+
 func TestTimerStore_CRUD(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewTimerStore(dir)
