@@ -937,6 +937,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  Manage one-shot timers\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Manage heartbeat\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
@@ -980,6 +981,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  管理一次性定时器\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
@@ -1022,6 +1024,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  管理一次性定時器\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
@@ -1063,6 +1066,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  ワンショットタイマー管理\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
@@ -1104,6 +1108,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  Gestionar temporizadores de uso único\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
@@ -1222,6 +1227,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
 			"/cron [add|list|del|...] — Scheduled tasks\n" +
+			"/timer [add|list|del|...] — One-shot timers\n" +
 			"/commands [add|del] — Custom commands\n" +
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
@@ -1232,6 +1238,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
 			"/cron [add|list|del|...] — 定时任务\n" +
+			"/timer [add|list|del|...] — 一次性定时器\n" +
 			"/commands [add|del] — 自定义命令\n" +
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1242,6 +1249,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
 			"/cron [add|list|del|...] — 定時任務\n" +
+			"/timer [add|list|del|...] — 一次性定時器\n" +
 			"/commands [add|del] — 自訂命令\n" +
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1252,6 +1260,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
 			"/cron [add|list|del|...] — スケジュールタスク\n" +
+			"/timer [add|list|del|...] — ワンショットタイマー\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
@@ -1262,6 +1271,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
 			"/cron [add|list|del|...] — Tareas programadas\n" +
+			"/timer [add|list|del|...] — Temporizadores de uso único\n" +
 			"/commands [add|del] — Comandos personalizados\n" +
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
@@ -1918,11 +1928,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso:\n/timer add <retraso> <tarea>\n/timer addexec <retraso> <comando>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nRetraso: 30m, 2h, 1h30m. O absoluto: 2026-05-16T09:00",
 	},
 	MsgTimerAddUsage: {
-		LangEnglish:            "Usage: /timer add <delay> <prompt>\nExample: /timer add 2h Check PR status",
-		LangChinese:            "用法：/timer add <延迟> <任务描述>\n示例：/timer add 2h 检查PR状态",
-		LangTraditionalChinese: "用法：/timer add <延遲> <任務描述>\n範例：/timer add 2h 檢查PR狀態",
-		LangJapanese:           "使い方: /timer add <遅延> <タスク内容>\n例: /timer add 2h PRの状態を確認",
-		LangSpanish:            "Uso: /timer add <retraso> <tarea>\nEjemplo: /timer add 2h Verificar estado del PR",
+		LangEnglish:            "Usage: /timer add <delay|time> <prompt>\nExamples:\n  /timer add 2h Check PR status\n  /timer add 2026-05-16T09:00 Morning standup reminder\nDelay: 30m, 2h, 1h30m. Time: ISO format (2026-05-16T09:00)",
+		LangChinese:            "用法：/timer add <延迟|时间> <任务描述>\n示例：\n  /timer add 2h 检查PR状态\n  /timer add 2026-05-16T09:00 早会提醒\n延迟：30m、2h、1h30m。时间：ISO格式（2026-05-16T09:00）",
+		LangTraditionalChinese: "用法：/timer add <延遲|時間> <任務描述>\n範例：\n  /timer add 2h 檢查PR狀態\n  /timer add 2026-05-16T09:00 早會提醒\n延遲：30m、2h、1h30m。時間：ISO格式（2026-05-16T09:00）",
+		LangJapanese:           "使い方: /timer add <遅延|時刻> <タスク内容>\n例:\n  /timer add 2h PRの状態を確認\n  /timer add 2026-05-16T09:00 朝会リマインダー\n遅延: 30m, 2h, 1h30m。時刻: ISO形式（2026-05-16T09:00）",
+		LangSpanish:            "Uso: /timer add <retraso|hora> <tarea>\nEjemplos:\n  /timer add 2h Verificar estado del PR\n  /timer add 2026-05-16T09:00 Recordatorio de reunión\nRetraso: 30m, 2h, 1h30m. Hora: formato ISO (2026-05-16T09:00)",
 	},
 	MsgTimerAdded: {
 		LangEnglish:            "✅ Timer created\nID: `%s`\nFires in: %s\nPrompt: %s",

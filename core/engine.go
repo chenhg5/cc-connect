@@ -7571,6 +7571,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/shell", action: "cmd:/shell"},
 				{command: "/show", action: "cmd:/show"},
 				{command: "/cron", action: "nav:/cron"},
+				{command: "/timer", action: "nav:/timer"},
 				{command: "/heartbeat", action: "nav:/heartbeat"},
 				{command: "/commands", action: "nav:/commands"},
 				{command: "/alias", action: "nav:/alias"},
