@@ -408,7 +408,7 @@ Options:
   -p, --project <name>       Target project (auto-detected from CC_PROJECT env)
   -s, --session-key <key>    Target session (auto-detected from CC_SESSION_KEY env)
   -d, --delay <duration>     Delay from now (e.g. 30m, 2h, 1h30m)
-  -a, --at <time>            Absolute ISO time (e.g. 2026-05-16T09:00)
+  -a, --at <time>            Absolute ISO time (e.g. 2026-05-16T09:00, local timezone)
       --prompt <text>        Task prompt (runs through agent)
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description

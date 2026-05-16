@@ -125,6 +125,8 @@ use the Bash tool to run:
   cc-connect timer add --delay <duration> --prompt "<task description>"
 
 Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
+Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
+system's local timezone. When the user says "明天早上9点", use local time.
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
 
 Optional flags:
