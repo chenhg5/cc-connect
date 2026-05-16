@@ -252,12 +252,22 @@ func (s *CronStore) ListBySessionKey(sessionKey string) []*CronJob {
 	return out
 }
 
+// Get returns a shallow copy of the job matching id, or nil if not
+// found. Returning a copy (rather than the stored pointer) is what
+// lets callers — executeJob, the management cron PATCH handler, the
+// /cron/edit API echo, etc. — read mutable fields like Prompt,
+// SessionKey, Enabled, LastRun without racing with concurrent
+// Update / SetEnabled / MarkRun writers that grab s.mu. The pointer
+// fields on CronJob (Silent, TimeoutMins) are only ever reassigned
+// to a fresh local in updateJobField, never mutated in place, so a
+// shallow copy is sufficient.
 func (s *CronStore) Get(id string) *CronJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, j := range s.jobs {
 		if j.ID == id {
-			return j
+			cp := *j
+			return &cp
 		}
 	}
 	return nil

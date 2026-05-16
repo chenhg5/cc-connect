@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -564,4 +565,88 @@ func TestCronStore_ListByProject(t *testing.T) {
 	if len(list3) != 0 {
 		t.Errorf("ListByProject(nonexistent) = %d jobs, want 0", len(list3))
 	}
+}
+
+// TestCronStore_GetReturnsSnapshot pins the bug where CronStore.Get
+// returned the stored *CronJob, so callers (executeJob,
+// handleCronByID's PATCH echo, handleCronEdit's response, the
+// engine's ExecuteCronJob consumer) read mutable fields without
+// holding s.mu while concurrent Update / SetEnabled / MarkRun
+// writers grabbed the lock and rewrote the same fields.
+//
+// With the production fix Get returns a shallow copy, so concurrent
+// readers operate on the snapshot and the race detector stays quiet.
+func TestCronStore_GetReturnsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job := &CronJob{
+		ID:         "race-target",
+		Project:    "proj",
+		SessionKey: "test:ch1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "initial",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// The returned pointer must NOT alias the stored job. Mutating
+	// the snapshot must leave the store untouched, and the store's
+	// own Update must not be visible through an earlier snapshot.
+	snap := store.Get("race-target")
+	if snap == nil {
+		t.Fatal("Get returned nil for stored job")
+	}
+	snap.Prompt = "mutated by caller"
+	if got := store.Get("race-target").Prompt; got != "initial" {
+		t.Fatalf("caller mutation leaked into store: Prompt = %q, want %q", got, "initial")
+	}
+
+	// Hammer the store with concurrent Updates while readers call
+	// Get and read mutable fields. Under -race, an unsynchronized
+	// read of *job would trip "DATA RACE detected".
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				value := "writer-" + strings.Repeat("x", w%3+1)
+				store.Update("race-target", "prompt", value)
+				store.MarkRun("race-target", nil)
+			}
+		}(w)
+	}
+	for r := 0; r < 8; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				j := store.Get("race-target")
+				if j == nil {
+					continue
+				}
+				_ = j.Prompt
+				_ = j.SessionKey
+				_ = j.Enabled
+				_ = j.LastError
+				_ = j.LastRun
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
 }
