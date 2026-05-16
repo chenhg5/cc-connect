@@ -1065,6 +1065,35 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_OversizePanelsKeepVisibleContent(t *testing.T) {
+	var steps []core.ToolStep
+	for i := 0; i < 40; i++ {
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindThinking,
+			Name:    "Thinking",
+			Summary: "visible reasoning " + strconv.Itoa(i) + " " + strings.Repeat("r", 700),
+		})
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindTool,
+			Name:    "Bash",
+			Summary: "visible command " + strconv.Itoa(i) + " " + strings.Repeat("c", 700),
+			Result:  "visible result " + strconv.Itoa(i) + " " + strings.Repeat("o", 700),
+			Done:    true,
+		})
+	}
+
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) == 0 {
+		t.Fatalf("oversize rich card should preserve compact reasoning/tool panels instead of blank fallback: %q", cardJSON)
+	}
+	rendered := strings.Join(collectCardMarkdownContents(t, cardJSON), "\n") + "\n" + cardJSON
+	if !strings.Contains(rendered, "visible reasoning") && !strings.Contains(rendered, "visible command") {
+		t.Fatalf("oversize rich card should keep visible step content, got %q", cardJSON)
+	}
+}
+
 func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
