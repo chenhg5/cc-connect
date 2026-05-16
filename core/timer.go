@@ -336,7 +336,7 @@ func (ts *TimerScheduler) AddJob(job *TimerJob) error {
 	if err := ts.store.Add(job); err != nil {
 		return err
 	}
-	delay := job.ScheduledAt.Sub(time.Now())
+	delay := time.Until(job.ScheduledAt)
 	if delay <= 0 {
 		// Already due — fire immediately
 		slog.Info("timer: new job already due, firing immediately", "id", job.ID)
