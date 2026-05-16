@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,8 +36,11 @@ func (p *Platform) connectLoop(ctx context.Context) {
 			attempt++
 			continue
 		}
-		if err := p.runWebSocket(ctx, robotID, wss); err != nil && ctx.Err() == nil {
-			slog.Warn("youzone: websocket disconnected", "err", err)
+		// runWebSocket is the only layer that knows connectedAt / lastFrameAt,
+		// so it owns the disconnected log. We deliberately do not emit a second
+		// "websocket disconnected" warn here — that would double-print and lose
+		// the lifecycle context.
+		if err := p.runWebSocket(ctx, robotID, wss, attempt); err != nil && ctx.Err() == nil {
 			p.sleepReconnect(ctx, attempt)
 			attempt++
 			continue
@@ -58,7 +62,7 @@ func newWebSocketDialer(cfg config) websocket.Dialer {
 	}
 }
 
-func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string) error {
+func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string, attempt int) error {
 	dialer := newWebSocketDialer(p.cfg)
 	header := http.Header{}
 	header.Set("User-Agent", "cc-connect-youzone/0.1")
@@ -66,11 +70,22 @@ func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string) error 
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	slog.Info("youzone: websocket connected", "robot_id", robotID, "protocol", conn.Subprotocol())
+	connectedAt := time.Now()
+	slog.Info("youzone: websocket connected",
+		"robot_id", robotID,
+		"protocol", conn.Subprotocol(),
+		"attempt", attempt,
+	)
 
 	connCtx, cancel := context.WithCancel(ctx)
 	var writeMu sync.Mutex
 	var wg sync.WaitGroup
+
+	// lastFrameAt is updated on each successful ReadMessage. It is used in the
+	// disconnected log so an operator can align "user reported sending at T"
+	// with "last frame we got was at T-30s" → message landed in the offline
+	// gap.
+	var lastFrameAtUnix atomic.Int64
 
 	wg.Add(1)
 	go func() {
@@ -101,13 +116,37 @@ func (p *Platform) runWebSocket(ctx context.Context, robotID, wss string) error 
 			readErr = err
 			break
 		}
+		lastFrameAtUnix.Store(time.Now().UnixNano())
 		p.handleInbound(data)
 	}
 
 	cancel() // stop pingLoop and trigger the close watcher (no-op if Stop already did)
 	_ = conn.Close()
 	wg.Wait()
+
+	// Only treat the disconnect as anomalous when our context is still live.
+	// Stop()/reload/parent-cancel paths cancel ctx first and must not produce
+	// a warn — the ws closing on those paths is by design.
+	if ctx.Err() == nil {
+		fields := []any{
+			"robot_id", robotID,
+			"err", errString(readErr),
+			"connected_for", time.Since(connectedAt),
+			"attempt", attempt,
+		}
+		if ns := lastFrameAtUnix.Load(); ns > 0 {
+			fields = append(fields, "last_frame_at", time.Unix(0, ns).Format(time.RFC3339Nano))
+		}
+		slog.Warn("youzone: websocket disconnected", fields...)
+	}
 	return readErr
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (p *Platform) pingLoop(ctx context.Context, conn wsConn, writeMu *sync.Mutex) {
