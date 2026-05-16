@@ -1094,6 +1094,70 @@ func TestBuildRichCard_OversizePanelsKeepVisibleContent(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_PanelsShowLatestTenSteps(t *testing.T) {
+	var steps []core.ToolStep
+	for i := 0; i < 15; i++ {
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindThinking,
+			Name:    "Thinking",
+			Summary: "reasoning-index-" + strconv.Itoa(i),
+		})
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindTool,
+			Name:    "Bash",
+			Summary: "tool-command-" + strconv.Itoa(i),
+			Result:  "tool-result-" + strconv.Itoa(i),
+			Done:    true,
+		})
+	}
+
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 2 {
+		t.Fatalf("panel count = %d, want reasoning and tools panels: %#v", len(panels), panels)
+	}
+	for _, tt := range []struct {
+		name          string
+		panel         map[string]any
+		oldestHidden  string
+		windowStart   string
+		latestVisible string
+		resultVisible string
+		hiddenSummary string
+	}{
+		{
+			name:          "reasoning",
+			panel:         panels[0],
+			oldestHidden:  "reasoning-index-0",
+			windowStart:   "reasoning-index-5",
+			latestVisible: "reasoning-index-14",
+			hiddenSummary: "5 earlier steps hidden",
+		},
+		{
+			name:          "tools",
+			panel:         panels[1],
+			oldestHidden:  "tool-command-0",
+			windowStart:   "tool-command-5",
+			latestVisible: "tool-command-14",
+			resultVisible: "tool-result-14",
+			hiddenSummary: "5 earlier steps hidden",
+		},
+	} {
+		if panelContains(t, tt.panel, tt.oldestHidden) {
+			t.Fatalf("%s panel should hide oldest step %q: %#v", tt.name, tt.oldestHidden, tt.panel)
+		}
+		for _, want := range []string{tt.windowStart, tt.latestVisible, tt.resultVisible, tt.hiddenSummary} {
+			if want == "" {
+				continue
+			}
+			if !panelContains(t, tt.panel, want) {
+				t.Fatalf("%s panel should contain %q: %#v", tt.name, want, tt.panel)
+			}
+		}
+	}
+}
+
 func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
