@@ -48,22 +48,39 @@ type sendResult struct {
 }
 
 type inboundMessage struct {
-	MessageID      string
-	SenderID       string
-	SenderName     string
-	ConversationID string
-	Text           string
-	ContentType    int
-	MessageVersion *int // YOUZONE sessionVersion/messageVersion/version; nil when absent
-	Type           string
-	Raw            []byte
+	MessageID         string
+	SenderID          string
+	SenderName        string
+	ConversationID    string
+	Text              string
+	ContentType       int
+	MessageVersion    *int   // YOUZONE sessionVersion/messageVersion/version; nil when absent — used for the outbound reply-quote header
+	MessageVersionRaw string // same key as MessageVersion, kept as the original string form for logs / future replay cursor; "" when absent
+	Type              string
+	Raw               []byte
 }
 
 type replyContext struct {
-	robotID        string
-	conversationID string
-	senderID       string
-	messageID      string
-	messageVersion *int   // carried for the outbound reply-quote header (see outbound.go)
-	replyText      string // inbound text, shown as the reply-quote preview
+	robotID           string
+	conversationID    string
+	senderID          string
+	messageID         string
+	messageVersion    *int   // carried for the outbound reply-quote header (see outbound.go)
+	messageVersionRaw string // same value as messageVersion in string form; logs only
+	replyText         string // inbound text, shown as the reply-quote preview
 }
+
+// inboundDropReason names why an inbound frame was discarded before reaching
+// the engine. inboundDropNone means the frame was accepted.
+type inboundDropReason string
+
+const (
+	inboundDropNone             inboundDropReason = ""
+	inboundDropJSONInvalid      inboundDropReason = "json_invalid"
+	inboundDropHeartbeat        inboundDropReason = "heartbeat"
+	inboundDropEmptyFrame       inboundDropReason = "empty_frame"
+	inboundDropEmptyText        inboundDropReason = "empty_text"
+	inboundDropDuplicate        inboundDropReason = "duplicate_message"
+	inboundDropUnauthorizedUser inboundDropReason = "unauthorized_user"
+	inboundDropMissingHandler   inboundDropReason = "missing_handler"
+)
