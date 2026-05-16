@@ -664,6 +664,17 @@ func (s *session) updateCurrentProfile(profile string) {
 	if s.profileUpdater != nil {
 		s.profileUpdater(profile)
 	}
+	// Persist the (project, session_key) → profile mapping so a future
+	// cc-connect daemon restart can auto-restore this session's profile.
+	// "local" is a clear: the user explicitly disconnected (or never
+	// connected), so the stored entry — if any — must go.
+	if s.profileStore != nil && s.project != "" && s.sessionKey != "" {
+		if profile == "local" {
+			s.profileStore.Clear(s.project, s.sessionKey)
+		} else {
+			s.profileStore.Set(s.project, s.sessionKey, profile)
+		}
+	}
 }
 
 func (s *session) currentProfileName() string {

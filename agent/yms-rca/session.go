@@ -40,6 +40,29 @@ type session struct {
 	cfg      *Agent // snapshot used to build args / read confirm timeout
 	extraEnv []string
 
+	// project and sessionKey are derived from CC_PROJECT and CC_SESSION_KEY
+	// in extraEnv (injected by core.SessionEnvInjector). They identify the
+	// (project, conversation+user) tuple for profile auto-restore. Either
+	// may be "" when run outside a routed engine path (e.g. unit tests).
+	project    string
+	sessionKey string
+	// profileStore persists the last successful non-local profile per
+	// (project, sessionKey) so cross-daemon-restart sessions can auto-
+	// reconnect on the first user message. May be nil in unit tests.
+	profileStore *profileStore
+
+	// internalActive is set while a hidden control turn (e.g. auto-
+	// restore /connect <profile>) is in flight. emit() consults it and
+	// routes events to handleInternalEvent instead of s.events.
+	internalActive atomic.Bool
+	// internalMu guards internalDone — the result channel for the
+	// currently-running hidden turn (nil otherwise).
+	internalMu   sync.Mutex
+	internalDone chan error
+	// restoreAttempted ensures profile auto-restore runs at most once
+	// per session lifetime, regardless of how many Send calls arrive.
+	restoreAttempted atomic.Bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -171,12 +194,16 @@ func newSession(parent context.Context, snap *Agent, resumeFile string, extraEnv
 		return nil, fmt.Errorf("yms-rca: stderr pipe: %w", err)
 	}
 
+	project, sessionKey := parseProjectAndSessionKey(extraEnv)
 	s := &session{
 		cmd:            snap.cmd,
 		workDir:        snap.workDir,
 		mode:           snap.mode,
 		cfg:            snap,
 		extraEnv:       extraEnv,
+		project:        project,
+		sessionKey:     sessionKey,
+		profileStore:   snap.profileStore,
 		ctx:            ctx,
 		cancel:         cancel,
 		proc:           c,
@@ -252,19 +279,20 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	if !s.busy.CompareAndSwap(false, true) {
 		return errors.New("yms-rca: previous turn still running")
 	}
+	// Auto-restore the last successful profile (no-op except on the first
+	// Send after a fresh subprocess, and only when the store has a non-
+	// local entry for this session). Runs INSIDE the busy critical section
+	// so concurrent Sends can't interleave, and BEFORE the user-prompt
+	// latch reset so a successful hidden turn ends with fresh latches for
+	// the upcoming user prompt.
+	if err := s.maybeRestoreProfileBeforePrompt(s.ctx, prompt); err != nil {
+		s.busy.Store(false)
+		return err
+	}
 	// New turn — reset the result-emit dedup latch so agent_end / turn_end
 	// for this turn can fire EventResult exactly once. Also reset the
 	// promptAcked flag so the slash-command terminator path is armed fresh.
-	s.turnResultEmitted.Store(false)
-	s.promptAcked.Store(false)
-	s.slashCommandEnded.Store(false)
-	s.assistantMessageEnded.Store(false)
-	s.awaitingPostToolSummary.Store(false)
-	s.postToolTextEmitted.Store(false)
-	s.currentPromptSlashCommand.Store(isSlashCommandPrompt(prompt))
-	s.turnTextEmitted.Store(false)
-	s.resetAssistantText()
-	s.clearPendingTurnResult()
+	s.resetTurnLatches(prompt)
 
 	// On any error after CAS we must release busy.
 	released := false
@@ -578,7 +606,14 @@ func (s *session) writeFrameWithTimeout(v any, d time.Duration) error {
 }
 
 // emit blocks on ctx.Done — use during the normal session lifetime.
+// While a hidden control turn is active, events are routed to
+// handleInternalEvent instead of the user-facing s.events channel so the
+// /connect output (text, thinking, tool calls) is fully suppressed.
 func (s *session) emit(evt core.Event) {
+	if s.internalActive.Load() {
+		s.handleInternalEvent(evt)
+		return
+	}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -825,4 +860,19 @@ func envHasKey(env []string, key string) bool {
 		}
 	}
 	return false
+}
+
+// parseProjectAndSessionKey extracts CC_PROJECT and CC_SESSION_KEY from
+// extraEnv (injected by core.SessionEnvInjector). Returns ("", "") when
+// either is absent — callers must treat that as "no auto-restore wiring
+// for this session".
+func parseProjectAndSessionKey(env []string) (project, sessionKey string) {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CC_PROJECT="); ok {
+			project = v
+		} else if v, ok := strings.CutPrefix(kv, "CC_SESSION_KEY="); ok {
+			sessionKey = v
+		}
+	}
+	return project, sessionKey
 }

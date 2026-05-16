@@ -48,6 +48,11 @@ type Agent struct {
 
 	currentProfile atomic.Value // string
 	profileUpdater func(string)
+
+	// profileStore is the process-wide singleton that persists
+	// (project, session_key) → last successful profile across daemon
+	// restarts. Wired via the package-level getSharedProfileStore().
+	profileStore *profileStore
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -65,6 +70,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		connectionsDir: getString(opts, "connections_dir", ""),
 	}
 	a.setCurrentProfile("local")
+	a.profileStore = getSharedProfileStore()
 	if a.provider != "" && a.model == "" {
 		return nil, fmt.Errorf("yms-rca: provider %q requires model to be set", a.provider)
 	}
@@ -208,6 +214,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		confirmTimeout: a.confirmTimeout,
 		connectionsDir: a.connectionsDir,
 		profileUpdater: a.setCurrentProfile,
+		profileStore:   a.profileStore,
 	}
 	snapshot.setCurrentProfile(a.currentProfileName())
 	extraEnv := append([]string{}, a.sessionEnv...)
