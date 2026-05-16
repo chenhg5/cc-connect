@@ -5732,19 +5732,19 @@ func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any
 	if len(steps) == 0 {
 		return []map[string]any{richPlaceholderElement(emptyText)}
 	}
-	const maxPanelSteps = 30
+	const maxPanelSteps = 10
 	visible := steps
-	overflow := 0
+	hidden := 0
 	if len(steps) > maxPanelSteps {
-		visible = steps[:maxPanelSteps]
-		overflow = len(steps) - maxPanelSteps
+		hidden = len(steps) - maxPanelSteps
+		visible = steps[hidden:]
 	}
 	elements := make([]map[string]any, 0, len(visible)+1)
+	if hidden > 0 {
+		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... %d earlier steps hidden", hidden)))
+	}
 	for _, step := range visible {
 		elements = append(elements, richStepElement(step))
-	}
-	if overflow > 0 {
-		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... and %d more steps", overflow)))
 	}
 	return elements
 }
@@ -5787,7 +5787,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		perLane int
 		textLen int
 	}{
-		{perLane: 12, textLen: 180},
+		{perLane: 10, textLen: 180},
 		{perLane: 6, textLen: 120},
 		{perLane: 3, textLen: 80},
 	} {
