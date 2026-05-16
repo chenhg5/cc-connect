@@ -319,6 +319,7 @@ const (
 	MsgCardTitleHistoryLast      MsgKey = "card_title_history_last"
 	MsgCardTitleProvider         MsgKey = "card_title_provider"
 	MsgCardTitleCron             MsgKey = "card_title_cron"
+	MsgCardTitleTimer            MsgKey = "card_title_timer"
 	MsgCardTitleHeartbeat        MsgKey = "card_title_heartbeat"
 	MsgCardTitleCommands         MsgKey = "card_title_commands"
 	MsgCardTitleAlias            MsgKey = "card_title_alias"
@@ -331,6 +332,29 @@ const (
 	MsgListEmptySummary          MsgKey = "list_empty_summary"
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
+
+	MsgTimerNotAvailable  MsgKey = "timer_not_available"
+	MsgTimerUsage         MsgKey = "timer_usage"
+	MsgTimerAddUsage      MsgKey = "timer_add_usage"
+	MsgTimerAdded         MsgKey = "timer_added"
+	MsgTimerAddedExec     MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty         MsgKey = "timer_empty"
+	MsgTimerListTitle     MsgKey = "timer_list_title"
+	MsgTimerListFooter    MsgKey = "timer_list_footer"
+	MsgTimerDelUsage      MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
+	MsgTimerDeleted       MsgKey = "timer_deleted"
+	MsgTimerNotFound      MsgKey = "timer_not_found"
+	MsgTimerMuted         MsgKey = "timer_muted"
+	MsgTimerUnmuted       MsgKey = "timer_unmuted"
+	MsgTimerCardHint      MsgKey = "timer_card_hint"
+	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel       MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
 	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
 	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
 	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
@@ -1869,6 +1893,165 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "前回",
 		LangSpanish:            "Últ",
 	},
+
+	// ── Timer (one-shot) ──────────────────────────────────────
+
+	MsgCardTitleTimer: {
+		LangEnglish:            "One-Shot Timer",
+		LangChinese:            "一次性定时器",
+		LangTraditionalChinese: "一次性定時器",
+		LangJapanese:           "ワンショットタイマー",
+		LangSpanish:            "Temporizador único",
+	},
+	MsgTimerNotAvailable: {
+		LangEnglish:            "Timer scheduler is not available.",
+		LangChinese:            "定时器调度器未启用。",
+		LangTraditionalChinese: "定時器調度器未啟用。",
+		LangJapanese:           "タイマースケジューラは利用できません。",
+		LangSpanish:            "El programador de temporizador no está disponible.",
+	},
+	MsgTimerUsage: {
+		LangEnglish:            "Usage:\n/timer add <delay> <prompt>\n/timer addexec <delay> <command>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nDelay: 30m, 2h, 1h30m. Or absolute: 2026-05-16T09:00",
+		LangChinese:            "用法：\n/timer add <延迟> <任务描述>\n/timer addexec <延迟> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延迟：30m、2h、1h30m。或绝对时间：2026-05-16T09:00",
+		LangTraditionalChinese: "用法：\n/timer add <延遲> <任務描述>\n/timer addexec <延遲> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延遲：30m、2h、1h30m。或絕對時間：2026-05-16T09:00",
+		LangJapanese:           "使い方:\n/timer add <遅延> <タスク内容>\n/timer addexec <遅延> <コマンド>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n遅延: 30m, 2h, 1h30m。または絶対時刻: 2026-05-16T09:00",
+		LangSpanish:            "Uso:\n/timer add <retraso> <tarea>\n/timer addexec <retraso> <comando>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nRetraso: 30m, 2h, 1h30m. O absoluto: 2026-05-16T09:00",
+	},
+	MsgTimerAddUsage: {
+		LangEnglish:            "Usage: /timer add <delay> <prompt>\nExample: /timer add 2h Check PR status",
+		LangChinese:            "用法：/timer add <延迟> <任务描述>\n示例：/timer add 2h 检查PR状态",
+		LangTraditionalChinese: "用法：/timer add <延遲> <任務描述>\n範例：/timer add 2h 檢查PR狀態",
+		LangJapanese:           "使い方: /timer add <遅延> <タスク内容>\n例: /timer add 2h PRの状態を確認",
+		LangSpanish:            "Uso: /timer add <retraso> <tarea>\nEjemplo: /timer add 2h Verificar estado del PR",
+	},
+	MsgTimerAdded: {
+		LangEnglish:            "✅ Timer created\nID: `%s`\nFires in: %s\nPrompt: %s",
+		LangChinese:            "✅ 定时器已创建\nID: `%s`\n将在 %s 后触发\n内容: %s",
+		LangTraditionalChinese: "✅ 定時器已建立\nID: `%s`\n將在 %s 後觸發\n內容: %s",
+		LangJapanese:           "✅ タイマーを作成しました\nID: `%s`\n%s 後に実行\n内容: %s",
+		LangSpanish:            "✅ Temporizador creado\nID: `%s`\nSe ejecuta en: %s\nContenido: %s",
+	},
+	MsgTimerAddedExec: {
+		LangEnglish:            "✅ Shell timer created\nID: `%s`\nFires in: %s\nCommand: `%s`",
+		LangChinese:            "✅ Shell 定时器已创建\nID: `%s`\n将在 %s 后触发\n命令: `%s`",
+		LangTraditionalChinese: "✅ Shell 定時器已建立\nID: `%s`\n將在 %s 後觸發\n命令: `%s`",
+		LangJapanese:           "✅ Shell タイマーを作成しました\nID: `%s`\n%s 後に実行\nコマンド: `%s`",
+		LangSpanish:            "✅ Temporizador shell creado\nID: `%s`\nSe ejecuta en: %s\nComando: `%s`",
+	},
+	MsgTimerAddExecUsage: {
+		LangEnglish:            "Usage: /timer addexec <delay> <shell command>\nExample: /timer addexec 30m df -h",
+		LangChinese:            "用法：/timer addexec <延迟> <shell 命令>\n示例：/timer addexec 30m df -h",
+		LangTraditionalChinese: "用法：/timer addexec <延遲> <shell 命令>\n範例：/timer addexec 30m df -h",
+		LangJapanese:           "使い方: /timer addexec <遅延> <シェルコマンド>\n例: /timer addexec 30m df -h",
+		LangSpanish:            "Uso: /timer addexec <retraso> <comando shell>\nEjemplo: /timer addexec 30m df -h",
+	},
+	MsgTimerEmpty: {
+		LangEnglish:            "No pending timers.",
+		LangChinese:            "暂无待执行的定时器。",
+		LangTraditionalChinese: "暫無待執行的定時器。",
+		LangJapanese:           "保留中のタイマーはありません。",
+		LangSpanish:            "No hay temporizadores pendientes.",
+	},
+	MsgTimerListTitle: {
+		LangEnglish:            "⏰ Pending Timers (%d)",
+		LangChinese:            "⏰ 待执行定时器 (%d)",
+		LangTraditionalChinese: "⏰ 待執行定時器 (%d)",
+		LangJapanese:           "⏰ 保留中のタイマー (%d)",
+		LangSpanish:            "⏰ Temporizadores pendientes (%d)",
+	},
+	MsgTimerListFooter: {
+		LangEnglish:            "`/timer del <id>` remove · `/timer mute/unmute <id>` mute",
+		LangChinese:            "`/timer del <id>` 删除 · `/timer mute/unmute <id>` 静音",
+		LangTraditionalChinese: "`/timer del <id>` 刪除 · `/timer mute/unmute <id>` 靜音",
+		LangJapanese:           "`/timer del <id>` 削除 · `/timer mute/unmute <id>` ミュート",
+		LangSpanish:            "`/timer del <id>` eliminar · `/timer mute/unmute <id>` silenciar",
+	},
+	MsgTimerDelUsage: {
+		LangEnglish:            "Usage: /timer del <id>",
+		LangChinese:            "用法：/timer del <id>",
+		LangTraditionalChinese: "用法：/timer del <id>",
+		LangJapanese:           "使い方: /timer del <id>",
+		LangSpanish:            "Uso: /timer del <id>",
+	},
+	MsgTimerMuteUsage: {
+		LangEnglish:            "Usage: /timer mute <id> · /timer unmute <id>",
+		LangChinese:            "用法：/timer mute <id> · /timer unmute <id>",
+		LangTraditionalChinese: "用法：/timer mute <id> · /timer unmute <id>",
+		LangJapanese:           "使い方: /timer mute <id> · /timer unmute <id>",
+		LangSpanish:            "Uso: /timer mute <id> · /timer unmute <id>",
+	},
+	MsgTimerDeleted: {
+		LangEnglish:            "✅ Timer `%s` cancelled.",
+		LangChinese:            "✅ 定时器 `%s` 已取消。",
+		LangTraditionalChinese: "✅ 定時器 `%s` 已取消。",
+		LangJapanese:           "✅ タイマー `%s` をキャンセルしました。",
+		LangSpanish:            "✅ Temporizador `%s` cancelado.",
+	},
+	MsgTimerNotFound: {
+		LangEnglish:            "❌ Timer `%s` not found.",
+		LangChinese:            "❌ 定时器 `%s` 未找到。",
+		LangTraditionalChinese: "❌ 定時器 `%s` 未找到。",
+		LangJapanese:           "❌ タイマー `%s` が見つかりません。",
+		LangSpanish:            "❌ Temporizador `%s` no encontrado.",
+	},
+	MsgTimerMuted: {
+		LangEnglish:            "🔇 Timer `%s` muted.",
+		LangChinese:            "🔇 定时器 `%s` 已静音。",
+		LangTraditionalChinese: "🔇 定時器 `%s` 已靜音。",
+		LangJapanese:           "🔇 タイマー `%s` をミュートしました。",
+		LangSpanish:            "🔇 Temporizador `%s` silenciado.",
+	},
+	MsgTimerUnmuted: {
+		LangEnglish:            "🔔 Timer `%s` unmuted.",
+		LangChinese:            "🔔 定时器 `%s` 已取消静音。",
+		LangTraditionalChinese: "🔔 定時器 `%s` 已取消靜音。",
+		LangJapanese:           "🔔 タイマー `%s` のミュートを解除しました。",
+		LangSpanish:            "🔔 Temporizador `%s` reactivado.",
+	},
+	MsgTimerCardHint: {
+		LangEnglish:            "💡 `/timer add <delay> <prompt>` · `/timer del <id>` · `/timer mute/unmute <id>`",
+		LangChinese:            "💡 `/timer add <延迟> <内容>` 添加 · `/timer del <id>` 删除 · `/timer mute/unmute <id>` 静音",
+		LangTraditionalChinese: "💡 `/timer add <延遲> <內容>` 新增 · `/timer del <id>` 刪除 · `/timer mute/unmute <id>` 靜音",
+		LangJapanese:           "💡 `/timer add <遅延> <内容>` 追加 · `/timer del <id>` 削除 · `/timer mute/unmute <id>` ミュート",
+		LangSpanish:            "💡 `/timer add <retraso> <tarea>` · `/timer del <id>` · `/timer mute/unmute <id>`",
+	},
+	MsgTimerBtnMute: {
+		LangEnglish:            "Mute",
+		LangChinese:            "静音",
+		LangTraditionalChinese: "靜音",
+		LangJapanese:           "ミュート",
+		LangSpanish:            "Silenciar",
+	},
+	MsgTimerBtnUnmute: {
+		LangEnglish:            "Unmute",
+		LangChinese:            "取消静音",
+		LangTraditionalChinese: "取消靜音",
+		LangJapanese:           "ミュート解除",
+		LangSpanish:            "Reactivar",
+	},
+	MsgTimerBtnDelete: {
+		LangEnglish:            "Cancel Timer",
+		LangChinese:            "取消定时器",
+		LangTraditionalChinese: "取消定時器",
+		LangJapanese:           "タイマーをキャンセル",
+		LangSpanish:            "Cancelar temporizador",
+	},
+	MsgTimerIDLabel: {
+		LangEnglish: "ID: %s\n", LangChinese: "ID：%s\n", LangTraditionalChinese: "ID：%s\n",
+		LangJapanese: "ID: %s\n", LangSpanish: "ID: %s\n",
+	},
+	MsgTimerScheduledLabel: {
+		LangEnglish:            "Scheduled: %s (%s remaining)\n",
+		LangChinese:            "计划: %s（剩余 %s）\n",
+		LangTraditionalChinese: "計劃: %s（剩餘 %s）\n",
+		LangJapanese:           "予定: %s（残り %s）\n",
+		LangSpanish:            "Programado: %s (%s restante)\n",
+	},
+	MsgTimerFailedSuffix: {
+		LangEnglish: " (failed: %s)", LangChinese: "（失败：%s）", LangTraditionalChinese: "（失敗：%s）",
+		LangJapanese: "（失敗: %s）", LangSpanish: " (falló: %s)",
+	},
+
 	MsgStatusTitle: {
 		LangEnglish: "cc-connect Status\n\n" +
 			"Project: %s\n" +

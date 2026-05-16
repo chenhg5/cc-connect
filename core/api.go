@@ -22,6 +22,7 @@ type APIServer struct {
 	mux        *http.ServeMux
 	engines    map[string]*Engine // project name → engine
 	cron       *CronScheduler
+	timer      *TimerScheduler
 	relay      *RelayManager
 	mu         sync.RWMutex
 }
@@ -68,6 +69,10 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
 	s.mux.HandleFunc("/cron/edit", s.handleCronEdit)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
+	s.mux.HandleFunc("/timer/add", s.handleTimerAdd)
+	s.mux.HandleFunc("/timer/list", s.handleTimerList)
+	s.mux.HandleFunc("/timer/info", s.handleTimerInfo)
+	s.mux.HandleFunc("/timer/del", s.handleTimerDel)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
@@ -98,6 +103,10 @@ func (s *APIServer) RelayManager() *RelayManager {
 
 func (s *APIServer) SetCronScheduler(cs *CronScheduler) {
 	s.cron = cs
+}
+
+func (s *APIServer) SetTimerScheduler(ts *TimerScheduler) {
+	s.timer = ts
 }
 
 func (s *APIServer) Start() {
@@ -419,6 +428,195 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 	// Return updated job
 	job := s.cron.Store().Get(req.ID)
 	apiJSON(w, http.StatusOK, job)
+}
+
+// ── Timer API ─────────────────────────────────────────────────
+
+// TimerAddRequest is the JSON body for POST /timer/add.
+type TimerAddRequest struct {
+	Project     string `json:"project"`
+	SessionKey  string `json:"session_key"`
+	Delay       string `json:"delay"` // relative ("2h") or absolute ISO time
+	Prompt      string `json:"prompt"`
+	Exec        string `json:"exec"`
+	WorkDir     string `json:"work_dir"`
+	Description string `json:"description"`
+	Silent      *bool  `json:"silent,omitempty"`
+	Mute        bool   `json:"mute,omitempty"`
+	SessionMode string `json:"session_mode,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	TimeoutMins *int   `json:"timeout_mins,omitempty"`
+}
+
+func (s *APIServer) handleTimerAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req TimerAddRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Delay == "" {
+		http.Error(w, "delay is required (e.g. 2h, 30m, or ISO time)", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt == "" && req.Exec == "" {
+		http.Error(w, "either prompt or exec is required", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt != "" && req.Exec != "" {
+		http.Error(w, "prompt and exec are mutually exclusive", http.StatusBadRequest)
+		return
+	}
+
+	fireAt, err := ParseDelayOrTime(req.Delay)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	project := req.Project
+	if project == "" {
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for name := range s.engines {
+				project = name
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if project == "" {
+		http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+		return
+	}
+
+	sessionKey := req.SessionKey
+	if sessionKey == "" {
+		s.mu.RLock()
+		engine := s.engines[project]
+		s.mu.RUnlock()
+		if engine != nil {
+			keys := engine.ActiveSessionKeys()
+			if len(keys) == 1 {
+				sessionKey = keys[0]
+			}
+		}
+	}
+	if sessionKey == "" {
+		http.Error(w, "session_key is required", http.StatusBadRequest)
+		return
+	}
+
+	job := &TimerJob{
+		ID:          GenerateTimerID(),
+		Project:     project,
+		SessionKey:  sessionKey,
+		ScheduledAt: fireAt,
+		Prompt:      req.Prompt,
+		Exec:        req.Exec,
+		WorkDir:     req.WorkDir,
+		Description: req.Description,
+		Silent:      req.Silent,
+		Mute:        req.Mute,
+		SessionMode: req.SessionMode,
+		Mode:        req.Mode,
+		TimeoutMins: req.TimeoutMins,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.timer.AddJob(job); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, job)
+}
+
+func (s *APIServer) handleTimerList(w http.ResponseWriter, r *http.Request) {
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	project := r.URL.Query().Get("project")
+	var jobs []*TimerJob
+	if project != "" {
+		jobs = s.timer.Store().ListByProject(project)
+	} else {
+		jobs = s.timer.Store().List()
+	}
+
+	// Filter to pending only
+	var pending []*TimerJob
+	for _, j := range jobs {
+		if !j.Fired {
+			pending = append(pending, j)
+		}
+	}
+
+	apiJSON(w, http.StatusOK, pending)
+}
+
+func (s *APIServer) handleTimerInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	job := s.timer.Store().Get(id)
+	if job == nil {
+		http.Error(w, "timer not found", http.StatusNotFound)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, job)
+}
+
+func (s *APIServer) handleTimerDel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if !s.timer.RemoveJob(req.ID) {
+		http.Error(w, "timer not found", http.StatusNotFound)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": req.ID})
 }
 
 // ── Relay API ──────────────────────────────────────────────────

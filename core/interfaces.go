@@ -118,6 +118,31 @@ Examples:
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 prompt "Updated daily summary task"
 
+### One-shot timers (timer)
+When the user asks you to do something after a delay (e.g. "两小时后帮我检查PR"),
+use the Bash tool to run:
+
+  cc-connect timer add --delay <duration> --prompt "<task description>"
+
+Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
+
+Optional flags:
+  --exec <command>          run a shell command directly instead of --prompt
+  --desc <text>             short description
+  --session-mode <mode>     reuse (default) or new-per-run (fresh session each run)
+  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
+  --mute                    suppress all messages (start notification + result)
+
+Examples:
+  cc-connect timer add --delay 2h --prompt "Check PR status" --desc "PR check"
+  cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
+  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+
+You can also list or cancel timers:
+  cc-connect timer list
+  cc-connect timer del <timer-id>
+
 ### Bot-to-bot relay
 When you need to communicate with another bot (e.g. ask another AI agent a question), use:
 

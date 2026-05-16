@@ -90,6 +90,9 @@ func main() {
 		case "cron":
 			runCron(os.Args[2:])
 			return
+		case "timer", "at":
+			runTimer(os.Args[2:])
+			return
 		case "relay":
 			runRelay(os.Args[2:])
 			return
@@ -785,6 +788,26 @@ func main() {
 		}
 	}
 
+	// Start timer scheduler
+	timerStore, err := core.NewTimerStore(cfg.DataDir)
+	if err != nil {
+		slog.Warn("timer store unavailable", "error", err)
+	}
+	var timerSched *core.TimerScheduler
+	if timerStore != nil {
+		timerSched = core.NewTimerScheduler(timerStore)
+		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
+			timerSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		}
+		for i, e := range engines {
+			timerSched.RegisterEngine(cfg.Projects[i].Name, e)
+			e.SetTimerScheduler(timerSched)
+		}
+	}
+
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
 	for i, proj := range cfg.Projects {
@@ -811,6 +834,12 @@ func main() {
 	if cronSched != nil {
 		if err := cronSched.Start(); err != nil {
 			slog.Error("cron scheduler start failed", "error", err)
+		}
+	}
+
+	if timerSched != nil {
+		if err := timerSched.Start(); err != nil {
+			slog.Error("timer scheduler start failed", "error", err)
 		}
 	}
 
@@ -877,6 +906,9 @@ func main() {
 		}
 		if cronSched != nil {
 			mgmtSrv.SetCronScheduler(cronSched)
+		}
+		if timerSched != nil {
+			mgmtSrv.SetTimerScheduler(timerSched)
 		}
 		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
 		if bridgeSrv != nil {
@@ -1059,6 +1091,9 @@ func main() {
 		if cronSched != nil {
 			apiSrv.SetCronScheduler(cronSched)
 		}
+		if timerSched != nil {
+			apiSrv.SetTimerScheduler(timerSched)
+		}
 		apiSrv.Start()
 	}
 
@@ -1094,6 +1129,9 @@ func main() {
 		webhookSrv.Stop()
 	}
 	heartbeatSched.Stop()
+	if timerSched != nil {
+		timerSched.Stop()
+	}
 	if cronSched != nil {
 		cronSched.Stop()
 	}
