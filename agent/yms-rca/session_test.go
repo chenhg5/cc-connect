@@ -66,6 +66,7 @@ func newTestSession(t *testing.T, mode string) (*session, *mockEncoder) {
 	}
 	s.alive.Store(true)
 	s.sessionID.Store("")
+	s.currentProfile.Store("local")
 	// Hook encoder via a tiny adapter so writeFrame uses it.
 	s.encMock = enc
 	t.Cleanup(func() {

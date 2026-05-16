@@ -109,6 +109,9 @@ func TestHandleEvent_PromptFailure(t *testing.T) {
 		if e.Type == core.EventError {
 			gotErr = true
 		}
+		if e.Type == core.EventText && strings.Contains(e.Content, "profile:") {
+			t.Errorf("prompt failure must not emit profile footer text: %+v", events)
+		}
 		if e.Type == core.EventResult && e.Done {
 			gotResult = true
 		}
@@ -129,6 +132,13 @@ func TestHandleEvent_AgentEnd(t *testing.T) {
 	s.sessionID.Store("sid-1")
 	s.busy.Store(true)
 	s.turnResultEmitted.Store(false)
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "answer",
+		},
+	})
 	s.handleEvent(map[string]any{
 		"type":  "agent_end",
 		"usage": map[string]any{"input": 100.0, "output": 50.0},
@@ -243,6 +253,25 @@ func TestHandleEvent_ToolExecutionStartEnd_Dedup(t *testing.T) {
 	}
 	if results != 1 {
 		t.Errorf("expected 1 EventToolResult (dedup), got %d", results)
+	}
+}
+
+func TestHandleEvent_ToolResultAllowsOneThousandRunes(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	result := strings.Repeat("中", 800)
+	s.handleEvent(map[string]any{
+		"type":       "tool_execution_end",
+		"toolCallId": "tc-long",
+		"toolName":   "kubectl",
+		"result":     result,
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	if len(evts) != 1 || evts[0].Type != core.EventToolResult {
+		t.Fatalf("got %+v", evts)
+	}
+	if evts[0].ToolResult != result {
+		t.Fatalf("tool result was truncated below 1000 runes: got %d runes", len([]rune(evts[0].ToolResult)))
 	}
 }
 
@@ -376,6 +405,120 @@ func TestHandleEvent_NonResponseAssistantError(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_AssistantMessageEndEmitsTextWhenNoDelta(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "集群有 3 个节点。"}},
+		},
+	})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	if len(evts) != 1 || evts[0].Type != core.EventText || evts[0].Content != "集群有 3 个节点。" {
+		t.Fatalf("got %+v", evts)
+	}
+}
+
+func TestHandleEvent_AssistantMessageEndDoesNotDuplicateTextDelta(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "集群有 3 个节点。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "集群有 3 个节点。"}},
+		},
+	})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var texts []string
+	for _, e := range evts {
+		if e.Type == core.EventText {
+			texts = append(texts, e.Content)
+		}
+	}
+	if len(texts) != 1 || texts[0] != "集群有 3 个节点。" {
+		t.Fatalf("EventText = %#v; all events=%+v", texts, evts)
+	}
+}
+
+func TestHandleEvent_AssistantMessageEndDoesNotDuplicateNormalizedTextDelta(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	rawDelta := "\x1b[32m集群有 3 个节点。\x1b[0m\n\n\n"
+	cleanFinal := "集群有 3 个节点。\n\n"
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": rawDelta,
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": cleanFinal}},
+		},
+	})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var texts []string
+	for _, e := range evts {
+		if e.Type == core.EventText {
+			texts = append(texts, e.Content)
+		}
+	}
+	if len(texts) != 1 || texts[0] != rawDelta {
+		t.Fatalf("EventText = %#v; all events=%+v", texts, evts)
+	}
+}
+
+func TestHandleEvent_TurnEndWaitsForAssistantMessageEndWhenNoDelta(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	s.handleEvent(map[string]any{"type": "turn_end"})
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("turn_end emitted result before final assistant text: %+v", evts)
+		}
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared before final assistant text")
+	}
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "集群有 3 个节点。"}},
+		},
+	})
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	var idxText, idxResult = -1, -1
+	for i, e := range evts {
+		if e.Type == core.EventText {
+			idxText = i
+		}
+		if e.Type == core.EventResult {
+			idxResult = i
+		}
+	}
+	if idxText < 0 || idxResult < 0 || idxText > idxResult {
+		t.Fatalf("want EventText before EventResult, got %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Fatal("busy not cleared after deferred turn result")
+	}
+}
+
 func TestHandleEvent_ToolExecutionUpdate_ProgressAsThinking(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.handleEvent(map[string]any{
@@ -477,6 +620,97 @@ func TestHandleEvent_CustomEnvSwitch_DisplayFalseEmitsThinking(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_AppendsCurrentProfileFooter(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "custom",
+			"display":    false,
+			"customType": "yms-rca.env-switch",
+			"content":    []any{map[string]any{"text": "switched to new5"}},
+			"details":    map[string]any{"from": "local", "to": "new5", "host": "10.0.0.5"},
+		},
+	})
+	_ = drainEvents(t, s, 100*time.Millisecond)
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "集群有 2 个节点。",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "turn_end"})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var footerIdx, resultIdx = -1, -1
+	for i, e := range evts {
+		if e.Type == core.EventText && e.Content == "\n\n*profile: new5*" {
+			footerIdx = i
+		}
+		if e.Type == core.EventResult {
+			resultIdx = i
+		}
+	}
+	if footerIdx < 0 {
+		t.Fatalf("missing profile footer before result; got %+v", evts)
+	}
+	if resultIdx < 0 {
+		t.Fatalf("missing EventResult; got %+v", evts)
+	}
+	if footerIdx > resultIdx {
+		t.Fatalf("profile footer must be emitted before EventResult; got %+v", evts)
+	}
+}
+
+func TestHandleEvent_ProfileFooterTracksSetStatus(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.handleEvent(map[string]any{
+		"type":   "extension_ui_request",
+		"method": "setStatus",
+		"key":    "yms-env",
+		"text":   "env: pre (10.0.0.8)",
+	})
+	if got := s.currentProfileName(); got != "pre" {
+		t.Fatalf("current profile = %q, want pre", got)
+	}
+}
+
+func TestSessionProfileUpdateSurvivesAdapterRecycle(t *testing.T) {
+	a := &Agent{}
+	a.setCurrentProfile("local")
+
+	s1, _ := newTestSession(t, "default")
+	s1.profileUpdater = a.setCurrentProfile
+	s1.currentProfile.Store(a.currentProfileName())
+	s1.updateCurrentProfile("yms-dev")
+
+	s2, _ := newTestSession(t, "default")
+	s2.currentProfile.Store(a.currentProfileName())
+	s2.busy.Store(true)
+	s2.turnResultEmitted.Store(false)
+	s2.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "集群有 5 个节点。",
+		},
+	})
+	s2.handleEvent(map[string]any{"type": "turn_end"})
+
+	evts := drainEvents(t, s2, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "profile: yms-dev") {
+			return
+		}
+	}
+	t.Fatalf("recycled adapter session did not inherit profile yms-dev; events=%+v", evts)
+}
+
 func TestHandleEvent_AgentEnd_NoUsage(t *testing.T) {
 	// agent_end without a usage block still emits EventResult (with zero
 	// token counts) but does NOT clear busy — that happens at turn_end.
@@ -484,6 +718,13 @@ func TestHandleEvent_AgentEnd_NoUsage(t *testing.T) {
 	s.sessionID.Store("sid-no-usage")
 	s.busy.Store(true)
 	s.turnResultEmitted.Store(false)
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "answer",
+		},
+	})
 	s.handleEvent(map[string]any{"type": "agent_end"})
 	evts := drainEvents(t, s, 100*time.Millisecond)
 	var ev *core.Event
@@ -731,9 +972,9 @@ func TestHandleEvent_StalePromptAckIgnored(t *testing.T) {
 	}
 }
 
-// Regression: an LLM turn (where agent_end fires BEFORE response/prompt)
-// must emit Result via agent_end with correct token usage. The later
-// response/prompt must be a no-op for Result (already latched).
+// Regression: an LLM turn where agent_end/turn_end/response arrive before the
+// final assistant message_end must preserve token usage and emit Result only
+// after final assistant text, so core does not send "(empty response)" first.
 func TestHandleEvent_LLMTurn_AgentEndBeatsResponsePrompt(t *testing.T) {
 	s, _ := newTestSession(t, "default")
 	s.busy.Store(true)
@@ -748,8 +989,22 @@ func TestHandleEvent_LLMTurn_AgentEndBeatsResponsePrompt(t *testing.T) {
 	s.handleEvent(map[string]any{
 		"type": "response", "command": "prompt", "success": true,
 	})
-
 	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("Result emitted before final assistant text: %+v", evts)
+		}
+	}
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "answer"}},
+		},
+	})
+
+	evts = drainEvents(t, s, 100*time.Millisecond)
 	var results []core.Event
 	for _, e := range evts {
 		if e.Type == core.EventResult {
@@ -826,6 +1081,183 @@ func TestHandleEvent_ToolTurnEndDoesNotFinalizeBeforeSummaryTurn(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_ToolCallAssistantMessageEndDoesNotFinalizeBeforeSummary(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 120.0, "output": 20.0},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 1.0},
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type":      "toolCall",
+				"id":        "tc-1",
+				"name":      "kubectl",
+				"arguments": map[string]any{"command": "kubectl get nodes"},
+			}},
+		},
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	for _, e := range evts {
+		if e.Type == core.EventResult {
+			t.Fatalf("tool-call assistant message_end finalized before summary text: %+v", evts)
+		}
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared before summary turn")
+	}
+	if s.turnResultEmitted.Load() {
+		t.Fatal("tool-call assistant message_end consumed result latch")
+	}
+
+	s.handleEvent(map[string]any{
+		"type":       "tool_execution_end",
+		"toolCallId": "tc-1",
+		"toolName":   "kubectl",
+		"result":     "node-a\nnode-b\n",
+		"status":     "completed",
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "集群有 2 个节点。",
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 0.0},
+	})
+
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	var gotText, gotResult bool
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "2 个节点") {
+			gotText = true
+		}
+		if e.Type == core.EventResult && e.Done {
+			gotResult = true
+		}
+	}
+	if !gotText {
+		t.Fatalf("missing summary text: %+v", evts)
+	}
+	if !gotResult {
+		t.Fatalf("missing final result after summary turn: %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Fatal("busy not cleared after summary turn")
+	}
+}
+
+func TestHandleEvent_TextAndToolCallAssistantMessageEndWaitsForSummary(t *testing.T) {
+	s, _ := newTestSession(t, "default")
+	s.busy.Store(true)
+	s.turnResultEmitted.Store(false)
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{
+					"type": "text",
+					"text": "`pre` 环境切入态查询 — 使用 `iuap-apcom-workbench` 作为 canonical 探针。\n",
+				},
+				map[string]any{
+					"type":      "toolCall",
+					"id":        "tc-pre",
+					"name":      "pre__ymscloud.list_traffic_deploys",
+					"arguments": map[string]any{"app": "iuap-apcom-workbench"},
+				},
+			},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type":  "agent_end",
+		"usage": map[string]any{"input": 300.0, "output": 40.0},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 1.0},
+	})
+
+	evts := drainEvents(t, s, 100*time.Millisecond)
+	var gotIntro bool
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "canonical 探针") {
+			gotIntro = true
+		}
+		if e.Type == core.EventResult {
+			t.Fatalf("text+toolCall assistant message_end finalized before summary text: %+v", evts)
+		}
+	}
+	if !gotIntro {
+		t.Fatalf("missing intro text before tool call: %+v", evts)
+	}
+	if !s.busy.Load() {
+		t.Fatal("busy cleared before summary turn")
+	}
+	if s.turnResultEmitted.Load() {
+		t.Fatal("tool-call turn consumed result latch before summary")
+	}
+
+	s.handleEvent(map[string]any{
+		"type":       "tool_execution_end",
+		"toolCallId": "tc-pre",
+		"toolName":   "pre__ymscloud.list_traffic_deploys",
+		"result":     `{"deploys":[{"ruleType":"TENANT_GROUP_GRAY","trafficRuleStatus":"部署成功，已分流"}]}`,
+		"status":     "completed",
+	})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type": "text",
+				"text": "**`pre` 环境当前已切入 ✅**",
+			}},
+		},
+	})
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"data": map[string]any{"toolCallsInTurn": 0.0},
+	})
+
+	evts = drainEvents(t, s, 100*time.Millisecond)
+	var gotSummary, gotResult bool
+	for _, e := range evts {
+		if e.Type == core.EventText && strings.Contains(e.Content, "当前已切入") {
+			gotSummary = true
+		}
+		if e.Type == core.EventResult && e.Done {
+			gotResult = true
+			if e.InputTokens != 300 || e.OutputTokens != 40 {
+				t.Fatalf("token usage from tool-call agent_end lost: %+v", e)
+			}
+		}
+	}
+	if !gotSummary {
+		t.Fatalf("missing final summary text: %+v", evts)
+	}
+	if !gotResult {
+		t.Fatalf("missing final result after summary turn: %+v", evts)
+	}
+	if s.busy.Load() {
+		t.Fatal("busy not cleared after summary turn")
+	}
+}
+
 // Regression for code-review HIGH: a slash-command turn (no agent_end)
 // must still clear busy and emit EventResult on turn_end, otherwise the
 // next Send is permanently refused with "previous turn still running".
@@ -834,6 +1266,7 @@ func TestHandleEvent_TurnEndClearsBusyForSlashCommands(t *testing.T) {
 	// Simulate a turn in progress (Send would have set this).
 	s.busy.Store(true)
 	s.turnResultEmitted.Store(false)
+	s.currentPromptSlashCommand.Store(true)
 
 	// No agent_end (slash command) — just turn_end.
 	s.handleEvent(map[string]any{"type": "turn_end"})
@@ -867,6 +1300,13 @@ func TestHandleEvent_AgentEndThenTurnEnd_SingleResult(t *testing.T) {
 		"usage": map[string]any{"input": 100.0, "output": 50.0},
 	})
 	s.handleEvent(map[string]any{"type": "turn_end"})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "answer"}},
+		},
+	})
 
 	if s.busy.Load() {
 		t.Error("busy not cleared")
@@ -898,6 +1338,13 @@ func TestSend_ResetsTurnEmitLatch(t *testing.T) {
 	}
 	s.handleEvent(map[string]any{"type": "agent_end"})
 	s.handleEvent(map[string]any{"type": "turn_end"})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "first answer"}},
+		},
+	})
 	_ = drainEvents(t, s, 100*time.Millisecond)
 
 	// Second turn — Send should reset the latch so result can fire again.
@@ -908,6 +1355,13 @@ func TestSend_ResetsTurnEmitLatch(t *testing.T) {
 		t.Error("Send did not reset turnResultEmitted for new turn")
 	}
 	s.handleEvent(map[string]any{"type": "turn_end"})
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{map[string]any{"text": "second answer"}},
+		},
+	})
 	evts := drainEvents(t, s, 100*time.Millisecond)
 	var done bool
 	for _, e := range evts {

@@ -54,6 +54,7 @@ config.*.toml
 package-lock.json
 node_modules/
 .vite/
+*.tsbuildinfo
 
 # ============================================================================
 # Build & distribution

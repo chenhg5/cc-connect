@@ -70,6 +70,20 @@ type session struct {
 	// before or after response/prompt, so slash-command finalization waits for
 	// both latches.
 	slashCommandEnded atomic.Bool
+	// assistantMessageEnded is set when the current LLM turn receives the final
+	// assistant message_end. yms-rca can report turn_end before this frame, so
+	// LLM EventResult may need to wait until final text has been observed.
+	assistantMessageEnded atomic.Bool
+	// awaitingPostToolSummary is set once the current prompt has emitted a tool
+	// call. Text before that tool call is only an intro/progress message, not a
+	// final answer; the turn must wait for post-tool summary text or a terminal
+	// assistant message_end.
+	awaitingPostToolSummary atomic.Bool
+	postToolTextEmitted     atomic.Bool
+	// currentPromptSlashCommand is true for a slash-command turn. Some command
+	// turns have no assistant message_end, so turn_end remains a valid fallback
+	// finalizer for those turns.
+	currentPromptSlashCommand atomic.Bool
 
 	sessionID    atomic.Value // string
 	contextUsage atomic.Pointer[core.ContextUsage]
@@ -79,6 +93,13 @@ type session struct {
 	// sent via Send. Used to detect stale response/prompt acks from a
 	// prior turn — a late ack must not influence the current turn's state.
 	currentPromptID atomic.Value // string
+	// currentProfile tracks the yms-rca connection profile currently attached
+	// inside the subprocess. It is rendered as an agent-native footer.
+	currentProfile atomic.Value // string
+	profileUpdater func(string)
+	// turnTextEmitted is set once a visible EventText is emitted for the
+	// current turn. It prevents error-only turns from sending footer-only replies.
+	turnTextEmitted atomic.Bool
 
 	// confirm bridge
 	confirmMu      sync.Mutex
@@ -98,7 +119,11 @@ type session struct {
 	seenToolDone map[string]struct{}
 
 	// streaming buffers
-	thinkingBuf strings.Builder
+	thinkingBuf     strings.Builder
+	assistantTextMu sync.Mutex
+	assistantText   strings.Builder
+	pendingResultMu sync.Mutex
+	pendingResult   *pendingTurnResult
 }
 
 type pendingPermission struct {
@@ -107,6 +132,11 @@ type pendingPermission struct {
 	createdAt time.Time
 	timer     *time.Timer
 	once      sync.Once
+}
+
+type pendingTurnResult struct {
+	evt       core.Event
+	clearBusy bool
 }
 
 type confirmSnapshot struct {
@@ -156,6 +186,12 @@ func newSession(parent context.Context, snap *Agent, resumeFile string, extraEnv
 		seenToolUse:    make(map[string]struct{}),
 		seenToolDone:   make(map[string]struct{}),
 	}
+	if profile := snap.currentProfileName(); profile != "" {
+		s.currentProfile.Store(profile)
+	} else {
+		s.currentProfile.Store("local")
+	}
+	s.profileUpdater = snap.profileUpdater
 	s.enc = json.NewEncoder(stdinPipe)
 	s.enc.SetEscapeHTML(false)
 	s.alive.Store(true)
@@ -222,6 +258,13 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	s.turnResultEmitted.Store(false)
 	s.promptAcked.Store(false)
 	s.slashCommandEnded.Store(false)
+	s.assistantMessageEnded.Store(false)
+	s.awaitingPostToolSummary.Store(false)
+	s.postToolTextEmitted.Store(false)
+	s.currentPromptSlashCommand.Store(isSlashCommandPrompt(prompt))
+	s.turnTextEmitted.Store(false)
+	s.resetAssistantText()
+	s.clearPendingTurnResult()
 
 	// On any error after CAS we must release busy.
 	released := false

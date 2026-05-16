@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -44,6 +45,9 @@ type Agent struct {
 
 	mu         sync.Mutex
 	sessionEnv []string
+
+	currentProfile atomic.Value // string
+	profileUpdater func(string)
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -60,6 +64,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		confirmTimeout: time.Duration(getInt(opts, "confirm_timeout_secs", 300)) * time.Second,
 		connectionsDir: getString(opts, "connections_dir", ""),
 	}
+	a.setCurrentProfile("local")
 	if a.provider != "" && a.model == "" {
 		return nil, fmt.Errorf("yms-rca: provider %q requires model to be set", a.provider)
 	}
@@ -169,6 +174,19 @@ func normalizeMode(raw string) string {
 func (a *Agent) Name() string { return "yms-rca" }
 func (a *Agent) Stop() error  { return nil }
 
+func (a *Agent) setCurrentProfile(profile string) {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return
+	}
+	a.currentProfile.Store(profile)
+}
+
+func (a *Agent) currentProfileName() string {
+	profile, _ := a.currentProfile.Load().(string)
+	return strings.TrimSpace(profile)
+}
+
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -189,7 +207,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		offline:        a.offline,
 		confirmTimeout: a.confirmTimeout,
 		connectionsDir: a.connectionsDir,
+		profileUpdater: a.setCurrentProfile,
 	}
+	snapshot.setCurrentProfile(a.currentProfileName())
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
 
