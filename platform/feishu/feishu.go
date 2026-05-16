@@ -5764,10 +5764,55 @@ func buildRichPanel(title string, expanded bool, elements []map[string]any) map[
 	}
 }
 
+const maxRichCardJSONBytes = 28000
+
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
 func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+	if err != nil {
+		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSONWithStatus(markdown, status)
+	}
+	if len(b) <= maxRichCardJSONBytes {
+		return string(b)
+	}
+
+	// Keep Card 2.0 visible when long tool/reasoning history would exceed the
+	// Feishu payload limit. Dropping to a body-only fallback is unsafe because
+	// Codex intermediate messages often live only in panels, leaving markdown
+	// empty and producing a blank white card on update.
+	for _, limit := range []struct {
+		perLane int
+		textLen int
+	}{
+		{perLane: 12, textLen: 180},
+		{perLane: 6, textLen: 120},
+		{perLane: 3, textLen: 80},
+	} {
+		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		if err == nil && len(compact) <= maxRichCardJSONBytes {
+			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
+				"original_size", len(b),
+				"compacted_size", len(compact),
+				"steps", len(steps),
+				"compacted_steps", len(compactSteps),
+			)
+			return string(compact)
+		}
+	}
+
+	fallbackMarkdown := markdown
+	if strings.TrimSpace(fallbackMarkdown) == "" {
+		fallbackMarkdown = compactRichFallbackMarkdown(steps)
+	}
+	slog.Debug("feishu: rich card exceeds size limit, fallback to compact markdown card", "size", len(b))
+	return buildCardJSONWithStatus(fallbackMarkdown, status)
+}
+
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
 	panelMaps := make([]map[string]any, 0, 2)
 	if len(reasoningSteps) > 0 {
@@ -5856,20 +5901,69 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		"body": map[string]any{"elements": elements},
 	}
 
-	b, err := json.Marshal(card)
-	if err != nil {
-		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
-		return buildCardJSONWithStatus(markdown, status)
+	return json.Marshal(card)
+}
+
+func compactRichStepsForCardSize(steps []core.ToolStep, perLaneLimit, textLimit int) []core.ToolStep {
+	if len(steps) == 0 || perLaneLimit <= 0 {
+		return nil
 	}
-	// Feishu interactive card payload limit is ~30KB; over that the API
-	// rejects the whole card and the lark client may render it as a
-	// mangled JSON dump. Drop the panel and keep just the markdown body.
-	const maxCardJSONBytes = 28000
-	if len(b) > maxCardJSONBytes {
-		slog.Debug("feishu: rich card exceeds size limit, fallback to basic card", "size", len(b))
-		return buildCardJSONWithStatus(markdown, status)
+	kept := make([]core.ToolStep, 0, min(len(steps), perLaneLimit*2))
+	reasoning := 0
+	tools := 0
+	for i := len(steps) - 1; i >= 0; i-- {
+		step := steps[i]
+		if step.Kind == core.ToolStepKindThinking {
+			if reasoning >= perLaneLimit {
+				continue
+			}
+			reasoning++
+		} else {
+			if tools >= perLaneLimit {
+				continue
+			}
+			tools++
+		}
+		kept = append(kept, compactRichStepText(step, textLimit))
 	}
-	return string(b)
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	return kept
+}
+
+func compactRichStepText(step core.ToolStep, textLimit int) core.ToolStep {
+	step.Summary = compactRichText(step.Summary, textLimit)
+	step.Result = compactRichText(step.Result, textLimit)
+	return step
+}
+
+func compactRichText(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	rs := []rune(strings.TrimSpace(s))
+	if len(rs) <= maxRunes {
+		return string(rs)
+	}
+	return string(rs[:maxRunes]) + "..."
+}
+
+func compactRichFallbackMarkdown(steps []core.ToolStep) string {
+	compactSteps := compactRichStepsForCardSize(steps, 3, 120)
+	if len(compactSteps) == 0 {
+		return ""
+	}
+	lines := []string{"Card content is large; showing recent activity:"}
+	for _, step := range compactSteps {
+		line := strings.TrimSpace(richStepRowContent(step))
+		if line == "" {
+			continue
+		}
+		line = strings.ReplaceAll(line, "\n", " - ")
+		lines = append(lines, "- "+line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func splitMarkdownByTables(md string, maxTables int) []string {
