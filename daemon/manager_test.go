@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +16,128 @@ func captureSlog(t *testing.T) (get func() string, restore func()) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return func() string { return buf.String() }, func() { slog.SetDefault(prev) }
+}
+
+// withDiscoverer registers d for the duration of the test and resets
+// the registry on cleanup so tests cannot pollute each other.
+func withDiscoverer(t *testing.T, d EnvDiscoverer) {
+	t.Helper()
+	ResetEnvDiscoverers()
+	RegisterEnvDiscoverer(d)
+	t.Cleanup(ResetEnvDiscoverers)
+}
+
+func TestCaptureDaemonEnv_IncludesDiscoveredVars(t *testing.T) {
+	t.Setenv("CAPTURE_TEST_TOK", "shhh")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"CAPTURE_TEST_TOK": os.Getenv("CAPTURE_TEST_TOK")}, nil
+	})
+
+	got := captureDaemonEnv(false)
+	if got["CAPTURE_TEST_TOK"] != "shhh" {
+		t.Errorf("CAPTURE_TEST_TOK = %q, want %q", got["CAPTURE_TEST_TOK"], "shhh")
+	}
+	if got["HTTPS_PROXY"] != "http://127.0.0.1:10818" {
+		t.Errorf("HTTPS_PROXY missing or wrong: %q", got["HTTPS_PROXY"])
+	}
+}
+
+func TestCaptureDaemonEnv_SkipsDiscoverersWhenNoCapture(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"CAPTURE_TEST_TOK2": "do-not-capture-me"}, nil
+	})
+
+	got := captureDaemonEnv(true)
+	if _, ok := got["CAPTURE_TEST_TOK2"]; ok {
+		t.Errorf("CAPTURE_TEST_TOK2 must not be captured under NoCaptureSecrets")
+	}
+	if got["HTTPS_PROXY"] != "http://127.0.0.1:10818" {
+		t.Errorf("HTTPS_PROXY should still be captured: %q", got["HTTPS_PROXY"])
+	}
+}
+
+func TestCaptureDaemonEnv_DropsEmptyDiscoveredValues(t *testing.T) {
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"CAPTURE_TEST_EMPTY": ""}, nil
+	})
+
+	got := captureDaemonEnv(false)
+	if _, ok := got["CAPTURE_TEST_EMPTY"]; ok {
+		t.Error("discoverer returned empty value; must not appear in captured map")
+	}
+}
+
+func TestCaptureDaemonEnv_LogsDiscovererErrorButContinues(t *testing.T) {
+	getLogs, restore := captureSlog(t)
+	defer restore()
+
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return nil, fmt.Errorf("simulated discovery failure")
+	})
+
+	got := captureDaemonEnv(false)
+	if got["HTTPS_PROXY"] != "http://127.0.0.1:10818" {
+		t.Errorf("HTTPS_PROXY missing despite discoverer error: %q", got["HTTPS_PROXY"])
+	}
+	if !strings.Contains(getLogs(), "env discoverer reported warnings") {
+		t.Errorf("expected warning log, got: %s", getLogs())
+	}
+}
+
+func TestCaptureDaemonEnv_DropsInvalidEnvName(t *testing.T) {
+	getLogs, restore := captureSlog(t)
+	defer restore()
+
+	t.Setenv("CAPTURE_TEST_OK", "ok")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{
+			"BAD NAME":        "v",
+			"CAPTURE_TEST_OK": os.Getenv("CAPTURE_TEST_OK"),
+		}, nil
+	})
+
+	got := captureDaemonEnv(false)
+	if got["CAPTURE_TEST_OK"] != "ok" {
+		t.Errorf("valid name missing: %+v", got)
+	}
+	if _, ok := got["BAD NAME"]; ok {
+		t.Errorf("invalid name must not appear: %+v", got)
+	}
+	if !strings.Contains(getLogs(), "dropping invalid env name from discoverer") {
+		t.Errorf("expected warn about invalid env name; got: %s", getLogs())
+	}
+}
+
+func TestResolve_PropagatesNoCaptureSecretsToDiscoverers(t *testing.T) {
+	t.Setenv("RESOLVE_TOK", "v")
+	t.Setenv("HTTPS_PROXY", "http://1.2.3.4:8080")
+	withDiscoverer(t, func() (map[string]string, error) {
+		return map[string]string{"RESOLVE_TOK": os.Getenv("RESOLVE_TOK")}, nil
+	})
+
+	// NoCaptureSecrets=true → discoverer skipped.
+	cfg := Config{NoCaptureSecrets: true, BinaryPath: "/bin/true", WorkDir: t.TempDir()}
+	if err := Resolve(&cfg); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if _, ok := cfg.EnvExtra["RESOLVE_TOK"]; ok {
+		t.Errorf("Resolve must skip discoverer under NoCaptureSecrets; EnvExtra=%+v", cfg.EnvExtra)
+	}
+	if cfg.EnvExtra["HTTPS_PROXY"] == "" {
+		t.Errorf("Resolve must still capture proxy vars; EnvExtra=%+v", cfg.EnvExtra)
+	}
+
+	// NoCaptureSecrets=false → discoverer runs.
+	cfg2 := Config{NoCaptureSecrets: false, BinaryPath: "/bin/true", WorkDir: t.TempDir()}
+	if err := Resolve(&cfg2); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg2.EnvExtra["RESOLVE_TOK"] != "v" {
+		t.Errorf("Resolve must capture discoverer output when NoCaptureSecrets=false; EnvExtra=%+v", cfg2.EnvExtra)
+	}
 }
 
 func TestResolveCapturesConfigEnvPlaceholders(t *testing.T) {

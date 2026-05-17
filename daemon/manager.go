@@ -27,10 +27,11 @@ type Config struct {
 	EnvPATH    string            // capture user's PATH so agents are accessible
 	EnvExtra   map[string]string // selected environment variables needed by the service runtime
 	// NoCaptureSecrets, when true, restricts the install-time env capture
-	// to proxy-related variables only and skips the config.toml ${ENV}
-	// placeholder scan. Operators who'd rather inject secrets via keychain
-	// / `secret-tool` / EnvironmentFile= set this to keep token values out
-	// of the service manager files on disk.
+	// to proxy-related variables only and skips both the config.toml ${ENV}
+	// placeholder scan and any extension discoverers registered via
+	// RegisterEnvDiscoverer. Operators who'd rather inject secrets via
+	// keychain / `secret-tool` / EnvironmentFile= set this to keep token
+	// values out of the service manager files on disk.
 	NoCaptureSecrets bool
 }
 
@@ -142,7 +143,7 @@ func Resolve(cfg *Config) error {
 		cfg.EnvPATH = os.Getenv("PATH")
 	}
 	if len(cfg.EnvExtra) == 0 {
-		cfg.EnvExtra = captureDaemonEnv()
+		cfg.EnvExtra = captureDaemonEnv(cfg.NoCaptureSecrets)
 		if !cfg.NoCaptureSecrets {
 			captureConfigEnvPlaceholders(filepath.Join(cfg.WorkDir, "config.toml"), cfg.EnvExtra)
 		}
@@ -150,16 +151,47 @@ func Resolve(cfg *Config) error {
 	return nil
 }
 
-func captureDaemonEnv() map[string]string {
-	keys := []string{
+// captureDaemonEnv builds the EnvExtra map baked into the installed
+// service file. Proxy-related vars are always captured. When
+// noCaptureSecrets is false, every registered EnvDiscoverer is also
+// invoked and its (envName -> value) pairs are merged in.
+//
+// Discoverer errors are logged but never fail the install — the
+// daemon's job is to install the service; plugins surface their own
+// per-feature warnings at runtime.
+func captureDaemonEnv(noCaptureSecrets bool) map[string]string {
+	env := make(map[string]string)
+	proxyKeys := []string{
 		"http_proxy", "https_proxy", "no_proxy",
 		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 		"all_proxy", "ALL_PROXY",
 	}
-	env := make(map[string]string, len(keys))
-	for _, key := range keys {
+	for _, key := range proxyKeys {
 		if value := os.Getenv(key); value != "" {
 			env[key] = value
+		}
+	}
+
+	if noCaptureSecrets {
+		return env
+	}
+
+	for i, d := range snapshotEnvDiscoverers() {
+		extra, err := d()
+		if err != nil {
+			slog.Warn("daemon: env discoverer reported warnings",
+				"index", i, "err", err)
+		}
+		for k, v := range extra {
+			if !isValidEnvName(k) {
+				slog.Warn("daemon: dropping invalid env name from discoverer",
+					"index", i, "key", k)
+				continue
+			}
+			if v == "" {
+				continue
+			}
+			env[k] = v
 		}
 	}
 	return env
@@ -232,12 +264,3 @@ func captureConfigEnvPlaceholdersInString(s string, env map[string]string) {
 	}
 }
 
-var envNameRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// isValidEnvName reports whether s is a syntactically valid env-var name.
-// Used by every renderer (launchd / systemd / windows) so that malformed
-// keys cannot leak into a service file where they would either fail to
-// parse or, worse, inject syntax.
-func isValidEnvName(s string) bool {
-	return envNameRegexp.MatchString(s)
-}

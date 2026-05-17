@@ -49,10 +49,11 @@ func (m *launchdManager) Install(cfg Config) error {
 
 	plist := buildPlist(cfg)
 	// 0600: plist may contain captured secret values (config.toml ${ENV}
-	// placeholders). User-only LaunchAgents path; root can still read but
-	// that is the user's own machine boundary. os.WriteFile only applies
-	// perm on create, so Chmod afterwards is required to harden reinstalls
-	// of files that pre-existed at 0644 from earlier cc-connect versions.
+	// placeholders and any EnvDiscoverer extension output). User-only
+	// LaunchAgents path; root can still read but that is the user's own
+	// machine boundary. os.WriteFile only applies perm on create, so
+	// Chmod afterwards is required to harden reinstalls of files that
+	// pre-existed at 0644 from earlier cc-connect versions.
 	if err := os.WriteFile(plistPath, []byte(plist), 0600); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
