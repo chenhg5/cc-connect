@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -473,5 +476,72 @@ func TestEdgeTTS_Synthesize_Integration(t *testing.T) {
 	}
 	if len(audio) == 0 {
 		t.Error("expected non-empty audio data")
+	}
+}
+
+// writeSleepStub creates a temporary executable shell script that ignores all
+// args and sleeps for the given number of seconds. Used by subprocess
+// cancellation tests to stand in for espeak / pico2wave so the test does not
+// depend on those binaries being installed.
+func writeSleepStub(t *testing.T, seconds int) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tts-stub.sh")
+	body := fmt.Sprintf("#!/bin/sh\nsleep %d\n", seconds)
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	return path
+}
+
+func TestEspeakTTS_Synthesize_RespectsContextCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not portable on windows")
+	}
+
+	stub := writeSleepStub(t, 30)
+	tts := NewEspeakTTS(stub, "en")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error after context cancel, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize took %v after ctx cancel; expected subprocess to be killed promptly", elapsed)
+	}
+}
+
+func TestPicoTTS_Synthesize_RespectsContextCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not portable on windows")
+	}
+
+	stub := writeSleepStub(t, 30)
+	tts := NewPicoTTS(stub, "en-US")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error after context cancel, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize took %v after ctx cancel; expected subprocess to be killed promptly", elapsed)
 	}
 }

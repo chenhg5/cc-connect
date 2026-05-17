@@ -429,7 +429,7 @@ func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 
 	// Execute espeak command
 	// Use Output() instead of CombinedOutput() to avoid mixing stderr warnings with audio data
-	cmd := exec.Command(e.Path, args...)
+	cmd := exec.CommandContext(ctx, e.Path, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, "", fmt.Errorf("espeak: voice=%s text=%q: %w", voice, text, err)
@@ -489,7 +489,7 @@ func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 
 	// Execute pico2wave command
-	cmd := exec.Command(p.Path, args...)
+	cmd := exec.CommandContext(ctx, p.Path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, "", fmt.Errorf("pico2wave: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
