@@ -3,9 +3,15 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strings"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 const (
@@ -20,6 +26,12 @@ type Config struct {
 	LogMaxSize int64
 	EnvPATH    string            // capture user's PATH so agents are accessible
 	EnvExtra   map[string]string // selected environment variables needed by the service runtime
+	// NoCaptureSecrets, when true, restricts the install-time env capture
+	// to proxy-related variables only and skips the config.toml ${ENV}
+	// placeholder scan. Operators who'd rather inject secrets via keychain
+	// / `secret-tool` / EnvironmentFile= set this to keep token values out
+	// of the service manager files on disk.
+	NoCaptureSecrets bool
 }
 
 type Status struct {
@@ -131,6 +143,9 @@ func Resolve(cfg *Config) error {
 	}
 	if len(cfg.EnvExtra) == 0 {
 		cfg.EnvExtra = captureDaemonEnv()
+		if !cfg.NoCaptureSecrets {
+			captureConfigEnvPlaceholders(filepath.Join(cfg.WorkDir, "config.toml"), cfg.EnvExtra)
+		}
 	}
 	return nil
 }
@@ -148,4 +163,81 @@ func captureDaemonEnv() map[string]string {
 		}
 	}
 	return env
+}
+
+var configEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// captureConfigEnvPlaceholders scans configPath for ${ENV_NAME} placeholders
+// and, for each one set in the current process environment, copies it into
+// env. cc-connect resolves these placeholders at startup using os.ExpandEnv;
+// if the daemon's service file doesn't carry the values, the started daemon
+// process will see empty strings and fail to authenticate to any platform.
+//
+// Errors are logged and swallowed: a broken or missing config.toml must not
+// abort `daemon install`. Empty / unset env names are skipped silently.
+func captureConfigEnvPlaceholders(configPath string, env map[string]string) {
+	if strings.TrimSpace(configPath) == "" || env == nil {
+		return
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("daemon: config env placeholder discovery failed",
+				"path", configPath, "err", err)
+		}
+		return
+	}
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		slog.Warn("daemon: config env placeholder discovery failed",
+			"path", configPath, "err", err)
+		return
+	}
+	captureConfigEnvPlaceholdersInValue(reflect.ValueOf(raw), env)
+}
+
+func captureConfigEnvPlaceholdersInValue(v reflect.Value, env map[string]string) {
+	if !v.IsValid() {
+		return
+	}
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if !v.IsNil() {
+			captureConfigEnvPlaceholdersInValue(v.Elem(), env)
+		}
+	case reflect.String:
+		captureConfigEnvPlaceholdersInString(v.String(), env)
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			captureConfigEnvPlaceholdersInValue(v.Index(i), env)
+		}
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			captureConfigEnvPlaceholdersInValue(iter.Value(), env)
+		}
+	}
+}
+
+func captureConfigEnvPlaceholdersInString(s string, env map[string]string) {
+	matches := configEnvPlaceholderPattern.FindAllStringSubmatch(s, -1)
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		name := match[1]
+		if v, ok := os.LookupEnv(name); ok && v != "" {
+			env[name] = v
+		}
+	}
+}
+
+var envNameRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// isValidEnvName reports whether s is a syntactically valid env-var name.
+// Used by every renderer (launchd / systemd / windows) so that malformed
+// keys cannot leak into a service file where they would either fail to
+// parse or, worse, inject syntax.
+func isValidEnvName(s string) bool {
+	return envNameRegexp.MatchString(s)
 }
