@@ -857,3 +857,39 @@ func TestWebhookHandlerWrongMethod(t *testing.T) {
 		t.Fatalf("got %d, want 405", rec.Code)
 	}
 }
+
+// TestStartStoresLifecycleContext verifies that Start captures the platform's
+// cancellation context onto p.ctx so webhookHandler's async goroutine has a
+// lifecycle parent to inherit from. Without this wiring, webhookHandler falls
+// back to context.Background() and Stop() cannot short-circuit in-flight
+// handler work.
+func TestStartStoresLifecycleContext(t *testing.T) {
+	m := newMockAPI(t)
+	defer m.close()
+	p := newTestPlatform(t, m.server.URL)
+
+	if got := p.ctx; got != nil {
+		t.Fatalf("p.ctx already set before Start: %v", got)
+	}
+	if err := p.Start(func(_ core.Platform, _ *core.Message) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ctx := p.ctx
+	if ctx == nil {
+		t.Fatal("p.ctx not stored after Start; webhookHandler goroutine will fall back to context.Background and Stop cannot cancel it")
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("p.ctx already Done after Start")
+	default:
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+		// expected — Stop's cancel cascaded into p.ctx.
+	case <-time.After(time.Second):
+		t.Fatal("p.ctx not Done one second after Stop")
+	}
+}

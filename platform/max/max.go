@@ -70,6 +70,7 @@ type Platform struct {
 
 	mu           sync.RWMutex
 	handler      core.MessageHandler
+	ctx          context.Context
 	cancel       context.CancelFunc
 	stopping     bool
 	client       *http.Client // general API calls — httpTimeout
@@ -160,6 +161,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
 	p.cancel = cancel
 
 	// Verify token at startup
@@ -304,16 +306,16 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	// never let agent latency back-pressure the delivery side.
 	go func() {
 		p.mu.RLock()
-		ctx := context.Background()
-		if p.cancel != nil {
-			// Use the platform's own cancellation context so a Stop() also
-			// short-circuits in-flight handler work.
-			ctx2, cancel := context.WithCancel(ctx)
-			_ = cancel
-			ctx = ctx2
-		}
+		parent := p.ctx
 		p.mu.RUnlock()
-		p.handleUpdate(ctx, &upd)
+		// Use the platform's own cancellation context so a Stop() also
+		// short-circuits in-flight handler work. Fall back to Background
+		// only when the platform was never Start-ed (test paths that call
+		// webhookHandler directly).
+		if parent == nil {
+			parent = context.Background()
+		}
+		p.handleUpdate(parent, &upd)
 	}()
 	w.WriteHeader(http.StatusOK)
 }
