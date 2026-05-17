@@ -332,6 +332,7 @@ cc-connect update --pre     # 含预发布版本
 | Agent | Cursor Agent | ✅ 已支持 |
 | Agent | Gemini CLI (Google) | ✅ 已支持 |
 | Agent | Qoder CLI | ✅ 已支持 |
+| Agent | Reasonix | ✅ 已支持（通过 ACP）|
 | Agent | OpenCode (Crush) | ✅ 已支持 |
 | Agent | iFlow CLI | ✅ 已支持 |
 | Agent | Kimi CLI (Moonshot) | ✅ 已支持 |

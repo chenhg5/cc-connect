@@ -332,6 +332,7 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Cursor Agent | ✅ Supported |
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
+| Agent | Reasonix | ✅ Supported (via ACP) |
 | Agent | OpenCode (Crush) | ✅ Supported |
 | Agent | iFlow CLI | ✅ Supported |
 | Agent | Kimi CLI (Moonshot) | ✅ Supported |
