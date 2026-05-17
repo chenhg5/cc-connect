@@ -1507,7 +1507,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project: Reasonix (DeepSeek-native coding agent) / 使用 Reasonix
+# Project 7: Reasonix (DeepSeek-native coding agent) / 项目 7：使用 Reasonix
 # =============================================================================
 # Requires: npm install -g reasonix
 # 需要安装：npm install -g reasonix
@@ -1515,6 +1515,7 @@ app_secret = "your-feishu-app-secret"
 # first-class `type = "reasonix"` so you do not need to spell command/args.
 # Reasonix 通过 `reasonix acp` 使用 stdio ACP；cc-connect 将其封装为
 # 一级 `type = "reasonix"`，无需手动配置 command/args。
+# Full guide / 完整指南: docs/reasonix.md / docs/reasonix.zh-CN.md
 #
 # Prerequisites / 前置条件:
 #   1. Install Reasonix and verify `reasonix doctor` passes.
@@ -1540,12 +1541,15 @@ app_secret = "your-feishu-app-secret"
 # #
 # # Optional: pass flags to `reasonix acp`.
 # # 可选：传给 `reasonix acp` 的参数。
+# # Keep "acp" first. Examples:
+# # 保留 "acp" 作为第一项。例如：
 # # args = ["acp", "--yolo"]
+# # args = ["acp", "--preset", "flash", "--budget", "1.00"]
 # #
 # # Optional: pass a DeepSeek API key directly to the child process.
 # # 可选：直接给子进程注入 DeepSeek API Key。
 # # [projects.agent.options.env]
-# # DEEPSEEK_API_KEY = "sk-..."
+# # DEEPSEEK_API_KEY = "${DEEPSEEK_API_KEY}"
 
 # [[projects.platforms]]
 # type = "telegram"

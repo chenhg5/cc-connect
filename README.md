@@ -30,6 +30,12 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Agents-Reasonix%20%7C%20Claude%20Code%20%7C%20Codex%20%7C%20Gemini-0f766e" alt="Agent support"/>
+  <img src="https://img.shields.io/badge/Reasonix-ACP%20stdio-2563eb" alt="Reasonix ACP"/>
+  <img src="https://img.shields.io/badge/Channels-Telegram%20%7C%20Feishu%20%7C%20Weixin-7c3aed" alt="Verified channels"/>
+</p>
+
+<p align="center">
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
@@ -167,7 +173,7 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 - **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
 - **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
 - **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
-- **New Agents** — Kimi CLI and Pi agent support added.
+- **New Agents** — Kimi CLI, Pi agent, and **Reasonix** support added. Reasonix runs through ACP stdio and works with the existing platform layer. *[Setup → `docs/reasonix.md`](docs/reasonix.md)*
 
 
 ## 🧩 Platform feature snapshot
@@ -202,7 +208,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
+**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin, **Reasonix** — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
 **12 Chat Platforms** — Feishu, WPS Xiezuo, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
@@ -332,7 +338,7 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Cursor Agent | ✅ Supported |
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
-| Agent | Reasonix | ✅ Supported (via ACP) |
+| Agent | Reasonix | ✅ Supported (via ACP) — [guide](docs/reasonix.md) |
 | Agent | OpenCode (Crush) | ✅ Supported |
 | Agent | iFlow CLI | ✅ Supported |
 | Agent | Kimi CLI (Moonshot) | ✅ Supported |
@@ -369,6 +375,12 @@ cc-connect update --pre     # Include pre-releases
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
 | Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
 | QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
+
+## 🤖 Agent Setup Guides
+
+| Agent | Guide | Runtime |
+|-------|-------|---------|
+| Reasonix | [docs/reasonix.md](docs/reasonix.md) | ACP stdio (`reasonix acp`) |
 
 
 ## 🎯 Key Features
@@ -519,6 +531,7 @@ Notes:
 ## 📚 Documentation
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
+- [Reasonix Agent Guide](docs/reasonix.md) — DeepSeek-native Reasonix via ACP stdio
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests

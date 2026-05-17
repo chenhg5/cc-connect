@@ -114,6 +114,11 @@ reset_on_idle_mins = 60
 | 默认 | `default` | 标准权限 |
 | YOLO | `yolo` | 跳过所有检查 |
 
+### Reasonix
+
+Reasonix 可通过 `type = "reasonix"` 使用，底层通过 `reasonix acp` 走 ACP
+stdio。安装、密钥处理和平台示例见 [Reasonix Agent 接入指南](reasonix.zh-CN.md)。
+
 ### 配置示例
 
 ```toml
@@ -920,7 +925,7 @@ WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Age
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow, reasonix
 
 [projects.agent.options]
 work_dir = "/path/to/project"

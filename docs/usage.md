@@ -116,6 +116,12 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Default | `default` | Standard permissions |
 | YOLO | `yolo` | Skip all checks |
 
+### Reasonix
+
+Reasonix is available as `type = "reasonix"` and runs through ACP stdio using
+`reasonix acp`. See [Reasonix Agent Guide](reasonix.md) for installation,
+credential handling, and platform examples.
+
 ### Configuration
 
 ```toml
@@ -1008,7 +1014,7 @@ See [config.example.toml](../config.example.toml) for full examples.
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow, reasonix
 
 [projects.agent.options]
 work_dir = "/path/to/project"
