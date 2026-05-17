@@ -27,9 +27,9 @@ type tmuxSession struct {
 	alive           atomic.Bool
 	closeOnce       sync.Once
 
-	mu          sync.Mutex
-	pollCancel  context.CancelFunc
-	baselineLen int // scrollback line count at the time of the last Send()
+	mu              sync.Mutex
+	pollCancel      context.CancelFunc
+	baselineCapture string // full captureScrollback output at the time of the last Send()
 }
 
 func newTmuxSession(ctx context.Context, target, sessionID, promptPattern string, pollInt time.Duration, stripInputBlock bool, stripPatternStrs []string) (*tmuxSession, error) {
@@ -90,15 +90,12 @@ func (s *tmuxSession) Send(prompt string, _ []core.ImageAttachment, files []core
 		s.pollCancel = nil
 	}
 
-	// Use the scrollback buffer line count as baseline so that terminal scrolling
-	// never causes the previous response to bleed into the next one.
-	scrollback, err := captureScrollback(s.target)
-	if err != nil {
-		s.mu.Unlock()
-		return fmt.Errorf("tmux: capture baseline: %w", err)
-	}
-	visibleBase, _ := capturePane(s.target) // for stability comparison only
-	s.baselineLen = len(strings.Split(scrollback, "\n"))
+	// Snapshot the full scrollback (history + visible pane) before sending.
+	// extractResponse diffs against this to find exactly what the agent added,
+	// regardless of whether the TUI rewrites lines in-place or scrolls them.
+	baseline, _ := captureScrollback(s.target)
+	visibleBase, _ := capturePane(s.target) // for poll stability comparison
+	s.baselineCapture = baseline
 
 	pollCtx, pollCancel := context.WithCancel(s.ctx)
 	s.pollCancel = pollCancel
@@ -261,39 +258,45 @@ func sendKeys(target, keys string) error {
 	return nil
 }
 
-// extractResponse reads the current scrollback buffer and returns only the lines
-// that appeared after the baseline captured in Send(). This is immune to terminal
-// scrolling because the scrollback buffer never drops lines.
+// extractResponse diffs the current full scrollback against the snapshot taken
+// in Send() and returns only what the agent added.
+//
+// Using extractNew on full captures (history + visible pane) handles both TUI
+// rendering modes correctly:
+//
+//   - Append mode (agent scrolls content up): the baseline is a prefix of the
+//     new capture, so the fast-path HasPrefix strips it and returns only the
+//     new lines — no old visible-pane content leaks in.
+//
+//   - In-place rewrite mode (agent overwrites pane rows then scrolls): the
+//     first divergence is at line N (the first pane row, now containing the
+//     first response line), so extractNew returns everything from that point —
+//     no lines are skipped.
 func (s *tmuxSession) extractResponse() string {
-	scrollback, err := captureScrollback(s.target)
+	current, err := captureScrollback(s.target)
 	if err != nil {
 		slog.Warn("tmux: captureScrollback failed", "err", err)
-		current, _ := capturePane(s.target)
-		return s.cleanTUIContent(current)
+		pane, _ := capturePane(s.target)
+		return s.cleanTUIContent(pane)
 	}
 
 	s.mu.Lock()
-	baselineLen := s.baselineLen
+	baseline := s.baselineCapture
 	s.mu.Unlock()
 
-	lines := strings.Split(scrollback, "\n")
-	if baselineLen < len(lines) {
-		newLines := lines[baselineLen:]
-		response := strings.TrimRight(strings.Join(newLines, "\n"), "\n")
-		response = s.cleanTUIContent(response)
-		if response != "" {
-			response = "```\n" + response + "\n```"
-		}
-		return response
+	response := s.cleanTUIContent(extractNew(baseline, current))
+	if response != "" {
+		response = "```\n" + response + "\n```"
 	}
-	// Baseline is at or beyond current scrollback — nothing new yet.
-	return ""
+	return response
 }
 
-// captureScrollback captures up to 1000 lines of scrollback history plus the
-// visible pane, giving a stable view that does not lose content to scrolling.
+// captureScrollback captures the full scrollback history plus the visible pane.
+// Using "-S -" (start of history) instead of a fixed line count avoids the bug
+// where a long response pushes the capture window past the response start,
+// causing the first N lines of the response to be silently dropped.
 func captureScrollback(target string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p", "-S", "-1000").Output()
+	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p", "-S", "-").Output()
 	if err != nil {
 		return "", err
 	}
