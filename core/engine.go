@@ -209,10 +209,11 @@ type Engine struct {
 	bannedWords []string
 	bannedMu    sync.RWMutex
 
-	disabledCmds map[string]bool
-	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
-	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
+	disabledCmds    map[string]bool
+	passthroughCmds map[string]bool
+	adminFrom       string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	userRoles       *UserRoleManager // nil = legacy mode (no per-user policies)
+	userRolesMu     sync.RWMutex     // protects userRoles, disabledCmds, passthroughCmds, and adminFrom
 
 	rateLimiter       *RateLimiter
 	outgoingRL        *OutgoingRateLimiter
@@ -419,6 +420,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
+		disabledCmds:          make(map[string]bool),
+		passthroughCmds:       make(map[string]bool),
 		interactiveStates:     make(map[string]*interactiveState),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
@@ -801,6 +804,54 @@ func (e *Engine) SetDisabledCommands(cmds []string) {
 	e.userRolesMu.Lock()
 	defer e.userRolesMu.Unlock()
 	e.disabledCmds = resolveDisabledCmds(cmds)
+}
+
+// resolvePassthroughCmds resolves a list of slash-command names (including
+// "*" wildcard) to a set of canonical command IDs. Unknown names are kept
+// in their normalized form so passthrough rules can target agent-side
+// commands that cc-connect doesn't know about.
+func resolvePassthroughCmds(cmds []string) map[string]bool {
+	m := make(map[string]bool, len(cmds))
+	for _, c := range cmds {
+		c = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(c, "/")))
+		if c == "" {
+			continue
+		}
+		if c == "*" {
+			m["*"] = true
+			continue
+		}
+		if id := matchPrefix(c, builtinCommands); id != "" {
+			m[id] = true
+		} else {
+			m[normalizeCommandName(c)] = true
+		}
+	}
+	return m
+}
+
+func shouldPassthroughCommand(cmd, cmdID string, passthroughCmds map[string]bool) bool {
+	if len(passthroughCmds) == 0 {
+		return false
+	}
+	if passthroughCmds["*"] {
+		return true
+	}
+	if cmdID != "" && passthroughCmds[cmdID] {
+		return true
+	}
+	return passthroughCmds[normalizeCommandName(cmd)]
+}
+
+// SetPassthroughCommands marks slash commands that should bypass
+// cc-connect command handling and be forwarded to the agent as plain
+// user input. Use "*" to forward every slash command. Disabled and
+// admin-only commands are still gated before passthrough — passthrough
+// only fires for commands the user is otherwise authorized to run.
+func (e *Engine) SetPassthroughCommands(cmds []string) {
+	e.userRolesMu.Lock()
+	defer e.userRolesMu.Unlock()
+	e.passthroughCmds = resolvePassthroughCmds(cmds)
 }
 
 // SetUserRoles configures per-user role-based policies. Pass nil to disable.
@@ -4733,12 +4784,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	e.userRolesMu.RLock()
 	disabledCmds := e.disabledCmds
 	urm := e.userRoles
-	e.userRolesMu.RUnlock()
 	if urm != nil {
 		if role := urm.ResolveRole(msg.UserID); role != nil {
 			disabledCmds = role.DisabledCmds
 		}
 	}
+	passthrough := shouldPassthroughCommand(cmd, cmdID, e.passthroughCmds)
+	e.userRolesMu.RUnlock()
 
 	if cmdID != "" && disabledCmds[cmdID] {
 		slog.Info("audit: command_blocked",
@@ -4754,6 +4806,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
 		return true
+	}
+
+	if passthrough && cmdID != "" {
+		slog.Info("audit: command_passthrough",
+			"user_id", msg.UserID, "platform", msg.Platform,
+			"project", e.name, "command", cmd)
+		return false
 	}
 
 	if cmdID != "" {
@@ -4861,6 +4920,12 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+custom.Name))
 				return true
 			}
+			if passthrough {
+				slog.Info("audit: command_passthrough",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", cmd)
+				return false
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", custom.Name, "type", "custom")
@@ -4875,11 +4940,23 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+skill.Name))
 				return true
 			}
+			if passthrough {
+				slog.Info("audit: command_passthrough",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", cmd)
+				return false
+			}
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
 			e.executeSkill(p, msg, skill, args)
 			return true
+		}
+		if passthrough {
+			slog.Info("audit: command_passthrough",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", cmd)
+			return false
 		}
 		// Not a cc-connect command — notify user, then fall through to agent
 		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
