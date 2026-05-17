@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
+	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -350,6 +353,82 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 	}
 	if rc.senderStaffId != "user111" {
 		t.Errorf("direct routing: senderStaffId=%q, want %q", rc.senderStaffId, "user111")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// onMessage: richText branch must propagate isGroup so that proactive
+// sends after sessionWebhook expiry route to the group API rather than
+// to a 1:1 DM with the original sender.
+// ──────────────────────────────────────────────────────────────
+
+func TestOnMessage_RichTextInGroup_SetsIsGroup(t *testing.T) {
+	var captured *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured = msg
+		},
+	}
+
+	data := &chatbot.BotCallbackDataModel{
+		MsgId:            "msg-rt-group-1",
+		Msgtype:          "richText",
+		ConversationId:   "conv-group",
+		ConversationType: "2",
+		SenderStaffId:    "user1",
+		SenderNick:       "Alice",
+		Content: map[string]interface{}{
+			"richText": []interface{}{
+				map[string]interface{}{"text": "hello"},
+			},
+		},
+	}
+	p.onMessage(data, &richTextContent{})
+
+	if captured == nil {
+		t.Fatal("handler was not invoked for richText message")
+	}
+	rc, ok := captured.ReplyCtx.(replyContext)
+	if !ok {
+		t.Fatalf("ReplyCtx = %T, want replyContext", captured.ReplyCtx)
+	}
+	if !rc.isGroup {
+		t.Errorf("richText in ConversationType=2 group: isGroup=false, want true (proactive send would misroute to 1:1 DM)")
+	}
+}
+
+func TestOnMessage_RichTextDirect_KeepsIsGroupFalse(t *testing.T) {
+	var captured *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured = msg
+		},
+	}
+
+	data := &chatbot.BotCallbackDataModel{
+		MsgId:            "msg-rt-direct-1",
+		Msgtype:          "richText",
+		ConversationId:   "conv-direct",
+		ConversationType: "1",
+		SenderStaffId:    "user2",
+		SenderNick:       "Bob",
+		Content: map[string]interface{}{
+			"richText": []interface{}{
+				map[string]interface{}{"text": "hi"},
+			},
+		},
+	}
+	p.onMessage(data, &richTextContent{})
+
+	if captured == nil {
+		t.Fatal("handler was not invoked for richText message")
+	}
+	rc, ok := captured.ReplyCtx.(replyContext)
+	if !ok {
+		t.Fatalf("ReplyCtx = %T, want replyContext", captured.ReplyCtx)
+	}
+	if rc.isGroup {
+		t.Errorf("richText in 1:1 chat: isGroup=true, want false")
 	}
 }
 
