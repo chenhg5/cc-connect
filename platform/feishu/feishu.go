@@ -106,9 +106,10 @@ func init() {
 }
 
 type replyContext struct {
-	messageID  string
-	chatID     string
-	sessionKey string
+	messageID     string
+	chatID        string
+	sessionKey    string
+	receiveIDType string // ""=chat_id (default), "open_id", "union_id"
 }
 
 type Platform struct {
@@ -2255,7 +2256,7 @@ func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgTyp
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.replyMessage(ctx, rc, msgType, content)
 	}
-	return p.createMessage(ctx, rc.chatID, msgType, content, "send media message")
+	return p.createMessage(ctx, rc.chatID, rc.receiveIDType, msgType, content, "send media message")
 }
 
 func detectFeishuFileType(mimeType, fileName string) string {
@@ -2782,7 +2783,7 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 	if rc.chatID == "" {
 		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
 	}
-	return p.createMessage(ctx, rc.chatID, msgType, content, "send")
+	return p.createMessage(ctx, rc.chatID, rc.receiveIDType, msgType, content, "send")
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
@@ -2814,9 +2815,16 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 	})
 }
 
-func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msgType, content, op string) error {
+	ridType := larkim.ReceiveIdTypeChatId
+	switch receiveIDType {
+	case "open_id":
+		ridType = larkim.ReceiveIdTypeOpenId
+	case "union_id":
+		ridType = larkim.ReceiveIdTypeUnionId
+	}
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		ReceiveIdType(ridType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType(msgType).
@@ -2996,6 +3004,11 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("%s: invalid session key %q", p.tag(), sessionKey)
 	}
 	rc := replyContext{chatID: parts[1], sessionKey: sessionKey}
+	if strings.HasPrefix(parts[1], "ou_") {
+		rc.receiveIDType = "open_id"
+	} else if strings.HasPrefix(parts[1], "on_") {
+		rc.receiveIDType = "union_id"
+	}
 	if len(parts) == 3 {
 		if rootID, ok := parseThreadRootID(parts[2]); ok {
 			rc.messageID = rootID
@@ -3492,8 +3505,15 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 			msgID = *resp.Data.MessageId
 		}
 	} else {
+		ridType := larkim.ReceiveIdTypeChatId
+		switch rc.receiveIDType {
+		case "open_id":
+			ridType = larkim.ReceiveIdTypeOpenId
+		case "union_id":
+			ridType = larkim.ReceiveIdTypeUnionId
+		}
 		req := larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			ReceiveIdType(ridType).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
@@ -3818,7 +3838,7 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 		Content:    content,
 		UserID:     userID,
 		UserName:   userName,
-		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey},
+		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey, receiveIDType: "open_id"},
 	})
 	return nil
 }
