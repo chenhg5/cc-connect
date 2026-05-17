@@ -840,6 +840,42 @@ var privilegedCommands = map[string]bool{
 	"diff":    true,
 }
 
+// isPrivilegedCommandInvocation extends the privilegedCommands map to
+// also gate specific destructive subcommands. Currently:
+//
+//   - /commands addexec ...    — registers a custom shell-exec command
+//   - /cron    addexec ...     — schedules a recurring shell-exec
+//
+// Both effectively create new admin-only commands at runtime; if a
+// non-admin can call addexec, they can install arbitrary shell commands
+// for any future user to trigger. Sibling subcommands (list, add, del,
+// etc.) remain non-privileged.
+//
+// Returns true when the cmdID itself is in privilegedCommands, or when
+// the (cmdID, args[0]) pair matches one of the explicitly-gated
+// subcommands above.
+func isPrivilegedCommandInvocation(cmdID string, args []string) bool {
+	if privilegedCommands[cmdID] {
+		return true
+	}
+	if len(args) == 0 {
+		return false
+	}
+	sub := strings.ToLower(args[0])
+	switch cmdID {
+	case "commands":
+		return matchSubCommand(sub, []string{
+			"list", "add", "addexec", "del", "delete", "rm", "remove",
+		}) == "addexec"
+	case "cron":
+		return matchSubCommand(sub, []string{
+			"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
+		}) == "addexec"
+	default:
+		return false
+	}
+}
+
 // isAdmin checks whether the given user ID is authorized for privileged commands.
 // Unlike AllowList, empty adminFrom means deny-all (fail-closed).
 func (e *Engine) isAdmin(userID string) bool {
@@ -4748,7 +4784,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	}
 
-	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+	if cmdID != "" && isPrivilegedCommandInvocation(cmdID, args) && !e.isAdmin(msg.UserID) {
 		slog.Info("audit: command_blocked",
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
