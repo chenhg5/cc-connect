@@ -704,3 +704,168 @@ func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
 		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
 	}
 }
+
+func TestParentWorkspaceChannelKey(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"feishu", ""},
+		{"feishu:chatA", ""},
+		{"feishu:chatA:rootX", "feishu:chatA"},
+		{"telegram:123:456", "telegram:123"},
+		{"feishu:chatA:rootX:extra", "feishu:chatA:rootX"},
+		// Legacy bare key without platform prefix has no parent (lookups
+		// don't pass these in — included for safety).
+		{"chatA", ""},
+	}
+	for _, tt := range tests {
+		if got := parentWorkspaceChannelKey(tt.in); got != tt.want {
+			t.Errorf("parentWorkspaceChannelKey(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestParentChannelID(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"chatA", ""},
+		{"chatA:rootX", "chatA"},
+		{"chatA:rootX:nested", "chatA:rootX"},
+	}
+	for _, tt := range tests {
+		if got := parentChannelID(tt.in); got != tt.want {
+			t.Errorf("parentChannelID(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestResolveWorkspace_ThreadInheritsChatBinding verifies that a thread-scoped
+// channel ID (e.g. "chatID:rootID") resolves to the chat-level binding when no
+// thread-specific binding exists. This preserves the pre-existing UX where a
+// new thread inside a bound chat works immediately without requiring re-bind.
+func TestResolveWorkspace_ThreadInheritsChatBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "chat-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{names: map[string]string{"chatA": "chat-workspace"}}
+
+	// Bind the chat-level scope.
+	chatKey := workspaceChannelKey(p.Name(), "chatA")
+	e.workspaceBindings.Bind("project:test", chatKey, "chat-workspace", normalizeWorkspacePath(wsDir))
+
+	// Resolve from a thread inside that chat. Fallback should pick up the
+	// chat binding.
+	ws, name, err := e.resolveWorkspace(p, "chatA:rootX")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(wsDir); ws != want {
+		t.Errorf("ws = %q, want %q", ws, want)
+	}
+	if name != "chat-workspace" {
+		t.Errorf("name = %q, want %q", name, "chat-workspace")
+	}
+}
+
+// TestResolveWorkspace_ThreadOverridesChat verifies that a thread-specific
+// binding shadows the chat-level binding when both exist.
+func TestResolveWorkspace_ThreadOverridesChat(t *testing.T) {
+	baseDir := t.TempDir()
+	chatWS := filepath.Join(baseDir, "chat-ws")
+	threadWS := filepath.Join(baseDir, "thread-ws")
+	for _, d := range []string{chatWS, threadWS} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{}
+
+	chatKey := workspaceChannelKey(p.Name(), "chatA")
+	threadKey := workspaceChannelKey(p.Name(), "chatA:rootX")
+	e.workspaceBindings.Bind("project:test", chatKey, "chat-ws", normalizeWorkspacePath(chatWS))
+	e.workspaceBindings.Bind("project:test", threadKey, "thread-ws", normalizeWorkspacePath(threadWS))
+
+	// Thread message uses thread-specific binding.
+	ws, _, err := e.resolveWorkspace(p, "chatA:rootX")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(threadWS); ws != want {
+		t.Errorf("thread ws = %q, want %q", ws, want)
+	}
+
+	// A different thread (no specific binding) still inherits from chat.
+	ws, _, err = e.resolveWorkspace(p, "chatA:rootY")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(chatWS); ws != want {
+		t.Errorf("sibling thread ws = %q, want %q", ws, want)
+	}
+
+	// And a non-thread message in the same chat also uses chat binding.
+	ws, _, err = e.resolveWorkspace(p, "chatA")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(chatWS); ws != want {
+		t.Errorf("chat ws = %q, want %q", ws, want)
+	}
+}
+
+// TestResolveWorkspace_ConventionAutoBindsToParent verifies that when a thread
+// message hits the convention path (no binding at any scope), the name
+// resolver ascends to the chat, and the auto-bind is created at chat scope so
+// sibling threads share the workspace.
+func TestResolveWorkspace_ConventionAutoBindsToParent(t *testing.T) {
+	baseDir := t.TempDir()
+	channelName := "team-proj"
+	if err := os.MkdirAll(filepath.Join(baseDir, channelName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	// Resolver only knows the chat ID, not the thread suffix.
+	p := &mockChannelResolver{names: map[string]string{"chatB": channelName}}
+
+	ws, name, err := e.resolveWorkspace(p, "chatB:rootZ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != channelName {
+		t.Errorf("name = %q, want %q", name, channelName)
+	}
+	want := normalizeWorkspacePath(filepath.Join(baseDir, channelName))
+	if ws != want {
+		t.Errorf("ws = %q, want %q", ws, want)
+	}
+
+	// Auto-bind must have been recorded under the chat key, not the thread key.
+	chatKey := workspaceChannelKey(p.Name(), "chatB")
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b == nil || b.Workspace != want {
+		t.Errorf("expected chat-level binding at %q, got %+v", chatKey, b)
+	}
+	threadKey := workspaceChannelKey(p.Name(), "chatB:rootZ")
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b != nil {
+		t.Errorf("did not expect thread-level binding at %q, got %+v", threadKey, b)
+	}
+
+	// A sibling thread now resolves via the chat binding without re-running
+	// the convention match.
+	ws2, _, err := e.resolveWorkspace(p, "chatB:rootOther")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ws2 != want {
+		t.Errorf("sibling thread ws = %q, want %q", ws2, want)
+	}
+}

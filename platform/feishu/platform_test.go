@@ -682,6 +682,67 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 	if receivedMsg.SessionKey != "lark:oc_test:root:om_root" {
 		t.Fatalf("SessionKey = %q, want lark:oc_test:root:om_root", receivedMsg.SessionKey)
 	}
+	// ChannelKey must embed the thread root so workspace binding can be
+	// scoped per thread (with engine-level fallback to the chat-level key).
+	if receivedMsg.ChannelKey != "oc_test:om_root" {
+		t.Fatalf("ChannelKey = %q, want oc_test:om_root", receivedMsg.ChannelKey)
+	}
+}
+
+func TestChannelKeyForBinding(t *testing.T) {
+	tests := []struct {
+		name            string
+		threadIsolation bool
+		chatID          string
+		sessionKey      string
+		wantChannelKey  string
+	}{
+		{
+			name:            "thread isolation off, plain group",
+			threadIsolation: false,
+			chatID:          "oc_chat",
+			sessionKey:      "feishu:oc_chat:ou_user",
+			wantChannelKey:  "oc_chat",
+		},
+		{
+			name:            "thread isolation off, ignores root-shaped session key",
+			threadIsolation: false,
+			chatID:          "oc_chat",
+			sessionKey:      "feishu:oc_chat:root:om_root",
+			wantChannelKey:  "oc_chat",
+		},
+		{
+			name:            "thread isolation on, top-level (no thread)",
+			threadIsolation: true,
+			chatID:          "oc_chat",
+			sessionKey:      "feishu:oc_chat:ou_user",
+			wantChannelKey:  "oc_chat",
+		},
+		{
+			name:            "thread isolation on, in thread (root: prefix)",
+			threadIsolation: true,
+			chatID:          "oc_chat",
+			sessionKey:      "feishu:oc_chat:root:om_root",
+			wantChannelKey:  "oc_chat:om_root",
+		},
+		{
+			name:            "thread isolation on, in thread (thread: prefix)",
+			threadIsolation: true,
+			chatID:          "oc_chat",
+			sessionKey:      "feishu:oc_chat:thread:om_root",
+			wantChannelKey:  "oc_chat:om_root",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{threadIsolation: tt.threadIsolation}
+			got := p.channelKeyForBinding(tt.chatID, tt.sessionKey)
+			if got != tt.wantChannelKey {
+				t.Errorf("channelKeyForBinding(%q, %q) = %q, want %q",
+					tt.chatID, tt.sessionKey, got, tt.wantChannelKey)
+			}
+		})
+	}
 }
 
 func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t *testing.T) {

@@ -539,6 +539,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+	channelKey := p.channelKeyForBinding(chatID, sessionKey)
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
@@ -621,6 +622,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
+			ChannelKey: channelKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -652,6 +654,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
+			ChannelKey: channelKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -687,6 +690,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
+			ChannelKey: channelKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -1081,6 +1085,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
+	channelKey := p.channelKeyForBinding(chatID, sessionKey)
+
 	switch msgType {
 	case "text":
 		var textBody struct {
@@ -1101,8 +1107,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
 		})
 
@@ -1124,8 +1131,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -1150,8 +1158,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -1169,8 +1178,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
 			ReplyCtx: rctx,
 		})
@@ -1197,8 +1207,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		mimeType := detectMimeType(fileData)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Files: []core.FileAttachment{{
 				MimeType: mimeType,
 				Data:     fileData,
@@ -1215,8 +1226,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content:  text,
 			Images:   images,
 			Files:    files,
@@ -1246,8 +1258,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -1282,8 +1295,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
 		})
 
@@ -3085,6 +3099,22 @@ func isThreadSessionKey(sessionKey string) bool {
 	}
 	_, ok := parseThreadRootID(parts[2])
 	return ok
+}
+
+// channelKeyForBinding returns the platform-provided channel key for workspace
+// binding. When thread_isolation is enabled and the message is inside a thread,
+// the key embeds the thread root ID so each thread can bind to its own
+// workspace; otherwise it returns the chat ID and preserves per-chat binding.
+func (p *Platform) channelKeyForBinding(chatID, sessionKey string) string {
+	if p.threadIsolation {
+		parts := strings.SplitN(sessionKey, ":", 3)
+		if len(parts) == 3 {
+			if rootID, ok := parseThreadRootID(parts[2]); ok {
+				return chatID + ":" + rootID
+			}
+		}
+	}
+	return chatID
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
