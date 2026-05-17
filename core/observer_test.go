@@ -243,6 +243,77 @@ func TestSessionObserverInitOffsetsSkipsExisting(t *testing.T) {
 	}
 }
 
+// TestSessionObserverOversizeLineDoesNotReforward verifies that a JSONL line
+// that exceeds the scanner buffer cap (e.g. a Claude Code session entry with
+// a large embedded image / base64 payload) does not cause the earlier valid
+// lines to be re-forwarded on every subsequent poll. Without the fix in
+// tailFile, scanner.Err() returns bufio.ErrTooLong and the function returns
+// the original offset, so each tick re-emits every line preceding the
+// oversize one.
+func TestSessionObserverOversizeLineDoesNotReforward(t *testing.T) {
+	dir := t.TempDir()
+
+	var received []string
+	var mu sync.Mutex
+	target := &mockObserverTargetCapture{
+		fn: func(_ context.Context, _, text string) error {
+			mu.Lock()
+			received = append(received, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	obs := newSessionObserver(dir, target, "C123")
+	sessionFile := filepath.Join(dir, "oversize.jsonl")
+	if err := os.WriteFile(sessionFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	obs.initOffsets()
+
+	appendLine := func(line string) {
+		t.Helper()
+		f, err := os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(line); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Append a short, valid line.
+	appendLine(`{"type":"user","message":{"role":"user","content":"first"},"entrypoint":"cli"}` + "\n")
+	// 2. Append a line exceeding the scanner's 1MiB buffer cap. JSON is
+	// well-formed but unparseable in the same Scan call because of size.
+	bigContent := strings.Repeat("x", 1100*1024)
+	appendLine(`{"type":"user","message":{"role":"user","content":"` + bigContent + `"},"entrypoint":"cli"}` + "\n")
+
+	obs.poll(context.Background())
+	mu.Lock()
+	afterFirstPoll := len(received)
+	mu.Unlock()
+	if afterFirstPoll < 1 {
+		t.Fatalf("expected the short line to be forwarded once; received=%d", afterFirstPoll)
+	}
+
+	// Poll several more times without appending. The short line must NOT be
+	// re-emitted, regardless of whether the oversize line is skipped.
+	for i := 0; i < 5; i++ {
+		obs.poll(context.Background())
+	}
+	mu.Lock()
+	afterRepeatPolls := len(received)
+	mu.Unlock()
+	if afterRepeatPolls != afterFirstPoll {
+		t.Fatalf("repeat polls re-forwarded prior lines: started at %d, now %d (delta %d)", afterFirstPoll, afterRepeatPolls, afterRepeatPolls-afterFirstPoll)
+	}
+}
+
 func TestSessionObserverTruncation(t *testing.T) {
 	dir := t.TempDir()
 
