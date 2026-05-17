@@ -150,11 +150,7 @@ func extractProjectFromFilename(filename string) string {
 	if idx := strings.LastIndex(base, "_"); idx >= 0 {
 		suffix := base[idx+1:]
 		if len(suffix) == sessionFileHashLen && isHex(suffix) {
-			stripped := base[:idx]
-			if strings.HasSuffix(stripped, "_ws") {
-				stripped = strings.TrimSuffix(stripped, "_ws")
-			}
-			return stripped
+			return strings.TrimSuffix(base[:idx], "_ws")
 		}
 	}
 	return base
