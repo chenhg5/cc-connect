@@ -3822,6 +3822,59 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 	}
 }
 
+func TestCmdProvider_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{
+		providers: []ProviderConfig{
+			{Name: "openai", Model: "gpt-4.1-mini"},
+			{Name: "azure", Model: "gpt-4.1-mini"},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-provider"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{
+		providers: []ProviderConfig{
+			{Name: "openai", Model: "gpt-4.1-mini"},
+			{Name: "azure", Model: "gpt-4.1-mini"},
+		},
+		active: "openai",
+	}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session", "test")
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("workspace-session", "test")
+
+	e.cmdProvider(p, msg, []string{"switch", "azure"})
+
+	if got := wsAgent.GetActiveProvider(); got == nil || got.Name != "azure" {
+		t.Fatalf("workspace agent active provider = %#v, want azure", got)
+	}
+	if got := globalAgent.GetActiveProvider(); got == nil || got.Name != "openai" {
+		t.Fatalf("global agent active provider = %#v, want unchanged openai", got)
+	}
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
+		t.Fatalf("workspace session id = %q, want cleared after provider switch", got)
+	}
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+}
+
 func TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	globalAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}
