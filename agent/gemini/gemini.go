@@ -234,25 +234,19 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		return fmt.Errorf("gemini: cannot determine home dir: %w", err)
 	}
 	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", geminiProjectSlug(a.workDir), "chats")
-	// Session files are named session-<timestamp>-<uuid_prefix>.json, not <uuid>.json.
+	// Session files are named session-<timestamp>-<uuid_prefix>.(json|jsonl), not <uuid>.json.
 	// Scan the directory to find the file containing the matching sessionId.
 	entries, err := os.ReadDir(chatsDir)
 	if err != nil {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !isGeminiSessionFile(entry.Name()) {
 			continue
 		}
 		fpath := filepath.Join(chatsDir, entry.Name())
-		data, err := os.ReadFile(fpath)
-		if err != nil {
-			continue
-		}
-		var sf struct {
-			SessionID string `json:"sessionId"`
-		}
-		if json.Unmarshal(data, &sf) == nil && sf.SessionID == sessionID {
+		sf, err := readGeminiSessionFile(fpath)
+		if err == nil && sf.SessionID == sessionID {
 			return os.Remove(fpath)
 		}
 	}
@@ -472,6 +466,7 @@ type sessionFile struct {
 type sessionMessage struct {
 	Type       string          `json:"type"`
 	RawContent json.RawMessage `json:"content"`
+	Timestamp  time.Time       `json:"timestamp"`
 }
 
 // textContent extracts text from the flexible content field.
@@ -519,17 +514,12 @@ func listGeminiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 
 	var sessions []core.AgentSessionInfo
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !isGeminiSessionFile(entry.Name()) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(chatsDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-
-		var sf sessionFile
-		if json.Unmarshal(data, &sf) != nil || sf.SessionID == "" {
+		sf, err := readGeminiSessionFile(filepath.Join(chatsDir, entry.Name()))
+		if err != nil || sf.SessionID == "" {
 			continue
 		}
 
@@ -550,7 +540,7 @@ func listGeminiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 			continue
 		}
 
-		summary := extractSessionSummary(&sf)
+		summary := extractSessionSummary(sf)
 		if utf8.RuneCountInString(summary) > 60 {
 			summary = string([]rune(summary)[:60]) + "..."
 		}
@@ -574,6 +564,105 @@ func listGeminiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	})
 
 	return sessions, nil
+}
+
+func isGeminiSessionFile(name string) bool {
+	return strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".jsonl")
+}
+
+func readGeminiSessionFile(path string) (*sessionFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(path, ".jsonl") {
+		return parseGeminiJSONLSession(data)
+	}
+
+	var sf sessionFile
+	if err := json.Unmarshal(data, &sf); err != nil {
+		return nil, err
+	}
+	return &sf, nil
+}
+
+func parseGeminiJSONLSession(data []byte) (*sessionFile, error) {
+	var sf sessionFile
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			return nil, err
+		}
+
+		if setRaw, ok := raw["$set"]; ok {
+			var set struct {
+				StartTime   time.Time `json:"startTime"`
+				LastUpdated time.Time `json:"lastUpdated"`
+				Kind        string    `json:"kind"`
+			}
+			if json.Unmarshal(setRaw, &set) == nil {
+				if !set.StartTime.IsZero() {
+					sf.StartTime = set.StartTime
+				}
+				if !set.LastUpdated.IsZero() {
+					sf.LastUpdated = set.LastUpdated
+				}
+				if set.Kind != "" {
+					sf.Kind = set.Kind
+				}
+			}
+			continue
+		}
+
+		if _, ok := raw["sessionId"]; ok {
+			var meta struct {
+				SessionID   string    `json:"sessionId"`
+				ProjectHash string    `json:"projectHash"`
+				StartTime   time.Time `json:"startTime"`
+				LastUpdated time.Time `json:"lastUpdated"`
+				Kind        string    `json:"kind"`
+			}
+			if err := json.Unmarshal([]byte(line), &meta); err != nil {
+				return nil, err
+			}
+			if meta.SessionID != "" {
+				sf.SessionID = meta.SessionID
+			}
+			if meta.ProjectHash != "" {
+				sf.ProjectHash = meta.ProjectHash
+			}
+			if !meta.StartTime.IsZero() {
+				sf.StartTime = meta.StartTime
+			}
+			if !meta.LastUpdated.IsZero() {
+				sf.LastUpdated = meta.LastUpdated
+			}
+			if meta.Kind != "" {
+				sf.Kind = meta.Kind
+			}
+			continue
+		}
+
+		if _, ok := raw["type"]; ok {
+			var msg sessionMessage
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				return nil, err
+			}
+			if msg.Type != "" {
+				sf.Messages = append(sf.Messages, msg)
+				if msg.Timestamp.After(sf.LastUpdated) {
+					sf.LastUpdated = msg.Timestamp
+				}
+			}
+		}
+	}
+
+	return &sf, nil
 }
 
 // extractSessionSummary picks the first meaningful user text as the session summary.

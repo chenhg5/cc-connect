@@ -41,6 +41,8 @@ type geminiSession struct {
 	pendingMsgs []string // buffered assistant messages awaiting classification
 }
 
+const geminiFlattenedThoughtMarker = "[Thought: true]"
+
 func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*geminiSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
@@ -276,6 +278,8 @@ func (gs *geminiSession) handleEvent(raw map[string]any) {
 		gs.handleInit(raw)
 	case "message":
 		gs.handleMessage(raw)
+	case "thinking", "thought", "reasoning", "reasoning_chunk":
+		gs.handleThinking(raw)
 	case "tool_use":
 		gs.handleToolUse(raw)
 	case "tool_result":
@@ -308,27 +312,38 @@ func (gs *geminiSession) handleInit(raw map[string]any) {
 
 func (gs *geminiSession) handleMessage(raw map[string]any) {
 	role, _ := raw["role"].(string)
-	content, _ := raw["content"].(string)
-
-	if role == "user" || content == "" {
+	if role == "user" {
 		return
 	}
 
-	// Delta messages are incremental streaming fragments — emit immediately
-	// as EventText so engine's stream preview can update in real time.
-	// Non-delta messages (complete text) are buffered for later classification
-	// (thinking vs final text) based on what event follows.
-	delta, _ := raw["delta"].(bool)
-	if delta {
-		evt := core.Event{Type: core.EventText, Content: content}
+	text, thinking := geminiMessageText(raw)
+	if thinking != "" {
+		evt := core.Event{Type: core.EventThinking, Content: thinking}
 		select {
 		case gs.events <- evt:
 		case <-gs.ctx.Done():
 		}
+	}
+	if text == "" {
 		return
 	}
 
-	gs.pendingMsgs = append(gs.pendingMsgs, content)
+	// Gemini CLI can flatten thought parts into ordinary text and append
+	// "[Thought: true]" after each thought. Buffer text until a result/tool
+	// boundary so those markers cannot leak through streaming EventText.
+	gs.pendingMsgs = append(gs.pendingMsgs, text)
+}
+
+func (gs *geminiSession) handleThinking(raw map[string]any) {
+	content := geminiThinkingText(raw)
+	if content == "" {
+		return
+	}
+	evt := core.Event{Type: core.EventThinking, Content: content}
+	select {
+	case gs.events <- evt:
+	case <-gs.ctx.Done():
+	}
 }
 
 func (gs *geminiSession) handleToolUse(raw map[string]any) {
@@ -429,6 +444,7 @@ func (gs *geminiSession) flushPendingAsThinking() {
 	}
 	text := strings.Join(gs.pendingMsgs, "")
 	gs.pendingMsgs = gs.pendingMsgs[:0]
+	text = stripGeminiFlattenedThoughts(text)
 	if text != "" {
 		evt := core.Event{Type: core.EventThinking, Content: text}
 		select {
@@ -444,6 +460,7 @@ func (gs *geminiSession) flushPendingAsText() {
 	}
 	text := strings.Join(gs.pendingMsgs, "")
 	gs.pendingMsgs = gs.pendingMsgs[:0]
+	text = stripGeminiFlattenedThoughts(text)
 	if text != "" {
 		evt := core.Event{Type: core.EventText, Content: text}
 		select {
@@ -451,6 +468,148 @@ func (gs *geminiSession) flushPendingAsText() {
 		case <-gs.ctx.Done():
 		}
 	}
+}
+
+func stripGeminiFlattenedThoughts(text string) string {
+	idx := strings.LastIndex(text, geminiFlattenedThoughtMarker)
+	if idx < 0 {
+		return text
+	}
+	return strings.TrimLeft(text[idx+len(geminiFlattenedThoughtMarker):], " \t\r\n")
+}
+
+func geminiMessageText(raw map[string]any) (text, thinking string) {
+	if s, ok := raw["content"].(string); ok {
+		if isGeminiThinkingMessage(raw) {
+			return "", s
+		}
+		return s, ""
+	}
+
+	parts, ok := raw["content"].([]any)
+	if !ok {
+		return "", ""
+	}
+	for _, part := range parts {
+		pm, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		partText := geminiPartText(pm)
+		if partText == "" {
+			continue
+		}
+		if isGeminiThinkingPart(pm) {
+			thinking += partText
+		} else {
+			text += partText
+		}
+	}
+	return text, thinking
+}
+
+func geminiThinkingText(raw map[string]any) string {
+	if s, ok := raw["content"].(string); ok && s != "" {
+		return s
+	}
+	if s, ok := raw["thought"].(string); ok && s != "" {
+		return s
+	}
+	if s, ok := raw["thinking"].(string); ok && s != "" {
+		return s
+	}
+	if s, ok := raw["reasoning"].(string); ok && s != "" {
+		return s
+	}
+	if delta, ok := raw["delta"].(string); ok && delta != "" {
+		return delta
+	}
+	if thought, ok := raw["thought"].(map[string]any); ok {
+		return joinNonEmpty(
+			stringField(thought, "subject"),
+			stringField(thought, "description"),
+		)
+	}
+	return ""
+}
+
+func geminiPartText(part map[string]any) string {
+	if s, ok := part["text"].(string); ok {
+		return s
+	}
+	if s, ok := part["thought"].(string); ok {
+		return s
+	}
+	if s, ok := part["content"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+func isGeminiThinkingMessage(raw map[string]any) bool {
+	if isTruthy(raw["thought"]) || isTruthy(raw["thinking"]) || isTruthy(raw["reasoning"]) {
+		return true
+	}
+	if kind, _ := raw["kind"].(string); isThinkingLabel(kind) {
+		return true
+	}
+	if subtype, _ := raw["subtype"].(string); isThinkingLabel(subtype) {
+		return true
+	}
+	if meta, ok := raw["_meta"].(map[string]any); ok {
+		if source, _ := meta["source"].(string); isThinkingLabel(source) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGeminiThinkingPart(part map[string]any) bool {
+	if isTruthy(part["thought"]) || isTruthy(part["thinking"]) || isTruthy(part["reasoning"]) {
+		return true
+	}
+	if partType, _ := part["type"].(string); isThinkingLabel(partType) {
+		return true
+	}
+	return false
+}
+
+func isThinkingLabel(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "thought", "thinking", "reasoning", "reasoning_chunk":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTruthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		trimmed := strings.ToLower(strings.TrimSpace(x))
+		return trimmed != "" && trimmed != "false" && trimmed != "0" && trimmed != "no"
+	case map[string]any:
+		return len(x) > 0
+	default:
+		return false
+	}
+}
+
+func stringField(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
+
+func joinNonEmpty(parts ...string) string {
+	var out []string
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // RespondPermission is a no-op — Gemini CLI permissions are handled via -y / --approval-mode flags.

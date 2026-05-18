@@ -3038,6 +3038,311 @@ func TestCmdList_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdProject_AssignsMetadataAndDoesNotSwitchAgentWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	baseDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: baseDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBaseWorkDir(baseDir)
+	msg := &Message{SessionKey: "telegram:chat:user", ReplyCtx: "ctx"}
+
+	e.cmdProject(p, msg, []string{"cc-connect-fix"})
+
+	projectDir := filepath.Join(baseDir, "cc-connect-fix")
+	if _, err := os.Stat(projectDir); err != nil {
+		t.Fatalf("project dir was not created: %v", err)
+	}
+	if got := agent.GetWorkDir(); got != baseDir {
+		t.Fatalf("agent workdir = %q, want unchanged %q", got, baseDir)
+	}
+	active := e.sessions.GetOrCreateActive(msg.SessionKey)
+	project, workDir := e.sessions.SessionProject(active.ID)
+	if project != "cc-connect-fix" || workDir != projectDir {
+		t.Fatalf("project metadata = %q/%q, want cc-connect-fix/%q", project, workDir, projectDir)
+	}
+}
+
+func TestCmdList_ProjectGroupsAndNumberSelection(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "agent-c", Summary: "Ungrouped", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	projectDir := filepath.Join(t.TempDir(), "cc-connect-fix")
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("agent-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", projectDir)
+	s2 := e.sessions.NewSession(userKey, "second")
+	s2.SetAgentSessionID("agent-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", projectDir)
+	if _, err := e.sessions.SwitchSession(userKey, s1.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx", Content: "/list"}
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "📁 cc-connect-fix (2 sessions)") {
+		t.Fatalf("/list did not show grouped project:\n%s", p.sent[0])
+	}
+	if !strings.Contains(p.sent[0], "Ungrouped") {
+		t.Fatalf("/list did not keep ungrouped native session:\n%s", p.sent[0])
+	}
+
+	p.clearSent()
+	e.handleMessage(p, &Message{SessionKey: userKey, ReplyCtx: "ctx", Content: "1"})
+	if len(p.sent) != 1 {
+		t.Fatalf("expand sent = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Grouped one") || !strings.Contains(p.sent[0], "Grouped two") {
+		t.Fatalf("expanded project missing sessions:\n%s", p.sent[0])
+	}
+
+	p.clearSent()
+	e.handleMessage(p, &Message{SessionKey: userKey, ReplyCtx: "ctx", Content: "2"})
+	active := e.sessions.GetOrCreateActive(userKey)
+	if got := active.GetAgentSessionID(); got != "agent-b" {
+		t.Fatalf("active agent session = %q, want agent-b", got)
+	}
+}
+
+func TestCmdSwitch_ProjectGroupsUseVisibleListIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Ungrouped", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("agent-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", filepath.Join(t.TempDir(), "cc-connect-fix"))
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"2"})
+
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "agent-b" {
+		t.Fatalf("/switch visible index active = %q, want agent-b", got)
+	}
+}
+
+func TestCmdSwitch_ProjectGroupRowDoesNotUseStaleFlatIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Ungrouped", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangChinese)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("agent-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", filepath.Join(t.TempDir(), "cc-connect-fix"))
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "回复项目序号可展开项目") {
+		t.Fatalf("/list grouped reply = %#v, want Chinese hint", p.sent)
+	}
+	p.clearSent()
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"1"})
+
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "agent-a" {
+		t.Fatalf("active agent session = %q, want unchanged agent-a", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "第 1 项是项目分组") {
+		t.Fatalf("/switch project row reply = %#v, want Chinese project-row hint", p.sent)
+	}
+}
+
+func TestCmdSwitch_UsesGroupedVisibleIndexAfterName(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "group-1a", Summary: "Group 1 A", MessageCount: 3, ModifiedAt: now},
+		{ID: "group-1b", Summary: "Group 1 B", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "group-2a", Summary: "Group 2 A", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+		{ID: "group-2b", Summary: "Group 2 B", MessageCount: 6, ModifiedAt: now.Add(-3 * time.Minute)},
+		{ID: "group-3a", Summary: "Group 3 A", MessageCount: 7, ModifiedAt: now.Add(-4 * time.Minute)},
+		{ID: "group-3b", Summary: "Group 3 B", MessageCount: 8, ModifiedAt: now.Add(-5 * time.Minute)},
+		{ID: "group-4a", Summary: "Group 4 A", MessageCount: 9, ModifiedAt: now.Add(-6 * time.Minute)},
+		{ID: "group-5a", Summary: "Group 5 A", MessageCount: 10, ModifiedAt: now.Add(-7 * time.Minute)},
+		{ID: "group-6a", Summary: "Group 6 A", MessageCount: 11, ModifiedAt: now.Add(-8 * time.Minute)},
+		{ID: "ungrouped-a", Summary: "Sticker handling research", MessageCount: 23, ModifiedAt: now.Add(-9 * time.Minute)},
+		{ID: "ungrouped-b", Summary: "Server project groups sync", MessageCount: 75, ModifiedAt: now.Add(-10 * time.Minute)},
+		{ID: "ungrouped-c", Summary: "Restore cc-connect server", MessageCount: 29, ModifiedAt: now.Add(-11 * time.Minute)},
+		{ID: "ungrouped-d", Summary: "Clean local ghost sessions", MessageCount: 18, ModifiedAt: now.Add(-12 * time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	projectDir := t.TempDir()
+
+	for _, item := range []struct {
+		id      string
+		project string
+	}{
+		{"group-1a", "Project 1"}, {"group-1b", "Project 1"},
+		{"group-2a", "Project 2"}, {"group-2b", "Project 2"},
+		{"group-3a", "Project 3"}, {"group-3b", "Project 3"},
+		{"group-4a", "Project 4"},
+		{"group-5a", "Project 5"},
+		{"group-6a", "Project 6"},
+	} {
+		s := e.sessions.NewSession(userKey, "")
+		s.SetAgentSessionID(item.id, "stub")
+		if _, err := e.sessions.SwitchSession(userKey, s.ID); err != nil {
+			t.Fatal(err)
+		}
+		e.sessions.SetActiveSessionProject(userKey, item.project, filepath.Join(projectDir, item.project))
+	}
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"7"})
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped-a" {
+		t.Fatalf("/switch 7 active = %q, want ungrouped-a", got)
+	}
+
+	e.cmdName(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"TG贴纸处理"})
+	e.cmdCurrent(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"})
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped-a" {
+		t.Fatalf("/current flow active = %q, want ungrouped-a", got)
+	}
+
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"10"})
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped-d" {
+		t.Fatalf("/switch 10 active = %q, want grouped visible row 10 ungrouped-d", got)
+	}
+}
+
+func TestCmdSwitch_ProjectGroupsUseVisibleIndexWithoutRecentListState(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "group-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "group-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "ungrouped", Summary: "Ungrouped visible row", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("group-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	s2 := e.sessions.NewSession(userKey, "")
+	s2.SetAgentSessionID("group-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	if _, err := e.sessions.SwitchSession(userKey, active.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"2"})
+
+	if got := e.sessions.GetOrCreateActive(userKey).GetAgentSessionID(); got != "ungrouped" {
+		t.Fatalf("/switch 2 without list state active = %q, want ungrouped", got)
+	}
+}
+
+func TestRenderGroupedListCard_UsesVisibleSwitchIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "group-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "group-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "ungrouped", Summary: "Ungrouped visible row", MessageCount: 5, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{&stubPlatformEngine{n: "card"}}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("group-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	s2 := e.sessions.NewSession(userKey, "")
+	s2.SetAgentSessionID("group-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+
+	card, err := e.renderListCard(userKey, 1)
+	if err != nil {
+		t.Fatalf("renderListCard: %v", err)
+	}
+	if _, ok := findCardAction(card, "act:/switch 2"); !ok {
+		t.Fatalf("grouped list card should switch ungrouped visible row 2; card:\n%s", card.RenderText())
+	}
+	if _, ok := findCardAction(card, "act:/switch 3"); ok {
+		t.Fatalf("grouped list card should not use flat index 3 for visible row 2; card:\n%s", card.RenderText())
+	}
+}
+
+func TestRenderProjectListCard_UsesProjectVisibleSwitchIndex(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "ungrouped", Summary: "Ungrouped first", MessageCount: 5, ModifiedAt: now},
+		{ID: "group-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now.Add(-time.Minute)},
+		{ID: "group-b", Summary: "Grouped two", MessageCount: 4, ModifiedAt: now.Add(-2 * time.Minute)},
+	}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{&stubPlatformEngine{n: "card"}}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+	active := e.sessions.GetOrCreateActive(userKey)
+	active.SetAgentSessionID("group-a", "stub")
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+	s2 := e.sessions.NewSession(userKey, "")
+	s2.SetAgentSessionID("group-b", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, s2.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "Project", filepath.Join(t.TempDir(), "Project"))
+
+	card := e.renderProjectListCard(userKey, "Project")
+	if _, ok := findCardAction(card, "act:/switch 2"); !ok {
+		t.Fatalf("project list card should switch project visible row 2; card:\n%s", card.RenderText())
+	}
+	if _, ok := findCardAction(card, "act:/switch 3"); ok {
+		t.Fatalf("project list card should not use flat index 3 for project row 2; card:\n%s", card.RenderText())
+	}
+}
+
+func TestCmdProject_ChineseCopyAndMenuDescription(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	baseDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: baseDir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetBaseWorkDir(baseDir)
+	msg := &Message{SessionKey: "telegram:chat:user", ReplyCtx: "ctx"}
+
+	e.cmdProject(p, msg, nil)
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "当前会话尚未归属项目") {
+		t.Fatalf("/project empty reply = %#v, want Chinese text", p.sent)
+	}
+	p.clearSent()
+	e.cmdProject(p, msg, []string{"cc-connect-fix"})
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "已加入项目") {
+		t.Fatalf("/project set reply = %#v, want Chinese text", p.sent)
+	}
+
+	var projectDesc string
+	for _, cmd := range e.GetAllCommands() {
+		if cmd.Command == "project" {
+			projectDesc = cmd.Description
+			break
+		}
+	}
+	if !strings.Contains(projectDesc, "查看/设置当前会话所属项目") {
+		t.Fatalf("project command description = %q, want localized project description", projectDesc)
+	}
+}
+
 func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -3057,6 +3362,129 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
+	}
+}
+
+func TestHandleMessage_TargetSessionDoesNotChangeActive(t *testing.T) {
+	p := &stubPlatformEngine{n: "bridge"}
+	agentSession := newResultAgentSession("done")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	sessionKey := "bridge:web-admin:test"
+	active := e.sessions.GetOrCreateActive(sessionKey)
+	target := e.sessions.NewSession(sessionKey, "picked")
+	if _, err := e.sessions.SwitchSession(sessionKey, active.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey:      sessionKey,
+		TargetSessionID: target.ID,
+		Platform:        "bridge",
+		UserID:          "web-admin",
+		UserName:        "Web Admin",
+		Content:         "hello target",
+		ReplyCtx:        "ctx",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(target.GetHistory(1)) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if hist := target.GetHistory(2); len(hist) == 0 || hist[0].Content != "hello target" {
+		t.Fatalf("target history = %#v, want routed user message", hist)
+	}
+	if hist := active.GetHistory(1); len(hist) != 0 {
+		t.Fatalf("active history = %#v, should remain untouched", hist)
+	}
+	if current := e.sessions.GetOrCreateActive(sessionKey); current.ID != active.ID {
+		t.Fatalf("active session = %q, want unchanged %q", current.ID, active.ID)
+	}
+}
+
+func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+		{ID: "agent-other", Summary: "Other title", MessageCount: 2, ModifiedAt: time.Now()},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	session.AddHistory("user", "latest user message")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Native generated title") {
+		t.Fatalf("/current = %q, want native summary display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Name: latest user message") {
+		t.Fatalf("/current = %q, should not use local Session.Name when native summary exists", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("list sent messages = %d, want 1", len(p.sent))
+	}
+	if got := strings.Count(p.sent[0], "msgs"); got != len(nativeSessions) {
+		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
+	}
+}
+
+func TestCmdCurrent_CustomNameOverridesNativeSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+	}}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	e.sessions.SetSessionName("agent-current", "Pinned custom name")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Pinned custom name") {
+		t.Fatalf("/current = %q, want custom session name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Native generated title") {
+		t.Fatalf("/current = %q, custom name should override native summary", p.sent[0])
+	}
+}
+
+func TestRenderCurrentCard_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	e := NewEngine("test", &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native card title", MessageCount: 4, ModifiedAt: time.Now()},
+	}}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	text := p.repliedCards[0].RenderText()
+	if !strings.Contains(text, "Name: Native card title") {
+		t.Fatalf("current card = %q, want native summary display name", text)
+	}
+	if strings.Contains(text, "Name: latest user message") {
+		t.Fatalf("current card = %q, should not use local Session.Name when native summary exists", text)
 	}
 }
 
@@ -10871,9 +11299,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                                { return false }
+func (c *stubStreamingCard) Failed() bool                               { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

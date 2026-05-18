@@ -104,6 +104,58 @@ func TestSessionManager_SwitchNotFound(t *testing.T) {
 	}
 }
 
+func TestSessionManager_SwitchSessionForRoutingRestoresPastAgentSessionID(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "bridge:web-admin:codex"
+	first := sm.GetOrCreateActive(userKey)
+	target := sm.NewSession(userKey, "past native")
+	target.PastAgentSessionIDs = []string{"thread-old"}
+	target.AgentType = "codex"
+
+	switched, err := sm.SwitchSessionForRouting(userKey, target.ID)
+	if err != nil {
+		t.Fatalf("SwitchSessionForRouting: %v", err)
+	}
+	if switched.ID != target.ID {
+		t.Fatalf("switched ID = %q, want %q", switched.ID, target.ID)
+	}
+	if active := sm.GetOrCreateActive(userKey); active.ID != target.ID {
+		t.Fatalf("active ID = %q, want %q", active.ID, target.ID)
+	}
+	if got := target.GetAgentSessionID(); got != "thread-old" {
+		t.Fatalf("agent session ID = %q, want restored past ID", got)
+	}
+	if first.GetAgentSessionID() != "" {
+		t.Fatalf("first session agent ID changed to %q", first.GetAgentSessionID())
+	}
+}
+
+func TestSessionManager_ResolveSessionForRoutingDoesNotChangeActive(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "bridge:web-admin:codex"
+	first := sm.GetOrCreateActive(userKey)
+	target := sm.NewSession(userKey, "past native")
+	target.PastAgentSessionIDs = []string{"thread-old"}
+	target.AgentType = "codex"
+	if _, err := sm.SwitchSession(userKey, first.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+
+	resolved, err := sm.ResolveSessionForRouting(userKey, target.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionForRouting: %v", err)
+	}
+	if resolved.ID != target.ID {
+		t.Fatalf("resolved ID = %q, want %q", resolved.ID, target.ID)
+	}
+	if active := sm.GetOrCreateActive(userKey); active.ID != first.ID {
+		t.Fatalf("active ID = %q, want unchanged %q", active.ID, first.ID)
+	}
+	if got := target.GetAgentSessionID(); got != "thread-old" {
+		t.Fatalf("agent session ID = %q, want restored past ID", got)
+	}
+}
+
 func TestSessionManager_ListSessions(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.NewSession("user1", "a")
@@ -153,6 +205,52 @@ func TestSessionManager_Persistence(t *testing.T) {
 	}
 	if got := sm2.GetSessionName("agent-x"); got != "custom-name" {
 		t.Errorf("session name after reload = %q, want custom-name", got)
+	}
+}
+
+func TestSessionManager_SessionProjectPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	userKey := "telegram:chat:user"
+
+	sm1 := NewSessionManager(path)
+	s := sm1.GetOrCreateActive(userKey)
+	s.SetAgentSessionID("agent-1", "codex")
+	projectDir := filepath.Join(dir, "cc-connect-fix")
+	sm1.SetActiveSessionProject(userKey, "cc-connect-fix", projectDir)
+
+	sm2 := NewSessionManager(path)
+	list := sm2.ListSessions(userKey)
+	if len(list) != 1 {
+		t.Fatalf("sessions after reload = %d, want 1", len(list))
+	}
+	project, workDir := sm2.SessionProject(list[0].ID)
+	if project != "cc-connect-fix" || workDir != projectDir {
+		t.Fatalf("project = %q/%q, want cc-connect-fix/%q", project, workDir, projectDir)
+	}
+	project, workDir = sm2.AgentSessionProject(userKey, "agent-1")
+	if project != "cc-connect-fix" || workDir != projectDir {
+		t.Fatalf("agent project = %q/%q, want cc-connect-fix/%q", project, workDir, projectDir)
+	}
+}
+
+func TestSessionManager_AgentSessionProjectPrefersCurrentProjectOverPastID(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "telegram:chat:user"
+	old := sm.GetOrCreateActive(userKey)
+	old.SetAgentSessionID("agent-1", "codex")
+	old.SetAgentSessionID("", "codex")
+
+	current := sm.NewSession(userKey, "current")
+	current.SetAgentSessionID("agent-1", "codex")
+	if _, err := sm.SwitchSession(userKey, current.ID); err != nil {
+		t.Fatal(err)
+	}
+	sm.SetActiveSessionProject(userKey, "server-admin", "/work/server-admin")
+
+	project, workDir := sm.AgentSessionProject(userKey, "agent-1")
+	if project != "server-admin" || workDir != "/work/server-admin" {
+		t.Fatalf("project = %q/%q, want server-admin//work/server-admin", project, workDir)
 	}
 }
 

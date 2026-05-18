@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,13 +126,35 @@ type Platform struct {
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+
+	mediaGroupMu       sync.Mutex
+	mediaGroups        map[string]*telegramMediaGroup
+	mediaGroupDebounce time.Duration
 }
 
 const (
 	initialReconnectBackoff = time.Second
 	maxReconnectBackoff     = 30 * time.Second
 	stableConnectionWindow  = 10 * time.Second
+	mediaGroupDebounce      = 900 * time.Millisecond
 )
+
+type telegramMessageContext struct {
+	sessionKey string
+	userID     string
+	userName   string
+	chatName   string
+	channelKey string
+	replyCtx   replyContext
+	isGroup    bool
+}
+
+type telegramMediaGroup struct {
+	ctx      telegramMessageContext
+	messages []*models.Message
+	timer    *time.Timer
+	seq      uint64
+}
 
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
@@ -359,6 +382,20 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		chatName = msg.Chat.Title
 	}
 
+	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	if p.isMediaGroupAttachment(msg) {
+		p.bufferMediaGroup(msg, telegramMessageContext{
+			sessionKey: sessionKey,
+			userID:     userID,
+			userName:   userName,
+			chatName:   chatName,
+			channelKey: channelKey,
+			replyCtx:   rctx,
+			isGroup:    isGroup,
+		})
+		return
+	}
+
 	if isGroup && !p.groupReplyAll {
 		slog.Debug("telegram: checking group message", "text", msg.Text, "is_command", isCommand(msg))
 		if !p.isDirectedAtBot(msg) {
@@ -366,11 +403,22 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		}
 	}
 
-	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
 	if p.enableReactions {
 		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
 	}
 	botName := p.botUsername()
+
+	if msg.Sticker != nil {
+		p.dispatchMessage(&core.Message{
+			SessionKey: sessionKey, Platform: "telegram",
+			UserID: userID, UserName: userName, ChatName: chatName,
+			Content:    formatStickerMCPContent(msg.Sticker),
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			ReplyCtx:   rctx,
+		}, msg)
+		return
+	}
 
 	if len(msg.Photo) > 0 {
 		best := msg.Photo[len(msg.Photo)-1]
@@ -500,6 +548,144 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}, msg)
 }
 
+func (p *Platform) isMediaGroupAttachment(msg *models.Message) bool {
+	return msg.MediaGroupID != "" && (len(msg.Photo) > 0 || msg.Document != nil)
+}
+
+func (p *Platform) bufferMediaGroup(msg *models.Message, msgCtx telegramMessageContext) {
+	key := fmt.Sprintf("%s:%s:%s", msgCtx.channelKey, msgCtx.userID, msg.MediaGroupID)
+	delay := p.mediaGroupDelay()
+
+	p.mediaGroupMu.Lock()
+	defer p.mediaGroupMu.Unlock()
+
+	if p.mediaGroups == nil {
+		p.mediaGroups = make(map[string]*telegramMediaGroup)
+	}
+	group := p.mediaGroups[key]
+	if group == nil {
+		group = &telegramMediaGroup{ctx: msgCtx}
+		p.mediaGroups[key] = group
+	}
+	group.messages = append(group.messages, msg)
+	group.seq++
+	seq := group.seq
+	if group.timer != nil {
+		group.timer.Stop()
+	}
+	group.timer = time.AfterFunc(delay, func() {
+		p.flushMediaGroup(key, seq)
+	})
+}
+
+func (p *Platform) mediaGroupDelay() time.Duration {
+	if p.mediaGroupDebounce > 0 {
+		return p.mediaGroupDebounce
+	}
+	return mediaGroupDebounce
+}
+
+func (p *Platform) flushMediaGroup(key string, seq uint64) {
+	p.mediaGroupMu.Lock()
+	group := p.mediaGroups[key]
+	if group == nil || group.seq != seq {
+		p.mediaGroupMu.Unlock()
+		return
+	}
+	delete(p.mediaGroups, key)
+	p.mediaGroupMu.Unlock()
+
+	if p.isStopping() {
+		return
+	}
+	p.dispatchMediaGroup(group)
+}
+
+func (p *Platform) stopMediaGroups() {
+	p.mediaGroupMu.Lock()
+	defer p.mediaGroupMu.Unlock()
+	for key, group := range p.mediaGroups {
+		if group.timer != nil {
+			group.timer.Stop()
+		}
+		delete(p.mediaGroups, key)
+	}
+}
+
+func (p *Platform) dispatchMediaGroup(group *telegramMediaGroup) {
+	if group == nil || len(group.messages) == 0 {
+		return
+	}
+	sort.SliceStable(group.messages, func(i, j int) bool {
+		return group.messages[i].ID < group.messages[j].ID
+	})
+
+	if group.ctx.isGroup && !p.groupReplyAll {
+		directed := false
+		for _, msg := range group.messages {
+			if p.isDirectedAtBot(msg) {
+				directed = true
+				break
+			}
+		}
+		if !directed {
+			return
+		}
+	}
+
+	botName := p.botUsername()
+	var captions []string
+	var images []core.ImageAttachment
+	var files []core.FileAttachment
+	replyCtx := group.ctx.replyCtx
+	dispatchTGMsg := group.messages[0]
+
+	for _, msg := range group.messages {
+		if caption := stripBotMention(msg.Caption, botName); caption != "" {
+			captions = append(captions, caption)
+			replyCtx.messageID = msg.ID
+			dispatchTGMsg = msg
+		}
+		if len(msg.Photo) > 0 {
+			best := msg.Photo[len(msg.Photo)-1]
+			imgData, err := p.downloadFile(best.FileID)
+			if err != nil {
+				slog.Error("telegram: download media group photo failed", "error", err)
+				continue
+			}
+			images = append(images, core.ImageAttachment{MimeType: "image/jpeg", Data: imgData})
+			continue
+		}
+		if msg.Document != nil {
+			slog.Info("telegram: media group document received", "user", group.ctx.userName, "file_name", msg.Document.FileName, "mime", msg.Document.MimeType)
+			fileData, err := p.downloadFile(msg.Document.FileID)
+			if err != nil {
+				slog.Error("telegram: download media group document failed", "error", err)
+				continue
+			}
+			files = append(files, core.FileAttachment{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName})
+		}
+	}
+
+	content := strings.Join(captions, "\n")
+	if content == "" && len(images) == 0 && len(files) == 0 {
+		return
+	}
+	p.dispatchMessage(&core.Message{
+		SessionKey: group.ctx.sessionKey,
+		Platform:   "telegram",
+		UserID:     group.ctx.userID,
+		UserName:   group.ctx.userName,
+		ChatName:   group.ctx.chatName,
+		Content:    content,
+		MessageID:  strconv.Itoa(group.messages[0].ID),
+		ChannelKey: group.ctx.channelKey,
+		Images:     images,
+		Files:      files,
+		ReplyCtx:   replyCtx,
+	}, dispatchTGMsg)
+}
+
 func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
 	// Enrich with platform-specific context (reply quotes, location text, etc.)
 	var extras []string
@@ -571,6 +757,18 @@ func stripBotMention(text, botName string) string {
 	}
 	text = strings.ReplaceAll(text, "@"+botName, "")
 	return strings.TrimSpace(text)
+}
+
+func formatStickerMCPContent(sticker *models.Sticker) string {
+	if sticker == nil {
+		return "[Telegram sticker]\nemoji: \nfile_id: \nUse the sticker MCP tool download_sticker(file_id, emoji) to view it as an image."
+	}
+
+	return fmt.Sprintf(
+		"[Telegram sticker]\nemoji: %s\nfile_id: %s\nUse the sticker MCP tool download_sticker(file_id, emoji) to view it as an image.",
+		strings.TrimSpace(sticker.Emoji),
+		strings.TrimSpace(sticker.FileID),
+	)
 }
 
 func (p *Platform) getNewBot() botFactory {
@@ -1476,6 +1674,7 @@ func (p *Platform) Stop() error {
 	if cancel != nil {
 		cancel()
 	}
+	p.stopMediaGroups()
 	return nil
 }
 

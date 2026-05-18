@@ -519,7 +519,13 @@ func sameCodexPath(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	return normalizeCodexPathForCompare(a) == normalizeCodexPathForCompare(b)
+}
+
+func normalizeCodexPathForCompare(path string) string {
+	clean := filepath.Clean(strings.ReplaceAll(path, "\\", "/"))
+	clean = strings.ReplaceAll(clean, "\\", "/")
+	return strings.ToLower(clean)
 }
 
 func uniqueCodexSkillDirs(paths []string) []string {

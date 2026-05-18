@@ -141,10 +141,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -552,7 +552,8 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := len(e.sessions.AllSessions())
+		_, activeIDs := e.sessions.SessionKeyMap()
+		sessCount := len(managementVisibleSessions(e.sessions.AllSessions(), activeIDs))
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -642,7 +643,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		allSessions := e.sessions.AllSessions()
+		_, activeIDs := e.sessions.SessionKeyMap()
+		allSessions := managementVisibleSessions(e.sessions.AllSessions(), activeIDs)
 		sessCount := len(allSessions)
 
 		e.interactiveMu.Lock()
@@ -895,6 +897,172 @@ func (m *ManagementServer) handleProjectUsers(w http.ResponseWriter, r *http.Req
 
 // ── Session endpoints ─────────────────────────────────────────
 
+func (e *Engine) managementSessionDisplayNames() map[string]string {
+	if e == nil || e.agent == nil || e.sessions == nil {
+		return nil
+	}
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil || len(agentSessions) == 0 {
+		return nil
+	}
+	agentSessions = e.applySessionFilter(agentSessions, e.sessions)
+	if len(agentSessions) == 0 {
+		return nil
+	}
+	names := make(map[string]string, len(agentSessions))
+	for _, info := range agentSessions {
+		if summary := compactSessionDisplayName(info.Summary); summary != "" {
+			names[info.ID] = summary
+		}
+	}
+	return names
+}
+
+func (e *Engine) managementSessionDisplayName(s *Session, nativeNames map[string]string) string {
+	if e == nil || e.sessions == nil || s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	agentID := s.AgentSessionID
+	pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+	s.mu.Unlock()
+	if agentID != "" {
+		if name := e.sessions.GetSessionName(agentID); name != "" {
+			return name
+		}
+		if name := nativeNames[agentID]; name != "" {
+			return name
+		}
+	}
+	for _, pastID := range pastIDs {
+		if name := e.sessions.GetSessionName(pastID); name != "" {
+			return name
+		}
+		if name := nativeNames[pastID]; name != "" {
+			return name
+		}
+	}
+	return s.GetName()
+}
+
+func managementVisibleSessions(stored []*Session, activeIDs map[string]bool) []*Session {
+	currentAgentIDs := make(map[string]struct{})
+	bestCurrentByAgentID := make(map[string]*Session)
+	latestPastOnly := make(map[string]*Session)
+	for _, s := range stored {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		agentID := s.AgentSessionID
+		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+		updatedAt := s.UpdatedAt
+		s.mu.Unlock()
+		if agentID != "" {
+			currentAgentIDs[agentID] = struct{}{}
+			if managementPreferSession(s, bestCurrentByAgentID[agentID], activeIDs) {
+				bestCurrentByAgentID[agentID] = s
+			}
+			continue
+		}
+		for _, pastID := range pastIDs {
+			if pastID == "" {
+				continue
+			}
+			if prev := latestPastOnly[pastID]; prev != nil {
+				prevUpdated := prev.GetUpdatedAt()
+				if !updatedAt.After(prevUpdated) {
+					continue
+				}
+			}
+			latestPastOnly[pastID] = s
+		}
+	}
+
+	visible := make([]*Session, 0, len(stored))
+	for _, s := range stored {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		agentID := s.AgentSessionID
+		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+		s.mu.Unlock()
+
+		if agentID != "" {
+			if best := bestCurrentByAgentID[agentID]; best != nil && best != s {
+				continue
+			}
+		}
+		if agentID == "" && len(pastIDs) > 0 {
+			shadowed := false
+			for _, pastID := range pastIDs {
+				if _, ok := currentAgentIDs[pastID]; ok {
+					shadowed = true
+					break
+				}
+				if latest := latestPastOnly[pastID]; latest != nil && latest != s {
+					shadowed = true
+					break
+				}
+			}
+			if shadowed {
+				continue
+			}
+		}
+		visible = append(visible, s)
+	}
+	return visible
+}
+
+func managementPreferSession(candidate, current *Session, activeIDs map[string]bool) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	candidateActive := activeIDs != nil && activeIDs[candidate.ID]
+	currentActive := activeIDs != nil && activeIDs[current.ID]
+	if candidateActive != currentActive {
+		return candidateActive
+	}
+
+	candidate.mu.Lock()
+	candidateProject := candidate.Project != ""
+	candidateName := strings.TrimSpace(candidate.Name)
+	candidateHist := len(candidate.History)
+	candidateUpdated := candidate.UpdatedAt
+	candidate.mu.Unlock()
+
+	current.mu.Lock()
+	currentProject := current.Project != ""
+	currentName := strings.TrimSpace(current.Name)
+	currentHist := len(current.History)
+	currentUpdated := current.UpdatedAt
+	current.mu.Unlock()
+
+	if candidateProject != currentProject {
+		return candidateProject
+	}
+	if sessionNameLooksIntentional(candidateName) != sessionNameLooksIntentional(currentName) {
+		return sessionNameLooksIntentional(candidateName)
+	}
+	if candidateHist != currentHist {
+		return candidateHist > currentHist
+	}
+	return candidateUpdated.After(currentUpdated)
+}
+
+func sessionNameLooksIntentional(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "default", "new", "new chat", "new session":
+		return false
+	default:
+		return true
+	}
+}
+
 func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
 	// sub-routes like /sessions/switch
 	if rest == "switch" {
@@ -920,9 +1088,11 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		e.interactiveMu.Unlock()
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := e.sessions.AllSessions()
+		stored := managementVisibleSessions(e.sessions.AllSessions(), activeIDs)
+		nativeNames := e.managementSessionDisplayNames()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
+			displayName := e.managementSessionDisplayName(s, nativeNames)
 			s.mu.Lock()
 			histCount := len(s.History)
 			var lastMsg map[string]any
@@ -940,7 +1110,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			}
 			info := map[string]any{
 				"id":            s.ID,
-				"name":          s.Name,
+				"name":          displayName,
 				"session_key":   idToKey[s.ID],
 				"agent_type":    s.AgentType,
 				"active":        activeIDs[s.ID],
@@ -948,6 +1118,10 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 				"created_at":    s.CreatedAt,
 				"updated_at":    s.UpdatedAt,
 				"last_message":  lastMsg,
+			}
+			if s.Project != "" {
+				info["project"] = s.Project
+				info["project_work_dir"] = s.ProjectWorkDir
 			}
 			s.mu.Unlock()
 
@@ -1038,10 +1212,11 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 		_, live := e.interactiveStates[sessionKey]
 		e.interactiveMu.Unlock()
 
+		displayName := e.managementSessionDisplayName(s, e.managementSessionDisplayNames())
 		s.mu.Lock()
 		data := map[string]any{
 			"id":               s.ID,
-			"name":             s.Name,
+			"name":             displayName,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
 			"agent_type":       s.AgentType,
@@ -1051,6 +1226,10 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			"created_at":       s.CreatedAt,
 			"updated_at":       s.UpdatedAt,
 			"history":          histJSON,
+		}
+		if s.Project != "" {
+			data["project"] = s.Project
+			data["project_work_dir"] = s.ProjectWorkDir
 		}
 		s.mu.Unlock()
 
@@ -1110,6 +1289,7 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 	}
 	var body struct {
 		SessionKey string `json:"session_key"`
+		SessionID  string `json:"session_id"`
 		Message    string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1119,6 +1299,16 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 	if body.Message == "" {
 		mgmtError(w, http.StatusBadRequest, "message is required")
 		return
+	}
+	if body.SessionID != "" {
+		if body.SessionKey == "" {
+			mgmtError(w, http.StatusBadRequest, "session_key is required when session_id is provided")
+			return
+		}
+		if _, err := e.sessions.SwitchSessionForRouting(body.SessionKey, body.SessionID); err != nil {
+			mgmtError(w, http.StatusNotFound, err.Error())
+			return
+		}
 	}
 	if err := e.SendToSession(body.SessionKey, body.Message); err != nil {
 		mgmtError(w, http.StatusInternalServerError, err.Error())
@@ -1859,10 +2049,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

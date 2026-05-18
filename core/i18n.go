@@ -250,8 +250,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgStatusTitle           MsgKey = "status_title"
+	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -443,10 +443,10 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent       MsgKey = "ps_sent"
-	MsgPsSendFailed MsgKey = "ps_send_failed"
-	MsgPsEmpty      MsgKey = "ps_empty"
-	MsgPsNoSession  MsgKey = "ps_no_session"
+	MsgPsSent            MsgKey = "ps_sent"
+	MsgPsSendFailed      MsgKey = "ps_send_failed"
+	MsgPsEmpty           MsgKey = "ps_empty"
+	MsgPsNoSession       MsgKey = "ps_no_session"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -484,6 +484,7 @@ const (
 	MsgBuiltinCmdSwitch    MsgKey = "switch"
 	MsgBuiltinCmdDelete    MsgKey = "delete"
 	MsgBuiltinCmdName      MsgKey = "name"
+	MsgBuiltinCmdProject   MsgKey = "project"
 	MsgBuiltinCmdCurrent   MsgKey = "current"
 	MsgBuiltinCmdHistory   MsgKey = "history"
 	MsgBuiltinCmdProvider  MsgKey = "provider"
@@ -3297,6 +3298,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "為會話命名，方便辨識，參數: [序號] <名稱>",
 		LangJapanese:           "セッションに名前を付ける、引数: [番号] <名前>",
 		LangSpanish:            "Nombrar una sesión para fácil identificación, arg: [número] <texto>",
+	},
+	MsgBuiltinCmdProject: {
+		LangEnglish:            "View or assign the current session project, arg: [name]",
+		LangChinese:            "查看/设置当前会话所属项目，参数: [项目名]",
+		LangTraditionalChinese: "查看/設定目前會話所屬專案，參數: [專案名]",
+		LangJapanese:           "現在のセッションのプロジェクトを表示/設定、引数: [名前]",
+		LangSpanish:            "Ver/asignar el proyecto de la sesión actual, arg: [nombre]",
 	},
 	MsgBuiltinCmdCurrent: {
 		LangEnglish:            "Show current active session",
