@@ -19,7 +19,7 @@ func runCron(args []string) {
 		return
 	}
 
-	switch args[0] {
+	switch canonicalCronSubcommand(args[0]) {
 	case "add":
 		runCronAdd(args[1:])
 	case "list":
@@ -28,7 +28,7 @@ func runCron(args []string) {
 		runCronEdit(args[1:])
 	case "info":
 		runCronInfo(args[1:])
-	case "exec", "run", "trigger":
+	case "exec":
 		runCronExec(args[1:])
 	case "del", "delete", "rm", "remove":
 		runCronDel(args[1:])
@@ -38,6 +38,15 @@ func runCron(args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown cron subcommand: %s\n", args[0])
 		printCronUsage()
 		os.Exit(1)
+	}
+}
+
+func canonicalCronSubcommand(sub string) string {
+	switch sub {
+	case "run", "trigger":
+		return "exec"
+	default:
+		return sub
 	}
 }
 

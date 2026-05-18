@@ -415,15 +415,16 @@ func TestCronScheduler_RunJobNow_DisabledJobStillRuns(t *testing.T) {
 			if sent[1] != "manual run complete" {
 				t.Fatalf("sent[1] = %q, want final result", sent[1])
 			}
-			stored := store.Get("manual1")
-			if stored == nil {
+			found, lastRunSet, lastErr := cronJobRunStatus(store, "manual1")
+			if !found {
 				t.Fatal("expected stored job")
 			}
-			if stored.LastRun.IsZero() {
-				t.Fatal("expected LastRun to be set after manual run")
+			if !lastRunSet {
+				time.Sleep(10 * time.Millisecond)
+				continue
 			}
-			if stored.LastError != "" {
-				t.Fatalf("LastError = %q, want empty", stored.LastError)
+			if lastErr != "" {
+				t.Fatalf("LastError = %q, want empty", lastErr)
 			}
 			return
 		}
@@ -528,12 +529,31 @@ func TestCronScheduler_RunJobNow_UsesSnapshot(t *testing.T) {
 			if strings.Contains(agentSession.sentPrompts[0], "mutated prompt") {
 				t.Fatalf("agent prompt used mutated value: %#v", agentSession.sentPrompts)
 			}
+			found, lastRunSet, _ := cronJobRunStatus(store, "snapshot1")
+			if !found {
+				t.Fatal("expected stored job")
+			}
+			if !lastRunSet {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	t.Fatalf("timed out waiting for snapshot run, sent=%v", platform.getSent())
+}
+
+func cronJobRunStatus(store *CronStore, id string) (found bool, lastRunSet bool, lastErr string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, job := range store.jobs {
+		if job.ID == id {
+			return true, !job.LastRun.IsZero(), job.LastError
+		}
+	}
+	return false, false, ""
 }
 
 func TestCronJob_ExecutionTimeout(t *testing.T) {

@@ -6590,50 +6590,94 @@ func TestCmdCronExec_UsageWhenMissingID(t *testing.T) {
 }
 
 func TestCmdCronExec_TriggersJob(t *testing.T) {
+	for _, subcommand := range []string{"exec", "run", "trigger"} {
+		t.Run(subcommand, func(t *testing.T) {
+			store, err := NewCronStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			scheduler := NewCronScheduler(store)
+			platform := &stubCronReplyTargetPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "plain"},
+			}
+			agentSession := newResultAgentSession("manual run complete")
+			e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+			e.cronScheduler = scheduler
+			scheduler.RegisterEngine("test", e)
+
+			job := &CronJob{
+				ID:          "run-from-chat",
+				Project:     "test",
+				SessionKey:  "plain:user1",
+				CronExpr:    "0 6 * * *",
+				Prompt:      "summarize",
+				Description: "Run from chat",
+				Enabled:     false,
+				CreatedAt:   time.Now(),
+			}
+			if err := store.Add(job); err != nil {
+				t.Fatal(err)
+			}
+
+			msg := &Message{SessionKey: "plain:user1", ReplyCtx: "ctx"}
+			e.cmdCron(platform, msg, []string{subcommand, job.ID})
+
+			sent := platform.getSent()
+			if len(sent) == 0 || !strings.Contains(sent[0], "triggered") {
+				t.Fatalf("reply = %v, want localized trigger confirmation", sent)
+			}
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				sent = platform.getSent()
+				if len(sent) >= 3 {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Fatalf("timed out waiting for run output, sent=%v", platform.getSent())
+		})
+	}
+}
+
+func TestCmdCronExec_BlocksShellJobForNonAdmin(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	scheduler := NewCronScheduler(store)
-	platform := &stubCronReplyTargetPlatform{
-		stubPlatformEngine: stubPlatformEngine{n: "plain"},
-	}
-	agentSession := newResultAgentSession("manual run complete")
-	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin1")
 	e.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", e)
 
 	job := &CronJob{
-		ID:          "run-from-chat",
+		ID:          "shell-from-chat",
 		Project:     "test",
 		SessionKey:  "plain:user1",
 		CronExpr:    "0 6 * * *",
-		Prompt:      "summarize",
-		Description: "Run from chat",
-		Enabled:     false,
+		Exec:        "echo should-not-run",
+		Description: "Shell from chat",
+		Enabled:     true,
 		CreatedAt:   time.Now(),
 	}
 	if err := store.Add(job); err != nil {
 		t.Fatal(err)
 	}
 
-	msg := &Message{SessionKey: "plain:user1", ReplyCtx: "ctx"}
-	e.cmdCron(platform, msg, []string{"run", job.ID})
+	msg := &Message{SessionKey: "plain:user1", UserID: "user1", ReplyCtx: "ctx"}
+	e.cmdCron(p, msg, []string{"trigger", job.ID})
 
-	sent := platform.getSent()
-	if len(sent) == 0 || !strings.Contains(sent[0], "triggered") {
-		t.Fatalf("reply = %v, want localized trigger confirmation", sent)
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(p.sent))
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		sent = platform.getSent()
-		if len(sent) >= 3 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !strings.Contains(strings.ToLower(p.sent[0]), "admin") {
+		t.Fatalf("reply = %q, want admin required", p.sent[0])
 	}
-	t.Fatalf("timed out waiting for run output, sent=%v", platform.getSent())
+	if strings.Contains(p.sent[0], "triggered") {
+		t.Fatalf("reply = %q, should not trigger shell cron", p.sent[0])
+	}
 }
 
 func TestCmdCronExec_ProjectMissingReply(t *testing.T) {
