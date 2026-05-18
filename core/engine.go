@@ -1286,12 +1286,23 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		return e.executeTimerShell(effectivePlatform, replyCtx, job)
 	}
 
+	content := job.Prompt
+	if strings.HasPrefix(content, "/") {
+		parts := strings.Fields(content)
+		if len(parts) > 0 {
+			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+			if skill := e.skills.Resolve(cmd); skill != nil {
+				content = BuildSkillInvocationPrompt(skill, parts[1:])
+			}
+		}
+	}
+
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
 		UserID:       "timer",
 		UserName:     "timer",
-		Content:      job.Prompt,
+		Content:      content,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
 	}

@@ -417,37 +417,47 @@ func TestValidateTimerJob(t *testing.T) {
 	}{
 		{
 			name:    "valid prompt job",
-			job:     &TimerJob{ScheduledAt: now.Add(time.Hour), Prompt: "test"},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Prompt: "test"},
 			wantErr: false,
 		},
 		{
 			name:    "valid exec job",
-			job:     &TimerJob{ScheduledAt: now.Add(time.Hour), Exec: "echo hello"},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Exec: "echo hello"},
 			wantErr: false,
 		},
 		{
+			name:    "empty session_key",
+			job:     &TimerJob{ScheduledAt: now.Add(time.Hour), Prompt: "test"},
+			wantErr: true,
+		},
+		{
+			name:    "whitespace session_key",
+			job:     &TimerJob{SessionKey: "   ", ScheduledAt: now.Add(time.Hour), Prompt: "test"},
+			wantErr: true,
+		},
+		{
 			name:    "missing scheduled_at",
-			job:     &TimerJob{Prompt: "test"},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", Prompt: "test"},
 			wantErr: true,
 		},
 		{
 			name:    "missing prompt and exec",
-			job:     &TimerJob{ScheduledAt: now.Add(time.Hour)},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour)},
 			wantErr: true,
 		},
 		{
 			name:    "both prompt and exec",
-			job:     &TimerJob{ScheduledAt: now.Add(time.Hour), Prompt: "test", Exec: "echo"},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Prompt: "test", Exec: "echo"},
 			wantErr: true,
 		},
 		{
 			name:    "invalid session_mode",
-			job:     &TimerJob{ScheduledAt: now.Add(time.Hour), Prompt: "test", SessionMode: "bad"},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Prompt: "test", SessionMode: "bad"},
 			wantErr: true,
 		},
 		{
 			name:    "valid session_mode",
-			job:     &TimerJob{ScheduledAt: now.Add(time.Hour), Prompt: "test", SessionMode: "new-per-run"},
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Prompt: "test", SessionMode: "new-per-run"},
 			wantErr: false,
 		},
 	}

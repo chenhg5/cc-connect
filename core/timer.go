@@ -58,6 +58,9 @@ func (j *TimerJob) UsesNewSessionPerRun() bool {
 }
 
 func validateTimerJob(j *TimerJob) error {
+	if strings.TrimSpace(j.SessionKey) == "" {
+		return fmt.Errorf("session_key is required")
+	}
 	if j.ScheduledAt.IsZero() {
 		return fmt.Errorf("scheduled_at is required")
 	}
