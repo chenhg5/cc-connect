@@ -3822,6 +3822,36 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 	}
 }
 
+func TestCmdMode_MultiWorkspaceUsesWorkspaceAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{mode: "default"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-mode"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{mode: "default"}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	e.cmdMode(p, msg, []string{"yolo"})
+
+	if wsAgent.mode != "yolo" {
+		t.Fatalf("workspace agent mode = %q, want yolo", wsAgent.mode)
+	}
+	if globalAgent.mode != "default" {
+		t.Fatalf("global agent mode = %q, want unchanged", globalAgent.mode)
+	}
+}
+
 func TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	globalAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}

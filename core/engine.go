@@ -7745,7 +7745,13 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ModeSwitcher)
+	agent, _, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModeNotSupported))
 		return
@@ -7803,7 +7809,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	appliedLive := e.applyLiveModeChange(msg.SessionKey, newMode)
 
 	if !appliedLive {
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		e.cleanupInteractiveState(interactiveKey)
 	}
 
 	modes := switcher.PermissionModes()
