@@ -8241,7 +8241,12 @@ func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ProviderSwitcher)
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	switcher, ok := agent.(ProviderSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNotSupported))
 		return
@@ -8326,7 +8331,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, "Usage: /provider switch <name>")
 			return
 		}
-		e.switchProvider(p, msg, switcher, args[1])
+		e.switchProvider(p, msg, switcher, sessions, interactiveKey, args[1])
 
 	case "current":
 		current := switcher.GetActiveProvider()
@@ -8338,12 +8343,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		e.cleanupInteractiveState(interactiveKey)
 		{
-			s := e.sessions.GetOrCreateActive(msg.SessionKey)
+			s := sessions.GetOrCreateActive(msg.SessionKey)
 			s.SetAgentSessionID("", "")
 			s.ClearHistory()
-			e.sessions.Save()
+			sessions.Save()
 		}
 		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
@@ -8353,7 +8358,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderCleared))
 
 	default:
-		e.switchProvider(p, msg, switcher, args[0])
+		e.switchProvider(p, msg, switcher, sessions, interactiveKey, args[0])
 	}
 }
 
@@ -8495,17 +8500,17 @@ func (e *Engine) resetAllSessions() {
 	e.sessions.Save()
 }
 
-func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitcher, name string) {
+func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitcher, sessions *SessionManager, interactiveKey, name string) {
 	if !switcher.SetActiveProvider(name) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.cleanupInteractiveState(interactiveKey)
 
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s := sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	e.sessions.Save()
+	sessions.Save()
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
