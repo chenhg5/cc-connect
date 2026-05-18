@@ -119,6 +119,7 @@ type appServerSession struct {
 	mode          string
 	baseURL       string
 	modelProvider string
+	permissions   codexPermissionOverrides
 	extraEnv      []string
 	codexHome     string
 
@@ -160,7 +161,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, permissions codexPermissionOverrides) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -170,6 +171,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		mode:             mode,
 		baseURL:          baseURL,
 		modelProvider:    modelProvider,
+		permissions:      permissions,
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
 		events:           make(chan core.Event, 128),
@@ -202,22 +204,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
-	if strings.TrimSpace(s.url) != "" {
-		args = append(args, "--listen", strings.TrimSpace(s.url))
-	}
-	if model := strings.TrimSpace(s.model); model != "" {
-		args = append(args, "-c", fmt.Sprintf("model=%q", model))
-	}
-	if effort := strings.TrimSpace(s.effort); effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
-	}
-	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
-		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
-	}
-	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
-		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
-	}
+	args := s.appServerCommandArgs()
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
@@ -256,6 +243,27 @@ func (s *appServerSession) connect() error {
 	go s.stderrLoop(stderr)
 	go s.waitLoop()
 	return nil
+}
+
+func (s *appServerSession) appServerCommandArgs() []string {
+	args := []string{"app-server"}
+	if strings.TrimSpace(s.url) != "" {
+		args = append(args, "--listen", strings.TrimSpace(s.url))
+	}
+	if model := strings.TrimSpace(s.model); model != "" {
+		args = append(args, "-c", fmt.Sprintf("model=%q", model))
+	}
+	if effort := strings.TrimSpace(s.effort); effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
+		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
+	}
+	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
+		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
+	}
+	args = s.permissions.appendConfigArgs(args)
+	return args
 }
 
 func (s *appServerSession) initialize() error {
@@ -328,24 +336,17 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
 	}
-	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
-		params["approvalPolicy"] = approval
-		if sandbox != "" {
-			params["sandbox"] = sandbox
-		}
+	permissions := s.permissions.effectiveForMode(s.mode)
+	if permissions.ApprovalPolicy != "" {
+		params["approvalPolicy"] = permissions.ApprovalPolicy
+	}
+	if permissions.ApprovalsReviewer != "" {
+		params["approvalsReviewer"] = permissions.ApprovalsReviewer
+	}
+	if permissions.SandboxMode != "" {
+		params["sandbox"] = permissions.SandboxMode
 	}
 	return params
-}
-
-func appServerModeSettings(mode string) (approval string, sandbox string) {
-	switch normalizeMode(mode) {
-	case "auto-edit", "full-auto":
-		return "never", "workspace-write"
-	case "yolo":
-		return "never", "danger-full-access"
-	default:
-		return "on-request", "read-only"
-	}
 }
 
 func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort *string) {
@@ -441,18 +442,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 		})
 	}
 
-	params := map[string]any{
-		"threadId": threadID,
-		"input":    input,
-	}
-	if model := s.GetModel(); model != "" {
-		params["model"] = model
-	}
-	if effort := s.GetReasoningEffort(); effort != "" {
-		params["effort"] = effort
-	}
-	if approval, _ := appServerModeSettings(s.mode); approval != "" {
-		params["approvalPolicy"] = approval
+	params, err := s.turnRequestParams(threadID, input)
+	if err != nil {
+		return err
 	}
 
 	var resp turnStartResponse
@@ -469,6 +461,49 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Unlock()
 
 	return nil
+}
+
+func (s *appServerSession) turnRequestParams(threadID string, input []map[string]any) (map[string]any, error) {
+	params := map[string]any{
+		"threadId": threadID,
+		"input":    input,
+	}
+	if model := s.GetModel(); model != "" {
+		params["model"] = model
+	}
+	if effort := s.GetReasoningEffort(); effort != "" {
+		params["effort"] = effort
+	}
+	permissions := s.permissions.effectiveForMode(s.mode)
+	if permissions.ApprovalPolicy != "" {
+		params["approvalPolicy"] = permissions.ApprovalPolicy
+	}
+	if permissions.ApprovalsReviewer != "" {
+		params["approvalsReviewer"] = permissions.ApprovalsReviewer
+	}
+	if s.permissions.SandboxMode != "" {
+		sandboxPolicy, err := appServerSandboxPolicy(permissions.SandboxMode)
+		if err != nil {
+			return nil, err
+		}
+		params["sandboxPolicy"] = sandboxPolicy
+	}
+	return params, nil
+}
+
+func appServerSandboxPolicy(mode string) (map[string]any, error) {
+	// thread/start uses config-style sandbox strings such as "workspace-write".
+	// turn/start sandboxPolicy.type uses app-server's structured spelling, e.g. "workspaceWrite".
+	switch strings.TrimSpace(mode) {
+	case "read-only":
+		return map[string]any{"type": "readOnly"}, nil
+	case "workspace-write":
+		return map[string]any{"type": "workspaceWrite"}, nil
+	case "danger-full-access":
+		return map[string]any{"type": "dangerFullAccess"}, nil
+	default:
+		return nil, fmt.Errorf("unsupported codex sandbox_mode %q: allowed values are read-only, workspace-write, and danger-full-access", mode)
+	}
 }
 
 func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
