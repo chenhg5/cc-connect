@@ -11356,7 +11356,7 @@ func (e *Engine) cmdCronMute(p Platform, msg *Message, args []string, mute bool)
 }
 
 func (e *Engine) cmdCronSetup(p Platform, msg *Message) {
-	result, baseName, err := e.setupMemoryFile()
+	result, baseName, err := e.setupMemoryFileForMessage(p, msg)
 	switch result {
 	case setupNative:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSetupNative))
@@ -13060,14 +13060,31 @@ const (
 	setupError                       // write error
 )
 
-// setupMemoryFile appends AgentSystemPrompt() to the agent's project memory
-// file. It returns the result, the filename (for messages), and any error.
+// setupMemoryFile appends AgentSystemPrompt() to the engine agent's project
+// memory file. It returns the result, the filename (for messages), and any
+// error.
 func (e *Engine) setupMemoryFile() (setupResult, string, error) {
-	if _, ok := e.agent.(SystemPromptSupporter); ok {
+	return setupMemoryFileForAgent(e.agent)
+}
+
+func (e *Engine) setupMemoryFileForMessage(p Platform, msg *Message) (setupResult, string, error) {
+	agent := e.agent
+	if e.multiWorkspace {
+		resolved, _, _, err := e.commandContext(p, msg)
+		if err != nil {
+			return setupError, "", err
+		}
+		agent = resolved
+	}
+	return setupMemoryFileForAgent(agent)
+}
+
+func setupMemoryFileForAgent(agent Agent) (setupResult, string, error) {
+	if _, ok := agent.(SystemPromptSupporter); ok {
 		return setupNative, "", nil
 	}
 
-	mp, ok := e.agent.(MemoryFileProvider)
+	mp, ok := agent.(MemoryFileProvider)
 	if !ok {
 		return setupNoMemory, "", nil
 	}
@@ -13111,7 +13128,7 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 }
 
 func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
-	result, baseName, err := e.setupMemoryFile()
+	result, baseName, err := e.setupMemoryFileForMessage(p, msg)
 	switch result {
 	case setupNative:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSetupNative))
