@@ -1105,7 +1105,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n---\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	want := "answer\n\n---\n*gpt-5.4 · xhigh · 100% left · " + compactReplyFooterPath(workDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1116,9 +1116,10 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
 
+	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
-		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+		workDir:            workDir,
 	}
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -1142,7 +1143,7 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "answer\n\n---\n*[ctx: ~14%] · glm-5.1 · " + compactReplyFooterPath(workDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1153,9 +1154,10 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
 
+	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
-		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+		workDir:            workDir,
 	}
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -1184,7 +1186,7 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 		t.Fatal("sent = nil, want final reply")
 	}
 	final := sent[len(sent)-1]
-	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "已处理完成。\n\n---\n*[ctx: ~14%] · glm-5.1 · " + compactReplyFooterPath(workDir) + "*"
 	if final != want {
 		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
 	}
@@ -1297,7 +1299,8 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	agentSession := newControllableSession("s-footer-runtime")
 	agentSession.model = "gpt-5.4"
 	agentSession.reasoningEffort = "xhigh"
-	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.workDir = sessionWorkDir
 	agentSession.report = &UsageReport{
 		Buckets: []UsageBucket{{
 			Name: "Rate limit",
@@ -1329,7 +1332,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n---\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
+	want := "answer\n\n---\n*gpt-5.4 · xhigh · 31% left · " + compactReplyFooterPath(sessionWorkDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -8786,8 +8789,12 @@ func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != sub {
-		t.Fatalf("expected %q, got %q", sub, got)
+	want, err := filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatalf("resolve expected path: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
