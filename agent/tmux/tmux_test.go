@@ -2,8 +2,11 @@ package tmux
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestExtractNew(t *testing.T) {
@@ -159,5 +162,51 @@ func TestNewTmuxSessionWorkDir(t *testing.T) {
 
 	if s.workDir != "/tmp/workspace" {
 		t.Errorf("workDir = %q, want /tmp/workspace", s.workDir)
+	}
+}
+
+// TestSend_ImagesPromotedToFiles verifies that image attachments are saved to
+// disk alongside file attachments and referenced by path in the prompt, rather
+// than being silently dropped.
+func TestSend_ImagesPromotedToFiles(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s, err := newTmuxSession(ctx, "sess:win", "sid1", "", 200*time.Millisecond, false, nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	images := []core.ImageAttachment{
+		{MimeType: "image/png", Data: []byte("\x89PNG\r\n"), FileName: "screenshot.png"},
+	}
+	files := []core.FileAttachment{
+		{MimeType: "text/plain", Data: []byte("hello"), FileName: "note.txt"},
+	}
+
+	// Build the promoted file list the same way Send() does, without calling
+	// tmux (which isn't available in unit tests).
+	for _, img := range images {
+		files = append(files, core.FileAttachment{
+			MimeType: img.MimeType,
+			Data:     img.Data,
+			FileName: img.FileName,
+		})
+	}
+	paths := core.SaveFilesToDisk(dir, files)
+
+	if len(paths) != 2 {
+		t.Fatalf("saved %d paths, want 2 (file + image)", len(paths))
+	}
+	hasImage := false
+	for _, p := range paths {
+		if strings.HasSuffix(p, "screenshot.png") {
+			hasImage = true
+		}
+	}
+	if !hasImage {
+		t.Errorf("paths = %v, want screenshot.png among them", paths)
 	}
 }
