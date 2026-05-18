@@ -69,6 +69,10 @@ type Platform struct {
 	// streamPusherMu protects streamPushers map.
 	streamPushMu   sync.Mutex
 	streamPushers  map[string]*streamPusher // outTrackID -> pusher
+
+	// mentionMu protects needEndMention map.
+	mentionMu       sync.Mutex
+	needEndMention  map[string]bool // conversationId -> needs @mention on done
 }
 
 // streamPusher gradually pushes content to a DingTalk AI Card in a
@@ -142,6 +146,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		lastMsgContext:        make(map[string]*msgContext),
 		activeCardTrackID:     make(map[string]string),
 		streamPushers:         make(map[string]*streamPusher),
+		needEndMention:        make(map[string]bool),
 	}, nil
 }
 
@@ -744,11 +749,11 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	// Build webhook payload. When the final reply carries the
-	// END_OF_CONVERSATION marker, send two messages:
-	//   1) A text message with @mention for notification.
-	//   2) The actual content as markdown (marker stripped).
-	// All other messages (progress updates, intermediate replies) use
-	// markdown without @mention.
+	// END_OF_CONVERSATION marker or the permission prompt marker,
+	// the @mention notification is deferred to AddDoneReaction so
+	// it fires at the very end of the conversation turn.
+	// All messages (progress updates, intermediate replies, final
+	// replies) are sent as markdown without @mention here.
 	var payload map[string]any
 	// Check if the last 100 chars contain a marker that warrants @mention.
 	tail := content
@@ -762,27 +767,15 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		atMarker = "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有"
 	}
 	if len(rc.mentionIDs) > 0 && atMarker != "" {
+		// Flag this conversation for @mention in AddDoneReaction.
+		p.mentionMu.Lock()
+		p.needEndMention[rc.conversationId] = true
+		p.mentionMu.Unlock()
+
 		// Strip the marker for the markdown content.
 		markdownContent := strings.Replace(content, atMarker, "", 1)
 		markdownContent = strings.TrimSpace(markdownContent)
 
-		// 1. Send a standalone text message for @mention notification.
-		var mentionText strings.Builder
-		for _, id := range rc.mentionIDs {
-			mentionText.WriteString(" @" + id)
-		}
-		mentionPayload := map[string]any{
-			"msgtype": "text",
-			"text":    map[string]string{"content": mentionText.String()},
-			"at": map[string]any{
-				"atMobiles": []string{},
-				"atUserIds": rc.mentionIDs,
-				"isAtAll":   false,
-			},
-		}
-		_ = p.sendWebhookMessage(ctx, rc.sessionWebhook, mentionPayload)
-
-		// 2. Send the actual content as markdown.
 		payload = map[string]any{
 			"msgtype":  "markdown",
 			"markdown": map[string]string{"title": "reply", "text": markdownContent},
@@ -1300,18 +1293,37 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 }
 
 // AddDoneReaction implements core.TypingIndicatorDone.
-// Recalls the "🤔Thinking" reaction and adds a "🥳Done" reaction
-// to signal that the agent has finished processing.
+// Recalls the "🤔Thinking" reaction, adds a "🥳Done" reaction,
+// and if Reply flagged this conversation for an end-of-conversation
+// @mention, sends the @mention text notification.
 func (p *Platform) AddDoneReaction(rctx any) {
 	rc, ok := rctx.(replyContext)
 	if !ok || rc.conversationId == "" || rc.messageId == "" {
 		return
 	}
 
-	// Fire-and-forget: recall thinking + add done reaction
 	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
+		// Send @mention for END_OF_CONVERSATION if flagged by Reply.
+		if len(rc.mentionIDs) > 0 {
+			var mentionText strings.Builder
+			for _, id := range rc.mentionIDs {
+				mentionText.WriteString(" @" + id)
+			}
+			mentionPayload := map[string]any{
+				"msgtype": "text",
+				"text":    map[string]string{"content": mentionText.String()},
+				"at": map[string]any{
+					"atMobiles": []string{},
+					"atUserIds": rc.mentionIDs,
+					"isAtAll":   false,
+				},
+			}
+			_ = p.sendWebhookMessage(bgCtx, rc.sessionWebhook, mentionPayload)
+		}
+
 		// Recall the thinking emoji first
 		_ = p.sendEmotion(bgCtx, rc.messageId, rc.conversationId, "🤔Thinking", true)
 		// Then add the done emoji
