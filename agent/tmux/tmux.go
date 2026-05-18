@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"os/exec"
 	"path/filepath"
@@ -199,19 +200,31 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 	}
 
-	return newTmuxSession(ctx, target, sessionID, promptPat, time.Duration(pollMs)*time.Millisecond, stripInputBlock, stripPatterns)
+	return newTmuxSession(ctx, target, sessionID, promptPat, time.Duration(pollMs)*time.Millisecond, stripInputBlock, stripPatterns, workDir)
 }
 
 // resolveTarget returns the tmux target string and the window name for the given workDir.
-// When workDir is a real path the window is named after the directory basename,
-// enabling one window per workspace.  When workDir is "." or empty the legacy
+// When workDir is a real path the window is named with a hash suffix derived from the
+// full path so that two workDirs sharing the same basename (e.g. /a/app and /b/app)
+// never collide into the same tmux window.  When workDir is "." or empty the legacy
 // session:pane target is returned and windowName == pane.
 func (a *Agent) resolveTarget(sessionName, pane, workDir string) (target, windowName string) {
 	if workDir != "" && workDir != "." {
-		windowName = sanitizeWindowName(filepath.Base(workDir))
+		windowName = uniqueWindowName(workDir)
 		return sessionName + ":" + windowName, windowName
 	}
 	return sessionName + ":" + pane, pane
+}
+
+// uniqueWindowName builds a tmux window name that is unique per workDir path.
+// It appends a 4-hex-char FNV hash of the full path so that directories with
+// the same basename do not collide (e.g. /repo/a/app → "app-1a2b",
+// /repo/b/app → "app-3c4d").
+func uniqueWindowName(workDir string) string {
+	base := sanitizeWindowName(filepath.Base(workDir))
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(workDir))
+	return fmt.Sprintf("%s-%04x", base, h.Sum32()&0xffff)
 }
 
 // sanitizeWindowName makes a string safe to use as a tmux window name.

@@ -17,6 +17,7 @@ import (
 type tmuxSession struct {
 	target          string // e.g., "mywork:0"
 	sessionID       string
+	workDir         string
 	promptPat       *regexp.Regexp
 	pollInt         time.Duration
 	stripInputBlock bool
@@ -32,7 +33,7 @@ type tmuxSession struct {
 	baselineCapture string // full captureScrollback output at the time of the last Send()
 }
 
-func newTmuxSession(ctx context.Context, target, sessionID, promptPattern string, pollInt time.Duration, stripInputBlock bool, stripPatternStrs []string) (*tmuxSession, error) {
+func newTmuxSession(ctx context.Context, target, sessionID, promptPattern string, pollInt time.Duration, stripInputBlock bool, stripPatternStrs []string, workDir string) (*tmuxSession, error) {
 	sessCtx, cancel := context.WithCancel(ctx)
 
 	var pat *regexp.Regexp
@@ -58,6 +59,7 @@ func newTmuxSession(ctx context.Context, target, sessionID, promptPattern string
 	s := &tmuxSession{
 		target:          target,
 		sessionID:       sessionID,
+		workDir:         workDir,
 		promptPat:       pat,
 		pollInt:         pollInt,
 		stripInputBlock: stripInputBlock,
@@ -77,7 +79,7 @@ func (s *tmuxSession) Send(prompt string, _ []core.ImageAttachment, files []core
 
 	// Save attached files and append their paths to the prompt
 	if len(files) > 0 {
-		paths := core.SaveFilesToDisk(".", files)
+		paths := core.SaveFilesToDisk(s.workDir, files)
 		if len(paths) > 0 {
 			prompt = prompt + "\n# files: " + strings.Join(paths, ", ")
 		}
@@ -251,7 +253,13 @@ func capturePane(target string) (string, error) {
 }
 
 func sendKeys(target, keys string) error {
-	out, err := exec.Command("tmux", "send-keys", "-t", target, keys, "Enter").CombinedOutput()
+	// -l (literal) prevents tmux from interpreting key names (C-c, Enter, Up, …)
+	// embedded in the user's text. Enter is sent as a separate keystroke afterwards.
+	out, err := exec.Command("tmux", "send-keys", "-t", target, "-l", keys).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	out, err = exec.Command("tmux", "send-keys", "-t", target, "Enter").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
