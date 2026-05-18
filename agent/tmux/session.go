@@ -337,28 +337,33 @@ func shellQuote(s string) string {
 // trailing characters on the prompt line.
 var tuiInputBlockRe = regexp.MustCompile("(?m)^─+\n❯[^\n]*\n─+")
 
+// consecutiveBlankRe matches three or more consecutive newlines (two or more
+// blank lines) so they can be collapsed to a single blank line.
+var consecutiveBlankRe = regexp.MustCompile(`\n{3,}`)
+
 func (s *tmuxSession) cleanTUIContent(text string) string {
 	if s.stripInputBlock {
 		text = tuiInputBlockRe.ReplaceAllString(text, "")
 	}
-	if len(s.stripPatterns) == 0 {
-		return strings.TrimRight(text, "\n")
-	}
-	lines := strings.Split(text, "\n")
-	out := lines[:0]
-	for _, line := range lines {
-		drop := false
-		for _, re := range s.stripPatterns {
-			if re.MatchString(line) {
-				drop = true
-				break
+	if len(s.stripPatterns) > 0 {
+		lines := strings.Split(text, "\n")
+		out := lines[:0]
+		for _, line := range lines {
+			drop := false
+			for _, re := range s.stripPatterns {
+				if re.MatchString(line) {
+					drop = true
+					break
+				}
+			}
+			if !drop {
+				out = append(out, line)
 			}
 		}
-		if !drop {
-			out = append(out, line)
-		}
+		text = strings.Join(out, "\n")
 	}
-	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+	text = consecutiveBlankRe.ReplaceAllString(text, "\n\n")
+	return strings.TrimRight(text, "\n")
 }
 
 // normalizeCapture trims trailing whitespace per line and strips ANSI codes.

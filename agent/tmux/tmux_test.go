@@ -76,6 +76,16 @@ func TestExtractNew(t *testing.T) {
 	}
 }
 
+func TestCleanTUIContent_CollapsesConsecutiveBlanks(t *testing.T) {
+	s := &tmuxSession{}
+	input := " ✻ Thinking...\n\n\n  tokens:22k"
+	got := s.cleanTUIContent(input)
+	want := " ✻ Thinking...\n\n  tokens:22k"
+	if got != want {
+		t.Errorf("cleanTUIContent() = %q, want %q", got, want)
+	}
+}
+
 func TestNormalizeCapture(t *testing.T) {
 	tests := []struct {
 		name string
