@@ -1,12 +1,20 @@
 package cursor
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func shortTestContext(t *testing.T) (context.Context, context.CancelFunc) {
@@ -119,5 +127,79 @@ func TestAvailableModels_FetchFromAgent(t *testing.T) {
 	if !hasCodex {
 		t.Logf("models: %v", models)
 		t.Log("agent models returned models but none of the expected ones (gpt-5.3-codex, opus-4.6-thinking, auto) - may be OK if CLI output format changed")
+	}
+}
+
+func TestSaveCursorImagesToDisk(t *testing.T) {
+	workDir := t.TempDir()
+
+	paths, err := saveCursorImagesToDisk(workDir, []core.ImageAttachment{
+		{MimeType: "image/jpeg", FileName: "photo.jpg", Data: []byte("jpeg-bytes")},
+		{MimeType: "image/webp", Data: []byte("webp-bytes")},
+	})
+	if err != nil {
+		t.Fatalf("saveCursorImagesToDisk returned error: %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 paths, got %d", len(paths))
+	}
+
+	wantDir := filepath.Join(workDir, ".cc-connect", "images")
+	if paths[0] != filepath.Join(wantDir, "photo.jpg") {
+		t.Fatalf("first image path = %q, want photo.jpg under images dir", paths[0])
+	}
+	if filepath.Ext(paths[1]) != ".webp" {
+		t.Fatalf("generated webp path = %q, want .webp extension", paths[1])
+	}
+
+	data, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatalf("read saved image: %v", err)
+	}
+	if string(data) != "jpeg-bytes" {
+		t.Fatalf("saved image data = %q, want jpeg-bytes", string(data))
+	}
+}
+
+func TestSaveCursorImagesToDiskDownscalesReadableImages(t *testing.T) {
+	workDir := t.TempDir()
+
+	src := image.NewRGBA(image.Rect(0, 0, 1200, 900))
+	for y := 0; y < 900; y++ {
+		for x := 0; x < 1200; x++ {
+			src.Set(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 128, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+
+	paths, err := saveCursorImagesToDisk(workDir, []core.ImageAttachment{{
+		MimeType: "image/png",
+		FileName: "large.png",
+		Data:     buf.Bytes(),
+	}})
+	if err != nil {
+		t.Fatalf("saveCursorImagesToDisk returned error: %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 path, got %d", len(paths))
+	}
+	if filepath.Base(paths[0]) != "large.jpg" {
+		t.Fatalf("saved path = %q, want large.jpg", paths[0])
+	}
+
+	f, err := os.Open(paths[0])
+	if err != nil {
+		t.Fatalf("open saved image: %v", err)
+	}
+	defer f.Close()
+	got, err := jpeg.Decode(f)
+	if err != nil {
+		t.Fatalf("decode saved jpeg: %v", err)
+	}
+	if got.Bounds().Dx() > 768 || got.Bounds().Dy() > 768 {
+		t.Fatalf("saved image bounds = %v, want max side <= 768", got.Bounds())
 	}
 }

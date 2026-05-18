@@ -302,9 +302,6 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
-			if proj.WorkspaceInitAllowLocalPaths != nil {
-				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
-			}
 			idleMins := cfg.WorkspaceIdleTimeoutMins
 			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
 				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
@@ -318,9 +315,6 @@ func main() {
 				} else {
 					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
 				}
-			}
-			if proj.SkipGit != nil {
-				engine.SetSkipGit(*proj.SkipGit)
 			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}

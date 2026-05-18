@@ -605,9 +605,7 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # name = "claude-multi"
 # mode = "multi-workspace"
-# skip_git = true # skip bind git repo, create a dir directly
 # base_dir = "~/workspace"
-# workspace_init_allow_local_paths = true  # Optional: allow /workspace init <local-dir>; default false keeps init git-URL only
 #
 # [projects.agent]
 # type = "claudecode"
@@ -963,25 +961,6 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed staff IDs / 允许的员工 ID
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
-# WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
-# 1. Create a WPS Open Platform app and enable event WebSocket delivery
-#    创建 WPS 开放平台应用，并启用事件 WebSocket 推送
-# 2. Subscribe to app chat message events such as kso.app_chat.message
-#    订阅应用会话消息事件，如 kso.app_chat.message
-# 3. Fill in app_id and app_secret below
-#    填入下方 app_id 和 app_secret
-# Connection: WebSocket — no public URL required / 无需公网地址
-
-# [[projects.platforms]]
-# type = "wps-xiezuo"
-#
-# [projects.platforms.options]
-# app_id = "your-wps-xiezuo-app-id"
-# app_secret = "your-wps-xiezuo-app-secret"
-# allow_from = "*"             # Allowed WPS user IDs / 允许的 WPS 用户 ID
-# clean_reply = false          # Strip thinking/tool progress lines from replies / 过滤思考和工具进度行
-# base_url = "https://openapi.wps.cn"  # Optional API base URL override / 可选 API 基础地址覆盖
-
 # Telegram (uncomment to enable / 取消注释以启用)
 # 1. Message @BotFather on Telegram, send /newbot to create a bot
 #    在 Telegram 中找 @BotFather，发送 /newbot 创建机器人
@@ -1071,9 +1050,6 @@ app_secret = "your-feishu-app-secret"
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
 # group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
-# group_reply_all_guilds = ""  # Comma-separated guild IDs where group_reply_all is active (overrides group_reply_all)
-#                              # e.g. "123456789012345678,987654321098765432"; takes precedence over group_reply_all
-#                              # 逗号分隔的服务器 ID，仅在这些服务器无需 @ 也响应（优先于 group_reply_all）
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
@@ -1247,6 +1223,30 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
+#
+# Alternative: use the persistent Cursor SDK sidecar instead of launching the
+# Cursor CLI for every turn. This requires a Node 18+ runtime, @cursor/sdk
+# available to the sidecar process (for example in the sidecar directory or via
+# NODE_PATH), and valid Cursor SDK authentication such as CURSOR_API_KEY.
+# Cursor CLI login auth is not accepted by @cursor/sdk; keep type = "cursor"
+# when you rely on `agent login`.
+# The classic "cursor" adapter above remains the default fallback.
+# 备选：使用常驻 Cursor SDK sidecar，避免每轮都启动 Cursor CLI。需要 Node 环境中
+# 可加载 @cursor/sdk，并具备有效 Cursor SDK 认证（例如 CURSOR_API_KEY）。
+# @cursor/sdk 不接受 Cursor CLI login 凭据；依赖 `agent login` 时请继续使用
+# type = "cursor"。
+# 上面的经典 "cursor" adapter 仍是默认回退方案。
+#
+# [projects.agent]
+# type = "cursor_sdk"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# model = "composer-2"
+# mode = "force"
+# sidecar_cmd = "/root/.nvm/versions/node/v18.20.8/bin/node"
+# turn_timeout_seconds = 600
+# idle_ttl_minutes = 30
 #
 # [[projects.platforms]]
 # type = "feishu"
@@ -1432,46 +1432,6 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model tier / 可选：指定模型级别
 # model = "auto"  # "auto" | "ultimate" | "performance" | "efficient" | "lite"
-#
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project: Using tmux / 使用 tmux (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: tmux — https://github.com/tmux/tmux
-# Attaches to a named tmux session and routes messages as shell commands.
-# Output is captured by polling capture-pane; done is detected via shell prompt.
-#
-# [[projects]]
-# name = "my-tmux-project"
-#
-# [projects.agent]
-# type = "tmux"
-#
-# [projects.agent.options]
-# session = "mywork"           # tmux session name (required)
-# pane = "0"                   # pane target within the session (default: "0")
-# work_dir = "/path/to/dir"    # working directory when auto-creating the session
-# auto_create = true           # create session if it doesn't exist (default: true)
-# shell = ""                   # shell to use when creating a new session (default: system default)
-# init_command = ""            # command to run once when a NEW session is created (e.g. "claude")
-# startup_wait_ms = 2000       # milliseconds to wait after init_command before accepting messages (default: 2000 when init_command is set)
-# prompt_pattern = '[\$#>%]\s*$'  # regex to detect shell prompt = command done (default shown)
-# poll_interval_ms = 200       # output poll interval in milliseconds (default: 200)
-#
-# --- Running Claude Code inside tmux ---
-# Set init_command to start claude automatically; adjust prompt_pattern to match
-# Claude Code's input prompt ("> ") rather than a shell prompt:
-#
-# session = "claude-work"
-# work_dir = "/path/to/project"
-# init_command = "claude --dangerously-skip-permissions"
-# startup_wait_ms = 3000
-# prompt_pattern = '>\s*$'
 #
 # [[projects.platforms]]
 # type = "telegram"

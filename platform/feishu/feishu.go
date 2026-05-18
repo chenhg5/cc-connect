@@ -560,14 +560,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				},
 			}, nil
 		}
-	if p.cardNavHandler != nil {
-		done := make(chan *core.Card, 1)
-		go func() {
-			done <- p.cardNavHandler(actionVal, sessionKey)
-		}()
-
-		select {
-		case card := <-done:
+		if p.cardNavHandler != nil {
+			card := p.cardNavHandler(actionVal, sessionKey)
 			if card != nil {
 				return &callback.CardActionTriggerResponse{
 					Card: &callback.Card{
@@ -576,32 +570,13 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					},
 				}, nil
 			}
-		case <-time.After(cardNavTimeout):
-			go func() {
-				card := <-done
-				if card == nil {
-					return
-				}
-				if refresher, ok := p.self.(core.CardRefresher); ok {
-					if err := refresher.RefreshCard(context.Background(), sessionKey, card); err != nil {
-						slog.Warn(p.tag()+": async card refresh failed", "action", actionVal, "err", err)
-					}
-				}
-			}()
-			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{
-					Type:    "info",
-					Content: "⏳ Loading... / 加载中...",
-				},
-			}, nil
 		}
-	}
-	if strings.HasPrefix(actionVal, "act:") {
-		slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
+		if strings.HasPrefix(actionVal, "act:") {
+			slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
+			return nil, nil
+		}
+		slog.Warn(p.tag()+": card nav returned nil, ignoring", "action", actionVal)
 		return nil, nil
-	}
-	slog.Warn(p.tag()+": card nav returned nil, ignoring", "action", actionVal)
-	return nil, nil
 	}
 
 	// perm: — permission response with in-place card update
@@ -773,8 +748,6 @@ func (p *Platform) AddDoneReaction(rctx any) {
 }
 
 const recalledMessageTTL = 10 * time.Minute
-
-const cardNavTimeout = 2500 * time.Millisecond
 
 func (p *Platform) markMessageRecalled(messageID string) {
 	messageID = strings.TrimSpace(messageID)
@@ -1076,9 +1049,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// Skip quote injection when thread_isolation is enabled and the message is
 	// inside a thread — the thread already provides conversational context, and
 	// long quoted prefixes can drown out the user's actual text (issue #764).
-	var quoted quotedMessage
+	quotedPrefix := ""
 	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
-		quoted = p.fetchQuotedMessage(ctx, parentID)
+		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
 	}
 
 	switch msgType {
@@ -1103,7 +1076,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quotedPrefix, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -1171,7 +1144,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
+			Content: text, ExtraContent: quotedPrefix, Images: images,
 			ReplyCtx: rctx,
 		})
 
@@ -1240,7 +1213,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
-				Content: "[sticker]", ExtraContent: quoted.text, ReplyCtx: rctx,
+				Content: "[sticker]", ExtraContent: quotedPrefix, ReplyCtx: rctx,
 			})
 			return
 		}
@@ -1284,7 +1257,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quotedPrefix, Images: images, ReplyCtx: rctx,
 		})
 
 	default:
@@ -1504,13 +1477,7 @@ type chainMessage struct {
 	senderName string
 	senderType string // "user" or "app"
 	text       string
-	images     []core.ImageAttachment
 	parentID   string
-}
-
-type quotedMessage struct {
-	text   string
-	images []core.ImageAttachment
 }
 
 // maxReplyChainDepth is the maximum number of parent messages to traverse
@@ -1518,17 +1485,17 @@ type quotedMessage struct {
 const maxReplyChainDepth = 5
 
 // fetchQuotedMessage retrieves the content of a parent message that the user
-// is replying to, and returns formatted context plus downloaded attachments.
+// is replying to, and returns a formatted prefix string for context injection.
 // For multi-level reply chains, it traces parent_id links up to maxReplyChainDepth
 // levels and returns the full conversation chain.
-// Returns empty content on any failure (graceful degradation — the user's own
+// Returns empty string on any failure (graceful degradation — the user's own
 // message is still delivered without the quote).
-func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) quotedMessage {
+func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) string {
 	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
 	if len(chain) == 0 {
-		return quotedMessage{}
+		return ""
 	}
-	return quotedMessage{text: formatReplyChain(chain), images: collectReplyChainImages(chain)}
+	return formatReplyChain(chain)
 }
 
 // resolveBotSenderName returns a display name for a bot sender in a quoted
@@ -1585,7 +1552,6 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 
 	// Extract plain text based on message type.
 	var text string
-	var images []core.ImageAttachment
 	switch item.MsgType {
 	case "text":
 		var textBody struct {
@@ -1595,25 +1561,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			text = replaceMentions(textBody.Text, item.Mentions)
 		}
 	case "post":
-		textParts, postImages := p.parsePostContent(messageID, content)
-		text = replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
-		images = postImages
-		if text == "" && len(images) > 0 {
-			text = "[image]"
-		}
-	case "image":
-		text = "[image]"
-		var imgBody struct {
-			ImageKey string `json:"image_key"`
-		}
-		if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
-			imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
-			if err != nil {
-				slog.Error(p.tag()+": download quoted image failed", "error", err, "message_id", messageID, "key", imgBody.ImageKey)
-			} else {
-				images = append(images, core.ImageAttachment{MimeType: mimeType, Data: imgData})
-			}
-		}
+		text = extractPostPlainText(content)
 	case "interactive":
 		text = extractInteractiveCardText(content)
 	default:
@@ -1643,17 +1591,8 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		senderName: senderName,
 		senderType: item.Sender.SenderType,
 		text:       text,
-		images:     images,
 		parentID:   item.ParentID,
 	}
-}
-
-func collectReplyChainImages(chain []chainMessage) []core.ImageAttachment {
-	var images []core.ImageAttachment
-	for _, msg := range chain {
-		images = append(images, msg.images...)
-	}
-	return images
 }
 
 // fetchReplyChain iteratively traverses parent_id links to build a reply chain.

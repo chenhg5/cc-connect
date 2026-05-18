@@ -260,7 +260,7 @@ func buildPlist(cfg Config) string {
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>
-		<false/>
+		<true/>
 	</dict>
 	<key>EnvironmentVariables</key>
 	<dict>

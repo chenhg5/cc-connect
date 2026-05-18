@@ -322,19 +322,13 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name    string `toml:"name"`
-	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
-	SkipGit *bool  `toml:"skip_git,omitempty"`
-	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
-	// init flow to bind existing local directories. Default false keeps init
-	// limited to git URLs; use /workspace bind or /workspace route for explicit
-	// local bindings.
-	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
-	Agent                        AgentConfig        `toml:"agent"`
-	Platforms                    []PlatformConfig   `toml:"platforms"`
-	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
-	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
+	Name         string             `toml:"name"`
+	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
+	Agent        AgentConfig        `toml:"agent"`
+	Platforms    []PlatformConfig   `toml:"platforms"`
+	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
+	AutoCompress AutoCompressConfig `toml:"auto_compress"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

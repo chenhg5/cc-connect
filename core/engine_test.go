@@ -2514,7 +2514,7 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: sessionKey, ReplyCtx: "ctx"}
 
-	if !e.handlePendingPermission(p, msg, "allow", "") {
+	if !e.handlePendingPermission(p, msg, "allow") {
 		t.Fatal("expected pending permission to be handled")
 	}
 
@@ -2803,6 +2803,9 @@ func TestHandleMessage_AutoResetOnIdle_RotatesToNewSession(t *testing.T) {
 	if !strings.Contains(sent[0], "Session auto-reset") {
 		t.Fatalf("first reply = %q, want auto-reset notice", sent[0])
 	}
+	if !strings.Contains(sent[0], "`/switch old-session`") {
+		t.Fatalf("first reply = %q, want switch-back command", sent[0])
+	}
 	if got := sent[len(sent)-1]; got != "fresh reply" {
 		t.Fatalf("final reply = %q, want fresh reply", got)
 	}
@@ -3043,8 +3046,8 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "Focus"
 	session.SetAgentSessionID("session-123", "test")
-	e.sessions.SetSessionName("session-123", "Focus")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -3055,161 +3058,9 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Current session") {
 		t.Fatalf("current text = %q, want legacy current session text", p.sent[0])
 	}
-	if !strings.Contains(p.sent[0], "Focus") {
-		t.Fatalf("current text = %q, want session name 'Focus'", p.sent[0])
-	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
 	}
-}
-
-func TestCmdCurrent_ShowsAgentSummaryWhenNoCustomName(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubListAgent{sessions: []AgentSessionInfo{
-		{ID: "session-abc", Summary: "Fix the login bug", MessageCount: 5},
-	}}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentSessionID("session-abc", "test")
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "Fix the login bug") {
-		t.Fatalf("current text = %q, want agent summary 'Fix the login bug'", p.sent[0])
-	}
-}
-
-func TestCmdCurrent_ShowsUntitledWhenNoNameOrSummary(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubListAgent{sessions: []AgentSessionInfo{
-		{ID: "session-xyz", Summary: "", MessageCount: 0},
-	}}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentSessionID("session-xyz", "test")
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "(untitled)") {
-		t.Fatalf("current text = %q, want '(untitled)' fallback", p.sent[0])
-	}
-}
-
-func TestCmdCurrent_CustomNameOverridesSummary(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubListAgent{sessions: []AgentSessionInfo{
-		{ID: "session-override", Summary: "Agent summary", MessageCount: 3},
-	}}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentSessionID("session-override", "test")
-	e.sessions.SetSessionName("session-override", "MyCustomName")
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "MyCustomName") {
-		t.Fatalf("current text = %q, want custom name 'MyCustomName'", p.sent[0])
-	}
-	if strings.Contains(p.sent[0], "Agent summary") {
-		t.Fatalf("current text = %q, should not contain agent summary when custom name set", p.sent[0])
-	}
-}
-
-func TestCmdCurrent_NotStartedSessionShowsUntitled(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "(untitled)") {
-		t.Fatalf("current text = %q, want '(untitled)' for not-started session", p.sent[0])
-	}
-}
-
-type stubTitleAgent struct {
-	stubAgent
-	titles map[string]string
-}
-
-func (a *stubTitleAgent) GetSessionTitle(sessionID string) string {
-	if a.titles == nil {
-		return ""
-	}
-	return a.titles[sessionID]
-}
-
-func TestCmdCurrent_SessionTitleProviderFallback(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubTitleAgent{
-		titles: map[string]string{
-			"session-not-in-list": "Title from DB",
-		},
-	}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentSessionID("session-not-in-list", "test")
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "Title from DB") {
-		t.Fatalf("current text = %q, want 'Title from DB' from SessionTitleProvider", p.sent[0])
-	}
-}
-
-func TestCmdCurrent_SessionTitleProviderNotUsedWhenListMatches(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubListAgentWithTitle{
-		stubTitleAgent: stubTitleAgent{
-			titles: map[string]string{
-				"session-abc": "DB Title (should not appear)",
-			},
-		},
-		sessions: []AgentSessionInfo{
-			{ID: "session-abc", Summary: "List Summary", MessageCount: 5},
-		},
-	}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
-	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.SetAgentSessionID("session-abc", "test")
-
-	e.cmdCurrent(p, msg)
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "List Summary") {
-		t.Fatalf("current text = %q, want 'List Summary' from ListSessions", p.sent[0])
-	}
-}
-
-type stubListAgentWithTitle struct {
-	stubTitleAgent
-	sessions []AgentSessionInfo
-}
-
-func (a *stubListAgentWithTitle) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
-	return a.sessions, nil
 }
 
 func TestCmdDelete_BatchCommaList(t *testing.T) {
@@ -4676,162 +4527,6 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 }
 
-// TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions is a regression test
-// for the bug where cmdReasoning called e.sessions.Save() (global) instead of
-// sessions.Save() (workspace-resolved), leaving workspace session state unsaved.
-func TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubModelModeAgent{}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "C-reasoning-ws"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	wsAgent := &stubModelModeAgent{}
-	ws.agent = wsAgent
-	ws.sessions = NewSessionManager("")
-
-	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
-
-	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
-	wsSession.SetAgentSessionID("ws-session-id", "test")
-	wsSession.AddHistory("user", "hello")
-
-	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
-	globalSession.SetAgentSessionID("global-session-id", "test")
-
-	e.cmdReasoning(p, msg, []string{"3"}) // selects "high"
-
-	if wsAgent.reasoningEffort != "high" {
-		t.Fatalf("workspace agent reasoning effort = %q, want high", wsAgent.reasoningEffort)
-	}
-	if got := wsSession.GetAgentSessionID(); got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
-	}
-	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
-		t.Fatalf("global session id = %q, want untouched", got)
-	}
-}
-
-// TestCmdProvider_ClearMultiWorkspaceUsesWorkspaceSessions is a regression test
-// for the bug where cmdProvider "clear" used e.sessions (global) instead of
-// the workspace-resolved sessions, and called providerSaveFunc in workspace mode.
-func TestCmdProvider_ClearMultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubProviderAgent{
-		providers: []ProviderConfig{{Name: "openai"}},
-		active:    "openai",
-	}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	var savedProvider string
-	e.SetProviderSaveFunc(func(name string) error {
-		savedProvider = name
-		return nil
-	})
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "C-provider-clear-ws"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	wsAgent := &stubProviderAgent{
-		providers: []ProviderConfig{{Name: "openai"}},
-		active:    "openai",
-	}
-	ws.agent = wsAgent
-	ws.sessions = NewSessionManager("")
-
-	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
-
-	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
-	wsSession.SetAgentSessionID("ws-session-id", "test")
-
-	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
-	globalSession.SetAgentSessionID("global-session-id", "test")
-
-	e.cmdProvider(p, msg, []string{"clear"})
-
-	if got := wsSession.GetAgentSessionID(); got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
-	}
-	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
-		t.Fatalf("global session id = %q, want untouched", got)
-	}
-	// providerSaveFunc must not be called when operating on a workspace agent.
-	if savedProvider != "" {
-		t.Fatalf("providerSaveFunc was called with %q in workspace mode, want no call", savedProvider)
-	}
-}
-
-// TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions is a regression test
-// for the bug where switchProvider used e.sessions (global) instead of the
-// workspace-resolved sessions, and called providerSaveFunc in workspace mode.
-func TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
-	globalAgent := &stubProviderAgent{
-		providers: []ProviderConfig{{Name: "openai"}, {Name: "azure"}},
-		active:    "openai",
-	}
-	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
-
-	var savedProvider string
-	e.SetProviderSaveFunc(func(name string) error {
-		savedProvider = name
-		return nil
-	})
-
-	baseDir := t.TempDir()
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
-
-	wsDir := normalizeWorkspacePath(t.TempDir())
-	channelID := "C-provider-switch-ws"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
-
-	ws := e.workspacePool.GetOrCreate(wsDir)
-	wsAgent := &stubProviderAgent{
-		providers: []ProviderConfig{{Name: "openai"}, {Name: "azure"}},
-		active:    "openai",
-	}
-	ws.agent = wsAgent
-	ws.sessions = NewSessionManager("")
-
-	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
-
-	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
-	wsSession.SetAgentSessionID("ws-session-id", "test")
-
-	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
-	globalSession.SetAgentSessionID("global-session-id", "test")
-
-	e.cmdProvider(p, msg, []string{"switch", "azure"})
-
-	if wsAgent.active != "azure" {
-		t.Fatalf("workspace agent active provider = %q, want azure", wsAgent.active)
-	}
-	if got := wsSession.GetAgentSessionID(); got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
-	}
-	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
-		t.Fatalf("global session id = %q, want untouched", got)
-	}
-	// providerSaveFunc must not be called when operating on a workspace agent.
-	if savedProvider != "" {
-		t.Fatalf("providerSaveFunc was called with %q in workspace mode, want no call", savedProvider)
-	}
-}
-
 func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	agent := &stubModelModeAgent{}
@@ -5661,7 +5356,7 @@ func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 		UserID:     "user1",
 		Content:    "2",
 		ReplyCtx:   "ctx",
-	}, "2", "")
+	}, "2")
 
 	if !handled {
 		t.Fatal("expected handlePendingPermission to return true")
@@ -5712,7 +5407,7 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 		UserID:     "user1",
 		Content:    "1",
 		ReplyCtx:   "ctx",
-	}, "1", "")
+	}, "1")
 	if !handled {
 		t.Fatal("expected handled=true for question 0")
 	}
@@ -5734,7 +5429,7 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 		UserID:     "user1",
 		Content:    "2",
 		ReplyCtx:   "ctx",
-	}, "2", "")
+	}, "2")
 	if !handled {
 		t.Fatal("expected handled=true for question 1")
 	}
@@ -5788,7 +5483,7 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 		UserID:     "user1",
 		Content:    "allow",
 		ReplyCtx:   "ctx",
-	}, "allow", "")
+	}, "allow")
 
 	if !handled {
 		t.Fatal("expected handled=true")
@@ -6845,7 +6540,7 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 		t.Fatal("permission inline buttons not sent while Send blocked")
 	}
 
-	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow", "") {
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow") {
 		t.Fatal("expected handlePendingPermission to resolve pending request")
 	}
 	close(sess.unblock)
@@ -6988,7 +6683,7 @@ func TestReapIdleWorkspaces_SkipsWorkspaceWaitingForPermission(t *testing.T) {
 		UserID:     "user2",
 		Content:    "allow",
 		ReplyCtx:   "ctx",
-	}, "allow", "") {
+	}, "allow") {
 		t.Fatal("expected pending permission to be handled")
 	}
 	close(sess.unblock)
@@ -8580,11 +8275,6 @@ func TestExtractChannelID(t *testing.T) {
 		{"a:bb:c:d", "bb"},
 		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
 		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
-		// 3-segment shared-session keys with single-char type tag — used by
-		// dingtalk/qq/qqbot when share_session_in_channel is enabled.
-		{"dingtalk:g:cidZZZ", "cidZZZ"},
-		{"qq:g:12345", "12345"},
-		{"qqbot:g:openid_abc", "openid_abc"},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -10055,7 +9745,6 @@ func TestWorkspace_Init_LocalDirAbsolute(t *testing.T) {
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindStore)
-	e.SetWorkspaceInitAllowLocalPaths(true)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -10083,7 +9772,6 @@ func TestWorkspace_Init_LocalDirRelative(t *testing.T) {
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindStore)
-	e.SetWorkspaceInitAllowLocalPaths(true)
 
 	// Use relative name — should resolve under baseDir.
 	msg := &Message{
@@ -10108,7 +9796,6 @@ func TestWorkspace_Init_LocalDirNotFound(t *testing.T) {
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindStore)
-	e.SetWorkspaceInitAllowLocalPaths(true)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -10126,35 +9813,6 @@ func TestWorkspace_Init_LocalDirNotFound(t *testing.T) {
 	projectKey := "project:test"
 	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got != nil {
 		t.Fatalf("expected no binding for nonexistent dir, got %+v", got)
-	}
-}
-
-func TestWorkspace_Init_LocalDirDisabledByDefault(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-
-	baseDir := t.TempDir()
-	wsDir := filepath.Join(baseDir, "my-project")
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
-
-	msg := &Message{
-		SessionKey: "test:ch1:user1",
-		Content:    "/workspace init " + wsDir,
-		ReplyCtx:   "ctx",
-		UserID:     "user1",
-	}
-	e.handleCommand(p, msg, msg.Content)
-
-	sent := p.getSent()
-	if len(sent) == 0 || !strings.Contains(sent[0], "workspace_init_allow_local_paths") {
-		t.Fatalf("expected local-path disabled reply, got %v", sent)
-	}
-	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
-		t.Fatalf("expected no binding when local init paths are disabled, got %+v", got)
 	}
 }
 
@@ -10301,6 +9959,35 @@ func TestCmdSwitch_ByIDPrefix(t *testing.T) {
 	}
 	if !foundSwitch {
 		t.Fatalf("expected switch by prefix to succeed, got %v", sent)
+	}
+}
+
+func TestCmdSwitch_ByKnownIDPrefixFallback(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchableAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:ch:user1"
+	old := e.sessions.GetOrCreateActive(key)
+	old.SetAgentSessionID("known-session-123456", "test")
+	e.sessions.NewSession(key, "")
+
+	msg := &Message{SessionKey: key, Content: "/switch known-session", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	session := e.sessions.GetOrCreateActive(key)
+	if got := session.GetAgentSessionID(); got != "known-session-123456" {
+		t.Fatalf("active agent session = %q, want known-session-123456", got)
+	}
+	sent := p.getSent()
+	foundSwitch := false
+	for _, s := range sent {
+		if strings.Contains(s, "known-sessio") {
+			foundSwitch = true
+		}
+	}
+	if !foundSwitch {
+		t.Fatalf("expected switch fallback to succeed, got %v", sent)
 	}
 }
 
@@ -11127,8 +10814,6 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
 		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
-		{"three-segment with type tag (shared session)", "dingtalk:g:cidZZZ", "dingtalk", "cidZZZ", "dingtalk:cidZZZ", ""},
-		{"three-segment qq group", "qq:g:12345", "qq", "12345", "qq:12345", ""},
 	}
 
 	for _, tt := range tests {

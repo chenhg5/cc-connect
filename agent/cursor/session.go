@@ -6,10 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	_ "image/gif"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,12 +67,16 @@ func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 }
 
 func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	if len(images) > 0 {
-		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
-	}
 	if len(files) > 0 {
 		filePaths := core.SaveFilesToDisk(cs.workDir, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
+	}
+	if len(images) > 0 {
+		imagePaths, err := saveCursorImagesToDisk(cs.workDir, images)
+		if err != nil {
+			return err
+		}
+		prompt = core.AppendFileRefs(prompt, imagePaths)
 	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
@@ -123,6 +134,100 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 	go cs.readLoop(cmd, stdout, &stderrBuf)
 
 	return nil
+}
+
+func saveCursorImagesToDisk(workDir string, images []core.ImageAttachment) ([]string, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+
+	imgDir := filepath.Join(workDir, ".cc-connect", "images")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		return nil, fmt.Errorf("cursorSession: create image dir: %w", err)
+	}
+
+	paths := make([]string, 0, len(images))
+	for i, img := range images {
+		data, ext := prepareCursorImageForCLI(img)
+		name := img.FileName
+		if name == "" {
+			name = fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		} else if ext == ".jpg" && strings.ToLower(filepath.Ext(name)) != ".jpg" && strings.ToLower(filepath.Ext(name)) != ".jpeg" {
+			name = strings.TrimSuffix(name, filepath.Ext(name)) + ext
+		}
+
+		path := filepath.Join(imgDir, name)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return nil, fmt.Errorf("cursorSession: save image: %w", err)
+		}
+		paths = append(paths, path)
+	}
+
+	return paths, nil
+}
+
+func prepareCursorImageForCLI(img core.ImageAttachment) ([]byte, string) {
+	src, _, err := image.Decode(bytes.NewReader(img.Data))
+	if err != nil {
+		return img.Data, cursorImageExt(img.MimeType)
+	}
+
+	scaled := scaleImageToFit(src, 768)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, flattenOnWhite(scaled), &jpeg.Options{Quality: 82}); err != nil {
+		return img.Data, cursorImageExt(img.MimeType)
+	}
+	return buf.Bytes(), ".jpg"
+}
+
+func scaleImageToFit(src image.Image, maxSide int) image.Image {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 || maxSide <= 0 {
+		return src
+	}
+	if w <= maxSide && h <= maxSide {
+		return src
+	}
+
+	nw, nh := maxSide, maxSide
+	if w >= h {
+		nh = max(1, h*maxSide/w)
+	} else {
+		nw = max(1, w*maxSide/h)
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	for y := 0; y < nh; y++ {
+		sy := b.Min.Y + y*h/nh
+		for x := 0; x < nw; x++ {
+			sx := b.Min.X + x*w/nw
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	return dst
+}
+
+func flattenOnWhite(src image.Image) image.Image {
+	b := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: white}, image.Point{}, draw.Src)
+	draw.Draw(dst, dst.Bounds(), src, b.Min, draw.Over)
+	return dst
+}
+
+func cursorImageExt(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
@@ -464,10 +569,10 @@ func (cs *cursorSession) Close() error {
 	}()
 	select {
 	case <-done:
-		close(cs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
 	}
+	close(cs.events)
 	return nil
 }
 

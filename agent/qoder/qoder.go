@@ -105,11 +105,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
-	workDir := a.workDir
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
 
-	return newQoderSession(ctx, workDir, model, mode, sessionID, extraEnv)
+	return newQoderSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -143,10 +142,9 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 // ── SkillProvider ────────────────────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	workDir := a.GetWorkDir()
-	absDir, err := filepath.Abs(workDir)
+	absDir, err := filepath.Abs(a.workDir)
 	if err != nil {
-		absDir = workDir
+		absDir = a.workDir
 	}
 	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -162,10 +160,9 @@ func (a *Agent) CompressCommand() string { return "/compact" }
 // ── MemoryFileProvider ───────────────────────────────────────
 
 func (a *Agent) ProjectMemoryFile() string {
-	workDir := a.GetWorkDir()
-	absDir, err := filepath.Abs(workDir)
+	absDir, err := filepath.Abs(a.workDir)
 	if err != nil {
-		absDir = workDir
+		absDir = a.workDir
 	}
 	return filepath.Join(absDir, "AGENTS.md")
 }

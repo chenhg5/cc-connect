@@ -369,27 +369,20 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			slog.Warn("weixin: getUpdates ret", "ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
 		}
 
+		p.syncBufMu.Lock()
+		if resp.GetUpdatesBuf != "" {
+			p.persistSyncBuf(resp.GetUpdatesBuf)
+		}
+		p.syncBufMu.Unlock()
+
 		p.mu.RLock()
 		h := p.handler
 		p.mu.RUnlock()
 		if h == nil {
 			continue
 		}
-		var wg sync.WaitGroup
 		for i := range resp.Msgs {
-			i := i
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				p.dispatchInbound(ctx, &resp.Msgs[i], h)
-			}()
-		}
-		wg.Wait()
-
-		if ctx.Err() == nil && resp.GetUpdatesBuf != "" {
-			p.syncBufMu.Lock()
-			p.persistSyncBuf(resp.GetUpdatesBuf)
-			p.syncBufMu.Unlock()
+			p.dispatchInbound(ctx, &resp.Msgs[i], h)
 		}
 	}
 }

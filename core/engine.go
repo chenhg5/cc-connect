@@ -242,14 +242,12 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Multi-workspace mode
-	multiWorkspace               bool
-	baseDir                      string
-	skipGit                      bool
-	workspaceInitAllowLocalPaths bool
-	workspaceBindings            *WorkspaceBindingManager
-	workspacePool                *workspacePool
-	initFlows                    map[string]*workspaceInitFlow // workspace channel key → init state
-	initFlowsMu                  sync.Mutex
+	multiWorkspace    bool
+	baseDir           string
+	workspaceBindings *WorkspaceBindingManager
+	workspacePool     *workspacePool
+	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
+	initFlowsMu       sync.Mutex
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -469,12 +467,6 @@ func (e *Engine) SetWorkspaceIdleTimeout(d time.Duration) {
 	}
 }
 
-// SetWorkspaceInitAllowLocalPaths controls whether workspace init accepts
-// existing local directories as targets. When false, init remains git-URL only.
-func (e *Engine) SetWorkspaceInitAllowLocalPaths(allow bool) {
-	e.workspaceInitAllowLocalPaths = allow
-}
-
 func (e *Engine) runIdleReaper() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -621,11 +613,6 @@ func (e *Engine) SetFilterExternalSessions(v bool) {
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
 func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
-
-func (e *Engine) SetSkipGit(skipGit bool) {
-	e.skipGit = skipGit
-}
-
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -2004,16 +1991,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	// Select session manager and agent based on workspace mode
-	sessions := e.sessions
-	agent := e.agent
-	interactiveKey := msg.SessionKey
-	if e.multiWorkspace && wsSessions != nil {
-		sessions = wsSessions
-		agent = wsAgent
-		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
-	}
-
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -2021,9 +1998,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		// Unrecognized slash command — fall through to agent as normal message
 	}
 
-	// Permission responses bypass the session lock.
-	// Must be after workspace resolution so interactiveKey is correct.
-	if e.handlePendingPermission(p, msg, content, interactiveKey) {
+	// Permission responses bypass the session lock
+	if e.handlePendingPermission(p, msg, content) {
 		return
 	}
 
@@ -2059,8 +2035,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	// Pending provider add (card-driven multi-step flow)
-	if e.handlePendingProviderAdd(p, msg, content, interactiveKey) {
+	if e.handlePendingProviderAdd(p, msg, content) {
 		return
+	}
+
+	// Select session manager and agent based on workspace mode
+	sessions := e.sessions
+	agent := e.agent
+	interactiveKey := msg.SessionKey
+	if e.multiWorkspace && wsSessions != nil {
+		sessions = wsSessions
+		agent = wsAgent
+		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
@@ -2113,6 +2099,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
+	oldAgentSessionID := session.GetAgentSessionID()
 	hasBackend := session.GetAgentSessionID() != ""
 	hasHistory := len(session.GetHistory(1)) > 0
 	if !hasBackend && !hasHistory {
@@ -2154,8 +2141,19 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	switchCmd := "/list"
+	if oldAgentSessionID != "" {
+		switchCmd = "/switch " + shortAgentSessionID(oldAgentSessionID)
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute), switchCmd))
 	return newSession
+}
+
+func shortAgentSessionID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -2318,11 +2316,8 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 // Permission handling
 // ──────────────────────────────────────────────────────────────
 
-func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string, interactiveKey string) bool {
-	iKey := interactiveKey
-	if iKey == "" {
-		iKey = e.interactiveKeyForSessionKey(msg.SessionKey)
-	}
+func (e *Engine) handlePendingPermission(p Platform, msg *Message, content string) bool {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
@@ -2685,14 +2680,11 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create a new agent instance with this workspace's work_dir
 	opts := make(map[string]any)
-	// Let the agent seed its own base options (e.g. tmux session name)
 	if snapshotter, ok := e.agent.(WorkspaceAgentOptionSnapshotter); ok {
 		for k, v := range snapshotter.WorkspaceAgentOptions() {
 			opts[k] = v
 		}
 	}
-
-	// workspace-specific overrides always win
 	opts["work_dir"] = workspace
 
 	// Copy model from original agent if possible
@@ -2850,20 +2842,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
-	if inj, ok := agent.(SessionEnvInjector); ok {
-		envVars := []string{
-			"CC_PROJECT=" + e.name,
-			"CC_SESSION_KEY=" + ccKey,
+	envVars := e.sessionEnvVars(ccKey)
+	if _, ok := agent.(SessionEnvStarter); !ok {
+		if inj, ok := agent.(SessionEnvInjector); ok {
+			inj.SetSessionEnv(envVars)
 		}
-		if exePath, err := os.Executable(); err == nil {
-			binDir := filepath.Dir(exePath)
-			if curPath := os.Getenv("PATH"); curPath != "" {
-				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
-			} else {
-				envVars = append(envVars, "PATH="+binDir)
-			}
-		}
-		inj.SetSessionEnv(envVars)
 	}
 
 	// Inject platform-specific formatting instructions into the agent's system prompt.
@@ -2893,7 +2876,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	startSessionID := session.GetAgentSessionID()
 	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := startAgentSession(e.ctx, agent, startSessionID, envVars)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -2902,7 +2885,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = startAgentSession(e.ctx, agent, "", envVars)
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -4977,7 +4960,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 	}
 	initWorkspace := func(bindingKey, target string, successKey MsgKey) bool {
 		// Support local directory paths (absolute or relative to baseDir).
-		if e.workspaceInitAllowLocalPaths && looksLikeLocalDir(target) {
+		if looksLikeLocalDir(target) {
 			dirPath, err := resolveLocalDirPath(target, e.baseDir)
 			if err != nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, target))
@@ -4989,12 +4972,8 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				return false
 			}
 			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(dirPath))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, dirPath))
 			return true
-		}
-		if !e.workspaceInitAllowLocalPaths && looksLikeLocalDir(target) && !looksLikeGitURL(target) {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitLocalPathsDisabled))
-			return false
 		}
 
 		if !looksLikeGitURL(target) {
@@ -5321,6 +5300,11 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
+		if knownID := matchKnownAgentSessionID(sessions, query); knownID != "" {
+			matched = &AgentSessionInfo{ID: knownID, Summary: sessions.GetSessionName(knownID)}
+		}
+	}
+	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
 		return
 	}
@@ -5393,6 +5377,36 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 	}
 
 	return nil
+}
+
+func matchKnownAgentSessionID(manager *SessionManager, query string) string {
+	query = strings.TrimSpace(query)
+	if query == "" || manager == nil {
+		return ""
+	}
+	known := manager.KnownAgentSessionIDs()
+	if len(known) == 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(known))
+	for id := range known {
+		if id == query {
+			return id
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	matched := ""
+	for _, id := range ids {
+		if !strings.HasPrefix(id, query) {
+			continue
+		}
+		if matched != "" {
+			return ""
+		}
+		matched = id
+	}
+	return matched
 }
 
 func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
@@ -6453,7 +6467,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		agent, sessions, _, err := e.commandContext(p, msg)
+		_, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
@@ -6463,8 +6477,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		displayName := e.currentSessionDisplayName(agent, sessions, agentID)
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History)))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
 		return
 	}
 
@@ -6565,13 +6578,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 }
 
 func (e *Engine) cmdUsage(p Platform, msg *Message) {
-	agent, _, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
-	reporter, ok := agent.(UsageReporter)
+	reporter, ok := e.agent.(UsageReporter)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUsageNotSupported))
 		return
@@ -7694,13 +7701,7 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
-	switcher, ok := agent.(ReasoningEffortSwitcher)
+	switcher, ok := e.agent.(ReasoningEffortSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
 		return
@@ -7772,22 +7773,16 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	switcher.SetReasoningEffort(target)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	sessions.Save()
+	e.sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
-	switcher, ok := agent.(ModeSwitcher)
+	switcher, ok := e.agent.(ModeSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModeNotSupported))
 		return
@@ -7974,15 +7969,6 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 func (e *Engine) cmdStop(p Platform, msg *Message) {
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
-		// Fallback: try suffix scan in case interactiveKeyForSessionKey
-		// resolved a different key than the one used to store the state
-		// (e.g. workspace binding lookup inconsistency).
-		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
-			if e.stopInteractiveSession(found, p, msg.ReplyCtx) {
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
-				return
-			}
-		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
@@ -8039,13 +8025,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 }
 
 func (e *Engine) cmdCompress(p Platform, msg *Message) {
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
-	compressor, ok := agent.(ContextCompressor)
+	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
 		return
@@ -8056,20 +8036,12 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 	state, hasState := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil {
-		// Fallback: suffix scan for multi-workspace key mismatch
-		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
-			e.interactiveMu.Lock()
-			state, hasState = e.interactiveStates[found]
-			e.interactiveMu.Unlock()
-		}
-	}
-
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNoSession))
 		return
 	}
 
+	_, sessions := e.sessionContextForKey(msg.SessionKey)
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
@@ -8256,14 +8228,8 @@ func (e *Engine) drainQueuedMessagesAfterCompress(state *interactiveState, sessi
 }
 
 func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
 	if len(args) == 0 {
-		if auth, ok := agent.(ToolAuthorizer); ok {
+		if auth, ok := e.agent.(ToolAuthorizer); ok {
 			tools := auth.GetAllowedTools()
 			if len(tools) == 0 {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoToolsAllowed))
@@ -8277,7 +8243,7 @@ func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {
 	}
 
 	toolName := strings.TrimSpace(args[0])
-	if auth, ok := agent.(ToolAuthorizer); ok {
+	if auth, ok := e.agent.(ToolAuthorizer); ok {
 		if err := auth.AddAllowedTools(toolName); err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgToolAllowFailed), err))
 			return
@@ -8289,13 +8255,7 @@ func (e *Engine) cmdAllow(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
-	agent, sessions, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
-	switcher, ok := agent.(ProviderSwitcher)
+	switcher, ok := e.agent.(ProviderSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNotSupported))
 		return
@@ -8380,7 +8340,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, "Usage: /provider switch <name>")
 			return
 		}
-		e.switchProvider(p, msg, sessions, switcher, args[1])
+		e.switchProvider(p, msg, switcher, args[1])
 
 	case "current":
 		current := switcher.GetActiveProvider()
@@ -8394,14 +8354,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		switcher.SetActiveProvider("")
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 		{
-			s := sessions.GetOrCreateActive(msg.SessionKey)
+			s := e.sessions.GetOrCreateActive(msg.SessionKey)
 			s.SetAgentSessionID("", "")
 			s.ClearHistory()
-			sessions.Save()
+			e.sessions.Save()
 		}
-		// Only persist to global config when operating on the global agent;
-		// in workspace mode the provider state lives on the per-workspace agent.
-		if sessions == e.sessions && e.providerSaveFunc != nil {
+		if e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
 			}
@@ -8409,7 +8367,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderCleared))
 
 	default:
-		e.switchProvider(p, msg, sessions, switcher, args[0])
+		e.switchProvider(p, msg, switcher, args[0])
 	}
 }
 
@@ -8551,21 +8509,19 @@ func (e *Engine) resetAllSessions() {
 	e.sessions.Save()
 }
 
-func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManager, switcher ProviderSwitcher, name string) {
+func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitcher, name string) {
 	if !switcher.SetActiveProvider(name) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	sessions.Save()
+	e.sessions.Save()
 
-	// Only persist to global config when operating on the global agent;
-	// in workspace mode the provider state lives on the per-workspace agent.
-	if sessions == e.sessions && e.providerSaveFunc != nil {
+	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
 			slog.Error("failed to save provider", "error", err)
 		}
@@ -8576,13 +8532,11 @@ func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManag
 
 // handlePendingProviderAdd checks for a pending provider add state (from the
 // card-driven add flow) and completes the add if the user sends the required input.
-func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content string, interactiveKey string) bool {
+func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content string) bool {
 	if strings.HasPrefix(content, "/") {
 		return false
 	}
-	if interactiveKey == "" {
-		interactiveKey = e.interactiveKeyForSessionKey(msg.SessionKey)
-	}
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
@@ -10522,44 +10476,14 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 // Navigable sub-cards (for in-place card updates)
 // ──────────────────────────────────────────────────────────────
 
-func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, agentID string) string {
-	if agentID == "" || agentID == e.i18n.T(MsgSessionNotStarted) {
-		return e.i18n.T(MsgUntitled)
-	}
-	displayName := sessions.GetSessionName(agentID)
-	if displayName != "" {
-		return displayName
-	}
-	agentSessions, err := agent.ListSessions(e.ctx)
-	if err == nil {
-		for _, as := range agentSessions {
-			if as.ID == agentID {
-				displayName = strings.ReplaceAll(as.Summary, "\n", " ")
-				displayName = strings.Join(strings.Fields(displayName), " ")
-				break
-			}
-		}
-	}
-	if displayName == "" {
-		if tp, ok := agent.(SessionTitleProvider); ok {
-			displayName = tp.GetSessionTitle(agentID)
-		}
-	}
-	if displayName == "" {
-		return e.i18n.T(MsgUntitled)
-	}
-	return displayName
-}
-
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	_, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	displayName := e.currentSessionDisplayName(agent, sessions, agentID)
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History))
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).
@@ -11026,13 +10950,7 @@ func (e *Engine) renderUpgradeCard() *Card {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
-
-	mp, ok := agent.(MemoryFileProvider)
+	mp, ok := e.agent.(MemoryFileProvider)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
 		return
@@ -11811,11 +11729,6 @@ func (e *Engine) cmdCommandsDel(p Platform, msg *Message, args []string) {
 
 func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []string) {
 	prompt := BuildSkillInvocationPrompt(skill, args)
-	_, _, _, err := e.commandContext(p, msg)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
-	}
 
 	// Resolve workspace-aware agent in multi-workspace mode. Without this the
 	// skill always runs against the global e.agent (with the project-level
@@ -12726,6 +12639,29 @@ func (e *Engine) sendTTSReply(p Platform, replyCtx any, text string) {
 	slog.Info("tts: audio sent successfully", "platform", p.Name())
 }
 
+func (e *Engine) sessionEnvVars(sessionKey string) []string {
+	envVars := []string{
+		"CC_PROJECT=" + e.name,
+		"CC_SESSION_KEY=" + sessionKey,
+	}
+	if exePath, err := os.Executable(); err == nil {
+		binDir := filepath.Dir(exePath)
+		if curPath := os.Getenv("PATH"); curPath != "" {
+			envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
+		} else {
+			envVars = append(envVars, "PATH="+binDir)
+		}
+	}
+	return envVars
+}
+
+func startAgentSession(ctx context.Context, agent Agent, sessionID string, env []string) (AgentSession, error) {
+	if starter, ok := agent.(SessionEnvStarter); ok {
+		return starter.StartSessionWithEnv(ctx, sessionID, env)
+	}
+	return agent.StartSession(ctx, sessionID)
+}
+
 // ──────────────────────────────────────────────────────────────
 // Bot-to-bot relay
 // ──────────────────────────────────────────────────────────────
@@ -12737,24 +12673,17 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	relaySessionKey := "relay:" + fromProject + ":" + chatID
 	session := e.sessions.GetOrCreateActive(relaySessionKey)
 
-	if inj, ok := e.agent.(SessionEnvInjector); ok {
-		envVars := []string{
-			"CC_PROJECT=" + e.name,
-			"CC_SESSION_KEY=" + relaySessionKey,
+	envVars := e.sessionEnvVars(relaySessionKey)
+	if _, ok := e.agent.(SessionEnvStarter); !ok {
+		if inj, ok := e.agent.(SessionEnvInjector); ok {
+			inj.SetSessionEnv(envVars)
 		}
-		if exePath, err := os.Executable(); err == nil {
-			binDir := filepath.Dir(exePath)
-			if curPath := os.Getenv("PATH"); curPath != "" {
-				envVars = append(envVars, "PATH="+binDir+string(filepath.ListSeparator)+curPath)
-			}
-		}
-		inj.SetSessionEnv(envVars)
 	}
 
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay
 	// timeout only controls how long we *wait* for the response.
-	agentSession, err := e.agent.StartSession(e.ctx, session.GetAgentSessionID())
+	agentSession, err := startAgentSession(e.ctx, e.agent, session.GetAgentSessionID(), envVars)
 	if err != nil {
 		// Resume failed — fall back to a fresh session so the relay is not
 		// permanently broken by a corrupted/stale session ID.
@@ -12763,7 +12692,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				"relay_key", relaySessionKey, "error", err)
 			session.SetAgentSessionID("", e.agent.Name())
 			e.sessions.Save()
-			agentSession, err = e.agent.StartSession(e.ctx, "")
+			agentSession, err = startAgentSession(e.ctx, e.agent, "", envVars)
 		}
 		if err != nil {
 			return "", fmt.Errorf("start relay session: %w", err)
@@ -13148,11 +13077,11 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 func extractChannelID(sessionKey string) string {
 	// Format: "platform:channelID:userID" or "platform:channelID"
 	// Some platforms encode a short type tag as an extra segment, e.g.
-	// "platform:t:channelID:userID" or "platform:t:channelID" (shared session)
-	// where t is a single-char tag. When parts[1] is a single char and at
-	// least one more segment follows, treat parts[2] as the real channel ID.
+	// "platform:t:channelID:userID" where t is a single-char tag.
+	// When 4+ segments exist and parts[1] is a single char, treat parts[2]
+	// as the real channel ID.
 	parts := strings.SplitN(sessionKey, ":", 4)
-	if len(parts) >= 3 && len(parts[1]) == 1 {
+	if len(parts) >= 4 && len(parts[1]) == 1 {
 		return parts[2]
 	}
 	if len(parts) >= 2 {
@@ -13163,15 +13092,11 @@ func extractChannelID(sessionKey string) string {
 
 func extractUserID(sessionKey string) string {
 	// Format: "platform:channelID:userID" or "platform:type:channelID:userID"
-	// When parts[1] is a single-char type tag, the user ID is in parts[3]
-	// (4-segment form). The 3-segment form with a type tag (shared session,
-	// e.g. "dingtalk:g:cid") has no per-user ID, so return "".
+	// When 4+ segments exist and parts[1] is a single-char type tag, the
+	// user ID is in parts[3].
 	parts := strings.SplitN(sessionKey, ":", 5)
-	if len(parts) >= 3 && len(parts[1]) == 1 {
-		if len(parts) >= 4 {
-			return parts[3]
-		}
-		return ""
+	if len(parts) >= 4 && len(parts[1]) == 1 {
+		return parts[3]
 	}
 	if len(parts) >= 3 {
 		return parts[2]
@@ -13480,48 +13405,25 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 	e.initFlowsMu.Unlock()
 
 	content := strings.TrimSpace(msg.Content)
-	looksLikeAllowedLocalDir := e.workspaceInitAllowLocalPaths && looksLikeLocalDir(content)
 
 	if !exists {
-		if strings.HasPrefix(content, "/") && !looksLikeAllowedLocalDir {
+		if strings.HasPrefix(content, "/") {
 			return false
 		}
-		if e.skipGit {
-			cloneTo := filepath.Join(e.baseDir, channelName)
-			flow = &workspaceInitFlow{
-				state:       "awaiting_confirm",
-				channelName: channelName,
-				cloneTo:     cloneTo,
-			}
-			e.initFlowsMu.Lock()
-			e.initFlows[channelKey] = flow
-			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("I'll mkdir `%s` and bind it to this channel. OK? (yes/no)", channelName))
-			return true
-		}
-		flow = &workspaceInitFlow{
+		e.initFlowsMu.Lock()
+		e.initFlows[channelKey] = &workspaceInitFlow{
 			state:       "awaiting_url",
 			channelName: channelName,
 		}
-		e.initFlowsMu.Lock()
-		e.initFlows[channelKey] = flow
 		e.initFlowsMu.Unlock()
-		// If the first message is already a path or URL, process it now;
-		// otherwise show the hint and wait for the next message.
-		if !looksLikeAllowedLocalDir && !looksLikeGitURL(content) {
-			hintKey := MsgWsNotFoundHintGitOnly
-			if e.workspaceInitAllowLocalPaths {
-				hintKey = MsgWsNotFoundHint
-			}
-			e.reply(p, msg.ReplyCtx, e.i18n.T(hintKey))
-			return true
-		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotFoundHint))
+		return true
 	}
 
 	// Slash commands always take priority over the init flow — let them
 	// pass through to handleCommand. Clean up the stale flow since the
 	// user is issuing explicit commands instead of following the clone guide.
-	if exists && strings.HasPrefix(content, "/") && !looksLikeAllowedLocalDir {
+	if strings.HasPrefix(content, "/") {
 		e.initFlowsMu.Lock()
 		delete(e.initFlows, channelKey)
 		e.initFlowsMu.Unlock()
@@ -13531,7 +13433,7 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 	switch flow.state {
 	case "awaiting_url":
 		// Accept local directory paths: bind directly without cloning.
-		if looksLikeAllowedLocalDir {
+		if looksLikeLocalDir(content) {
 			dirPath, resolveErr := resolveLocalDirPath(content, e.baseDir)
 			if resolveErr != nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInitDirNotFound, content))
@@ -13547,11 +13449,8 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 			e.initFlowsMu.Lock()
 			delete(e.initFlows, channelKey)
 			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, dirPath))
-			return true
-		}
-		if !e.workspaceInitAllowLocalPaths && looksLikeLocalDir(content) && !looksLikeGitURL(content) {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitLocalPathsDisabled))
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+				"Bound workspace `%s` to this channel. Ready.", dirPath))
 			return true
 		}
 
@@ -13582,21 +13481,13 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 			return true
 		}
 
-		var err error
-		var message string
-		if e.skipGit {
-			err = os.MkdirAll(flow.cloneTo, 0o755)
-			message = fmt.Sprintf("mkdir failed: %v", err)
-		} else {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
-			err = gitClone(flow.repoURL, flow.cloneTo)
-			message = fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err)
-		}
-		if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Cloning `%s` to `%s`...", flow.repoURL, flow.cloneTo))
+
+		if err := gitClone(flow.repoURL, flow.cloneTo); err != nil {
 			e.initFlowsMu.Lock()
 			delete(e.initFlows, channelKey)
 			e.initFlowsMu.Unlock()
-			e.reply(p, msg.ReplyCtx, message)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Clone failed: %v\nSend a repo URL to try again.", err))
 			return true
 		}
 
@@ -13607,7 +13498,8 @@ func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName s
 		delete(e.initFlows, channelKey)
 		e.initFlowsMu.Unlock()
 
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsCloneSuccess, flow.cloneTo))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
+			"Clone complete. Bound workspace `%s` to this channel. Ready.", flow.cloneTo))
 		return true
 	}
 
@@ -13626,7 +13518,7 @@ func looksLikeGitURL(s string) bool {
 // paths that escape baseDir via ../ traversal.
 func resolveLocalDirPath(target, baseDir string) (string, error) {
 	dirPath := target
-	if dirPath == "~" || strings.HasPrefix(dirPath, "~/") {
+	if strings.HasPrefix(dirPath, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("cannot resolve home directory: %w", err)
@@ -13640,7 +13532,7 @@ func resolveLocalDirPath(target, baseDir string) (string, error) {
 	if err != nil {
 		resolved = cleaned
 	}
-	if baseDir != "" && !filepath.IsAbs(target) && !strings.HasPrefix(target, "~") {
+	if baseDir != "" && !filepath.IsAbs(target) {
 		cleanBase := filepath.Clean(baseDir)
 		if evalBase, err := filepath.EvalSymlinks(cleanBase); err == nil {
 			cleanBase = evalBase
@@ -13654,30 +13546,16 @@ func resolveLocalDirPath(target, baseDir string) (string, error) {
 
 // looksLikeLocalDir returns true if the string looks like a local directory
 // path (absolute path, home-relative, dot-relative, or a bare name that
-// doesn't look like a URL). Slash commands like /dir are not local dirs.
+// doesn't look like a URL).
 func looksLikeLocalDir(s string) bool {
 	if s == "" {
 		return false
 	}
-	if strings.Contains(s, "://") || strings.Contains(s, "@") {
-		return false
-	}
-	if strings.HasPrefix(s, "~/") || s == "~" || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
-		return true
-	}
-	// A single /word could be a slash command or an absolute path like /root.
-	// Check against known commands; if it matches, it's not a local dir.
-	if strings.HasPrefix(s, "/") {
-		name := strings.ToLower(strings.SplitN(s[1:], " ", 2)[0])
-		for _, c := range builtinCommands {
-			for _, n := range c.names {
-				if name == n {
-					return false
-				}
-			}
-		}
-	}
-	return true
+	return strings.HasPrefix(s, "/") ||
+		strings.HasPrefix(s, "~/") ||
+		strings.HasPrefix(s, "./") ||
+		strings.HasPrefix(s, "../") ||
+		(!strings.Contains(s, "://") && !strings.Contains(s, "@"))
 }
 
 func extractRepoName(url string) string {

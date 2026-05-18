@@ -1,0 +1,9 @@
+{
+  "name": "cc-connect-cursor-sdk-sidecar",
+  "private": true,
+  "type": "module",
+  "description": "Cursor SDK sidecar for cc-connect cursor_sdk agent",
+  "peerDependencies": {
+    "@cursor/sdk": "^1.0.13"
+  }
+}

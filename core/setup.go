@@ -347,16 +347,7 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 		apiBase = strings.TrimRight(req.APIURL, "/")
 	}
 
-	// Validate api_url before dereferencing — url.Parse returns a nil URL for
-	// inputs like "://" or "%zz", and the previous `u, _ := url.Parse(...)`
-	// then crashed the management server with a nil-pointer panic on the
-	// next u.JoinPath call. handleSetupWeixinBegin already validates the
-	// same field; mirror that here.
-	u, err := url.Parse(apiBase + "/")
-	if err != nil {
-		mgmtError(w, http.StatusBadRequest, "invalid api_url")
-		return
-	}
+	u, _ := url.Parse(apiBase + "/")
 	u = u.JoinPath("ilink", "bot", "get_qrcode_status")
 	q := u.Query()
 	q.Set("qrcode", req.QRKey)
