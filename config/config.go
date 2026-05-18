@@ -123,10 +123,10 @@ type Config struct {
 	// "powershell.exe". Set to an absolute path (e.g. "/bin/zsh") to use a
 	// different shell. Supported: sh, bash, zsh, fish, cmd, powershell, pwsh.
 	Shell string `toml:"shell,omitempty"`
-	// InitCommand is prepended to every shell command before execution. Useful
+	// ShellProfile is prepended to every shell command before execution. Useful
 	// for sourcing shell profiles so that user-defined functions and aliases are
 	// available. Example: "source ~/.zshrc"
-	InitCommand string `toml:"init_command,omitempty"`
+	ShellProfile string `toml:"shell_profile,omitempty"`
 }
 
 // CronConfig controls cron job behavior.
@@ -418,8 +418,8 @@ type ProjectConfig struct {
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
 	// Shell overrides the global shell for this project. See Config.Shell.
 	Shell string `toml:"shell,omitempty"`
-	// InitCommand overrides the global init_command for this project.
-	InitCommand string `toml:"init_command,omitempty"`
+	// ShellProfile overrides the global shell_profile for this project.
+	ShellProfile string `toml:"shell_profile,omitempty"`
 }
 
 type AgentConfig struct {
@@ -791,18 +791,18 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 // EffectiveShell returns the shell binary, flag, and init command for the project.
 // Resolution: per-project > global > platform default.
 // The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
-func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, initCmd string) {
+func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile string) {
 	s := ""
 	p := ""
 	if proj != nil {
 		s = proj.Shell
-		p = proj.InitCommand
+		p = proj.ShellProfile
 	}
 	if s == "" {
 		s = cfg.Shell
 	}
 	if p == "" {
-		p = cfg.InitCommand
+		p = cfg.ShellProfile
 	}
 	if s == "" {
 		if runtime.GOOS == "windows" {

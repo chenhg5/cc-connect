@@ -250,7 +250,7 @@ type Engine struct {
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
 	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
 	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
-	initCommand string // prepended to every command (e.g. "source ~/.zshrc;")
+	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
 	multiWorkspace               bool
@@ -645,11 +645,11 @@ func (e *Engine) SetHooks(hm *HookManager) {
 	e.hooks = hm
 }
 
-// SetShell configures the shell binary, flag, and init command used for exec.
-func (e *Engine) SetShell(shell, flag, initCmd string) {
+// SetShell configures the shell binary, flag, and shell profile used for exec.
+func (e *Engine) SetShell(shell, flag, shellProfile string) {
 	e.shell = shell
 	e.shellFlag = flag
-	e.initCommand = initCmd
+	e.shellProfile = shellProfile
 }
 
 func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
@@ -1409,7 +1409,7 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.initCommand, job.Exec)
+	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
 	shellCmd.Dir = workDir
 
 	stdout, err := shellCmd.StdoutPipe()
@@ -6589,11 +6589,11 @@ const quickFinishTimeout = 500 * time.Millisecond
 
 // shellExecCommand builds an exec.Cmd for running command via the given shell.
 // For PowerShell/pwsh, extra flags (-NoProfile, -ExecutionPolicy Bypass) are
-// added automatically. If initCmd is non-empty, it is prepended to the command
+// added automatically. If shellProfile is non-empty, it is prepended to the command
 // with a newline separator (useful for sourcing shell profiles).
-func shellExecCommand(ctx context.Context, shell, flag, initCmd, command string) *exec.Cmd {
-	if initCmd != "" {
-		command = initCmd + "\n" + command
+func shellExecCommand(ctx context.Context, shell, flag, shellProfile, command string) *exec.Cmd {
+	if shellProfile != "" {
+		command = shellProfile + "\n" + command
 	}
 	base := strings.ToLower(filepath.Base(shell))
 	if strings.HasPrefix(base, "powershell") || strings.HasPrefix(base, "pwsh") {
@@ -6626,7 +6626,7 @@ func (e *Engine) runShellWithProgress(p Platform, replyCtx any, command string, 
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	cmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.initCommand, command)
+	cmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, command)
 	cmd.Dir = workDir
 
 	stdout, err := cmd.StdoutPipe()

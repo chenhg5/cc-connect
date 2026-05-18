@@ -78,13 +78,13 @@ type HookManager struct {
 	project     string
 	shell       string // shell binary (e.g. "sh", "/bin/zsh")
 	shellFlag   string // shell flag (e.g. "-c", "-Command")
-	initCommand string // prepended to every command
+	shellProfile string // prepended to every command
 	mu          sync.RWMutex
 	client      *http.Client
 }
 
 // NewHookManager creates a manager for the given project name.
-func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, initCmd string) *HookManager {
+func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, shellProfile string) *HookManager {
 	valid := make([]HookConfig, 0, len(hooks))
 	for _, h := range hooks {
 		if err := validateHookConfig(h); err != nil {
@@ -98,7 +98,7 @@ func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, initCm
 		project:     project,
 		shell:       shell,
 		shellFlag:   shellFlag,
-		initCommand: initCmd,
+		shellProfile: shellProfile,
 		client:      &http.Client{},
 	}
 }
@@ -175,7 +175,7 @@ func (hm *HookManager) executeCommand(h *HookConfig, event HookEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := shellExecCommand(ctx, hm.shell, hm.shellFlag, hm.initCommand, h.Command)
+	cmd := shellExecCommand(ctx, hm.shell, hm.shellFlag, hm.shellProfile, h.Command)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = append(os.Environ(), eventToEnv(event)...)
 

@@ -839,29 +839,29 @@ name = "my-project"
 shell = "/bin/fish"
 ```
 
-### Init Command
+### Shell Profile
 
-Use `init_command` to prepend a setup script to every shell command. This is useful for sourcing your shell profile so that custom functions, aliases, and environment variables are available:
+Use `shell_profile` to prepend a setup script to every shell command. This is useful for sourcing your shell profile so that custom functions, aliases, and environment variables are available:
 
 ```toml
 shell = "/bin/zsh"
-init_command = "source ~/.zshrc"
+shell_profile = "source ~/.zshrc"
 ```
 
-The init command and the user's command are joined with a newline and passed as a single script to the shell, avoiding quoting issues. For example, `/shell echo $MY_VAR` becomes:
+The shell profile and the user's command are joined with a newline and passed as a single script to the shell, avoiding quoting issues. For example, `/shell echo $MY_VAR` becomes:
 
 ```zsh
 source ~/.zshrc
 echo $MY_VAR
 ```
 
-`init_command` also supports per-project override:
+`shell_profile` also supports per-project override:
 
 ```toml
 [[projects]]
 name = "my-project"
 shell = "/bin/fish"
-init_command = "source ~/.config/fish/config.fish"
+shell_profile = "source ~/.config/fish/config.fish"
 ```
 
 ### Affected Execution Paths

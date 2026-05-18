@@ -751,29 +751,29 @@ name = "my-project"
 shell = "/bin/fish"
 ```
 
-### 初始化命令
+### Shell Profile
 
-使用 `init_command` 在每条 shell 命令前添加初始化脚本。适用于加载 shell profile，使自定义函数、别名和环境变量可用：
+使用 `shell_profile` 在每条 shell 命令前添加初始化脚本。适用于加载 shell profile，使自定义函数、别名和环境变量可用：
 
 ```toml
 shell = "/bin/zsh"
-init_command = "source ~/.zshrc"
+shell_profile = "source ~/.zshrc"
 ```
 
-初始化命令和用户命令会用换行符拼接后作为一个整体脚本传给 shell，避免引号转义问题。例如 `/shell echo $MY_VAR` 实际执行的是：
+shell profile 和用户命令会用换行符拼接后作为一个整体脚本传给 shell，避免引号转义问题。例如 `/shell echo $MY_VAR` 实际执行的是：
 
 ```zsh
 source ~/.zshrc
 echo $MY_VAR
 ```
 
-`init_command` 同样支持项目级覆盖：
+`shell_profile` 同样支持项目级覆盖：
 
 ```toml
 [[projects]]
 name = "my-project"
 shell = "/bin/fish"
-init_command = "source ~/.config/fish/config.fish"
+shell_profile = "source ~/.config/fish/config.fish"
 ```
 
 ### 影响范围

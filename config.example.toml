@@ -32,7 +32,7 @@
 # Init command prepended to every shell command. Useful for sourcing profiles
 # so user-defined functions and aliases are available.
 # 初始化命令，会添加到每条 shell 命令前面。用于加载 profile，使自定义函数和别名可用。
-# init_command = "source ~/.zshrc"
+# shell_profile = "source ~/.zshrc"
 
 # Session data storage directory (default: ~/.cc-connect)
 # Stores conversation history and session state as JSON files.
@@ -681,7 +681,7 @@ name = "my-backend"
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
 # shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
-# init_command = "source ~/.config/fish/config.fish"  # Per-project init / 项目级初始化命令
+# shell_profile = "source ~/.config/fish/config.fish"  # Per-project shell profile / 项目级 shell profile
 #
 # admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec).
 # admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec）。
