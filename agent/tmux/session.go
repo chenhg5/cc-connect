@@ -80,11 +80,7 @@ func (s *tmuxSession) Send(prompt string, images []core.ImageAttachment, files [
 	// Promote images to files so they are saved to disk and referenced by path.
 	// The CLI running in the pane (e.g. Claude Code) can then read them directly.
 	for _, img := range images {
-		files = append(files, core.FileAttachment{
-			MimeType: img.MimeType,
-			Data:     img.Data,
-			FileName: img.FileName,
-		})
+		files = append(files, core.FileAttachment(img))
 	}
 
 	// Save attached files and append their paths to the prompt

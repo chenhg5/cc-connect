@@ -199,11 +199,7 @@ func TestSend_ImagesPromotedToFiles(t *testing.T) {
 	// Build the promoted file list the same way Send() does, without calling
 	// tmux (which isn't available in unit tests).
 	for _, img := range images {
-		files = append(files, core.FileAttachment{
-			MimeType: img.MimeType,
-			Data:     img.Data,
-			FileName: img.FileName,
-		})
+		files = append(files, core.FileAttachment(img))
 	}
 	paths := core.SaveFilesToDisk(dir, files)
 
