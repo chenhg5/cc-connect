@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "description": "Cursor SDK sidecar for cc-connect cursor_sdk agent",
-  "peerDependencies": {
+  "dependencies": {
     "@cursor/sdk": "^1.0.13"
   }
 }

@@ -51,8 +51,20 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("cursor_sdk: sidecar command %q not found: %w", cmd, err)
 	}
 
+	_, customSidecarScript := opts["sidecar_script"]
 	script := stringOpt(opts, "sidecar_script", defaultSidecarScript())
-	args := []string{script}
+	absScript, err := filepath.Abs(script)
+	if err != nil {
+		return nil, fmt.Errorf("cursor_sdk: sidecar script path: %w", err)
+	}
+	if !customSidecarScript {
+		sidecarRoot := filepath.Dir(absScript)
+		sdkPkg := filepath.Join(sidecarRoot, "node_modules", "@cursor", "sdk", "package.json")
+		if _, statErr := os.Stat(sdkPkg); statErr != nil {
+			return nil, fmt.Errorf("cursor_sdk: sidecar dependency @cursor/sdk not installed (%w); run once: cd %q && npm install", statErr, sidecarRoot)
+		}
+	}
+	args := []string{absScript}
 	if extra := strings.TrimSpace(stringOpt(opts, "sidecar_args", "")); extra != "" {
 		args = append(args, strings.Fields(extra)...)
 	}
@@ -348,6 +360,11 @@ type sidecarSessionRef struct {
 func startSidecar(ctx context.Context, cmdName string, args []string, extraEnv []string) (*sidecarClient, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, cmdName, args...)
+	if len(args) > 0 && strings.HasSuffix(args[0], ".mjs") {
+		if d := filepath.Dir(args[0]); d != "" && d != "." {
+			cmd.Dir = d
+		}
+	}
 	cmd.Env = core.MergeEnv(os.Environ(), extraEnv)
 
 	stdin, err := cmd.StdinPipe()
