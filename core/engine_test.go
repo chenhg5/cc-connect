@@ -6590,6 +6590,15 @@ func TestCmdCronExec_UsageWhenMissingID(t *testing.T) {
 }
 
 func TestCmdCronExec_TriggersJob(t *testing.T) {
+	sentContains := func(sent []string, needle string) bool {
+		for _, msg := range sent {
+			if strings.Contains(msg, needle) {
+				return true
+			}
+		}
+		return false
+	}
+
 	for _, subcommand := range []string{"exec", "run", "trigger"} {
 		t.Run(subcommand, func(t *testing.T) {
 			store, err := NewCronStore(t.TempDir())
@@ -6622,15 +6631,10 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			msg := &Message{SessionKey: "plain:user1", ReplyCtx: "ctx"}
 			e.cmdCron(platform, msg, []string{subcommand, job.ID})
 
-			sent := platform.getSent()
-			if len(sent) == 0 || !strings.Contains(sent[0], "triggered") {
-				t.Fatalf("reply = %v, want localized trigger confirmation", sent)
-			}
-
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
-				sent = platform.getSent()
-				if len(sent) >= 3 {
+				sent := platform.getSent()
+				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
 					return
 				}
 				time.Sleep(10 * time.Millisecond)
