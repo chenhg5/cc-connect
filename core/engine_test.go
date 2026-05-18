@@ -1359,6 +1359,86 @@ func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testin
 	}
 }
 
+func TestReplyFooterGitBranch(t *testing.T) {
+	gitInit := func(t *testing.T, dir string) {
+		t.Helper()
+		exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", dir).Run()
+		exec.Command("git", "-C", dir, "config", "user.email", "test@test.com").Run()
+		exec.Command("git", "-C", dir, "config", "user.name", "test").Run()
+		exec.Command("git", "-C", dir, "commit", "-q", "--allow-empty", "-m", "init").Run()
+	}
+
+	t.Run("git repo returns branch", func(t *testing.T) {
+		dir := t.TempDir()
+		gitInit(t, dir)
+
+		branch := replyFooterGitBranch(dir)
+		if branch != "main" {
+			t.Fatalf("got %q, want main", branch)
+		}
+	})
+
+	t.Run("non-git dir returns empty", func(t *testing.T) {
+		dir := t.TempDir()
+		if got := replyFooterGitBranch(dir); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("empty dir returns empty", func(t *testing.T) {
+		if got := replyFooterGitBranch(""); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("custom branch name", func(t *testing.T) {
+		dir := t.TempDir()
+		gitInit(t, dir)
+		exec.Command("git", "-C", dir, "checkout", "-b", "feature/test-branch").Run()
+
+		branch := replyFooterGitBranch(dir)
+		if branch != "feature/test-branch" {
+			t.Fatalf("got %q, want feature/test-branch", branch)
+		}
+	})
+
+	t.Run("detached head returns HEAD", func(t *testing.T) {
+		dir := t.TempDir()
+		gitInit(t, dir)
+		exec.Command("git", "-C", dir, "checkout", "--detach", "HEAD").Run()
+
+		branch := replyFooterGitBranch(dir)
+		if branch != "HEAD" {
+			t.Fatalf("got %q, want HEAD", branch)
+		}
+	})
+}
+
+func TestBuildReplyFooter_GitBranchTruncation(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	repoDir := filepath.Join(homeDir, "repo")
+	exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", repoDir).Run()
+	exec.Command("git", "-C", repoDir, "config", "user.email", "test@test.com").Run()
+	exec.Command("git", "-C", repoDir, "config", "user.name", "test").Run()
+	exec.Command("git", "-C", repoDir, "commit", "-q", "--allow-empty", "-m", "init").Run()
+	longBranch := "feature/JIRA-1234-implement-very-long-name"
+	exec.Command("git", "-C", repoDir, "checkout", "-b", longBranch).Run()
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "test-model"},
+		workDir:            repoDir,
+	}
+	e := NewEngine("test", agent, nil, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	footer := e.buildReplyFooter(agent, nil, repoDir, "")
+	if !strings.Contains(footer, "(feature/JIRA-1234-implement-ve…)") {
+		t.Fatalf("footer = %q, want truncated branch", footer)
+	}
+}
+
 func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *testing.T) {
 	p := &mockKeepPreviewPlatform{}
 	p.n = "feishu"

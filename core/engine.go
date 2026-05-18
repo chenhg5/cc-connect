@@ -5493,7 +5493,22 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		parts = append(parts, usage)
 		hasStatus = true
 	}
-	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
+	if rawDir := resolveWorkDir(session, agent, workspaceDir); rawDir != "" {
+		dir := compactReplyFooterPath(rawDir)
+		if branch := replyFooterGitBranch(rawDir); branch != "" {
+			const maxBranchLen = 30
+			if utf8.RuneCountInString(branch) > maxBranchLen {
+				i := 0
+				for pos := range branch {
+					if i == maxBranchLen {
+						branch = branch[:pos] + "…"
+						break
+					}
+					i++
+				}
+			}
+			dir += " (" + branch + ")"
+		}
 		parts = append(parts, dir)
 	}
 	if !hasStatus {
@@ -5644,7 +5659,7 @@ func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
 	return i18n.Tf(MsgReplyFooterRemaining, left)
 }
 
-func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
+func resolveWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
 	dir := strings.TrimSpace(workspaceDir)
 	if dir == "" {
 		if session != nil {
@@ -5663,10 +5678,22 @@ func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) 
 			dir = strings.TrimSpace(wd.GetWorkDir())
 		}
 	}
+	return dir
+}
+
+func replyFooterGitBranch(dir string) string {
 	if dir == "" {
 		return ""
 	}
-	return compactReplyFooterPath(dir)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func compactReplyFooterPath(path string) string {
