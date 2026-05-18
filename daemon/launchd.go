@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -238,6 +239,26 @@ func buildPlist(cfg Config) string {
 	if envPATH == "" {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
+
+	// Mirror systemd.go / windows.go: forward EnvExtra (proxy variables
+	// captured by manager.go::captureDaemonEnv) into the service environment
+	// so the launchd-managed daemon honours user-configured HTTP proxies.
+	// Proxy values can legitimately contain '&' (query strings) or '<', so
+	// XML-escape both the key and value before embedding in the plist.
+	plistEsc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	var extraEnv strings.Builder
+	if len(cfg.EnvExtra) > 0 {
+		keys := make([]string, 0, len(cfg.EnvExtra))
+		for key := range cfg.EnvExtra {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			fmt.Fprintf(&extraEnv, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n",
+				plistEsc.Replace(key), plistEsc.Replace(cfg.EnvExtra[key]))
+		}
+	}
+
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -270,12 +291,12 @@ func buildPlist(cfg Config) string {
 		<string>%d</string>
 		<key>PATH</key>
 		<string>%s</string>
-	</dict>
+%s	</dict>
 	<key>StandardOutPath</key>
 	<string>/dev/null</string>
 	<key>StandardErrorPath</key>
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, cfg.BinaryPath, cfg.WorkDir, cfg.LogFile, cfg.LogMaxSize, envPATH)
+`, launchdLabel, cfg.BinaryPath, cfg.WorkDir, cfg.LogFile, cfg.LogMaxSize, envPATH, extraEnv.String())
 }

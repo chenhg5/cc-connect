@@ -3,7 +3,9 @@
 package daemon
 
 import (
+	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,4 +252,94 @@ func containsCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestBuildPlist_IncludesEnvExtra(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc-connect/cc-connect",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 10485760,
+		EnvPATH:    "/usr/bin",
+		EnvExtra: map[string]string{
+			"HTTPS_PROXY": "http://127.0.0.1:7890",
+			// '&' inside a proxy query string must be XML-escaped or the
+			// resulting plist is unparseable.
+			"HTTP_PROXY": "http://1.2.3.4:8080?a=1&b=2",
+			"NO_PROXY":   "localhost,127.0.0.1",
+		},
+	}
+	xml := buildPlist(cfg)
+
+	for _, want := range []string{
+		"<key>HTTPS_PROXY</key>",
+		"<string>http://127.0.0.1:7890</string>",
+		"<key>HTTP_PROXY</key>",
+		"<string>http://1.2.3.4:8080?a=1&amp;b=2</string>",
+		"<key>NO_PROXY</key>",
+		"<string>localhost,127.0.0.1</string>",
+	} {
+		if !strings.Contains(xml, want) {
+			t.Errorf("plist missing %q\nfull plist:\n%s", want, xml)
+		}
+	}
+
+	// Raw '&' would make the plist invalid XML; the only '&' allowed in the
+	// document body is the start of an entity reference like &amp;.
+	if strings.Contains(xml, "a=1&b=2") {
+		t.Errorf("plist contains unescaped '&' from proxy query string:\n%s", xml)
+	}
+
+	// Keys must be emitted in deterministic (sorted) order so reinstalls do
+	// not churn the on-disk plist.
+	idxHTTPS := strings.Index(xml, "<key>HTTPS_PROXY</key>")
+	idxHTTP := strings.Index(xml, "<key>HTTP_PROXY</key>")
+	idxNO := strings.Index(xml, "<key>NO_PROXY</key>")
+	if !(idxHTTPS < idxHTTP && idxHTTP < idxNO) {
+		t.Errorf("EnvExtra keys not sorted: HTTPS=%d HTTP=%d NO=%d", idxHTTPS, idxHTTP, idxNO)
+	}
+}
+
+func TestBuildPlist_NoEnvExtraIsValid(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc-connect/cc-connect",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 10485760,
+		EnvPATH:    "/usr/bin",
+	}
+	got := buildPlist(cfg)
+	// Missing the EnvironmentVariables dict closing tag would mean the
+	// EnvExtra splice broke the template.
+	if !strings.Contains(got, "<key>PATH</key>\n\t\t<string>/usr/bin</string>\n\t</dict>") {
+		t.Errorf("plist EnvironmentVariables dict not properly closed:\n%s", got)
+	}
+}
+
+// TestBuildPlist_XMLWellFormed walks the generated plist with encoding/xml to
+// catch any future change that emits unescaped XML special characters
+// (notably '&' from proxy query strings), which would silently produce a
+// plist that launchd refuses to bootstrap.
+func TestBuildPlist_XMLWellFormed(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc-connect/cc-connect",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 10485760,
+		EnvPATH:    "/usr/bin",
+		EnvExtra: map[string]string{
+			"HTTP_PROXY":  "http://1.2.3.4:8080?a=1&b=2",
+			"HTTPS_PROXY": "http://127.0.0.1:7890",
+		},
+	}
+	dec := xml.NewDecoder(strings.NewReader(buildPlist(cfg)))
+	for {
+		_, err := dec.Token()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			t.Fatalf("plist failed XML parse: %v", err)
+		}
+	}
 }
