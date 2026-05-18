@@ -78,3 +78,97 @@ func TestNew_ShareSessionInChannel(t *testing.T) {
 
 // verify Platform implements core.Platform
 var _ core.Platform = (*Platform)(nil)
+
+func TestReconstructReplyCtx(t *testing.T) {
+	p := &Platform{}
+
+	tests := []struct {
+		name        string
+		sessionKey  string
+		wantErr     bool
+		wantType    string
+		wantUserID  int64
+		wantGroupID int64
+	}{
+		{
+			name:       "private session",
+			sessionKey: "qq:12345",
+			wantType:   "private",
+			wantUserID: 12345,
+		},
+		{
+			name:        "group with shared session",
+			sessionKey:  "qq:g:67890",
+			wantType:    "group",
+			wantGroupID: 67890,
+		},
+		{
+			name:        "group with per-user session",
+			sessionKey:  "qq:67890:12345",
+			wantType:    "group",
+			wantGroupID: 67890,
+			wantUserID:  12345,
+		},
+		{
+			name:       "missing prefix",
+			sessionKey: "telegram:123",
+			wantErr:    true,
+		},
+		{
+			name:       "too few parts",
+			sessionKey: "qq",
+			wantErr:    true,
+		},
+		{
+			name:       "non-numeric private user ID",
+			sessionKey: "qq:notanumber",
+			wantErr:    true,
+		},
+		{
+			name:       "non-numeric shared-group ID",
+			sessionKey: "qq:g:notanumber",
+			wantErr:    true,
+		},
+		{
+			name:       "non-numeric per-user group ID",
+			sessionKey: "qq:abc:12345",
+			wantErr:    true,
+		},
+		{
+			name:       "non-numeric per-user user ID",
+			sessionKey: "qq:67890:xyz",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, err := p.ReconstructReplyCtx(tt.sessionKey)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil (ctx=%+v)", tt.sessionKey, ctx)
+				}
+				if ctx != nil {
+					t.Errorf("expected nil ctx on error, got %+v", ctx)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.sessionKey, err)
+			}
+			rc, ok := ctx.(*replyContext)
+			if !ok {
+				t.Fatalf("ctx type = %T, want *replyContext", ctx)
+			}
+			if rc.messageType != tt.wantType {
+				t.Errorf("messageType = %q, want %q", rc.messageType, tt.wantType)
+			}
+			if rc.userID != tt.wantUserID {
+				t.Errorf("userID = %d, want %d", rc.userID, tt.wantUserID)
+			}
+			if rc.groupID != tt.wantGroupID {
+				t.Errorf("groupID = %d, want %d", rc.groupID, tt.wantGroupID)
+			}
+		})
+	}
+}
