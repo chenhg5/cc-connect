@@ -6100,6 +6100,18 @@ func (e *Engine) diff2html(ctx context.Context, diff []byte, workDir, title stri
 	return cmd.Output()
 }
 
+// normalizeVolume uppercases the Windows drive letter so that the encoded
+// project path matches the one produced by the desktop CLI.  On non-Windows
+// systems or paths without a drive letter the input is returned as-is.
+func normalizeVolume(p string) string {
+	if len(p) >= 2 && p[1] == ':' && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
+		if p[0] >= 'a' && p[0] <= 'z' {
+			return string(p[0]-32) + p[1:]
+		}
+	}
+	return p
+}
+
 // dirApply applies /dir mutations (same semantics as cmdDir). sessionKey is used for GetOrCreateActive.
 // On failure returns a non-empty errMsg; on success returns ("", successMsg) for plain-text replies.
 func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey, sessionKey string, args []string) (errMsg, successMsg string) {
@@ -6122,6 +6134,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			if absDir, err := filepath.Abs(baseDir); err == nil {
 				baseDir = absDir
 			}
+			baseDir = normalizeVolume(baseDir)
 
 			if !e.multiWorkspace {
 				switcher.SetWorkDir(baseDir)
@@ -6187,6 +6200,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 	if absDir, err := filepath.Abs(newDir); err == nil {
 		newDir = absDir
 	}
+	newDir = normalizeVolume(newDir)
 
 	info, err := os.Stat(newDir)
 	if err != nil || !info.IsDir() {

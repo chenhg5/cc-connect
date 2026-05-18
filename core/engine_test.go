@@ -12478,3 +12478,25 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
 	}
 }
+
+// TestNormalizeVolume verifies that Windows drive letters are uppercased
+// while non-Windows paths and paths without volumes are returned as-is.
+func TestNormalizeVolume(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"/usr/local", "/usr/local"},
+		{"relative/path", "relative/path"},
+		{`D:\Users\test`, `D:\Users\test`},
+		{`d:\Users\test`, `D:\Users\test`},
+		{`c:\`, `C:\`},
+		{`C:\`, `C:\`},
+	}
+	for _, tt := range tests {
+		got := normalizeVolume(tt.in)
+		if got != tt.want {
+			t.Errorf("normalizeVolume(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

@@ -110,6 +110,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	// Normalize Windows drive letter (see #1040).
+	if len(workDir) >= 2 && workDir[1] == ':' && workDir[0] >= 'a' && workDir[0] <= 'z' {
+		workDir = string(workDir[0]-32) + workDir[1:]
+	}
 	cliBin := "claude"
 	var cliExtraArgs []string
 	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
@@ -266,6 +270,11 @@ func (a *Agent) CLIBinaryName() string  { return a.cliBin }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
+	// Normalize Windows drive letter to uppercase so that the encoded project
+	// path matches the one produced by the desktop CLI (see #1040).
+	if len(dir) >= 2 && dir[1] == ':' && dir[0] >= 'a' && dir[0] <= 'z' {
+		dir = string(dir[0]-32) + dir[1:]
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.workDir = dir
