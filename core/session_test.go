@@ -104,6 +104,58 @@ func TestSessionManager_SwitchNotFound(t *testing.T) {
 	}
 }
 
+func TestSessionManager_SwitchSessionForRoutingRestoresPastAgentSessionID(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "bridge:web-admin:codex"
+	first := sm.GetOrCreateActive(userKey)
+	target := sm.NewSession(userKey, "past native")
+	target.PastAgentSessionIDs = []string{"thread-old"}
+	target.AgentType = "codex"
+
+	switched, err := sm.SwitchSessionForRouting(userKey, target.ID)
+	if err != nil {
+		t.Fatalf("SwitchSessionForRouting: %v", err)
+	}
+	if switched.ID != target.ID {
+		t.Fatalf("switched ID = %q, want %q", switched.ID, target.ID)
+	}
+	if active := sm.GetOrCreateActive(userKey); active.ID != target.ID {
+		t.Fatalf("active ID = %q, want %q", active.ID, target.ID)
+	}
+	if got := target.GetAgentSessionID(); got != "thread-old" {
+		t.Fatalf("agent session ID = %q, want restored past ID", got)
+	}
+	if first.GetAgentSessionID() != "" {
+		t.Fatalf("first session agent ID changed to %q", first.GetAgentSessionID())
+	}
+}
+
+func TestSessionManager_ResolveSessionForRoutingDoesNotChangeActive(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "bridge:web-admin:codex"
+	first := sm.GetOrCreateActive(userKey)
+	target := sm.NewSession(userKey, "past native")
+	target.PastAgentSessionIDs = []string{"thread-old"}
+	target.AgentType = "codex"
+	if _, err := sm.SwitchSession(userKey, first.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+
+	resolved, err := sm.ResolveSessionForRouting(userKey, target.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionForRouting: %v", err)
+	}
+	if resolved.ID != target.ID {
+		t.Fatalf("resolved ID = %q, want %q", resolved.ID, target.ID)
+	}
+	if active := sm.GetOrCreateActive(userKey); active.ID != first.ID {
+		t.Fatalf("active ID = %q, want unchanged %q", active.ID, first.ID)
+	}
+	if got := target.GetAgentSessionID(); got != "thread-old" {
+		t.Fatalf("agent session ID = %q, want restored past ID", got)
+	}
+}
+
 func TestSessionManager_ListSessions(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.NewSession("user1", "a")

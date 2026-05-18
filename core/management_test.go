@@ -13,12 +13,22 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
 	stubModelModeAgent
 	mu          sync.Mutex
 	hasDeadline bool
+}
+
+type mgmtListAgent struct {
+	stubAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *mgmtListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
 }
 
 func (a *deadlineAwareModelAgent) AvailableModels(ctx context.Context) []ModelOption {
@@ -320,6 +330,139 @@ func TestMgmt_Sessions(t *testing.T) {
 	})
 	if !r.OK {
 		t.Fatalf("create session failed: %s", r.Error)
+	}
+}
+
+func TestMgmt_Sessions_DisplayNamePriority(t *testing.T) {
+	agent := &mgmtListAgent{
+		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native title"}},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	s := e.sessions.GetOrCreateActive("user1")
+	s.Name = "local name"
+	s.SetAgentSessionID("agent-1", "stub")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			Name string `json:"name"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
+	}
+	if listData.Sessions[0].Name != "native title" {
+		t.Fatalf("session name = %q, want native title", listData.Sessions[0].Name)
+	}
+
+	e.sessions.SetSessionName("agent-1", "custom name")
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID, "tok")
+	if !r.OK {
+		t.Fatalf("session detail failed: %s", r.Error)
+	}
+	var detail struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(r.Data, &detail); err != nil {
+		t.Fatalf("unmarshal session detail: %v", err)
+	}
+	if detail.Name != "custom name" {
+		t.Fatalf("session detail name = %q, want custom name", detail.Name)
+	}
+}
+
+func TestMgmt_Sessions_HidesShadowedPastSessions(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	current := e.sessions.NewSession("user1", "native current")
+	current.SetAgentSessionID("agent-1", "codex")
+	shadow := e.sessions.NewSession("user1", "old local shell")
+	shadow.SetAgentSessionID("agent-1", "codex")
+	shadow.SetAgentSessionID("", "")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			ID string `json:"id"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
+	}
+	if listData.Sessions[0].ID != current.ID {
+		t.Fatalf("visible session = %q, want current %q", listData.Sessions[0].ID, current.ID)
+	}
+	if shadow.ID == current.ID {
+		t.Fatal("test setup failed: shadow and current IDs match")
+	}
+}
+
+func TestMgmt_Sessions_DeduplicatesPastOnlySessions(t *testing.T) {
+	agent := &mgmtListAgent{
+		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native past title"}},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	older := e.sessions.NewSession("user1", "old shell")
+	older.SetAgentSessionID("agent-1", "codex")
+	older.SetAgentSessionID("", "")
+	older.UpdatedAt = time.Now().Add(-time.Minute)
+	newer := e.sessions.NewSession("user1", "new shell")
+	newer.SetAgentSessionID("agent-1", "codex")
+	newer.SetAgentSessionID("", "")
+	newer.UpdatedAt = time.Now()
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	var listData struct {
+		Sessions []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Data, &listData); err != nil {
+		t.Fatalf("unmarshal sessions list: %v", err)
+	}
+	if len(listData.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(listData.Sessions))
+	}
+	if listData.Sessions[0].ID != newer.ID {
+		t.Fatalf("visible session = %q, want newer %q", listData.Sessions[0].ID, newer.ID)
+	}
+	if listData.Sessions[0].Name != "native past title" {
+		t.Fatalf("visible session name = %q, want native past title", listData.Sessions[0].Name)
+	}
+	if older.ID == newer.ID {
+		t.Fatal("test setup failed: older and newer IDs match")
 	}
 }
 

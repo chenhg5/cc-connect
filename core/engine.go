@@ -2050,6 +2050,20 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
+	if msg.TargetSessionID != "" {
+		targetSession, err := sessions.ResolveSessionForRouting(msg.SessionKey, msg.TargetSessionID)
+		if err != nil {
+			slog.Warn("target session routing failed",
+				"platform", msg.Platform,
+				"session_key", msg.SessionKey,
+				"target_session_id", msg.TargetSessionID,
+				"error", err,
+			)
+			e.reply(p, msg.ReplyCtx, err.Error())
+			return
+		}
+		session = targetSession
+	}
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
@@ -3087,7 +3101,6 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 	return sb.String()
 }
 
-
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
 // for the reader goroutine to exit. The reader is structured so its iterations
 // are short (blocking adapter calls like RespondPermission are offloaded), so
@@ -3430,8 +3443,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry // track tool calls for card content
-	var cardThinkingText string       // latest thinking text
+	var cardToolCalls []cardToolEntry  // track tool calls for card content
+	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
@@ -6430,21 +6443,50 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		_, sessions, _, err := e.commandContext(p, msg)
+		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
 		s := sessions.GetOrCreateActive(msg.SessionKey)
 		agentID := s.GetAgentSessionID()
+		displayName := e.currentSessionDisplayName(agent, sessions, s)
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
 		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History)))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History)))
 		return
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
+}
+
+func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, s *Session) string {
+	agentID := s.GetAgentSessionID()
+	if agentID != "" {
+		if name := sessions.GetSessionName(agentID); name != "" {
+			return name
+		}
+		if agent != nil {
+			agentSessions, err := agent.ListSessions(e.ctx)
+			if err == nil {
+				for _, info := range e.applySessionFilter(agentSessions, sessions) {
+					if info.ID == agentID {
+						if summary := compactSessionDisplayName(info.Summary); summary != "" {
+							return summary
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	return s.GetName()
+}
+
+func compactSessionDisplayName(name string) string {
+	name = strings.ReplaceAll(name, "\n", " ")
+	return strings.Join(strings.Fields(name), " ")
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
@@ -10440,13 +10482,14 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	_, sessions := e.sessionContextForKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
+	displayName := e.currentSessionDisplayName(agent, sessions, s)
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
-	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
+	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), displayName, agentID, len(s.History))
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
 		Markdown(content).
