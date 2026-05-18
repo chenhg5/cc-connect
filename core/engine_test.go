@@ -10072,6 +10072,43 @@ func TestWorkspace_Init_LocalDirAbsolute(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Init_LocalDirUsesBindWording(t *testing.T) {
+	// Regression: /workspace init <local-dir> previously replied with the
+	// "Repository cloned successfully" message even though no clone occurred.
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init " + wsDir,
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatalf("expected a reply, got none")
+	}
+	for _, m := range sent {
+		if strings.Contains(strings.ToLower(m), "clone") {
+			t.Fatalf("reply should not mention clone for local-dir init, got: %v", sent)
+		}
+	}
+	if !strings.Contains(sent[0], "bound") {
+		t.Fatalf("expected reply to mention 'bound', got: %v", sent)
+	}
+}
+
 func TestWorkspace_Init_LocalDirRelative(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
