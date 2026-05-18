@@ -69,9 +69,22 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if mode != "" && mode != "default" {
 		innerArgs = append(innerArgs, "--permission-mode", mode)
 	}
-	switch sessionID {
-	case "", core.ContinueSession:
+	switch {
+	case sessionID == "":
 		// Truly fresh session — no resume, no continue.
+	case sessionID == core.ContinueSession:
+		// --continue grabs the most recent session in the workspace, which
+		// may belong to an active CLI terminal. Fork it so the platform
+		// conversation gets its own independent context branch.
+		args = append(args, "--continue", "--fork-session")
+	case strings.HasPrefix(sessionID, core.ResumeForkPrefix):
+		// User explicitly picked a prior workspace session via /resume.
+		// Strip the fork prefix and pass --resume <uuid> --fork-session so
+		// the source session (which may still be live in a terminal or
+		// another Slack conversation) is not mutated — we branch off its
+		// context into our own independent timeline.
+		realID := strings.TrimPrefix(sessionID, core.ResumeForkPrefix)
+		args = append(args, "--resume", realID, "--fork-session")
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
