@@ -8774,13 +8774,19 @@ func TestResolveLocalDirPath_RejectsTraversal(t *testing.T) {
 func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	base := t.TempDir()
 	sub := filepath.Join(base, "project")
-	os.MkdirAll(sub, 0755)
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", sub, err)
+	}
 	got, err := resolveLocalDirPath("project", base)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != sub {
-		t.Fatalf("expected %q, got %q", sub, got)
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
