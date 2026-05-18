@@ -332,3 +332,11 @@ func TestPrintUsage_ListsCronExecCommand(t *testing.T) {
 		t.Fatalf("printUsage() output missing cron exec command:\n%s", out)
 	}
 }
+
+func TestCanonicalCronSubcommand_ManualTriggerAliases(t *testing.T) {
+	for _, sub := range []string{"exec", "run", "trigger"} {
+		if got := canonicalCronSubcommand(sub); got != "exec" {
+			t.Fatalf("canonicalCronSubcommand(%q) = %q, want exec", sub, got)
+		}
+	}
+}

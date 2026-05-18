@@ -11473,6 +11473,15 @@ func (e *Engine) cmdCronExec(p Platform, msg *Message, args []string) {
 		return
 	}
 	id := args[0]
+	job := e.cronScheduler.store.Get(id)
+	if job == nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
+		return
+	}
+	if job.IsShellJob() && !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/cron exec"))
+		return
+	}
 	if err := e.cronScheduler.RunJobNow(id); err != nil {
 		switch {
 		case errors.Is(err, ErrCronJobNotFound):
