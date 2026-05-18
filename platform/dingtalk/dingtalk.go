@@ -706,11 +706,9 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	msgParamBytes, _ := json.Marshal(map[string]string{"photoURL": mediaID})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleImageMsg",
-		"msgParam":  string(msgParamBytes),
+	apiURL, requestBody, err := p.mediaSendTarget(rc, "sampleImageMsg", string(msgParamBytes))
+	if err != nil {
+		return fmt.Errorf("dingtalk: send image: %w", err)
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -718,9 +716,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return fmt.Errorf("dingtalk: marshal image message: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
-		bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create image request: %w", err)
 	}
@@ -799,11 +795,9 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		"fileName": name,
 		"fileType": ext,
 	})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleFile",
-		"msgParam":  string(msgParamBytes),
+	apiURL, requestBody, err := p.mediaSendTarget(rc, "sampleFile", string(msgParamBytes))
+	if err != nil {
+		return fmt.Errorf("dingtalk: send file: %w", err)
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -811,9 +805,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		return fmt.Errorf("dingtalk: marshal file message: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
-		bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create file request: %w", err)
 	}
@@ -919,14 +911,12 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("dingtalk: get access token: %w", err)
 	}
 
-	// Build oToMessages API request with sampleAudio msgKey
-	// msgParam must be a JSON string, not an object
+	// Build the API request with sampleAudio msgKey, routing on rc.isGroup.
+	// msgParam must be a JSON string, not an object.
 	msgParamJSON := fmt.Sprintf(`{"mediaId":"%s","duration":"%d"}`, mediaID, durationMs)
-	requestBody := map[string]interface{}{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleAudio",
-		"msgParam":  msgParamJSON,
+	apiURL, requestBody, err := p.mediaSendTarget(rc, "sampleAudio", msgParamJSON)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send audio: %w", err)
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -934,11 +924,9 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("dingtalk: marshal audio message: %w", err)
 	}
 
-	slog.Debug("dingtalk: sending voice via oToMessages API", "media_id", mediaID, "duration", durationMs, "user_id", rc.senderStaffId)
+	slog.Debug("dingtalk: sending voice", "media_id", mediaID, "duration", durationMs, "api_url", apiURL, "is_group", rc.isGroup)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
-		bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create audio request: %w", err)
 	}
@@ -1152,6 +1140,34 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		isGroup:        convType == "g",
 		proactive:      true,
 	}, nil
+}
+
+// mediaSendTarget returns the DingTalk API URL and request body for sending
+// a media message (image / file / audio), mirroring the routing in
+// sendProactiveMessage: group sessions go through
+// /v1.0/robot/groupMessages/send with openConversationId, 1:1 sessions go
+// through /v1.0/robot/oToMessages/batchSend with userIds. msgParam must
+// already be a JSON-encoded string per DingTalk's API contract.
+func (p *Platform) mediaSendTarget(rc replyContext, msgKey, msgParam string) (string, map[string]any, error) {
+	if rc.isGroup && rc.conversationId != "" {
+		return "https://api.dingtalk.com/v1.0/robot/groupMessages/send",
+			map[string]any{
+				"robotCode":          p.robotCode,
+				"openConversationId": rc.conversationId,
+				"msgKey":             msgKey,
+				"msgParam":           msgParam,
+			}, nil
+	}
+	if rc.senderStaffId == "" {
+		return "", nil, fmt.Errorf("dingtalk: media send requires conversationId (group) or senderStaffId (direct)")
+	}
+	return "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+		map[string]any{
+			"robotCode": p.robotCode,
+			"userIds":   []string{rc.senderStaffId},
+			"msgKey":    msgKey,
+			"msgParam":  msgParam,
+		}, nil
 }
 
 // sendProactiveMessage sends a message using the DingTalk group/direct message API
