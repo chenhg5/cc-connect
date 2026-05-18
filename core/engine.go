@@ -5981,13 +5981,19 @@ func updaterFor(p Platform) MessageUpdater {
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
 	shellCmd := raw
+	lower := strings.ToLower(strings.TrimSpace(raw))
 	for _, prefix := range []string{"/shell ", "/sh ", "/exec ", "/run "} {
-		if strings.HasPrefix(strings.ToLower(raw), prefix) {
+		if strings.HasPrefix(lower, prefix) {
 			shellCmd = raw[len(prefix):]
 			break
 		}
 	}
 	shellCmd = strings.TrimSpace(shellCmd)
+
+	// Handle bare command with no arguments (e.g. "/shell" without trailing space).
+	if lower == "/shell" || lower == "/sh" || lower == "/exec" || lower == "/run" {
+		shellCmd = ""
+	}
 
 	if shellCmd == "" {
 		e.reply(p, msg.ReplyCtx, "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install")
