@@ -3822,6 +3822,47 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 	}
 }
 
+func TestCmdReasoning_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{reasoningEffort: "low"}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-reasoning"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{reasoningEffort: "low"}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session", "test")
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("workspace-session", "test")
+
+	e.cmdReasoning(p, msg, []string{"high"})
+
+	if wsAgent.reasoningEffort != "high" {
+		t.Fatalf("workspace agent reasoning = %q, want high", wsAgent.reasoningEffort)
+	}
+	if globalAgent.reasoningEffort != "low" {
+		t.Fatalf("global agent reasoning = %q, want unchanged", globalAgent.reasoningEffort)
+	}
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+}
+
 func TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	globalAgent := &stubModelModeAgent{model: "gpt-4.1-mini"}

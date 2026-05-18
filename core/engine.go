@@ -7664,7 +7664,13 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
 		return
@@ -7734,12 +7740,12 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.cleanupInteractiveState(interactiveKey)
 
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s := sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
-	e.sessions.Save()
+	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
