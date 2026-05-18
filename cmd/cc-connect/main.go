@@ -689,6 +689,25 @@ func main() {
 			})
 		}
 
+		// Initialize OSS service for image upload
+		if cfg.OSS.Enabled {
+			ossSvc, err := core.NewOSSService(core.OSSConfig{
+				Enabled:           cfg.OSS.Enabled,
+				Endpoint:          cfg.OSS.Endpoint,
+				AccessKeyID:       cfg.OSS.AccessKeyID,
+				AccessKeySecret:   cfg.OSS.AccessKeySecret,
+				Bucket:            cfg.OSS.Bucket,
+				URLPrefix:         cfg.OSS.URLPrefix,
+				DeleteAfterUpload: cfg.OSS.DeleteAfterUpload,
+			})
+			if err != nil {
+				slog.Warn("oss: failed to initialize", "error", err)
+			} else if ossSvc != nil {
+				engine.SetOSSService(ossSvc)
+				slog.Info("oss: enabled", "bucket", cfg.OSS.Bucket, "delete_after_upload", cfg.OSS.DeleteAfterUpload)
+			}
+		}
+
 		// Set up save callbacks for provider management
 		projName := proj.Name
 		engine.SetProviderSaveFunc(func(providerName string) error {

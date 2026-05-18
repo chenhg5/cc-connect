@@ -298,6 +298,22 @@ type AgentSession interface {
 	Close() error
 }
 
+// MessageContextSetter is an optional interface for running agent sessions that
+// need per-message metadata (e.g., the platform message ID) for routing decisions
+// before the agent processes the message.
+type MessageContextSetter interface {
+	SetMessageContext(messageID string)
+}
+
+// SessionKeyContextSetter is an optional interface for running agent sessions that
+// need the session key (e.g., "feishu:{chatID}:{userID}") injected before each
+// Send() call. This ensures routing decisions (such as image generation forwarding)
+// always have access to the session identity, even when the session was created
+// without CC_SESSION_KEY in its environment.
+type SessionKeyContextSetter interface {
+	SetSessionKeyContext(sessionKey string)
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

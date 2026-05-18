@@ -66,9 +66,10 @@ func AllowList(allowFrom, userID string) bool {
 
 // ImageAttachment represents an image sent by the user.
 type ImageAttachment struct {
-	MimeType string // e.g. "image/png", "image/jpeg"
-	Data     []byte // raw image bytes
-	FileName string // original filename (optional)
+	MimeType  string // e.g. "image/png", "image/jpeg"
+	Data      []byte // raw image bytes
+	FileName  string // original filename (optional)
+	LocalPath string // local file path, used for cleanup after OSS upload
 }
 
 // FileAttachment represents a file (PDF, doc, spreadsheet, etc.) sent by the user.
@@ -204,6 +205,7 @@ type Event struct {
 	OutputTokens int
 	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
+	Images       []ImageAttachment // generated images to be sent to the user
 }
 
 // HistoryEntry is one turn in a conversation.

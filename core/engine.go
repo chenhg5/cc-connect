@@ -173,6 +173,7 @@ type Engine struct {
 	i18n                  *I18n
 	speech                SpeechCfg
 	tts                   *TTSCfg
+	oss                   *OSSService
 	display               DisplayCfg
 	injectSender          bool
 	attachmentSendEnabled bool
@@ -534,6 +535,11 @@ func (e *Engine) SetTTSConfig(cfg *TTSCfg) {
 // SetTTSSaveFunc registers a callback that persists TTS mode changes.
 func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 	e.ttsSaveFunc = fn
+}
+
+// SetOSSService configures the OSS upload service.
+func (e *Engine) SetOSSService(svc *OSSService) {
+	e.oss = svc
 }
 
 // SetDisplayConfig overrides the default truncation settings.
@@ -2622,6 +2628,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
 	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
+	if mcs, ok := state.agentSession.(MessageContextSetter); ok {
+		mcs.SetMessageContext(msg.MessageID)
+	}
+	if sks, ok := state.agentSession.(SessionKeyContextSetter); ok {
+		sks.SetSessionKeyContext(msg.SessionKey)
+	}
 	sendDone := make(chan error, 1)
 	go func() {
 		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
@@ -4201,6 +4213,46 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+
+			// Send generated images (e.g. from Codex image generation) if the platform supports it.
+			if !isSilent && len(event.Images) > 0 {
+				if imgSender, ok := p.(ImageSender); ok {
+					for _, img := range event.Images {
+						if err := e.waitOutgoing(p); err != nil {
+							slog.Warn("failed to wait before sending generated image", "error", err)
+							break
+						}
+						if err := imgSender.SendImage(e.ctx, replyCtx, img); err != nil {
+							slog.Warn("failed to send generated image", "platform", p.Name(), "file", img.FileName, "error", err)
+						}
+					}
+				} else {
+					slog.Debug("platform does not support ImageSender, skipping generated images", "platform", p.Name(), "count", len(event.Images))
+				}
+
+				// Async OSS upload and local cleanup (non-blocking)
+				if e.oss != nil {
+					go func(images []ImageAttachment) {
+						for _, img := range images {
+							if img.LocalPath == "" {
+								continue
+							}
+							ossURL, err := e.oss.Upload(e.ctx, img)
+							if err != nil {
+								slog.Warn("OSS upload failed, keeping local file", "file", img.FileName, "error", err)
+								continue
+							}
+							slog.Info("image uploaded to OSS", "file", img.FileName, "url", ossURL)
+
+							if e.oss.Config.DeleteAfterUpload {
+								if err := e.oss.CleanupLocal(img.LocalPath); err != nil {
+									slog.Warn("failed to cleanup local image", "file", img.FileName, "error", err)
+								}
+							}
+						}
+					}(event.Images)
+				}
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)

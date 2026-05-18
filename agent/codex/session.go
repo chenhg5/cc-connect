@@ -44,6 +44,7 @@ type codexSession struct {
 	cmds      map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
+	sentImages  map[string]struct{} // tracks already-sent generated image paths
 
 	runtimeCfgMu       sync.Mutex
 	runtimeCfgModel    string
@@ -54,6 +55,16 @@ type codexSession struct {
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
 	sessionFile  string
+
+	// messageID holds the platform message ID for the current turn, set via
+	// SetMessageContext before Send is called. Used for image forward routing.
+	messageID string
+
+	// chatID and senderID are parsed from the session key (CC_SESSION_KEY format)
+	// and injected via SetSessionKeyContext before each Send(). This ensures
+	// image forward routing works even when CC_SESSION_KEY is missing from extraEnv.
+	chatID   string
+	senderID string
 }
 
 var codexSessionCloseTimeout = 8 * time.Second
@@ -80,6 +91,7 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 		ctx:           sessionCtx,
 		cancel:        cancel,
 		cmds:          make(map[*exec.Cmd]struct{}),
+		sentImages:    make(map[string]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -88,6 +100,20 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 	}
 
 	return cs, nil
+}
+
+// SetMessageContext implements core.MessageContextSetter. It stores the platform
+// message ID so that the image forward interceptor can include it in the payload.
+func (cs *codexSession) SetMessageContext(messageID string) {
+	cs.messageID = messageID
+}
+
+// SetSessionKeyContext implements core.SessionKeyContextSetter. It parses the
+// session key to extract chatID/senderID for image forward routing.
+func (cs *codexSession) SetSessionKeyContext(sessionKey string) {
+	if strings.HasPrefix(sessionKey, "feishu:") || strings.HasPrefix(sessionKey, "lark:") {
+		cs.chatID, cs.senderID = parseSessionKey(sessionKey)
+	}
 }
 
 // Send launches a codex subprocess.
@@ -105,6 +131,18 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	prompt, imagePaths, err := cs.stageImages(prompt, images)
 	if err != nil {
 		return err
+	}
+
+	// Intercept: check if this message should be forwarded to generate-image service.
+	if tryForwardImageRequest(prompt, len(imagePaths) > 0, imagePaths, cs.extraEnv, cs.messageID, cs.chatID, cs.senderID) {
+		// Message was forwarded successfully; emit a synthetic result so the
+		// engine event loop completes this turn normally.
+		evt := core.Event{Type: core.EventResult, Done: true}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+		}
+		return nil
 	}
 
 	isResume := cs.CurrentSessionID() != ""
@@ -169,7 +207,7 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 	}
 
 	if strings.TrimSpace(prompt) == "" {
-		prompt = "Please analyze the attached image(s)."
+		prompt = "参考这张图片的风格和内容，生成一张全新的创意变体图片，保存图片到本地后告诉我图片路径。"
 	}
 
 	return prompt, imagePaths, nil
@@ -342,6 +380,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.refreshContextUsageFromRollout()
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
+		evt.Images = cs.scanGeneratedImages()
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -942,4 +981,71 @@ func truncate(s string, maxRunes int) string {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
+}
+
+// scanGeneratedImages checks ~/.codex/generated_images/<thread_id>/ for new image files
+// and returns them as ImageAttachments. Already-sent images are skipped.
+func (cs *codexSession) scanGeneratedImages() []core.ImageAttachment {
+	tid, _ := cs.threadID.Load().(string)
+	if tid == "" {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	imgDir := filepath.Join(home, ".codex", "generated_images", tid)
+	entries, err := os.ReadDir(imgDir)
+	if err != nil {
+		return nil
+	}
+
+	var images []core.ImageAttachment
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		fullPath := filepath.Join(imgDir, name)
+		if _, sent := cs.sentImages[fullPath]; sent {
+			continue
+		}
+		mime := imageFileMime(name)
+		if mime == "" {
+			continue
+		}
+		data, err := os.ReadFile(fullPath)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		cs.sentImages[fullPath] = struct{}{}
+		images = append(images, core.ImageAttachment{
+			MimeType:  mime,
+			Data:      data,
+			FileName:  name,
+			LocalPath: fullPath,
+		})
+		slog.Debug("codexSession: found generated image", "path", fullPath, "size", len(data))
+	}
+	return images
+}
+
+// imageFileMime returns the MIME type for known image extensions, or empty string.
+func imageFileMime(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	default:
+		return ""
+	}
 }
