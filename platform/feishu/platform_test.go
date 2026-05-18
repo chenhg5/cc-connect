@@ -745,6 +745,100 @@ func TestChannelKeyForBinding(t *testing.T) {
 	}
 }
 
+// TestChannelKeyForCronSession verifies the CronChannelKeyResolver
+// implementation. ExecuteCronJob calls this to discover thread-scoped
+// workspace bindings; without it the engine would fall back to extractChannelID
+// which strips the "root:rootID" suffix and misses any thread-scoped binding.
+func TestChannelKeyForCronSession(t *testing.T) {
+	tests := []struct {
+		name            string
+		platformName    string
+		threadIsolation bool
+		sessionKey      string
+		want            string
+	}{
+		{
+			name:            "thread isolation on, thread session_key",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "feishu:oc_chat:root:om_root",
+			want:            "oc_chat:om_root",
+		},
+		{
+			name:            "thread isolation on, DM-style session_key (no thread)",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "feishu:oc_chat:ou_user",
+			want:            "oc_chat",
+		},
+		{
+			name:            "thread isolation off, group session_key",
+			platformName:    "feishu",
+			threadIsolation: false,
+			sessionKey:      "feishu:oc_chat:ou_user",
+			want:            "oc_chat",
+		},
+		{
+			name:            "thread isolation off, ignores root-shaped session_key",
+			platformName:    "feishu",
+			threadIsolation: false,
+			sessionKey:      "feishu:oc_chat:root:om_root",
+			want:            "oc_chat",
+		},
+		{
+			name:            "shared_session_in_channel format (2 parts)",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "feishu:oc_chat",
+			want:            "oc_chat",
+		},
+		{
+			name:            "lark prefix matches platformName=lark",
+			platformName:    "lark",
+			threadIsolation: true,
+			sessionKey:      "lark:oc_chat:root:om_root",
+			want:            "oc_chat:om_root",
+		},
+		{
+			name:            "foreign prefix returns empty (lets engine fall back)",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "slack:C123:U456",
+			want:            "",
+		},
+		{
+			name:            "malformed: only platform segment",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "feishu",
+			want:            "",
+		},
+		{
+			name:            "malformed: empty chatID",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "feishu::ou_user",
+			want:            "",
+		},
+		{
+			name:            "empty session_key",
+			platformName:    "feishu",
+			threadIsolation: true,
+			sessionKey:      "",
+			want:            "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{platformName: tt.platformName, threadIsolation: tt.threadIsolation}
+			got := p.ChannelKeyForCronSession(tt.sessionKey)
+			if got != tt.want {
+				t.Errorf("ChannelKeyForCronSession(%q) = %q, want %q", tt.sessionKey, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,

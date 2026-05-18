@@ -612,10 +612,13 @@ const (
 	MsgWsResolutionError        MsgKey = "ws_resolution_error"
 	MsgWsCloneProgress          MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess           MsgKey = "ws_clone_success"
+	MsgWsBindLocalSuccess       MsgKey = "ws_bind_local_success"
+	MsgWsBindExistingSuccess    MsgKey = "ws_bind_existing_success"
 	MsgWsCloneFailed            MsgKey = "ws_clone_failed"
 	MsgWsInitDirNotFound        MsgKey = "ws_init_dir_not_found"
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
+	MsgWsTopicFlagInvalid       MsgKey = "ws_topic_flag_invalid"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
 )
 
@@ -3757,18 +3760,18 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/workspace [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list | shared ...]`",
 	},
 	MsgWsInitUsage: {
-		LangEnglish:            "Usage: `/workspace init <git-url or directory-path>`",
-		LangChinese:            "用法: `/workspace init <git仓库地址或目录路径>`",
-		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址或目錄路徑>`",
-		LangJapanese:           "使い方: `/workspace init <git-urlまたはディレクトリパス>`",
-		LangSpanish:            "Uso: `/workspace init <git-url o ruta-de-directorio>`",
+		LangEnglish:            "Usage: `/workspace init [-t|--topic] <git-url or directory-path>` — defaults to chat scope; -t binds only the current topic.",
+		LangChinese:            "用法: `/workspace init [-t|--topic] <git仓库地址或目录路径>` — 默认绑定整个群,-t 仅绑定当前话题。",
+		LangTraditionalChinese: "用法: `/workspace init [-t|--topic] <git倉庫地址或目錄路徑>` — 預設綁定整個群,-t 僅綁定當前話題。",
+		LangJapanese:           "使い方: `/workspace init [-t|--topic] <git-urlまたはディレクトリパス>` — 既定でチャット全体、-t を付けると現在のトピックのみ。",
+		LangSpanish:            "Uso: `/workspace init [-t|--topic] <git-url o ruta-de-directorio>` — por defecto vincula todo el chat; -t vincula solo el tema actual.",
 	},
 	MsgWsBindUsage: {
-		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
-		LangChinese:            "用法: `/workspace bind <工作区名称>`",
-		LangTraditionalChinese: "用法: `/workspace bind <工作區名稱>`",
-		LangJapanese:           "使い方: `/workspace bind <ワークスペース名>`",
-		LangSpanish:            "Uso: `/workspace bind <nombre-workspace>`",
+		LangEnglish:            "Usage: `/workspace bind [-t|--topic] <workspace-name>` — defaults to chat scope; -t binds only the current topic.",
+		LangChinese:            "用法: `/workspace bind [-t|--topic] <工作区名称>` — 默认绑定整个群,-t 仅绑定当前话题。",
+		LangTraditionalChinese: "用法: `/workspace bind [-t|--topic] <工作區名稱>` — 預設綁定整個群,-t 僅綁定當前話題。",
+		LangJapanese:           "使い方: `/workspace bind [-t|--topic] <ワークスペース名>` — 既定でチャット全体、-t を付けると現在のトピックのみ。",
+		LangSpanish:            "Uso: `/workspace bind [-t|--topic] <nombre-workspace>` — por defecto vincula todo el chat; -t vincula solo el tema actual.",
 	},
 	MsgWsBindSuccess: {
 		LangEnglish:            "✅ Workspace bound: `%s`",
@@ -3785,11 +3788,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Workspace no encontrado: `%s`",
 	},
 	MsgWsRouteUsage: {
-		LangEnglish:            "Usage: `/workspace route <absolute-path>`",
-		LangChinese:            "用法: `/workspace route <绝对路径>`",
-		LangTraditionalChinese: "用法: `/workspace route <絕對路徑>`",
-		LangJapanese:           "使い方: `/workspace route <絶対パス>`",
-		LangSpanish:            "Uso: `/workspace route <ruta-absoluta>`",
+		LangEnglish:            "Usage: `/workspace route [-t|--topic] <absolute-path>` — defaults to chat scope; -t binds only the current topic.",
+		LangChinese:            "用法: `/workspace route [-t|--topic] <绝对路径>` — 默认绑定整个群,-t 仅绑定当前话题。",
+		LangTraditionalChinese: "用法: `/workspace route [-t|--topic] <絕對路徑>` — 預設綁定整個群,-t 僅綁定當前話題。",
+		LangJapanese:           "使い方: `/workspace route [-t|--topic] <絶対パス>` — 既定でチャット全体、-t を付けると現在のトピックのみ。",
+		LangSpanish:            "Uso: `/workspace route [-t|--topic] <ruta-absoluta>` — por defecto vincula todo el chat; -t vincula solo el tema actual.",
 	},
 	MsgWsRouteSuccess: {
 		LangEnglish:            "✅ Workspace routed: `%s`",
@@ -3848,11 +3851,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay workspace compartido vinculado a este canal.",
 	},
 	MsgWsSharedUsage: {
-		LangEnglish:            "Usage: `/workspace shared [bind <name> | route <absolute-path> | init <url> | unbind | list]`",
-		LangChinese:            "用法: `/workspace shared [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list]`",
-		LangTraditionalChinese: "用法: `/workspace shared [bind <名稱> | route <絕對路徑> | init <倉庫地址> | unbind | list]`",
-		LangJapanese:           "使い方: `/workspace shared [bind <名前> | route <絶対パス> | init <url> | unbind | list]`",
-		LangSpanish:            "Uso: `/workspace shared [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list]`",
+		LangEnglish:            "Usage: `/workspace shared [bind <name> | route <absolute-path> | init <url> | unbind | list]` — chat-scope only.",
+		LangChinese:            "用法: `/workspace shared [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list]` — 仅支持群级绑定。",
+		LangTraditionalChinese: "用法: `/workspace shared [bind <名稱> | route <絕對路徑> | init <倉庫地址> | unbind | list]` — 僅支援群級綁定。",
+		LangJapanese:           "使い方: `/workspace shared [bind <名前> | route <絶対パス> | init <url> | unbind | list]` — チャット全体のみ。",
+		LangSpanish:            "Uso: `/workspace shared [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list]` — solo a nivel de chat.",
 	},
 	MsgWsSharedBindSuccess: {
 		LangEnglish:            "✅ Shared workspace bound: `%s`",
@@ -3931,6 +3934,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ リポジトリのクローンに成功しました: `%s`",
 		LangSpanish:            "✅ Repositorio clonado exitosamente: `%s`",
 	},
+	MsgWsBindLocalSuccess: {
+		LangEnglish:            "✅ Local directory bound: `%s`",
+		LangChinese:            "✅ 已绑定本地目录: `%s`",
+		LangTraditionalChinese: "✅ 已綁定本地目錄: `%s`",
+		LangJapanese:           "✅ ローカルディレクトリをバインドしました: `%s`",
+		LangSpanish:            "✅ Directorio local vinculado: `%s`",
+	},
+	MsgWsBindExistingSuccess: {
+		LangEnglish:            "✅ Directory already exists, bound: `%s`",
+		LangChinese:            "✅ 目录已存在，已绑定: `%s`",
+		LangTraditionalChinese: "✅ 目錄已存在，已綁定: `%s`",
+		LangJapanese:           "✅ ディレクトリは既に存在します。バインドしました: `%s`",
+		LangSpanish:            "✅ El directorio ya existe, vinculado: `%s`",
+	},
 	MsgWsCloneFailed: {
 		LangEnglish:            "❌ Failed to clone repository: %v",
 		LangChinese:            "❌ 克隆仓库失败: %v",
@@ -3958,6 +3975,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "`/workspace init` 未啟用本機目錄目標。請使用 git 倉庫地址，或在此專案配置 `workspace_init_allow_local_paths = true`。",
 		LangJapanese:           "`/workspace init` ではローカルディレクトリ対象が無効です。git URL を使うか、このプロジェクトで `workspace_init_allow_local_paths = true` を有効にしてください。",
 		LangSpanish:            "Los destinos de directorio local están deshabilitados para `/workspace init`. Use una URL de git o habilite `workspace_init_allow_local_paths = true` para este proyecto.",
+	},
+	MsgWsTopicFlagInvalid: {
+		LangEnglish:            "`-t`/`--topic` is only valid inside a topic/thread; this channel has no topic scope.",
+		LangChinese:            "`-t`/`--topic` 只能在话题/线程内使用,当前频道没有话题维度。",
+		LangTraditionalChinese: "`-t`/`--topic` 只能在話題/執行緒內使用,當前頻道沒有話題維度。",
+		LangJapanese:           "`-t`/`--topic` はトピック/スレッド内でのみ有効です。このチャンネルにはトピック粒度がありません。",
+		LangSpanish:            "`-t`/`--topic` solo es válido dentro de un tema/hilo; este canal no tiene ese alcance.",
 	},
 }
 

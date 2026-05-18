@@ -1153,7 +1153,16 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	workspaceDir := ""
 
 	if e.multiWorkspace {
-		channelID := extractChannelID(sessionKey)
+		// Prefer the platform-supplied thread-aware channel key so cron jobs
+		// scheduled inside a topic can find a thread-scoped binding. Fall back
+		// to extractChannelID (chat-only) for platforms with no thread concept.
+		channelID := ""
+		if resolver, ok := targetPlatform.(CronChannelKeyResolver); ok {
+			channelID = resolver.ChannelKeyForCronSession(sessionKey)
+		}
+		if channelID == "" {
+			channelID = extractChannelID(sessionKey)
+		}
 		if channelID != "" {
 			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
 			if err == nil && workspace != "" {
@@ -4946,8 +4955,46 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
 	channelID := effectiveChannelID(msg)
-	channelKey := effectiveWorkspaceChannelKey(msg)
+	// threadKey is the most specific channel key (chat:thread for platforms in
+	// thread/topic mode). chatKey is always the chat-level key (thread stripped).
+	// Write operations default to chatKey so a single bind covers the whole
+	// group; the -t / --topic flag opts in to threadKey for per-topic overrides.
+	// Read operations (status, list) continue to use threadKey so the existing
+	// thread→chat hierarchical fallback in lookupEffectiveWorkspaceBinding
+	// still produces the correct effective binding for any message.
+	threadKey := effectiveWorkspaceChannelKey(msg)
+	chatKey := workspaceChannelKey(p.Name(), extractChannelID(msg.SessionKey))
 	projectKey := "project:" + e.name
+
+	// parseScopeFlag scans args for -t / --topic (any position), returns the
+	// flag value and the remaining positional args in order.
+	parseScopeFlag := func(in []string) (bool, []string) {
+		threadScope := false
+		rest := make([]string, 0, len(in))
+		for _, a := range in {
+			if a == "-t" || a == "--topic" {
+				threadScope = true
+				continue
+			}
+			rest = append(rest, a)
+		}
+		return threadScope, rest
+	}
+
+	// pickBindingKey returns the channel key to use for a write op based on
+	// the -t flag. Without -t: chat scope. With -t: thread scope, unless the
+	// current message has no thread context (DM / non-isolated group), in
+	// which case it sends an error reply and returns ok=false.
+	pickBindingKey := func(threadScope bool) (string, bool) {
+		if !threadScope {
+			return chatKey, true
+		}
+		if threadKey == "" || threadKey == chatKey {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsTopicFlagInvalid))
+			return "", false
+		}
+		return threadKey, true
+	}
 	resolveChannelName := func() func() string {
 		resolved := false
 		channelName := ""
@@ -4969,7 +5016,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInfo, b.Workspace, b.BoundAt.Format(time.RFC3339)))
 	}
-	routeWorkspace := func(bindingKey string, pathParts []string, usageKey, successKey MsgKey) bool {
+	routeWorkspace := func(bindingKey, channelKey string, pathParts []string, usageKey, successKey MsgKey) bool {
 		routePath := strings.TrimSpace(strings.Join(pathParts, " "))
 		if routePath == "" {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(usageKey))
@@ -4999,7 +5046,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, normalizedPath))
 		return true
 	}
-	bindWorkspace := func(bindingKey, wsName string, successKey MsgKey) bool {
+	bindWorkspace := func(bindingKey, channelKey, wsName string, successKey MsgKey) bool {
 		wsPath := filepath.Join(e.baseDir, wsName)
 
 		// Check if workspace directory exists
@@ -5012,7 +5059,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, wsName))
 		return true
 	}
-	initWorkspace := func(bindingKey, target string, successKey MsgKey) bool {
+	initWorkspace := func(bindingKey, channelKey, target string, localKey, existingKey, cloneKey MsgKey) bool {
 		// Support local directory paths (absolute or relative to baseDir).
 		if e.workspaceInitAllowLocalPaths && looksLikeLocalDir(target) {
 			dirPath, err := resolveLocalDirPath(target, e.baseDir)
@@ -5026,7 +5073,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				return false
 			}
 			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(dirPath))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(localKey, dirPath))
 			return true
 		}
 		if !e.workspaceInitAllowLocalPaths && looksLikeLocalDir(target) && !looksLikeGitURL(target) {
@@ -5044,7 +5091,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 		if _, err := os.Stat(cloneTo); err == nil {
 			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(cloneTo))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, cloneTo))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(existingKey, cloneTo))
 			return true
 		}
 
@@ -5056,7 +5103,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 
 		e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(cloneTo))
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, cloneTo))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(cloneKey, cloneTo))
 		return true
 	}
 	listBindings := func(bindingKey string, emptyKey, titleKey MsgKey) {
@@ -5084,7 +5131,9 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 	switch subCmd {
 	case "":
-		b, bindingKey, usable := e.lookupEffectiveWorkspaceBinding(channelKey)
+		// Status lookup uses the thread-aware key so the hierarchical fallback
+		// in lookupEffectiveWorkspaceBinding can ascend thread → chat.
+		b, bindingKey, usable := e.lookupEffectiveWorkspaceBinding(threadKey)
 		if !usable {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
 		} else {
@@ -5092,34 +5141,53 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 
 	case "bind":
-		if len(args) < 2 {
+		threadScope, rest := parseScopeFlag(args[1:])
+		if len(rest) < 1 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsBindUsage))
 			return
 		}
-		bindWorkspace(projectKey, args[1], MsgWsBindSuccess)
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		bindWorkspace(projectKey, key, rest[0], MsgWsBindSuccess)
 
 	case "route":
-		if len(args) < 2 {
+		threadScope, rest := parseScopeFlag(args[1:])
+		if len(rest) < 1 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsRouteUsage))
 			return
 		}
-		routeWorkspace(projectKey, args[1:], MsgWsRouteUsage, MsgWsRouteSuccess)
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		routeWorkspace(projectKey, key, rest, MsgWsRouteUsage, MsgWsRouteSuccess)
 
 	case "init":
-		if len(args) < 2 {
+		threadScope, rest := parseScopeFlag(args[1:])
+		if len(rest) < 1 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitUsage))
 			return
 		}
-		initWorkspace(projectKey, args[1], MsgWsCloneSuccess)
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		initWorkspace(projectKey, key, rest[0], MsgWsBindLocalSuccess, MsgWsBindExistingSuccess, MsgWsCloneSuccess)
 
 	case "shared":
+		// Shared bindings are a cross-project fallback layer. Topic-scope
+		// shared bindings are niche enough that we keep this subcommand
+		// chat-only — simpler API, simpler docs. Use the regular
+		// `/workspace bind -t` if you need per-topic granularity.
 		sharedSubCmd := ""
 		if len(args) > 1 {
 			sharedSubCmd = matchSubCommand(args[1], []string{"init", "bind", "route", "unbind", "list"})
 		}
 		switch sharedSubCmd {
 		case "":
-			b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey)
+			b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, chatKey)
 			if b == nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedNoBinding))
 			} else {
@@ -5131,28 +5199,28 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
 				return
 			}
-			bindWorkspace(sharedWorkspaceBindingsKey, args[2], MsgWsSharedBindSuccess)
+			bindWorkspace(sharedWorkspaceBindingsKey, chatKey, args[2], MsgWsSharedBindSuccess)
 			return
 		case "route":
 			if len(args) < 3 {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
 				return
 			}
-			routeWorkspace(sharedWorkspaceBindingsKey, args[2:], MsgWsSharedUsage, MsgWsSharedRouteSuccess)
+			routeWorkspace(sharedWorkspaceBindingsKey, chatKey, args[2:], MsgWsSharedUsage, MsgWsSharedRouteSuccess)
 			return
 		case "init":
 			if len(args) < 3 {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
 				return
 			}
-			initWorkspace(sharedWorkspaceBindingsKey, args[2], MsgWsSharedBindSuccess)
+			initWorkspace(sharedWorkspaceBindingsKey, chatKey, args[2], MsgWsSharedBindSuccess, MsgWsSharedBindSuccess, MsgWsSharedBindSuccess)
 			return
 		case "unbind":
-			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey) == nil {
+			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, chatKey) == nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedNoBinding))
 				return
 			}
-			e.workspaceBindings.Unbind(sharedWorkspaceBindingsKey, channelKey)
+			e.workspaceBindings.Unbind(sharedWorkspaceBindingsKey, chatKey)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUnbindSuccess))
 			return
 		case "list":
@@ -5164,15 +5232,20 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 
 	case "unbind":
-		if e.workspaceBindings.Lookup(projectKey, channelKey) == nil {
-			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey) != nil {
+		threadScope, _ := parseScopeFlag(args[1:])
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		if e.workspaceBindings.Lookup(projectKey, key) == nil {
+			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, key) != nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedOnlyHint))
 			} else {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
 			}
 			return
 		}
-		e.workspaceBindings.Unbind(projectKey, channelKey)
+		e.workspaceBindings.Unbind(projectKey, key)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsUnbindSuccess))
 
 	case "list":

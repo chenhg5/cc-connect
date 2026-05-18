@@ -3117,6 +3117,31 @@ func (p *Platform) channelKeyForBinding(chatID, sessionKey string) string {
 	return chatID
 }
 
+// ChannelKeyForCronSession satisfies core.CronChannelKeyResolver. It maps a
+// cron session_key back to the channel key used for workspace bindings,
+// preserving thread/topic information when thread_isolation is on. Without
+// this, the engine would fall back to extractChannelID which drops the
+// "root:rootID" suffix, making thread-scoped bindings invisible to cron.
+//
+// Session-key shapes handled:
+//   - "feishu:chatID:userID"        → "chatID"          (DM / non-thread)
+//   - "feishu:chatID:root:rootID"   → "chatID:rootID"   (thread, isolation on)
+//   - "feishu:chatID"               → "chatID"          (share_session_in_channel)
+//
+// Returns an empty string for non-feishu prefixes or malformed keys; the engine
+// then falls back to extractChannelID.
+func (p *Platform) ChannelKeyForCronSession(sessionKey string) string {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != p.platformName {
+		return ""
+	}
+	chatID := parts[1]
+	if chatID == "" {
+		return ""
+	}
+	return p.channelKeyForBinding(chatID, sessionKey)
+}
+
 // feishuPreviewHandle stores the message ID for an editable preview message.
 // Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
 // the header color without re-rendering the whole card.
