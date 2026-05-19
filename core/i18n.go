@@ -1172,6 +1172,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — List agent sessions\n" +
 			"/search <keyword> — Search sessions\n" +
 			"/switch <number> — Resume a session\n" +
+			"/fork [name] — Fork current session\n" +
+			"/rollback [N] — Undo last N turns\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
@@ -1181,6 +1183,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出会话列表\n" +
 			"/search <关键词> — 搜索会话\n" +
 			"/switch <序号> — 切换会话\n" +
+			"/fork [名称] — 从当前会话分叉\n" +
+			"/rollback [N] — 回撤最近 N 轮对话\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
@@ -1190,6 +1194,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出會話列表\n" +
 			"/search <關鍵詞> — 搜尋會話\n" +
 			"/switch <序號> — 切換會話\n" +
+			"/fork [名稱] — 從當前會話分叉\n" +
+			"/rollback [N] — 回撤最近 N 輪對話\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
@@ -1199,6 +1205,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — セッション一覧\n" +
 			"/search <キーワード> — セッション検索\n" +
 			"/switch <番号> — セッション切り替え\n" +
+			"/fork [名前] — 現在のセッションから分岐\n" +
+			"/rollback [N] — 直近Nターンの会話を撤回\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
@@ -1208,6 +1216,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — Listar sesiones\n" +
 			"/search <keyword> — Buscar sesiones\n" +
 			"/switch <número> — Reanudar sesión\n" +
+			"/fork [nombre] — Bifurcar sesión actual\n" +
+			"/rollback [N] — Revertir últimos N turnos\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
