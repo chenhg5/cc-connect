@@ -242,6 +242,19 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	// never sees EventError after EventResult from the same turn.
 	waitErr := cmd.Wait()
 
+	// Kimi writes "To resume this session: kimi -r <uuid>" to stderr (not stdout),
+	// so the scanner above never sees it. Extract it from the captured stderr
+	// buffer before emitting EventResult so the next turn can pass --resume.
+	for _, line := range strings.Split(stderrBuf.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "To resume this session:") {
+			if id := extractResumeSessionID(line); id != "" {
+				ks.sessionID.Store(id)
+				slog.Debug("kimiSession: session id from stderr", "session_id", id)
+			}
+			break
+		}
+	}
+
 	if scanErr != nil {
 		slog.Error("kimiSession: scanner error", "error", scanErr)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)}
@@ -448,10 +461,10 @@ func (ks *kimiSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(ks.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("kimiSession: close timed out, abandoning wg.Wait")
 	}
-	close(ks.events)
 	return nil
 }
 

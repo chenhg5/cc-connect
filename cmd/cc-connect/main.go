@@ -30,6 +30,29 @@ var (
 	buildTime = "unknown"
 )
 
+// defaultResetOnIdleMins is applied when a project does not set
+// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
+// rotates to a fresh session for the next message instead of resuming the
+// previous transcript via --continue. This avoids "context drift" where stale
+// chat history (failed commands, debugging noise, abandoned tangents) is
+// repeatedly re-ingested and starts to dominate the model's attention. The
+// previous session is preserved and remains accessible via /list and /switch.
+//
+// Set reset_on_idle_mins = 0 in config.toml to opt out and restore the
+// previous behavior of always continuing the prior session.
+const defaultResetOnIdleMins = 0
+
+// resolveResetOnIdle returns the configured reset-on-idle duration for a
+// project, applying defaultResetOnIdleMins when the field is unset. The second
+// return value indicates whether the default was applied, so the caller can
+// emit a one-time nudge log directing users to the docs.
+func resolveResetOnIdle(configured *int) (time.Duration, bool) {
+	if configured != nil {
+		return time.Duration(*configured) * time.Minute, false
+	}
+	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -254,20 +277,16 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
-		showCtx := true
-		if proj.ShowContextIndicator != nil {
-			showCtx = *proj.ShowContextIndicator
-		}
+		// Wire display settings including show_context_indicator and reply_footer
+		// Global [display] config can be overridden by project-level settings
+		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
-		showFooter := true
-		if proj.ReplyFooter != nil {
-			showFooter = *proj.ReplyFooter
-		}
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
+		engine.SetDataDir(cfg.DataDir)
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -282,6 +301,9 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.WorkspaceInitAllowLocalPaths != nil {
+				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
+			}
 			idleMins := cfg.WorkspaceIdleTimeoutMins
 			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
 				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
@@ -295,6 +317,9 @@ func main() {
 				} else {
 					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
 				}
+			}
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
 			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
@@ -379,8 +404,10 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			mode, tm, tool, tmlen, toollen, _, _ := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
+				Mode:             mode,
+				CardMode:         config.EffectiveCardMode(cfg, &proj),
 				ThinkingMessages: tm,
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
@@ -434,6 +461,14 @@ func main() {
 			engine.SetStreamPreviewCfg(spcfg)
 		}
 
+		// Wire instant reply
+		if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+			engine.SetInstantReply(core.InstantReplyCfg{
+				Enabled: true,
+				Content: cfg.InstantReply.Content,
+			})
+		}
+
 		// Wire rate limiting
 		{
 			maxMsg := 20
@@ -479,8 +514,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -510,8 +545,11 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
-		if proj.ResetOnIdleMins != nil {
-			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+		engine.SetResetOnIdle(resetIdle)
+		if defaulted {
+			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
 
 		// Wire sender injection
@@ -607,6 +645,16 @@ func main() {
 					ttsCfg.Provider = "minimax"
 				} else {
 					slog.Warn("tts: minimax provider enabled but api_key is empty")
+				}
+			case "mimo":
+				apiKey := cfg.TTS.Mimo.APIKey
+				baseURL := cfg.TTS.Mimo.BaseURL
+				model := cfg.TTS.Mimo.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewMimoTTS(apiKey, baseURL, model, nil)
+					ttsCfg.Provider = "mimo"
+				} else {
+					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
 				voice := cfg.TTS.Voice
@@ -794,7 +842,17 @@ func main() {
 		if path == "" {
 			path = "/bridge/ws"
 		}
-		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		// Check insecure flag for local development mode
+		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
+		if insecure {
+			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		} else {
+			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		}
+		if bridgeSrv == nil {
+			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
@@ -1396,14 +1454,20 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	mode, tm, tool, tmlen, toollen, showCtx, showFooter := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
+		Mode:             mode,
+		CardMode:         config.EffectiveCardMode(cfg, proj),
 		ThinkingMessages: tm,
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
 		ToolMessages:     tool,
 	})
 	result.DisplayUpdated = true
+
+	// Wire show_context_indicator and reply_footer from display config
+	engine.SetShowContextIndicator(showCtx)
+	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1419,22 +1483,22 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
-	if proj.ResetOnIdleMins != nil {
-		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
-	} else {
-		engine.SetResetOnIdle(0)
+	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+	engine.SetResetOnIdle(resetIdle)
+	if defaulted {
+		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
 
-	showCtx := true
-	if proj.ShowContextIndicator != nil {
-		showCtx = *proj.ShowContextIndicator
+	// Reload instant reply
+	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+		engine.SetInstantReply(core.InstantReplyCfg{
+			Enabled: true,
+			Content: cfg.InstantReply.Content,
+		})
+	} else {
+		engine.SetInstantReply(core.InstantReplyCfg{})
 	}
-	engine.SetShowContextIndicator(showCtx)
-	showFooter := true
-	if proj.ReplyFooter != nil {
-		showFooter = *proj.ReplyFooter
-	}
-	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

@@ -59,6 +59,8 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	if appServerURL == "" {
 		appServerURL = "ws://127.0.0.1:3845"
+	} else if strings.EqualFold(strings.TrimSpace(appServerURL), "stdio") {
+		appServerURL = ""
 	}
 
 	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
@@ -337,6 +339,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
+	workDir := a.workDir
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	var baseURL string
@@ -359,13 +362,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -436,11 +439,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
-	return codexSkillDirs(absDir, a.codexHome)
+	return codexSkillDirs(absDir, codexHome)
 }
 
 // ── ContextCompressor implementation ──────────────────────────

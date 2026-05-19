@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -727,4 +728,91 @@ func TestSendFile_InvalidContext(t *testing.T) {
 func TestInterfaceCompliance(t *testing.T) {
 	var _ core.ImageSender = (*Platform)(nil)
 	var _ core.FileSender = (*Platform)(nil)
+}
+
+// TestWriteWS_ConcurrentSendsSerialized verifies that writeWS serializes
+// concurrent callers as gorilla/websocket requires (one writer at a time).
+// Without the wsMu fix, parallel WriteJSON calls race on the underlying
+// Conn.writer field (caught by go test -race) and may interleave frames.
+func TestWriteWS_ConcurrentSendsSerialized(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	const n = 50
+	gotMsg := make(chan map[string]any, n*2)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			if err := json.Unmarshal(msg, &m); err != nil {
+				gotMsg <- map[string]any{"_parse_error": err.Error(), "_raw": string(msg)}
+				continue
+			}
+			gotMsg <- m
+		}
+	}))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+
+	p := &Platform{name: "weibo", ws: ws, seen: make(map[string]struct{})}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rctx := replyContext{fromUserID: fmt.Sprintf("u%d", i)}
+			if err := p.sendMessage(rctx, fmt.Sprintf("m%d", i)); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent sendMessage: %v", err)
+	}
+
+	seen := map[string]bool{}
+	deadline := time.After(3 * time.Second)
+	for len(seen) < n {
+		select {
+		case m := <-gotMsg:
+			if pe, ok := m["_parse_error"]; ok {
+				t.Fatalf("server got malformed JSON frame (concurrent write interleaved): %v raw=%q", pe, m["_raw"])
+			}
+			payload, ok := m["payload"].(map[string]any)
+			if !ok {
+				t.Fatalf("frame missing payload: %v", m)
+			}
+			to, _ := payload["toUserId"].(string)
+			if to == "" {
+				t.Fatalf("frame missing toUserId: %v", payload)
+			}
+			if seen[to] {
+				t.Fatalf("duplicate frame for %s", to)
+			}
+			seen[to] = true
+		case <-deadline:
+			t.Fatalf("only got %d of %d messages within 3s", len(seen), n)
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d unique frames, want %d", len(seen), n)
+	}
 }

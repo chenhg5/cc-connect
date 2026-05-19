@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.3.3-beta.2 (2026-05-09)
+
+Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.
+
+### New Features
+- **Slack Assistant API**: support Slack Assistant API (Agent toggle) with natural on/off switching (#844)
+- **DingTalk richText**: support richText message type for DingTalk platform (#828)
+- **DingTalk image handling**: add DingTalk image message support (#828)
+- **MAX webhook delivery mode**: add webhook delivery mode for MAX messenger platform with deployment docs (#818)
+- **Claude Code env vars**: support project-level environment variables via `env` config section (#812)
+- **display_mode enum**: add `display_mode` enum to replace boolean `quiet` config, with quiet/compact/normal/full options (#655)
+- **Core reset_on_idle_mins default**: default to 30 minutes to prevent context drift (#494)
+- **Claude Code custom system prompt**: add support for custom system prompt configuration via `system_prompt` option (#534)
+
+### Fixed
+- **Bridge security**: require token when Bridge is enabled to prevent unauthorized access (#408)
+- **Feishu recalled messages**: handle recalled messages gracefully (#841)
+- **Feishu media download failure**: notify user when media download fails instead of silent drop (#815)
+- **WeChat video messages**: send video files as proper video messages in WeChat (#813)
+- **WeChat incomplete delivery**: notify user on incomplete message delivery and enhance retry logging (#771)
+- **Telegram private topics**: preserve private topic session keys (#804)
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout (#766)
+- **Codex app_server config**: app_server backend should honor model/effort/provider config + add stdio sentinel (#837)
+- **Codex progress rendering**: render progress in rich Card 2.0 format (#838)
+- **Core ellipsis events**: suppress ellipsis-only events and handle context indicator in footer
+- **Core Markdown table**: render inline formatting inside GFM table cells (#675)
+- **Feishu user id resolution**: guard user id resolution against edge cases
+- **Feishu thread topics**: skip quote injection in thread-isolated topics (#767)
+- **Config display mode**: honor project display mode setting
+- **Daemon restart**: add --force flag to daemon restart command (#736)
+- **AskUserQuestion**: use question text as answers key for proper answer routing (#822)
+
 ## v1.3.3-beta.1 (2026-04-25)
 
 Beta release with new agents, new features, and broad platform fixes. No breaking changes.

@@ -769,3 +769,143 @@ func TestReplyMessagePreservesUserPayload(t *testing.T) {
 		t.Errorf("reply should not merge attachments, got %d", len(atts))
 	}
 }
+
+func TestNewWebhookPathDefaults(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", "/webhook"},
+		{"/webhook", "/webhook"},
+		{"webhook", "/webhook"},
+		{"/bot1", "/bot1"},
+		{"bot1/inbox", "/bot1/inbox"},
+	}
+	for _, c := range cases {
+		p, err := New(map[string]any{"token": "t", "webhook_path": c.in})
+		if err != nil {
+			t.Fatalf("New(%q): %v", c.in, err)
+		}
+		if got := p.(*Platform).webhookPath; got != c.want {
+			t.Errorf("webhook_path=%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestWebhookHandlerNoSecret(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"update_type":"unknown"}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretViaHeader(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"update_type":"unknown"}`))
+	req.Header.Set("X-Max-Bot-Api-Secret", "s3cret")
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretViaQuery(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook?s=s3cret", strings.NewReader(`{"update_type":"unknown"}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretMismatch(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook?s=wrong", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}
+
+func TestWebhookHandlerSecretMissing(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t", "webhook_secret": "s3cret"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}
+
+// TestWebhookCtx_FallsBackToBackgroundBeforeStart pins the contract that
+// webhookHandler can be exercised in unit tests before Start has run.
+func TestWebhookCtx_FallsBackToBackgroundBeforeStart(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t"})
+	pl := p.(*Platform)
+	ctx := pl.webhookCtx()
+	if ctx == nil {
+		t.Fatal("webhookCtx returned nil")
+	}
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("expected no deadline on Background fallback")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx.Err = %v, want nil", err)
+	}
+}
+
+// TestWebhookCtx_CanceledByStop pins the bug where the async webhook handler
+// goroutine derived a brand-new WithCancel from context.Background() and
+// discarded the cancel func, leaving in-flight handlers running after Stop().
+// With the fix, webhookCtx returns the same context that Stop()/p.cancel
+// cancels, so handlers short-circuit on shutdown.
+func TestWebhookCtx_CanceledByStop(t *testing.T) {
+	m := newMockAPI(t)
+	defer m.close()
+	p := newTestPlatform(t, m.server.URL)
+
+	if err := p.Start(func(_ core.Platform, _ *core.Message) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx := p.webhookCtx()
+	if ctx == nil {
+		t.Fatal("webhookCtx returned nil after Start")
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("webhookCtx already canceled before Stop")
+	default:
+	}
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+		// expected: Stop() must propagate to in-flight webhook handlers.
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhookCtx was not canceled after Stop")
+	}
+}
+
+func TestWebhookHandlerWrongMethod(t *testing.T) {
+	p, _ := New(map[string]any{"token": "t"})
+	pl := p.(*Platform)
+	req := httptest.NewRequest(http.MethodGet, "/webhook", nil)
+	rec := httptest.NewRecorder()
+	pl.webhookHandler(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("got %d, want 405", rec.Code)
+	}
+}

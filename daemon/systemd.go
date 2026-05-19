@@ -280,3 +280,29 @@ func parseKeyValue(text string) map[string]string {
 	}
 	return m
 }
+
+// CheckLinger returns true if linger is enabled for the user, false otherwise.
+// If linger is not enabled, user-level systemd services will stop when
+// the user's last login session ends (e.g., SSH disconnect).
+func CheckLinger() (enabled bool, user string) {
+	user = os.Getenv("USER")
+	if user == "" {
+		user = "unknown"
+	}
+
+	// Check if we're in system mode (root)
+	if os.Getuid() == 0 {
+		return true, user // Linger check not relevant for system mode
+	}
+
+	// Check linger status via loginctl
+	out, err := exec.Command("loginctl", "show-user", user, "-p", "Linger").Output()
+	if err != nil {
+		// loginctl not available or error - assume linger is disabled
+		slog.Debug("linger check failed", "error", err)
+		return false, user
+	}
+
+	linger := strings.TrimSpace(string(out))
+	return linger == "Linger=yes", user
+}

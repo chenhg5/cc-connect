@@ -529,9 +529,19 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
 
-To list or delete cron jobs:
+To list, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
+
+Use `cron edit` to modify a single field instead of delete-and-recreate.
+Common editable fields: cron_expr, prompt, exec, description, enabled (true/false), mute (true/false), timeout_mins (int).
+Run `cc-connect cron edit --help` for the full field list.
+
+Examples:
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"
 
 ## Send message to current chat
 To proactively send a message back to the user's chat session (use --stdin heredoc for long/multi-line messages):
@@ -712,6 +722,26 @@ cc-connect daemon install --work-dir ~/.cc-connect
 ```
 
 Optional flags: `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit). `--config` points to a config file, while `--work-dir` points to the directory containing `config.toml`.
+
+### Linux systemd: Keep service running after SSH disconnect
+
+When installed as a user-level systemd service (non-root), cc-connect runs under `user@UID.service`. By default, systemd stops this service when your last login session ends (e.g., SSH disconnect). This is controlled by the "linger" setting.
+
+To keep cc-connect running persistently, enable linger for your user:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+After enabling linger, `user@UID.service` remains active even when you log out. The daemon install command will warn you if linger is not enabled.
+
+Alternatively, you can install as a system-level service (requires root):
+
+```bash
+sudo cc-connect daemon install --config ~/.cc-connect/config.toml
+```
+
+System-level services are independent of login sessions.
 
 ### Control the service
 

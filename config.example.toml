@@ -87,10 +87,21 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# thinking_messages = true # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
-# thinking_max_len = 300   # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
-# tool_max_len = 500       # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
-# tool_messages = true     # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+#                           # full: show thinking + tool messages as separate messages
+#                           #       显示思考和工具消息，每条单独发送
+#                           # compact: hide thinking/tool, each text segment sent separately
+#                           #          隐藏思考和工具消息，每段文本独立发送
+#                           # quiet: hide thinking/tool, all text in one card, done emoji at end
+#                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+# thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
+# thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
+# tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
+# tool_messages = true      # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
+# show_context_indicator = true  # Show "[ctx: ~N%]" suffix on assistant replies (default: true)
+#                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+# reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
+#                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
@@ -114,10 +125,19 @@ level = "info" # debug, info, warn, error
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.
+# This avoids "context drift", where stale chat history (failed commands,
+# debugging noise, abandoned tangents) gets re-ingested via --continue every
+# time the workspace pool evicts the session, and starts to dominate the model's
+# attention. The previous session is preserved and remains accessible via
+# /list and /switch.
+#
+# Default: 30 minutes when unset. Set to 0 to opt out and always continue the
+# previous session (the pre-default behavior).
 # 用户长时间未发消息后，自动切换到一个新的活跃会话。
 # 这与 idle_timeout_mins 不同：它不是检测 agent 卡住，而是用户回来后自动开始新会话。
+# 默认值为 30 分钟（未设置时）。设为 0 可以禁用此行为，恢复始终继续上次会话。
 # [[projects]]
-# reset_on_idle_mins = 60   # 0 or unset = disabled / 设为 0 或留空表示禁用
+# reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
@@ -175,6 +195,23 @@ level = "info" # debug, info, warn, error
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+
+# =============================================================================
+# Instant Reply / 即时确认回复
+# =============================================================================
+# Send an immediate confirmation message when a user message is received,
+# before the agent starts processing. This gives users quick feedback
+# that their message was received (e.g. "🤔 Thinking...").
+# 收到用户消息后立即发送确认消息（在 Agent 开始处理之前），让用户知道消息已收到。
+#
+# Platforms with streaming card support (e.g. DingTalk with AI Card configured)
+# will skip instant reply since the card itself provides a "processing" indicator.
+# 已配置流式卡片的平台（如钉钉 AI Card）会自动跳过即时回复，因为卡片本身已提供处理指示。
+
+# [instant_reply]
+# enabled = false            # Enable/disable instant reply (default: false) / 启用/禁用即时确认回复（默认 false）
+# content = "🤔 Thinking..." # Custom reply text; empty = use i18n default ("⏳ Processing...")
+#                            # 自定义回复内容；留空则使用 i18n 默认值（"⏳ 处理中..."）
 
 # =============================================================================
 # Rate Limiting / 速率限制
@@ -408,8 +445,8 @@ level = "info" # debug, info, warn, error
 
 # [tts]
 # enabled  = true
-# provider = "qwen"          # "qwen" | "openai" | "minimax"
-# voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等）
+# provider = "qwen"          # "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+# voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等；MiMo 支持：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）
 # tts_mode = "voice_only"    # "voice_only" (default) | "always"
 # max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
 #                            # 超过此长度则跳过 TTS；0 表示不限制
@@ -436,6 +473,15 @@ level = "info" # debug, info, warn, error
 # api_key  = "your-minimax-api-key"
 # base_url = ""              # optional: default "https://api.minimax.io" / 留空使用默认地址
 # model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
+#
+# # Alternative: Xiaomi MiMo-V2.5-TTS (OpenAI-compatible chat completions style)
+# # 备选：小米 MiMo-V2.5-TTS（OpenAI 兼容的 chat completions 风格）
+# # Docs: https://platform.xiaomimimo.com/#/docs/usage-guide/speech-synthesis
+# [tts.mimo]
+# api_key  = "your-mimo-api-key"
+# base_url = ""              # optional: default "https://api.xiaomimimo.com/v1" / 留空使用默认地址
+#                            # Token Plan 国内地址：https://token-plan-cn.xiaomimimo.com/v1
+# model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
 
 # =============================================================================
 # Daemon Mode / 守护进程模式
@@ -588,7 +634,9 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # name = "claude-multi"
 # mode = "multi-workspace"
+# skip_git = true # skip bind git repo, create a dir directly
 # base_dir = "~/workspace"
+# workspace_init_allow_local_paths = true  # Optional: allow /workspace init <local-dir>; default false keeps init git-URL only
 #
 # [projects.agent]
 # type = "claudecode"
@@ -721,6 +769,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 也可以禁用特定工具（传递给 --disallowedTools）：
 # disallowed_tools = ["WebSearch", "WebFetch"]
 
+# Optional: specify a custom system prompt / 可选：指定自定义系统提示
+# system_prompt = "You are a helpful AI assistant that specializes in Python development."
+
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
@@ -826,11 +877,16 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # model = "MiniMax-M2.5-highspeed"
 # alias = "m25fast"
 #
-# # For special setups (Bedrock, Vertex, etc.), use the env map:
-# # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
+# # For special setups (Bedrock, Vertex, Foundry), use the env map:
+# # 特殊环境（Bedrock、Vertex、Foundry）使用 env 字段：
 # [[projects.agent.providers]]
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+# # For Bedrock/Vertex/Foundry that don't support adaptive thinking,
+# # add thinking = "disabled" to enable automatic request rewriting.
+# # 对于不支持 adaptive thinking 的 Bedrock/Vertex/Foundry，
+# # 设置 thinking = "disabled" 启用自动请求重写。
+# thinking = "disabled"
 
 # Reference normalization and rendering / 本地引用标准化与展示优化
 # Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
@@ -941,6 +997,25 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed staff IDs / 允许的员工 ID
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
+# WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
+# 1. Create a WPS Open Platform app and enable event WebSocket delivery
+#    创建 WPS 开放平台应用，并启用事件 WebSocket 推送
+# 2. Subscribe to app chat message events such as kso.app_chat.message
+#    订阅应用会话消息事件，如 kso.app_chat.message
+# 3. Fill in app_id and app_secret below
+#    填入下方 app_id 和 app_secret
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "wps-xiezuo"
+#
+# [projects.platforms.options]
+# app_id = "your-wps-xiezuo-app-id"
+# app_secret = "your-wps-xiezuo-app-secret"
+# allow_from = "*"             # Allowed WPS user IDs / 允许的 WPS 用户 ID
+# clean_reply = false          # Strip thinking/tool progress lines from replies / 过滤思考和工具进度行
+# base_url = "https://openapi.wps.cn"  # Optional API base URL override / 可选 API 基础地址覆盖
+
 # Telegram (uncomment to enable / 取消注释以启用)
 # 1. Message @BotFather on Telegram, send /newbot to create a bot
 #    在 Telegram 中找 @BotFather，发送 /newbot 创建机器人
@@ -962,7 +1037,8 @@ app_secret = "your-feishu-app-secret"
 # 1. Create a bot via @MasterBot in MAX, get the access token
 #    在 MAX 中通过 @MasterBot 创建机器人，获取 access token
 # 2. Paste the token below / 填入下方 token
-# Connection: Long polling via platform-api.max.ru (no public URL needed) / 长轮询，无需公网 IP
+# Connection: long-poll by default; webhook supported (see docs/max-webhook.md)
+# 默认长轮询；如需 webhook 模式见 docs/max-webhook.md
 
 # [[projects.platforms]]
 # type = "max"
@@ -972,6 +1048,16 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"    # Allowed MAX user IDs, e.g. "66624886,12345678"; "*" = all
 #                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
 # api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
+#
+# --- Webhook mode (optional) ---
+# Set webhook_url to switch from long-poll to webhook. Required for high-traffic
+# bots since MAX throttles long-poll to 2 RPS from 2026-05-11.
+# 设置 webhook_url 即切换为 webhook 模式（高流量场景必需，MAX 自 2026-05-11 起限制长轮询为 2 RPS）
+# Full guide with nginx/Caddy/systemd samples: docs/max-webhook.md
+# webhook_url    = "https://bot.example.com/webhook"
+# webhook_listen = "127.0.0.1:8090"   # bot binds here; reverse proxy in front
+# webhook_path   = "/webhook"          # default; must match the path in webhook_url
+# webhook_secret = "long-random-string"  # optional; checked via X-Webhook-Secret header or ?s= query
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
@@ -1019,6 +1105,9 @@ app_secret = "your-feishu-app-secret"
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
 # group_reply_all = false  # If true, respond to ALL guild messages without @mention / 设为 true 群聊无需 @ 也响应
+# group_reply_all_guilds = ""  # Comma-separated guild IDs where group_reply_all is active (overrides group_reply_all)
+#                              # e.g. "123456789012345678,987654321098765432"; takes precedence over group_reply_all
+#                              # 逗号分隔的服务器 ID，仅在这些服务器无需 @ 也响应（优先于 group_reply_all）
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
@@ -1377,6 +1466,46 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model tier / 可选：指定模型级别
 # model = "auto"  # "auto" | "ultimate" | "performance" | "efficient" | "lite"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project: Using tmux / 使用 tmux (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: tmux — https://github.com/tmux/tmux
+# Attaches to a named tmux session and routes messages as shell commands.
+# Output is captured by polling capture-pane; done is detected via shell prompt.
+#
+# [[projects]]
+# name = "my-tmux-project"
+#
+# [projects.agent]
+# type = "tmux"
+#
+# [projects.agent.options]
+# session = "mywork"           # tmux session name (required)
+# pane = "0"                   # pane target within the session (default: "0")
+# work_dir = "/path/to/dir"    # working directory when auto-creating the session
+# auto_create = true           # create session if it doesn't exist (default: true)
+# shell = ""                   # shell to use when creating a new session (default: system default)
+# init_command = ""            # command to run once when a NEW session is created (e.g. "claude")
+# startup_wait_ms = 2000       # milliseconds to wait after init_command before accepting messages (default: 2000 when init_command is set)
+# prompt_pattern = '[\$#>%]\s*$'  # regex to detect shell prompt = command done (default shown)
+# poll_interval_ms = 200       # output poll interval in milliseconds (default: 200)
+#
+# --- Running Claude Code inside tmux ---
+# Set init_command to start claude automatically; adjust prompt_pattern to match
+# Claude Code's input prompt ("> ") rather than a shell prompt:
+#
+# session = "claude-work"
+# work_dir = "/path/to/project"
+# init_command = "claude --dangerously-skip-permissions"
+# startup_wait_ms = 3000
+# prompt_pattern = '>\s*$'
 #
 # [[projects.platforms]]
 # type = "telegram"

@@ -81,6 +81,12 @@ type FileAttachment struct {
 // SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
 // and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.
+//
+// The attachment FileName is treated as untrusted user input (it comes from
+// the IM/HTTP upload metadata) and is sanitized to a basename before being
+// joined into attachDir. Without this, FileName="../../escape.txt" was
+// written to workDir/escape.txt — outside the intended attachments
+// directory.
 func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
@@ -92,7 +98,7 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 
 	var paths []string
 	for i, f := range files {
-		fname := f.FileName
+		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
 		}
@@ -105,6 +111,23 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
 	return paths
+}
+
+// sanitizeAttachmentFileName reduces a user-supplied attachment filename to a
+// safe basename suitable for joining into an attachment directory. It strips
+// any directory components (both `/` and `\`, the latter so Linux strips
+// Windows-style paths too) and rejects parent / current-directory references.
+// Returns "" when the input cannot produce a safe basename, so callers can
+// fall back to a generated name.
+func sanitizeAttachmentFileName(name string) string {
+	// Normalize backslashes to forward slashes so filepath.Base on Linux
+	// strips Windows-style separators in attacker-supplied paths too.
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
 }
 
 // AppendFileRefs appends file path references to a prompt string.
@@ -128,32 +151,34 @@ type AudioAttachment struct {
 
 // LocationAttachment represents a geographical location sent by the user.
 type LocationAttachment struct {
-	Latitude            float64 // latitude coordinate
-	Longitude           float64 // longitude coordinate
-	HorizontalAccuracy  float64 // accuracy radius in meters (optional)
-	LivePeriod          int     // time period for live location updates in seconds (optional)
-	Heading             int     // direction of movement in degrees (optional)
-	ProximityAlertRadius int    // maximum distance for proximity alerts in meters (optional)
+	Latitude             float64 // latitude coordinate
+	Longitude            float64 // longitude coordinate
+	HorizontalAccuracy   float64 // accuracy radius in meters (optional)
+	LivePeriod           int     // time period for live location updates in seconds (optional)
+	Heading              int     // direction of movement in degrees (optional)
+	ProximityAlertRadius int     // maximum distance for proximity alerts in meters (optional)
 }
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform   string
-	MessageID  string // platform message ID for tracing
-	UserID     string
-	UserName   string
-	ChatName   string // human-readable chat/group name (optional)
-	Content    string
-	Images     []ImageAttachment // attached images (if any)
-	Files      []FileAttachment  // attached files (if any)
-	Audio        *AudioAttachment // voice message (if any)
+	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform     string
+	MessageID    string // platform message ID for tracing
+	Recalled     bool   // true for platform message recall/delete events targeting MessageID
+	ChannelID    string
+	UserID       string
+	UserName     string
+	ChatName     string // human-readable chat/group name (optional)
+	Content      string
+	Images       []ImageAttachment   // attached images (if any)
+	Files        []FileAttachment    // attached files (if any)
+	Audio        *AudioAttachment    // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any             // platform-specific context needed for replying
-	FromVoice    bool            // true if message originated from voice transcription
-	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	ReplyCtx     any                 // platform-specific context needed for replying
+	FromVoice    bool                // true if message originated from voice transcription
+	ModeOverride string              // if set, temporarily override agent permission mode for this message
 }
 
 // EventType distinguishes different kinds of agent output.

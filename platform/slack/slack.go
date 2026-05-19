@@ -376,12 +376,22 @@ func slackFileDisplayName(f slackevents.File) string {
 // — without it, the reply goes to the DM root and surfaces in the History
 // tab feed instead, breaking the conversational UX.
 //
-// For non-Assistant apps and for true top-level DM messages, ThreadTimeStamp
-// is empty and we return empty (top-level reply, normal DM behavior).
+// For regular channel messages (not DM, not already in a thread): use the
+// message's own TimeStamp so replies are threaded under the user's message,
+// preserving the old behavior of keeping conversations in threads.
+//
+// For DM messages (channel_type=im) that are not in an Assistant thread:
+// return empty so replies go top-level (natural 1-on-1 conversation).
 func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
 	if ev.ThreadTimeStamp != "" {
+		// Already in a thread (Assistant Chat tab or regular thread reply).
 		return ev.ThreadTimeStamp
 	}
+	// For non-DM channels, thread under the user's message.
+	if ev.ChannelType != "im" {
+		return ev.TimeStamp
+	}
+	// DM top-level: top-level reply is natural.
 	return ""
 }
 

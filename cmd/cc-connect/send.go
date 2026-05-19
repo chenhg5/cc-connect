@@ -236,6 +236,10 @@ func resolveSocketPath(dataDir string) string {
 	if dataDir != "" {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}
+	// Check CC_DATA_DIR env var for custom data_dir configuration
+	if envDataDir := strings.TrimSpace(os.Getenv("CC_DATA_DIR")); envDataDir != "" {
+		return filepath.Join(envDataDir, "run", "api.sock")
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".cc-connect", "run", "api.sock")
 	}

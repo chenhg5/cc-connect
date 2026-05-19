@@ -112,13 +112,15 @@ type appServerCreditsSnapshot struct {
 }
 
 type appServerSession struct {
-	url       string
-	workDir   string
-	model     string
-	effort    string
-	mode      string
-	extraEnv  []string
-	codexHome string
+	url           string
+	workDir       string
+	model         string
+	effort        string
+	mode          string
+	baseURL       string
+	modelProvider string
+	extraEnv      []string
+	codexHome     string
 
 	events chan core.Event
 
@@ -135,7 +137,7 @@ type appServerSession struct {
 	pendingMu sync.Mutex
 	pending   map[int64]chan rpcResponseEnvelope
 
-	approvalsMu     sync.Mutex
+	approvalsMu      sync.Mutex
 	pendingApprovals map[string]chan core.PermissionResult
 
 	threadID atomic.Value
@@ -158,7 +160,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -166,6 +168,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		model:            model,
 		effort:           effort,
 		mode:             mode,
+		baseURL:          baseURL,
+		modelProvider:    modelProvider,
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
 		events:           make(chan core.Event, 128),
@@ -198,7 +202,22 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server", "--listen", "stdio://"}
+	args := []string{"app-server"}
+	if strings.TrimSpace(s.url) != "" {
+		args = append(args, "--listen", strings.TrimSpace(s.url))
+	}
+	if model := strings.TrimSpace(s.model); model != "" {
+		args = append(args, "-c", fmt.Sprintf("model=%q", model))
+	}
+	if effort := strings.TrimSpace(s.effort); effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
+		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
+	}
+	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
+		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
+	}
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)

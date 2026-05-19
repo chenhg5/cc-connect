@@ -48,15 +48,19 @@ Each user gets an independent session with full conversation context. Manage ses
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
-You can also configure automatic session rotation after inactivity:
+cc-connect rotates to a fresh session automatically after long inactivity:
 
 ```toml
 [[projects]]
 name = "demo"
-reset_on_idle_mins = 60
+reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 ```
 
-When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+The next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+
+**Why this is on by default:** without idle rotation, every workspace-pool eviction (~15 min) caused the next message to resume the previous transcript via `--continue`. Over many cycles this re-ingests stale chat history (failed commands, debugging noise, abandoned tangents) and the model's attention drifts away from the original intent. Rotating after 30 minutes of user inactivity gives a clean slate when you come back to a task, while preserving the old session for `/list` and `/switch`.
+
+To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
 ### Model switch preserves history
 
@@ -770,6 +774,7 @@ Example:
 ```bash
 cc-connect cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
 cc-connect cron list
+cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
 cc-connect cron del <job-id>
 ```
 
@@ -1011,7 +1016,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
+type = "feishu"  # or wps-xiezuo, dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # platform-specific options

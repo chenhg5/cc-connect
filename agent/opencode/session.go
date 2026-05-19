@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-"path/filepath"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,17 +24,17 @@ import (
 // Each Send() launches a new `opencode run --format json` process
 // with --session for conversation continuity.
 type opencodeSession struct {
-	cmd      string
-	workDir  string
-	model    string
-	mode     string
-	extraEnv []string
-	events   chan core.Event
-	chatID   atomic.Value // stores string — OpenCode session ID
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	alive    atomic.Bool
+	cmd               string
+	workDir           string
+	model             string
+	mode              string
+	extraEnv          []string
+	events            chan core.Event
+	chatID            atomic.Value // stores string — OpenCode session ID
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 }
 
@@ -95,6 +95,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
+	cmd.Stdin = strings.NewReader(prompt)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opencodeSession: start: %w", err)
@@ -170,9 +171,6 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 		args = append(args, "--file", imagePath)
 	}
 
-	// Use "--" to separate flags from the positional prompt so that
-	// --file (yargs [array]) does not greedily consume the prompt text.
-	args = append(args, "--", prompt)
 	return args
 }
 
@@ -224,7 +222,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-// Check if we received compaction_continue before readLoop ended.
+	// Check if we received compaction_continue before readLoop ended.
 	// If so, OpenCode will continue with a new turn - do NOT send EventResult.
 	// The subsequent process will send its own EventResult when it finishes.
 	if s.expectingContinue.Load() {
@@ -484,10 +482,10 @@ func (s *opencodeSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(s.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
 	}
-	close(s.events)
 	return nil
 }
 

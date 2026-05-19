@@ -87,18 +87,28 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
-<td width="150"><a href="https://aicanapi.com"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
-<td>Thanks to aicanapi.com for sponsoring this project! aicanapi.com provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Stable, fast, and cost-effective access to mainstream AI models for developers. Register via <a href="https://aicanapi.com">this link</a> to get started.</td>
+<td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
+<td>Thanks to AnyRoute.io for sponsoring this project! AnyRoute.io is a reliable, stable, and efficient API relay platform integrating the latest Claude Code and Codex models. Transparent pricing with rates as low as 93% off official prices (just 0.7x), supports invoicing and enterprise-grade high-concurrency usage. Register via <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aicanapi.com/register?aff=rIEy"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
+<td>Thanks to aicanapi.com for sponsoring this project! Aican API provides high-performance, low-latency, high-concurrency API services for enterprises and developers. Claude Code models at up to 84% off, other models at 80% off official price. Doubao Seedance 2 real-person generation service with queue-free access for faster responses. Choose Aican API for simpler, more efficient, and more cost-effective enterprise-grade AI services. Register via <a href="https://aicanapi.com/register?aff=rIEy">this link</a> to get started.</td>
 </tr>
 
 <tr>
 <td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
-<td>Thanks to Pateway for sponsoring this project! Pateway is a high-quality AI model API relay platform providing stable access to Claude, GPT, Gemini and other mainstream models. Fast response, transparent pricing, enterprise-grade reliability. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get started.</td>
+<td>Thanks to Pateway for sponsoring this project! PatewayAI is a premium API relay service for serious AI developers, offering 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. Transparent billing with token-level verification. Enterprise-grade concurrency, formal contracts and invoicing available. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get $3 free trial credit, up to 40% off on top-ups, and referral rewards up to $150!</td>
 </tr>
 
 <tr>
 <td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
-<td>Thanks to 10点AI for sponsoring this project! 10点AI provides reliable AI model API relay services with support for Claude, GPT, Gemini and more. Cost-effective, stable access for developers and teams. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get started.</td>
+<td>Thanks to 10点AI for sponsoring this project! 10dian-AI Enterprise Platform is an AI API gateway for developers and enterprises, aggregating GPT, Claude, Gemini, DeepSeek and more. Optimized for production environments with stable high-concurrency operation, avoiding interface jitter and timeout issues. Affordable pricing, stable uptime, official guarantee. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cloud.siliconflow.cn/i/650Yh2Z7"><img src="assets/sponsors/siliconflow.png" alt="SiliconFlow" width="120"></a></td>
+<td>Thanks to SiliconFlow for supporting this project! SiliconFlow is a high-performance AI infrastructure and model API platform, providing fast and reliable access to language, speech, image, and video models in one place. With pay-as-you-go billing, broad multimodal model support, high-speed inference, and enterprise-grade stability, SiliconFlow helps developers and teams build and scale AI applications more efficiently. Register via <a href="https://cloud.siliconflow.cn/i/650Yh2Z7">this link</a> and complete real-name verification to receive ¥20 in bonus credit!</td>
 </tr>
 
 <tr>
@@ -179,15 +189,15 @@ High-level view of what each **built-in platform** can do in cc-connect.
 
 † **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
 
-| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
-|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
-| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
-| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
-| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Capability | Feishu | WPS Xiezuo | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
+|------------|:------:|:----------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Images & files | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
 
 > **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
@@ -200,7 +210,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 **10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
+**12 Chat Platforms** — Feishu, WPS Xiezuo, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -337,6 +347,7 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Aider | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
 | Platform | DingTalk | ✅ Stream — no public IP needed |
+| Platform | WPS Xiezuo | ✅ WebSocket — no public IP needed |
 | Platform | Telegram | ✅ Long Polling — no public IP needed |
 | Platform | Slack | ✅ Socket Mode — no public IP needed |
 | Platform | Discord | ✅ Gateway — no public IP needed |
@@ -354,6 +365,7 @@ cc-connect update --pre     # Include pre-releases
 |----------|-------|------------|------------|
 | Feishu (Lark) | [docs/feishu.md](docs/feishu.md) | WebSocket | No |
 | DingTalk | [docs/dingtalk.md](docs/dingtalk.md) | Stream | No |
+| WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
@@ -376,13 +388,14 @@ cc-connect update --pre     # Include pre-releases
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
-Project configs can also rotate to a fresh session automatically after long inactivity:
+Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 
 ```toml
 [[projects]]
-reset_on_idle_mins = 60
+reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 ```
 
+The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
 
 ### 🛡️ OS-User Isolation (`run_as_user`)
 

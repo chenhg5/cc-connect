@@ -621,13 +621,16 @@ func (p *Platform) SendFile(_ context.Context, rctx any, file core.FileAttachmen
 }
 
 func (p *Platform) writeWS(data any) error {
+	// gorilla/websocket only allows one concurrent writer; wsMu must guard the
+	// full WriteJSON call (pingLoop already follows this pattern), otherwise
+	// concurrent sendMessage / SendImage / SendFile calls interleave frames
+	// on the wire.
 	p.wsMu.Lock()
-	ws := p.ws
-	p.wsMu.Unlock()
-	if ws == nil {
+	defer p.wsMu.Unlock()
+	if p.ws == nil {
 		return fmt.Errorf("weibo: not connected")
 	}
-	if err := ws.WriteJSON(data); err != nil {
+	if err := p.ws.WriteJSON(data); err != nil {
 		return fmt.Errorf("weibo: ws send: %w", err)
 	}
 	return nil

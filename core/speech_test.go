@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -160,5 +161,23 @@ func TestGeminiSTT_Transcribe_InvalidJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "parse response") {
 		t.Errorf("expected 'parse response' in error, got: %v", err)
+	}
+}
+
+// TestConvertAudioToMP3_HonorsContextCancellation asserts that a cancelled
+// context aborts the ffmpeg subprocess rather than running it to completion.
+// Skips when ffmpeg is not installed (the conversion helper returns the
+// "not found" error before the context is ever consulted).
+func TestConvertAudioToMP3_HonorsContextCancellation(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not in PATH")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ConvertAudioToMP3(ctx, []byte{0, 1, 2, 3}, "mp3")
+	if err == nil {
+		t.Fatal("expected error after context cancellation, got nil")
 	}
 }

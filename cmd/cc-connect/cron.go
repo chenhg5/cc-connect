@@ -449,26 +449,10 @@ func runCronEdit(args []string) {
 		os.Exit(1)
 	}
 
-	// Parse value based on field type
-	var value any
-	switch field {
-	case "enabled", "mute":
-		v, err := strconv.ParseBool(valueStr)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s must be true or false\n", field)
-			os.Exit(1)
-		}
-		value = v
-	case "timeout_mins":
-		v, err := strconv.Atoi(valueStr)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: timeout_mins must be an integer\n")
-			os.Exit(1)
-		}
-		value = v
-	default:
-		// String fields: project, session_key, cron_expr, prompt, exec, work_dir, description, session_mode
-		value = valueStr
+	value, err := parseCronEditValue(field, valueStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: "+err.Error())
+		os.Exit(1)
 	}
 
 	sockPath := resolveSocketPath(dataDir)
@@ -498,6 +482,39 @@ func runCronEdit(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Updated job %s:\n%s\n", id, prettyJSON.String())
+}
+
+// parseCronEditValue converts the user-supplied <value> argument into the
+// concrete Go type the management API's cron-edit handler expects on the wire.
+// Bool/int fields must be sent as the matching JSON type so the server's
+// updateJobField type-switch (core/cron.go) matches — otherwise the server
+// falls through to its string-via-reflection path, which doesn't apply to
+// *bool / *int fields and returns the misleading error
+// "unknown or invalid field: <field>".
+//
+// `silent` was previously missing from the bool case here even though it's
+// documented as a bool in printCronEditUsage, so `cc-connect cron edit <id>
+// silent true` failed with "unknown or invalid field: silent" — see the
+// regression test in cron_edit_test.go.
+func parseCronEditValue(field, valueStr string) (any, error) {
+	switch field {
+	case "enabled", "mute", "silent":
+		v, err := strconv.ParseBool(valueStr)
+		if err != nil {
+			return nil, fmt.Errorf("%s must be true or false", field)
+		}
+		return v, nil
+	case "timeout_mins":
+		v, err := strconv.Atoi(valueStr)
+		if err != nil {
+			return nil, fmt.Errorf("timeout_mins must be an integer")
+		}
+		return v, nil
+	default:
+		// String fields: project, session_key, cron_expr, prompt, exec,
+		// work_dir, description, session_mode, mode
+		return valueStr, nil
+	}
 }
 
 func apiPost(sockPath, path string, payload []byte) (*http.Response, error) {

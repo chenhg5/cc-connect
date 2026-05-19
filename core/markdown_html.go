@@ -2,7 +2,9 @@ package core
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // MarkdownToSimpleHTML converts common Markdown to a simplified HTML subset.
@@ -57,6 +59,13 @@ func MarkdownToSimpleHTML(md string) string {
 	}
 
 	// flushTable renders buffered table rows inside a <pre> block with aligned columns.
+	//
+	// Inline formatting in cells (bold/italic/inline-code/strikethrough/links)
+	// is rendered as Telegram HTML tags; Telegram permits <b>, <i>, <u>, <s>,
+	// <code>, <a> inside <pre>, so `**foo**` becomes a bold "foo" rather than
+	// four literal asterisks. Column widths are computed from the *visual*
+	// (post-strip) rune length so that ` | ` separators still line up even
+	// though the rendered HTML bytes are longer than the plain text.
 	flushTable := func() {
 		if len(tblLines) == 0 {
 			return
@@ -85,7 +94,9 @@ func MarkdownToSimpleHTML(md string) string {
 			rows = append(rows, row{cells: cells})
 		}
 
-		// Compute max width per column.
+		// Compute max width per column using the visual rune length of each
+		// cell (markdown markers stripped). This keeps ASCII columns aligned
+		// even after `**x**` expands to `<b>x</b>` in the rendered output.
 		numCols := 0
 		for _, r := range rows {
 			if !r.isSep && len(r.cells) > numCols {
@@ -98,8 +109,10 @@ func MarkdownToSimpleHTML(md string) string {
 				continue
 			}
 			for k, c := range r.cells {
-				if k < numCols && len(c) > colWidths[k] {
-					colWidths[k] = len(c)
+				if k < numCols {
+					if w := tableCellVisualWidth(c); w > colWidths[k] {
+						colWidths[k] = w
+					}
 				}
 			}
 		}
@@ -129,9 +142,13 @@ func MarkdownToSimpleHTML(md string) string {
 					if k < len(r.cells) {
 						cell = r.cells[k]
 					}
-					b.WriteString(escapeHTML(cell))
-					// Pad to column width.
-					if pad := colWidths[k] - len(cell); pad > 0 {
+					// Render inline formatting to HTML tags (Telegram accepts
+					// <b>/<i>/<code>/<a>/etc. inside <pre>). Falls back to
+					// plain HTML-escaped text when there is no formatting.
+					b.WriteString(convertInlineHTML(cell))
+					// Pad to column width using the *visual* length so the
+					// `|` separators still line up in the rendered message.
+					if pad := colWidths[k] - tableCellVisualWidth(cell); pad > 0 {
 						b.WriteString(strings.Repeat(" ", pad))
 					}
 				}
@@ -279,8 +296,17 @@ func convertInlineHTML(s string) string {
 	var phs []placeholder
 	phIdx := 0
 
+	// The placeholder key embeds phIdx as decimal digits. The previous
+	// `string(rune('0'+phIdx))` form rolled past '9' once phIdx hit 10, so
+	// phIdx == 12 produced a key containing '<' and phIdx == 14 produced one
+	// containing '>'. Step 3 (escapeHTML on the entire string) then rewrote
+	// '<'/'>' inside those keys to "&lt;"/"&gt;" before step 8 could restore
+	// them, leaking literal "\x00PH<\x00" / "\x00PH>\x00" fragments into the
+	// rendered Telegram message and dropping the original code/link content.
+	// Decimal digits stay in the safe ASCII range regardless of phIdx, and
+	// no two indices collide.
 	nextPH := func(html string) string {
-		key := "\x00PH" + string(rune('0'+phIdx)) + "\x00"
+		key := "\x00PH" + strconv.Itoa(phIdx) + "\x00"
 		phs = append(phs, placeholder{key: key, html: html})
 		phIdx++
 		return key
@@ -377,50 +403,142 @@ func escapeHTML(s string) string {
 	return s
 }
 
-// SplitMessageCodeFenceAware splits text into chunks respecting code fence boundaries.
-// When a chunk boundary falls inside a code block, the fence is closed at the end of
-// the chunk and re-opened at the start of the next chunk.
+// tableCellVisualWidth returns the rune count of `cell` after stripping the
+// markdown markers that convertInlineHTML would remove when rendering. Used
+// to compute column widths for <pre>-wrapped tables so that ` | ` separators
+// still line up even though the rendered HTML bytes are longer than the
+// visible text.
+//
+// This is deliberately approximate: it counts each rune as one column, so
+// East-Asian wide characters (which occupy two monospace cells on most
+// clients) will misalign by the same amount the previous byte-based code
+// did. Callers that need exact visual width can switch to unicode width
+// tables later; this helper's contract is "strip formatting markers, count
+// runes".
+func tableCellVisualWidth(cell string) int {
+	// Strip bold ***x***, **x**, __x__ and bold-italic.
+	cell = reBoldItalicHTML.ReplaceAllString(cell, "$1")
+	cell = reBoldAstHTML.ReplaceAllString(cell, "$1")
+	cell = reBoldUndHTML.ReplaceAllString(cell, "$1")
+	// Strip strikethrough ~~x~~.
+	cell = reStrikeHTML.ReplaceAllString(cell, "$1")
+	// Strip inline code `x`.
+	cell = reInlineCodeHTML.ReplaceAllString(cell, "$1")
+	// Strip links [text](url) — keep link text only.
+	cell = reLinkHTML.ReplaceAllString(cell, "$1")
+	// Italic is matched with boundary chars in reItalicAstHTML, which would
+	// swallow the boundary on replace. Use a local, boundary-free pattern
+	// since cell content is already trimmed and we only need to drop *x*.
+	cell = reTableCellItalic.ReplaceAllString(cell, "$1")
+	return utf8.RuneCountInString(cell)
+}
+
+// reTableCellItalic is used ONLY by tableCellVisualWidth to strip `*x*` from
+// a cell for width measurement. It is NOT used for rendering — rendering
+// still goes through the main convertInlineHTML path with its stricter
+// boundary-aware italic regex.
+var reTableCellItalic = regexp.MustCompile(`\*([^*]+)\*`)
+
+// SplitMessageCodeFenceAware splits text into chunks no larger than maxLen runes,
+// preferring line boundaries. When a chunk boundary falls inside a code block,
+// the fence is closed at the end of the chunk and re-opened at the start of the
+// next chunk. If a single line exceeds maxLen, it is split within the line at
+// rune boundaries.
 func SplitMessageCodeFenceAware(text string, maxLen int) []string {
-	if len(text) <= maxLen {
+	if utf8.RuneCountInString(text) <= maxLen {
 		return []string{text}
 	}
 
-	const closingFence = "\n```" // 4 bytes appended when splitting inside a code block
+	// closingFence is appended when flushing a chunk that is inside a code block.
+	const closingFence = "\n```"
+	const closingFenceLen = 4 // rune count of "\n```"
 
 	lines := strings.Split(text, "\n")
 	var chunks []string
 	var current []string
+	// currentLen tracks rune count of strings.Join(current, "\n") + 1.
+	// The invariant is: actual_chunk_runes = currentLen - 1.
+	// This +1 accounting lets the fit check use a single expression.
 	currentLen := 0
-	openFence := "" // the ``` opening line, or "" if outside code block
+	openFence := "" // opening ``` line when inside a code block, else ""
+
+	// effectiveLimit returns the number of "currentLen units" available before
+	// the chunk (plus closingFence if needed) would exceed maxLen.
+	effectiveLimit := func() int {
+		if openFence != "" {
+			return maxLen - closingFenceLen
+		}
+		return maxLen
+	}
+
+	// flush emits the current chunk and resets state, re-seeding with the open
+	// fence header so the next chunk is a valid continuation of the code block.
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		chunk := strings.Join(current, "\n")
+		if openFence != "" {
+			chunk += closingFence
+		}
+		chunks = append(chunks, chunk)
+		current = nil
+		currentLen = 0
+		if openFence != "" {
+			current = append(current, openFence)
+			currentLen = utf8.RuneCountInString(openFence) + 1
+		}
+	}
 
 	for _, line := range lines {
-		lineLen := len(line) + 1 // +1 for newline
+		lineRunes := []rune(line)
+		limit := effectiveLimit()
 
-		// Reserve space for the closing fence when inside a code block,
-		// so the final chunk length stays within maxLen.
-		limit := maxLen
-		if openFence != "" {
-			limit -= len(closingFence)
+		// Fast path: line fits in the current chunk.
+		if currentLen+len(lineRunes)+1 <= limit {
+			current = append(current, line)
+			currentLen += len(lineRunes) + 1
+		} else {
+			// Line doesn't fit; flush and try again with a fresh chunk.
+			flush()
+			limit = effectiveLimit()
+
+			if currentLen+len(lineRunes)+1 <= limit {
+				// Fits after flush.
+				current = append(current, line)
+				currentLen += len(lineRunes) + 1
+			} else {
+				// The line itself exceeds the limit; split within the line at
+				// rune boundaries, flushing between parts as needed.
+				remaining := lineRunes
+				for len(remaining) > 0 {
+					limit = effectiveLimit()
+					// avail = how many runes we can add to current.
+					// Since currentLen = actual_runes + 1, actual_runes = currentLen - 1,
+					// and a new part adds 1 joining \n plus its own runes:
+					//   new_actual = (currentLen-1) + 1 + avail = currentLen + avail
+					// We need new_actual <= limit, so avail <= limit - currentLen.
+					avail := limit - currentLen
+					if avail <= 0 {
+						// Shouldn't happen after flush, but guard against it.
+						flush()
+						limit = effectiveLimit()
+						avail = limit - currentLen
+					}
+					if avail > len(remaining) {
+						avail = len(remaining)
+					}
+					current = append(current, string(remaining[:avail]))
+					currentLen += avail + 1
+					remaining = remaining[avail:]
+					if len(remaining) > 0 {
+						flush()
+					}
+				}
+			}
 		}
 
-		if currentLen+lineLen > limit && len(current) > 0 {
-			chunk := strings.Join(current, "\n")
-			if openFence != "" {
-				chunk += closingFence
-			}
-			chunks = append(chunks, chunk)
-
-			current = nil
-			currentLen = 0
-			if openFence != "" {
-				current = append(current, openFence)
-				currentLen = len(openFence) + 1
-			}
-		}
-
-		current = append(current, line)
-		currentLen += lineLen
-
+		// Track code fence state after processing the line.
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			if openFence != "" {
