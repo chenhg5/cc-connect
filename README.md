@@ -107,6 +107,11 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://cloud.siliconflow.cn/i/650Yh2Z7"><img src="assets/sponsors/siliconflow.png" alt="SiliconFlow" width="120"></a></td>
+<td>Thanks to SiliconFlow for supporting this project! SiliconFlow is a high-performance AI infrastructure and model API platform, providing fast and reliable access to language, speech, image, and video models in one place. With pay-as-you-go billing, broad multimodal model support, high-speed inference, and enterprise-grade stability, SiliconFlow helps developers and teams build and scale AI applications more efficiently. Register via <a href="https://cloud.siliconflow.cn/i/650Yh2Z7">this link</a> and complete real-name verification to receive ¥20 in bonus credit!</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
 <td>Thanks to Code0 for sponsoring this project! Code0 is an AI model aggregation API relay service for Chinese developers, compatible with OpenAI / Anthropic / Gemini protocols. One key for all mainstream models, stable support for Claude Code, Codex, Gemini CLI, cc-connect and more. Fixed exchange rate: ¥1.5 CNY = $1 USD API credit, transparent pricing, domestic direct connection, ready to use. Register via <a href="https://code0.ai/register?aff=5cGO">this link</a>.</td>
 </tr>
