@@ -10485,6 +10485,20 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		displayName := sessions.GetSessionName(s.ID)
 		if displayName != "" {
 			displayName = "📌 " + displayName
+		} else if tp, ok := agent.(SessionTitleProvider); ok {
+			title := tp.GetSessionTitle(s.ID)
+			if title != "" {
+				displayName = title
+			} else {
+				displayName = strings.ReplaceAll(s.Summary, "\n", " ")
+				displayName = strings.Join(strings.Fields(displayName), " ")
+				if displayName == "" {
+					displayName = e.i18n.T(MsgListEmptySummary)
+				}
+				if len([]rune(displayName)) > 40 {
+					displayName = string([]rune(displayName)[:40]) + "…"
+				}
+			}
 		} else {
 			displayName = strings.ReplaceAll(s.Summary, "\n", " ")
 			displayName = strings.Join(strings.Fields(displayName), " ")
