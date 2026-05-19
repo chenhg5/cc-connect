@@ -21,6 +21,7 @@ type Session struct {
 	AgentSessionID      string         `json:"agent_session_id"`
 	AgentType           string         `json:"agent_type,omitempty"`
 	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	ForkSourceID        string         `json:"fork_source_id,omitempty"` // source agent session ID for fork pending sessions
 	History             []HistoryEntry `json:"history"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`
@@ -402,6 +403,20 @@ func (sm *SessionManager) SetSessionName(agentSessionID, name string) {
 		sm.sessionNames[agentSessionID] = name
 	}
 	sm.saveLocked()
+}
+
+// SetSessionNameOnSession finds the session with the given agentSessionID
+// and updates its Name field to match, keeping sessions[sN].Name consistent
+// with session_names[agentSessionID].
+func (sm *SessionManager) SetSessionNameOnSession(agentSessionID, name string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for _, s := range sm.sessions {
+		if s.GetAgentSessionID() == agentSessionID {
+			s.SetName(name)
+			break
+		}
+	}
 }
 
 // GetSessionName returns the custom name for an agent session, or "".

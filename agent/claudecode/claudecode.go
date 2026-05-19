@@ -55,6 +55,7 @@ type Agent struct {
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
 	platformPrompt string              // platform-specific formatting instructions
+	forkSource     string              // source agent session ID for next fork call (cleared after use)
 
 	// spawnOpts controls OS-user isolation via run_as_user. Zero value
 	// means legacy spawn as the supervisor user. See core/runas.go.
@@ -419,6 +420,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	workDir := a.workDir
 	mode := a.mode
 	extraEnv := a.runtimeEnvLocked()
+	forkSource := a.forkSource
+	a.forkSource = "" // clear after use
 
 	activeIdx := a.activeIdx
 	var activeProviderName string
@@ -441,7 +444,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, forkSource)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -646,6 +649,245 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 
 // extractTextContent extracts readable text from Claude Code message content.
 // Content can be a plain string or an array of content blocks.
+// WriteSessionName appends a custom-title entry to the Claude Code JSONL file
+// for the given session. Claude Code reads the last custom-title entry for a
+// session, so this effectively sets the display name shown in the CLI sidebar
+// and VSCode extension.
+func (a *Agent) WriteSessionName(sessionID, name string) error {
+	if sessionID == "" || name == "" {
+		return nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return fmt.Errorf("claudecode: project dir not found for work_dir %s", absWorkDir)
+	}
+
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	entry := map[string]any{
+		"type":        "custom-title",
+		"customTitle": name,
+		"sessionId":   sessionID,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("claudecode: marshal custom-title: %w", err)
+	}
+
+	f, err := os.OpenFile(jsonlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("claudecode: open JSONL for append: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("claudecode: write custom-title: %w", err)
+	}
+	return nil
+}
+
+// GetSessionTitle reads the display title for a Claude Code session.
+// Priority: custom-title (last entry) > ai-title > "".
+func (a *Agent) GetSessionTitle(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return ""
+	}
+
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var customTitle, aiTitle string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type        string `json:"type"`
+			CustomTitle string `json:"customTitle"`
+			AiTitle     string `json:"aiTitle"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Type == "custom-title" && raw.CustomTitle != "" {
+			customTitle = raw.CustomTitle // last one wins
+		}
+		if raw.Type == "ai-title" && raw.AiTitle != "" && customTitle == "" {
+			aiTitle = raw.AiTitle
+		}
+	}
+	if customTitle != "" {
+		return customTitle
+	}
+	return aiTitle
+}
+
+// ForkSession marks the agent to use --fork-session on the next StartSession call.
+// The sessionID passed to StartSession should be the source session's ID;
+// Claude Code will create a new session ID automatically and report it via events.
+func (a *Agent) ForkSession(sourceSessionID string) (string, error) {
+	if sourceSessionID == "" {
+		return "", fmt.Errorf("claudecode: source session ID required for fork")
+	}
+	a.mu.Lock()
+	a.forkSource = sourceSessionID
+	a.mu.Unlock()
+	// Return the source ID — it will be used as --resume <sourceID> --fork-session.
+	// The actual new session ID is reported by the agent after startup.
+	return sourceSessionID, nil
+}
+
+// ReadSessionTurnCount counts user/assistant turn pairs in the JSONL file.
+func (a *Agent) ReadSessionTurnCount(sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("claudecode: session ID required")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return 0, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: open session file: %w", err)
+	}
+	defer f.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Type == "user" || raw.Type == "human" {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// TruncateSessionHistory removes the last N turns from the session's JSONL file.
+// A turn is counted by user/human messages. Returns remaining turn count.
+func (a *Agent) TruncateSessionHistory(sessionID string, turns int) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("claudecode: session ID required")
+	}
+	if turns <= 0 {
+		return a.ReadSessionTurnCount(sessionID)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return 0, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: read session file: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	// Remove trailing empty line from Split
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// Find cutoff: scan from end, count N user/human messages
+	userCount := 0
+	cutoffIdx := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		var raw struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(lines[i]), &raw) != nil {
+			continue
+		}
+		if raw.Type == "user" || raw.Type == "human" {
+			userCount++
+			if userCount == turns {
+				cutoffIdx = i
+				break
+			}
+		}
+	}
+
+	if cutoffIdx == len(lines) {
+		// More turns requested than exist — truncate everything
+		return 0, fmt.Errorf("claudecode: cannot remove %d turns (only %d exist)", turns, userCount)
+	}
+
+	// Keep everything before cutoffIdx
+	truncated := lines[:cutoffIdx]
+	content := strings.Join(truncated, "\n") + "\n"
+
+	// Atomic write
+	tmpPath := jsonlPath + ".rollback.tmp"
+	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
+		return 0, fmt.Errorf("claudecode: write truncated file: %w", err)
+	}
+	if err := os.Rename(tmpPath, jsonlPath); err != nil {
+		return 0, fmt.Errorf("claudecode: replace session file: %w", err)
+	}
+
+	// Count remaining turns
+	remaining := 0
+	for _, line := range truncated {
+		var raw struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(line), &raw) != nil {
+			continue
+		}
+		if raw.Type == "user" || raw.Type == "human" {
+			remaining++
+		}
+	}
+	return remaining, nil
+}
+
 func extractTextContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

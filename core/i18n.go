@@ -222,6 +222,7 @@ const (
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
+	MsgNameSyncFailed            MsgKey = "name_sync_failed"
 	MsgProviderNotSupported      MsgKey = "provider_not_supported"
 	MsgProviderNone              MsgKey = "provider_none"
 	MsgProviderCurrent           MsgKey = "provider_current"
@@ -465,6 +466,13 @@ const (
 	MsgDeleteModeSelectedCount  MsgKey = "delete_mode_selected_count"
 	MsgDeleteModeDeleteSelected MsgKey = "delete_mode_delete_selected"
 	MsgDeleteModeCancel         MsgKey = "delete_mode_cancel"
+	MsgForkNotSupported         MsgKey = "fork_not_supported"
+	MsgForkNoSession            MsgKey = "fork_no_session"
+	MsgForkCreated              MsgKey = "fork_created"
+	MsgRollbackNotSupported     MsgKey = "rollback_not_supported"
+	MsgRollbackNoSession        MsgKey = "rollback_no_session"
+	MsgRollbackDone             MsgKey = "rollback_done"
+	MsgRollbackError            MsgKey = "rollback_error"
 	MsgDeleteModeConfirmTitle   MsgKey = "delete_mode_confirm_title"
 	MsgDeleteModeConfirmButton  MsgKey = "delete_mode_confirm_button"
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
@@ -1424,6 +1432,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有活躍會話，請先傳送訊息或切換到一個會話。",
 		LangJapanese:           "❌ アクティブなセッションがありません。メッセージを送信するかセッションに切り替えてください。",
 		LangSpanish:            "❌ No hay sesión activa. Envía un mensaje primero o cambia a una sesión.",
+	},
+	MsgNameSyncFailed: {
+		LangEnglish:            "Name saved locally but failed to sync to agent: %s",
+		LangChinese:            "名称已本地保存但同步到 agent 失败：%s",
+		LangTraditionalChinese: "名稱已本地儲存但同步到 agent 失敗：%s",
+		LangJapanese:           "名前はローカルに保存されましたが、agentへの同期に失敗しました：%s",
+		LangSpanish:            "Nombre guardado localmente pero falló la sincronización con el agente: %s",
 	},
 	MsgProviderNotSupported: {
 		LangEnglish:            "This agent does not support provider switching.",
@@ -3027,6 +3042,55 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "取消",
 		LangJapanese:           "キャンセル",
 		LangSpanish:            "Cancelar",
+	},
+	MsgForkNotSupported: {
+		LangEnglish:            "Fork not supported by this agent.",
+		LangChinese:            "当前 agent 不支持 fork。",
+		LangTraditionalChinese: "當前 agent 不支援 fork。",
+		LangJapanese:           "このagentはforkをサポートしていません。",
+		LangSpanish:            "Fork no soportado por este agente.",
+	},
+	MsgForkNoSession: {
+		LangEnglish:            "No active session to fork. Send a message first.",
+		LangChinese:            "没有活跃会话可以分叉，请先发送消息。",
+		LangTraditionalChinese: "沒有活躍會話可以分叉，請先傳送訊息。",
+		LangJapanese:           "forkできるアクティブなセッションがありません。先にメッセージを送信してください。",
+		LangSpanish:            "No hay sesión activa para fork. Envía un mensaje primero.",
+	},
+	MsgForkCreated: {
+		LangEnglish:            "🌿 Fork created: **%s** (%s). Use /switch to start working on it.",
+		LangChinese:            "🌿 分叉已创建：**%s** (%s)。使用 /switch 切换到分叉会话。",
+		LangTraditionalChinese: "🌿 分叉已建立：**%s** (%s)。使用 /switch 切換到分叉會話。",
+		LangJapanese:           "🌿 fork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
+		LangSpanish:            "🌿 Fork creado: **%s** (%s). Usa /switch para empezar a trabajar en él.",
+	},
+	MsgRollbackNotSupported: {
+		LangEnglish:            "Rollback not supported by this agent.",
+		LangChinese:            "当前 agent 不支持回撤。",
+		LangTraditionalChinese: "當前 agent 不支援回撤。",
+		LangJapanese:           "このagentはrollbackをサポートしていません。",
+		LangSpanish:            "Rollback no soportado por este agente.",
+	},
+	MsgRollbackNoSession: {
+		LangEnglish:            "No active session to rollback. Send a message first.",
+		LangChinese:            "没有活跃会话可以回撤，请先发送消息。",
+		LangTraditionalChinese: "沒有活躍會話可以回撤，請先傳送訊息。",
+		LangJapanese:           "rollbackできるアクティブなセッションがありません。先にメッセージを送信してください。",
+		LangSpanish:            "No hay sesión activa para rollback. Envía un mensaje primero.",
+	},
+	MsgRollbackDone: {
+		LangEnglish:            "↩️ Rolled back %d turns. %d remaining. Send a message to continue.",
+		LangChinese:            "↩️ 已回撤 %d 轮，剩余 %d 轮。发送消息继续对话。",
+		LangTraditionalChinese: "↩️ 已回撤 %d 輪，剩餘 %d 輪。傳送訊息繼續對話。",
+		LangJapanese:           "↩️ %dターンrollback完了。残り%dターン。メッセージを送信して続行してください。",
+		LangSpanish:            "↩️ Se han revertido %d turnos. %d restantes. Envía un mensaje para continuar.",
+	},
+	MsgRollbackError: {
+		LangEnglish:            "Rollback failed: %s",
+		LangChinese:            "回撤失败：%s",
+		LangTraditionalChinese: "回撤失敗：%s",
+		LangJapanese:           "rollback失敗：%s",
+		LangSpanish:            "Rollback falló: %s",
 	},
 	MsgDeleteModeConfirmTitle: {
 		LangEnglish:            "Confirm Delete",
