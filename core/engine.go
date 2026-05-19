@@ -5239,6 +5239,36 @@ func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionMana
 	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
 }
 
+// forkPendingSession describes a cc-connect session that is a fork waiting to
+// be activated (ForkSourceID is set, agentSID still matches source).
+type forkPendingSession struct {
+	shortID string // cc-connect session ID (e.g., "s105")
+	name    string // session display name
+	created time.Time
+}
+
+// forkPendingSessions returns cc-connect sessions that are fork-pending:
+// they have ForkSourceID set and their AgentSessionID still equals ForkSourceID,
+// meaning the fork hasn't been activated yet (no new agentSID assigned).
+func forkPendingSessions(sm *SessionManager, userKey string) []forkPendingSession {
+	ccSessions := sm.ListSessions(userKey)
+	var result []forkPendingSession
+	for _, s := range ccSessions {
+		s.mu.Lock()
+		fork := s.ForkSourceID
+		agentSID := s.AgentSessionID
+		s.mu.Unlock()
+		if fork != "" && agentSID == fork {
+			result = append(result, forkPendingSession{
+				shortID: s.ID,
+				name:    s.Name,
+				created: s.CreatedAt,
+			})
+		}
+	}
+	return result
+}
+
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
 // session manager. This prevents external CLI sessions in the same work_dir from
 // appearing in /list, /switch, /delete, etc. If the session manager has no tracked
@@ -5275,7 +5305,8 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions)
-		if len(agentSessions) == 0 {
+		forks := forkPendingSessions(sessions, msg.SessionKey)
+		if len(agentSessions) == 0 && len(forks) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
 		}
@@ -5345,6 +5376,16 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 		}
+		// Append fork-pending sessions (forks that haven't been activated yet)
+		for _, fk := range forks {
+			dn := "📌 " + fk.name
+			if fk.name == "" {
+				dn = e.i18n.T(MsgForkPending)
+			}
+			dn += e.i18n.Tf(MsgForkPendingSuffix, e.i18n.T(MsgForkPending))
+			sb.WriteString(fmt.Sprintf("◇ **%s** %s · 0 msgs · %s\n",
+				fk.shortID, dn, fk.created.Format("01-02 15:04")))
+		}
 		if totalPages > 1 {
 			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
 		}
@@ -5388,8 +5429,31 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
 
 	matched := e.matchSession(agentSessions, sessions, query)
+
+	// If no agent session match, try matching a cc-connect session by shortID or name.
+	// This allows /switch s105 or /switch "测试" to work for fork-pending sessions.
 	if matched == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
+		ccSession, err := sessions.SwitchSession(msg.SessionKey, query)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
+			return
+		}
+		slog.Info("cmdSwitch: switched to cc-connect session", "session_key", msg.SessionKey, "session_id", ccSession.ID)
+		e.cleanupInteractiveState(interactiveKey)
+		session := ccSession
+		session.ClearHistory()
+
+		shortID := session.ID
+		agentSID := session.GetAgentSessionID()
+		displayName := session.Name
+		if displayName == "" {
+			displayName = sessions.GetSessionName(agentSID)
+		}
+		if displayName == "" {
+			displayName = shortID
+		}
+		e.reply(p, msg.ReplyCtx,
+			e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, 0))
 		return
 	}
 
@@ -10453,7 +10517,8 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
-	if len(agentSessions) == 0 {
+	forks := forkPendingSessions(sessions, sessionKey)
+	if len(agentSessions) == 0 && len(forks) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
 
@@ -10523,6 +10588,21 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			fmt.Sprintf("#%d", i+1),
 			btnType,
 			fmt.Sprintf("act:/switch %d", i+1),
+		)
+	}
+
+	// Append fork-pending sessions (forks already computed above)
+	for _, fk := range forks {
+		dn := "📌 " + fk.name
+		if fk.name == "" {
+			dn = e.i18n.T(MsgForkPending)
+		}
+		dn += e.i18n.Tf(MsgForkPendingSuffix, e.i18n.T(MsgForkPending))
+		cb.ListItemBtn(
+			fmt.Sprintf("◇ %s %s · 0 msgs · %s", fk.shortID, dn, fk.created.Format("01-02 15:04")),
+			fk.shortID,
+			"default",
+			fmt.Sprintf("act:/switch %s", fk.shortID),
 		)
 	}
 
@@ -12548,6 +12628,7 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 	}
 
 	// Create new cc-connect session for the fork
+		slog.Info("cmdFork: creating fork session", "forkName", forkName, "agentSID", agentSID)
 	forkSession := sessions.NewSideSession(msg.SessionKey, forkName)
 
 	// Set fork source so StartSession knows to add --fork-session
@@ -12559,8 +12640,8 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 	forkSession.ForkSourceID = agentSID
 	sessions.Save()
 
-
 	shortID := forkSession.ID
+	slog.Info("cmdFork: replying", "forkName", forkName, "shortID", shortID)
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
 }
 

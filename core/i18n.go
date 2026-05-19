@@ -469,6 +469,8 @@ const (
 	MsgForkNotSupported         MsgKey = "fork_not_supported"
 	MsgForkNoSession            MsgKey = "fork_no_session"
 	MsgForkCreated              MsgKey = "fork_created"
+	MsgForkPending              MsgKey = "fork_pending"
+	MsgForkPendingSuffix        MsgKey = "fork_pending_suffix"
 	MsgRollbackNotSupported     MsgKey = "rollback_not_supported"
 	MsgRollbackNoSession        MsgKey = "rollback_no_session"
 	MsgRollbackDone             MsgKey = "rollback_done"
@@ -3073,6 +3075,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🌿 分叉已建立：**%s** (%s)。使用 /switch 切換到分叉會話。",
 		LangJapanese:           "🌿 fork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
 		LangSpanish:            "🌿 Fork creado: **%s** (%s). Usa /switch para empezar a trabajar en él.",
+	},
+	MsgForkPending: {
+		LangEnglish:            "fork pending",
+		LangChinese:            "分叉待激活",
+		LangTraditionalChinese: "分叉待啟動",
+		LangJapanese:           "fork待機中",
+		LangSpanish:            "fork pendiente",
+	},
+	MsgForkPendingSuffix: {
+		LangEnglish:            " ◇ %s",
+		LangChinese:            " ◇ %s",
+		LangTraditionalChinese: " ◇ %s",
+		LangJapanese:           " ◇ %s",
+		LangSpanish:            " ◇ %s",
 	},
 	MsgRollbackNotSupported: {
 		LangEnglish:            "Rollback not supported by this agent.",
