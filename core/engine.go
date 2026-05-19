@@ -2930,16 +2930,6 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
 	isResume := startSessionID != ""
-	// Handle fork: if this session has a fork source, set it on the agent
-	// so StartSession will add --fork-session to the spawn command.
-	if session.ForkSourceID != "" {
-		if forker, ok := agent.(SessionForker); ok {
-			forker.ForkSession(session.ForkSourceID)
-			slog.Info("fork: using --fork-session", "source", session.ForkSourceID, "target_session", sessionKey)
-			session.ForkSourceID = ""
-			sessions.Save()
-		}
-	}
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
@@ -5239,35 +5229,6 @@ func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionMana
 	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
 }
 
-// forkPendingSession describes a cc-connect session that is a fork waiting to
-// be activated (ForkSourceID is set, agentSID still matches source).
-type forkPendingSession struct {
-	shortID string // cc-connect session ID (e.g., "s105")
-	name    string // session display name
-	created time.Time
-}
-
-// forkPendingSessions returns cc-connect sessions that are fork-pending:
-// they have ForkSourceID set and their AgentSessionID still equals ForkSourceID,
-// meaning the fork hasn't been activated yet (no new agentSID assigned).
-func forkPendingSessions(sm *SessionManager, userKey string) []forkPendingSession {
-	ccSessions := sm.ListSessions(userKey)
-	var result []forkPendingSession
-	for _, s := range ccSessions {
-		s.mu.Lock()
-		fork := s.ForkSourceID
-		agentSID := s.AgentSessionID
-		s.mu.Unlock()
-		if fork != "" && agentSID == fork {
-			result = append(result, forkPendingSession{
-				shortID: s.ID,
-				name:    s.Name,
-				created: s.CreatedAt,
-			})
-		}
-	}
-	return result
-}
 
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
 // session manager. This prevents external CLI sessions in the same work_dir from
@@ -5305,8 +5266,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions)
-		forks := forkPendingSessions(sessions, msg.SessionKey)
-		if len(agentSessions) == 0 && len(forks) == 0 {
+		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
 		}
@@ -5375,16 +5335,6 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			}
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
-		}
-		// Append fork-pending sessions (forks that haven't been activated yet)
-		for _, fk := range forks {
-			dn := "📌 " + fk.name
-			if fk.name == "" {
-				dn = e.i18n.T(MsgForkPending)
-			}
-			dn += e.i18n.Tf(MsgForkPendingSuffix, e.i18n.T(MsgForkPending))
-			sb.WriteString(fmt.Sprintf("◇ **%s** %s · 0 msgs · %s\n",
-				fk.shortID, dn, fk.created.Format("01-02 15:04")))
 		}
 		if totalPages > 1 {
 			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
@@ -10517,8 +10467,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
-	forks := forkPendingSessions(sessions, sessionKey)
-	if len(agentSessions) == 0 && len(forks) == 0 {
+	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
 
@@ -10588,21 +10537,6 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			fmt.Sprintf("#%d", i+1),
 			btnType,
 			fmt.Sprintf("act:/switch %d", i+1),
-		)
-	}
-
-	// Append fork-pending sessions (forks already computed above)
-	for _, fk := range forks {
-		dn := "📌 " + fk.name
-		if fk.name == "" {
-			dn = e.i18n.T(MsgForkPending)
-		}
-		dn += e.i18n.Tf(MsgForkPendingSuffix, e.i18n.T(MsgForkPending))
-		cb.ListItemBtn(
-			fmt.Sprintf("◇ %s %s · 0 msgs · %s", fk.shortID, dn, fk.created.Format("01-02 15:04")),
-			fk.shortID,
-			"default",
-			fmt.Sprintf("act:/switch %s", fk.shortID),
 		)
 	}
 
@@ -12613,7 +12547,6 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 	if forkName == "" {
 		forkName = "fork of " + session.GetName()
 		if forkName == "fork of " || forkName == "fork of session" || forkName == "fork of default" {
-			// Try getting title from JSONL
 			if tp, ok2 := agent.(SessionTitleProvider); ok2 {
 				title := tp.GetSessionTitle(agentSID)
 				if title != "" {
@@ -12627,21 +12560,24 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 		}
 	}
 
-	// Create new cc-connect session for the fork
-		slog.Info("cmdFork: creating fork session", "forkName", forkName, "agentSID", agentSID)
+	// Fork: copy JSONL to a new session ID immediately
+	newAgentSID, err := forker.ForkSession(agentSID)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkError), err))
+		return
+	}
+
+	// Create new cc-connect session with the new agent session ID
 	forkSession := sessions.NewSideSession(msg.SessionKey, forkName)
-
-	// Set fork source so StartSession knows to add --fork-session
-	forker.ForkSession(agentSID)
-
-	// Set the fork session's AgentSessionID to the source session temporarily
-	// (it will be updated when the new agent session reports its ID after fork)
-	forkSession.SetAgentSessionID(agentSID, agent.Name())
-	forkSession.ForkSourceID = agentSID
+	forkSession.SetAgentSessionID(newAgentSID, agent.Name())
+	sessions.SetSessionName(newAgentSID, forkName)
 	sessions.Save()
 
+	// Propagate name to JSONL if supported
+	e.propagateSessionName(agent, sessions, newAgentSID, forkName)
+
 	shortID := forkSession.ID
-	slog.Info("cmdFork: replying", "forkName", forkName, "shortID", shortID)
+	slog.Info("cmdFork: fork created", "forkName", forkName, "shortID", shortID, "newAgentSID", newAgentSID)
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
 }
 
@@ -12673,15 +12609,15 @@ func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
 		}
 	}
 
-	// 1. Truncate JSONL (must succeed before we stop the agent)
+	// 1. Stop current agent session FIRST (so it stops writing to JSONL)
+	e.cleanupInteractiveState(interactiveKey)
+
+	// 2. Truncate JSONL (agent is now stopped, safe to modify)
 	remaining, err := forker.TruncateSessionHistory(agentSID, turns)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgRollbackError, err))
 		return
 	}
-
-	// 2. Stop current agent session
-	e.cleanupInteractiveState(interactiveKey)
 
 	// 3. Trim local History mirror to match
 	history := session.GetHistory(0)

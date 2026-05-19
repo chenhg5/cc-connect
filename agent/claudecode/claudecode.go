@@ -3,8 +3,10 @@ package claudecode
 import (
 	"bufio"
 	"context"
+	cryptoRand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -55,7 +57,6 @@ type Agent struct {
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
 	platformPrompt string              // platform-specific formatting instructions
-	forkSource     string              // source agent session ID for next fork call (cleared after use)
 
 	// spawnOpts controls OS-user isolation via run_as_user. Zero value
 	// means legacy spawn as the supervisor user. See core/runas.go.
@@ -420,8 +421,6 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	workDir := a.workDir
 	mode := a.mode
 	extraEnv := a.runtimeEnvLocked()
-	forkSource := a.forkSource
-	a.forkSource = "" // clear after use
 
 	activeIdx := a.activeIdx
 	var activeProviderName string
@@ -444,7 +443,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, forkSource)
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -761,19 +760,44 @@ func (a *Agent) GetSessionTitle(sessionID string) string {
 	return aiTitle
 }
 
-// ForkSession marks the agent to use --fork-session on the next StartSession call.
-// The sessionID passed to StartSession should be the source session's ID;
-// Claude Code will create a new session ID automatically and report it via events.
+// ForkSession copies the source session's JSONL to a new UUID-based file,
+// returning the new session ID immediately. No "activation" step needed.
 func (a *Agent) ForkSession(sourceSessionID string) (string, error) {
 	if sourceSessionID == "" {
 		return "", fmt.Errorf("claudecode: source session ID required for fork")
 	}
-	a.mu.Lock()
-	a.forkSource = sourceSessionID
-	a.mu.Unlock()
-	// Return the source ID — it will be used as --resume <sourceID> --fork-session.
-	// The actual new session ID is reported by the agent after startup.
-	return sourceSessionID, nil
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("claudecode: home dir: %w", err)
+	}
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return "", fmt.Errorf("claudecode: work dir: %w", err)
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return "", fmt.Errorf("claudecode: project directory not found for fork")
+	}
+	srcPath := filepath.Join(projectDir, sourceSessionID+".jsonl")
+	if _, err := os.Stat(srcPath); err != nil {
+		return "", fmt.Errorf("claudecode: source JSONL not found: %w", err)
+	}
+
+	newID := generateUUID()
+	dstPath := filepath.Join(projectDir, newID+".jsonl")
+
+	// Copy the JSONL file. Use os.Rename on a temp copy for atomicity.
+	tmpPath := dstPath + ".tmp"
+	if err := copyFile(srcPath, tmpPath); err != nil {
+		return "", fmt.Errorf("claudecode: copy JSONL: %w", err)
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		os.Remove(tmpPath) // cleanup
+		return "", fmt.Errorf("claudecode: rename JSONL: %w", err)
+	}
+
+	slog.Info("claudecode: forked session", "source", sourceSessionID, "new", newID)
+	return newID, nil
 }
 
 // ReadSessionTurnCount counts user/assistant turn pairs in the JSONL file.
@@ -1668,4 +1692,33 @@ func findProjectDir(homeDir, absWorkDir string) string {
 	}
 
 	return ""
+}
+
+// generateUUID produces a v4-random UUID string (xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx).
+func generateUUID() string {
+	var buf [16]byte
+	_, _ = cryptoRand.Read(buf[:])
+	buf[6] = (buf[6] & 0x0f) | 0x40 // version 4
+	buf[8] = (buf[8] & 0x3f) | 0x80 // variant 2
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }

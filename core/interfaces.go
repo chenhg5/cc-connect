@@ -483,8 +483,8 @@ type SessionTitleProvider interface {
 // SessionForker is an optional interface for agents that support forking
 // and rolling back conversations by manipulating their session history.
 type SessionForker interface {
-	// ForkSession creates a fork of the source session. The agent handles
-	// copying history to a new session file. Returns the new session ID.
+	// ForkSession copies the source session's history to a new session ID,
+	// returning the new ID immediately. No activation step required.
 	ForkSession(sourceSessionID string) (newSessionID string, err error)
 	// TruncateSessionHistory removes the last N turns from the session's
 	// persistent history. Returns the remaining turn count after truncation.
