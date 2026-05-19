@@ -7298,6 +7298,8 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
+				{command: "/fork", action: "cmd:/fork"},
+				{command: "/rollback", action: "cmd:/rollback"},
 				{command: "/history", action: "nav:/history"},
 				{command: "/delete", action: "cmd:/delete"},
 				{command: "/name", action: "cmd:/name"},
