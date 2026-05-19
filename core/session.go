@@ -345,6 +345,11 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 		s.mu.Unlock()
 		if aid == agentSID {
 			sm.activeSession[userKey] = s.ID
+			// Touch UpdatedAt so the idle-reset check doesn't fire again
+			// immediately after a manual /switch back to this session.
+			s.mu.Lock()
+			s.UpdatedAt = time.Now()
+			s.mu.Unlock()
 			sm.saveLocked()
 			return s
 		}

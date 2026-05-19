@@ -777,3 +777,8 @@ The following additional features are available:
 - **WeChat Work can't send messages** — Ensure your outbound IP is in the Trusted IP whitelist. If using a proxy, check the proxy is reachable.
 - **LINE/WeChat Work can't receive messages** — Ensure your webhook URL is publicly accessible (ngrok/cloudflared running).
 - **macOS binary won't open** — Run `xattr -d com.apple.quarantine cc-connect` to remove quarantine flag.
+- **`spawn ... @cursor/sdk-darwin-arm64/bin/rg ENOENT`** — The `cursor_sdk` sidecar's npm dependencies are missing. Run:
+  ```bash
+  npm install --prefix /path/to/cc-connect/agent/cursorsdk/sidecar
+  ```
+  This happens after a fresh `git clone` or `git submodule update` because `node_modules/` is not committed. If you use this project's `config/cc-connect/run.sh`, it detects and installs automatically on next startup.
