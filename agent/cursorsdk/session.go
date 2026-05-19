@@ -234,6 +234,7 @@ func (s *session) forward(ch <-chan sidecarMessage) {
 }
 
 func (s *session) emit(evt core.Event) {
+	defer func() { recover() }() //nolint:errcheck // guard against send on closed channel (race with Close)
 	select {
 	case s.events <- evt:
 	default:
