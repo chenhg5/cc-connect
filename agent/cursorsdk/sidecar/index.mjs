@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import readline from "node:readline";
 import { stdin as input, stdout as output, stderr } from "node:process";
+import crypto from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 
 let sdkPromise;
 
@@ -61,6 +64,12 @@ function modelOption(model) {
   return model ? { id: model } : { id: "auto" };
 }
 
+function sessionStateRoot(sessionKey) {
+  if (!sessionKey) return undefined;
+  const hash = crypto.createHash("sha256").update(sessionKey).digest("hex").slice(0, 24);
+  return path.join(os.homedir(), ".cc-connect", "agent-store", hash);
+}
+
 function buildOptions(req) {
   const opts = {
     model: modelOption(req.model),
@@ -70,6 +79,10 @@ function buildOptions(req) {
     opts.apiKey = req.apiKey;
   } else if (process.env.CURSOR_API_KEY) {
     opts.apiKey = process.env.CURSOR_API_KEY;
+  }
+  const stateRoot = sessionStateRoot(req.sessionKey);
+  if (stateRoot) {
+    opts.platform = { stateRoot };
   }
   return opts;
 }

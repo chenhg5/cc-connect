@@ -213,7 +213,8 @@ func (a *Agent) StartSessionWithEnv(ctx context.Context, sessionID string, env [
 	if err != nil {
 		return nil, err
 	}
-	return newSession(client, workDir, model, mode, apiKey, sessionID, timeout, idleTTL), nil
+	sessionKey := sessionKeyFromEnv(env)
+	return newSession(client, workDir, sessionKey, model, mode, apiKey, sessionID, timeout, idleTTL), nil
 }
 
 func sidecarPoolKey(env []string, sessionID string) string {
@@ -229,6 +230,15 @@ func sidecarPoolKey(env []string, sessionID string) string {
 		return "agent:" + shortHash(sessionID)
 	}
 	return "default"
+}
+
+func sessionKeyFromEnv(env []string) string {
+	for _, kv := range env {
+		if key, value, ok := strings.Cut(kv, "="); ok && key == "CC_SESSION_KEY" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func userPoolKeyFromSessionKey(sessionKey string) string {
