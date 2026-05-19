@@ -24,6 +24,7 @@ const maxCursorSDKImageDimension = 768
 type session struct {
 	client      *sidecarClient
 	workDir     string
+	sessionKey  string
 	model       string
 	mode        string
 	apiKey      string
@@ -37,10 +38,11 @@ type session struct {
 	sessionID atomic.Value // string
 }
 
-func newSession(client *sidecarClient, workDir, model, mode, apiKey, sessionID string, timeout, idleTTL time.Duration) *session {
+func newSession(client *sidecarClient, workDir, sessionKey, model, mode, apiKey, sessionID string, timeout, idleTTL time.Duration) *session {
 	s := &session{
 		client:      client,
 		workDir:     workDir,
+		sessionKey:  sessionKey,
 		model:       model,
 		mode:        mode,
 		apiKey:      apiKey,
@@ -74,12 +76,13 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 	defer s.sendMu.Unlock()
 
 	req := map[string]any{
-		"op":        "send",
-		"cwd":       s.workDir,
-		"model":     s.model,
-		"mode":      s.mode,
-		"prompt":    prompt,
-		"sessionId": s.CurrentSessionID(),
+		"op":         "send",
+		"cwd":        s.workDir,
+		"sessionKey": s.sessionKey,
+		"model":      s.model,
+		"mode":       s.mode,
+		"prompt":     prompt,
+		"sessionId":  s.CurrentSessionID(),
 	}
 	if s.apiKey != "" {
 		req["apiKey"] = s.apiKey
