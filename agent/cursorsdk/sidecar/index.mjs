@@ -261,10 +261,53 @@ async function formatRunFailedError(run, result, streamDiagnostics) {
   return lines.join("\n");
 }
 
+async function doSend(req, agent, agentID) {
+  const prompt = req.prompt || "";
+  const sendOptions = req.mode === "force" ? { local: { force: true } } : undefined;
+  const run = await agent.send(prompt, sendOptions);
+  if (run && run.id) {
+    write({ id: req.id, event: "run", runId: run.id, sessionId: agentID });
+  }
+
+  putSession(agentID || req.id, { agent, activeRun: run, idleTtlMs: 0 });
+
+  let streamed = "";
+  const streamDiagnostics = [];
+  if (run && run.stream) {
+    for await (const event of run.stream()) {
+      collectStreamDiagnostics(event, streamDiagnostics);
+      if (event && event.type === "assistant") {
+        const text = extractTextFromAssistant(event);
+        if (text) {
+          streamed += text;
+          write({ id: req.id, event: "text", text, sessionId: agentID });
+        }
+        continue;
+      }
+      const tool = extractToolEvent(event);
+      if (tool) {
+        write({
+          id: req.id,
+          event: "tool",
+          toolName: tool.name,
+          toolInput: tool.input,
+          sessionId: agentID,
+        });
+      }
+    }
+  }
+
+  const result = run && run.wait ? await run.wait() : undefined;
+  return { run, result, streamDiagnostics, streamed };
+}
+
+function isSessionExpiredError(streamDiagnostics) {
+  return streamDiagnostics.some((d) => d.startsWith("sdk_status ERROR") || d.startsWith("sdk_status EXPIRED"));
+}
+
 async function handleSend(req) {
   let agent;
   let agentID = "";
-  let run;
   activeRequestID = req.id || "";
   try {
     agent = await createOrResume(req);
@@ -274,42 +317,23 @@ async function handleSend(req) {
       write({ id: req.id, event: "session", sessionId: agentID });
     }
 
-    const prompt = req.prompt || "";
-    const sendOptions = req.mode === "force" ? { local: { force: true } } : undefined;
-    run = await agent.send(prompt, sendOptions);
-    if (run && run.id) {
-      write({ id: req.id, event: "run", runId: run.id, sessionId: agentID });
-    }
+    let { run, result, streamDiagnostics, streamed } = await doSend(req, agent, agentID);
 
-    putSession(agentID || req.id, { agent, activeRun: run, idleTtlMs: 0 });
-
-    let streamed = "";
-    const streamDiagnostics = [];
-    if (run && run.stream) {
-      for await (const event of run.stream()) {
-        collectStreamDiagnostics(event, streamDiagnostics);
-        if (event && event.type === "assistant") {
-          const text = extractTextFromAssistant(event);
-          if (text) {
-            streamed += text;
-            write({ id: req.id, event: "text", text, sessionId: agentID });
-          }
-          continue;
-        }
-        const tool = extractToolEvent(event);
-        if (tool) {
-          write({
-            id: req.id,
-            event: "tool",
-            toolName: tool.name,
-            toolInput: tool.input,
-            sessionId: agentID,
-          });
-        }
+    // Session expired or invalid: retry once with a fresh agent
+    if (result && result.status === "error" && isSessionExpiredError(streamDiagnostics)) {
+      stderr.write(`[cursor-sdk-sidecar] session expired (${streamDiagnostics.join("|")}), retrying with fresh agent\n`);
+      if (agentID) sessions.delete(agentID);
+      const { Agent } = await loadSDK();
+      agent = await Agent.create(buildOptions(req));
+      const newID = getAgentID(agent, "");
+      agentID = newID || agentID;
+      if (agentID) {
+        putSession(agentID, { agent, idleTtlMs: 0 });
+        write({ id: req.id, event: "session", sessionId: agentID });
       }
+      ({ run, result, streamDiagnostics, streamed } = await doSend(req, agent, agentID));
     }
 
-    const result = run && run.wait ? await run.wait() : undefined;
     if (result && result.status === "error") {
       const detail = await formatRunFailedError(run, result, streamDiagnostics);
       stderr.write(`[cursor-sdk-sidecar] ${detail.replace(/\n/g, " | ")}\n`);
