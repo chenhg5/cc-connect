@@ -1139,21 +1139,22 @@ func TestHandleWorkspaceCommand_InitDefaultsToChatScope(t *testing.T) {
 	}
 }
 
-// cronChannelKeyMock is a stub platform that implements the new
-// CronChannelKeyResolver interface so we can verify ExecuteCronJob asks the
+// threadKeyMock is a stub platform that implements the new
+// SessionChannelKeyResolver interface so we can verify the engine asks the
 // platform for a thread-aware channel key (instead of falling back to the
-// thread-blind extractChannelID derivation).
-type cronChannelKeyMock struct {
+// thread-blind extractChannelID derivation) — both for cron and for any other
+// code path that resolves bindings from a sessionKey.
+type threadKeyMock struct {
 	stubPlatformEngine
 	threadKey      string
 	resolverCalled bool
 }
 
-func (p *cronChannelKeyMock) ReconstructReplyCtx(_ string) (any, error) {
+func (p *threadKeyMock) ReconstructReplyCtx(_ string) (any, error) {
 	return "rctx", nil
 }
 
-func (p *cronChannelKeyMock) ChannelKeyForCronSession(_ string) string {
+func (p *threadKeyMock) ChannelKeyForSession(_ string) string {
 	p.resolverCalled = true
 	return p.threadKey
 }
@@ -1177,7 +1178,7 @@ func (a *namedResultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, 
 func (a *namedResultAgent) Stop() error { return nil }
 
 // TestExecuteCronJob_UsesPlatformThreadAwareChannelKey verifies that when a
-// platform implements CronChannelKeyResolver, ExecuteCronJob uses the
+// platform implements SessionChannelKeyResolver, ExecuteCronJob uses the
 // platform-supplied (thread-aware) channel key for workspace lookup. Without
 // this, a thread-scoped binding (created by `/workspace bind -t`) is invisible
 // to the cron path because extractChannelID drops the thread suffix from the
@@ -1219,7 +1220,7 @@ func TestExecuteCronJob_UsesPlatformThreadAwareChannelKey(t *testing.T) {
 	e.workspaceBindings.Bind("project:test", bindingKey, "tradingagents",
 		normalizeWorkspacePath(wsDir))
 
-	p := &cronChannelKeyMock{
+	p := &threadKeyMock{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		threadKey:          threadOnlyKey,
 	}
@@ -1239,10 +1240,63 @@ func TestExecuteCronJob_UsesPlatformThreadAwareChannelKey(t *testing.T) {
 	}
 
 	if !p.resolverCalled {
-		t.Fatal("expected platform.ChannelKeyForCronSession to be called")
+		t.Fatal("expected platform.ChannelKeyForSession to be called")
 	}
 	if ws := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); ws == nil {
 		t.Fatalf("expected workspace pool entry for %q after cron resolved its thread-scoped binding", wsDir)
+	}
+}
+
+// TestSessionContextForKey_UsesPlatformThreadAwareChannelKey verifies that
+// when a platform implements SessionChannelKeyResolver, sessionContextForKey
+// (used by /list cards, /switch, /current, and many other lookups) honors the
+// platform-supplied thread-aware channel key. Without this, the engine falls
+// back to extractChannelID — which drops the thread suffix — and would route
+// to the chat-scope binding instead of the thread-scope one.
+func TestSessionContextForKey_UsesPlatformThreadAwareChannelKey(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "thread-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentName := "session-context-test-agent"
+	RegisterAgent(agentName, func(_ map[string]any) (Agent, error) {
+		return &namedResultAgent{name: agentName, session: newResultAgentSession("done")}, nil
+	})
+
+	tmpDir := t.TempDir()
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	e := NewEngine("test", &namedResultAgent{name: agentName}, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	defer e.cancel()
+
+	chatID := "oc_AAA"
+	threadID := "om_BBB"
+	threadOnlyKey := chatID + ":" + threadID
+	// Bind workspace at thread scope only.
+	bindingKey := workspaceChannelKey("feishu", threadOnlyKey)
+	e.workspaceBindings.Bind("project:test", bindingKey, "thread-ws",
+		normalizeWorkspacePath(wsDir))
+
+	p := &threadKeyMock{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		threadKey:          threadOnlyKey,
+	}
+	e.AddPlatform(p)
+
+	sessionKey := "feishu:" + chatID + ":root:" + threadID
+	agent, _ := e.sessionContextForKey(sessionKey)
+
+	if !p.resolverCalled {
+		t.Fatal("expected platform.ChannelKeyForSession to be called by sessionContextForKey")
+	}
+	if agent == e.agent {
+		t.Fatal("expected workspace-bound agent, got global agent — thread-scope binding was missed")
+	}
+	if ws := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); ws == nil {
+		t.Fatalf("expected workspace pool entry for %q, got nil", wsDir)
 	}
 }
 

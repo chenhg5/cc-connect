@@ -1125,6 +1125,8 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
+	// Expand `/skill ...` prompts to the registered skill's invocation
+	// template (added upstream as the cron skill-expand feature).
 	content := job.Prompt
 	if strings.HasPrefix(content, "/") {
 		parts := strings.Fields(content)
@@ -1136,9 +1138,19 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
+	// Set ChannelKey to the platform-supplied thread-aware key so downstream
+	// code (e.g. buildSenderPrompt's [cc-connect chat_id=...] prompt tag)
+	// preserves thread/topic information instead of falling back to
+	// extractChannelID, which would only show the chat ID.
+	var msgChannelKey string
+	if resolver, ok := targetPlatform.(SessionChannelKeyResolver); ok {
+		msgChannelKey = resolver.ChannelKeyForSession(sessionKey)
+	}
+
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
+		ChannelKey:   msgChannelKey,
 		UserID:       "cron",
 		UserName:     "cron",
 		Content:      content,
@@ -1157,8 +1169,8 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		// scheduled inside a topic can find a thread-scoped binding. Fall back
 		// to extractChannelID (chat-only) for platforms with no thread concept.
 		channelID := ""
-		if resolver, ok := targetPlatform.(CronChannelKeyResolver); ok {
-			channelID = resolver.ChannelKeyForCronSession(sessionKey)
+		if resolver, ok := targetPlatform.(SessionChannelKeyResolver); ok {
+			channelID = resolver.ChannelKeyForSession(sessionKey)
 		}
 		if channelID == "" {
 			channelID = extractChannelID(sessionKey)
@@ -13328,6 +13340,35 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 	return workspaceChannelKey(extractPlatformName(sessionKey), extractChannelID(sessionKey))
 }
 
+// workspaceChannelKeyForSessionKey returns the thread-aware workspace binding
+// channel key for a sessionKey. It first asks the owning platform (matched by
+// the session_key prefix) via the optional SessionChannelKeyResolver
+// interface, so platforms that encode thread/topic information into their
+// session keys (Feishu thread_isolation, Discord forum threads, etc.) can
+// preserve that scope. If no platform responds, falls back to
+// extractWorkspaceChannelKey, which is thread-blind.
+//
+// This is used by callers that have a session_key but no live Message —
+// ExecuteCronJob, card renderers like renderListCard, etc.
+func (e *Engine) workspaceChannelKeyForSessionKey(sessionKey string) string {
+	platformName := extractPlatformName(sessionKey)
+	if platformName == "" {
+		return extractWorkspaceChannelKey(sessionKey)
+	}
+	for _, p := range e.platforms {
+		if p.Name() != platformName {
+			continue
+		}
+		if resolver, ok := p.(SessionChannelKeyResolver); ok {
+			if id := resolver.ChannelKeyForSession(sessionKey); id != "" {
+				return workspaceChannelKey(platformName, id)
+			}
+		}
+		break
+	}
+	return extractWorkspaceChannelKey(sessionKey)
+}
+
 // effectiveChannelID returns the channel identifier from a Message.
 // It prefers the platform-provided ChannelKey (e.g. "chatID:threadID" for forum topics)
 // and falls back to parsing the session key.
@@ -13416,7 +13457,11 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	// Use the thread-aware key when the owning platform supports it, so
+	// thread-scoped bindings created by `/workspace bind -t` are honored by
+	// card renderers, /switch, /list, /current, and other lookups that only
+	// have the sessionKey.
+	if channelKey := e.workspaceChannelKeyForSessionKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 				return wsAgent, wsSessions
@@ -13499,7 +13544,7 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if _, ok := e.interactiveStates[sessionKey]; ok {
 		return sessionKey
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	if channelKey := e.workspaceChannelKeyForSessionKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 		}

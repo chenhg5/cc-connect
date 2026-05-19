@@ -3117,11 +3117,92 @@ func (p *Platform) channelKeyForBinding(chatID, sessionKey string) string {
 	return chatID
 }
 
-// ChannelKeyForCronSession satisfies core.CronChannelKeyResolver. It maps a
-// cron session_key back to the channel key used for workspace bindings,
-// preserving thread/topic information when thread_isolation is on. Without
-// this, the engine would fall back to extractChannelID which drops the
-// "root:rootID" suffix, making thread-scoped bindings invisible to cron.
+// ResolveCronReplyTarget satisfies core.CronReplyTargetResolver. For groups
+// in topic mode (thread_isolation=true), each cron run posts a "📌 <title>"
+// anchor as a new top-level message — which becomes a new topic in the group
+// — and returns a reply context targeting that topic. Subsequent cron
+// messages (the engine's "⏰ <desc>" start notice + the agent's streamed
+// output and final reply) all thread inside that topic instead of each one
+// spawning its own.
+//
+// Returns ErrNotSupported when thread_isolation is off, so the engine falls
+// back to ReconstructReplyCtx and messages are sent directly without anchor.
+func (p *Platform) ResolveCronReplyTarget(sessionKey, title string) (string, any, error) {
+	if !p.threadIsolation {
+		return "", nil, core.ErrNotSupported
+	}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != p.platformName || parts[1] == "" {
+		return "", nil, core.ErrNotSupported
+	}
+	chatID := parts[1]
+
+	anchor := strings.TrimSpace(title)
+	if anchor == "" {
+		anchor = "cron"
+	}
+	anchor = "📌 " + anchor
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msgID, err := p.createTopLevelTextMessage(ctx, chatID, anchor)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: post cron topic anchor: %w", p.tag(), err)
+	}
+
+	newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.platformName, chatID, msgID)
+	return newSessionKey, replyContext{
+		chatID:     chatID,
+		messageID:  msgID,
+		sessionKey: newSessionKey,
+	}, nil
+}
+
+// createTopLevelTextMessage posts a plain-text message at top level (no
+// reply parent) and returns the new message's ID. Used by
+// ResolveCronReplyTarget to plant the topic anchor.
+func (p *Platform) createTopLevelTextMessage(ctx context.Context, chatID, content string) (string, error) {
+	body, err := json.Marshal(map[string]string{"text": content})
+	if err != nil {
+		return "", fmt.Errorf("%s: marshal anchor text: %w", p.tag(), err)
+	}
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeText).
+			Content(string(body)).
+			Build()).
+		Build()
+	var resp *larkim.CreateMessageResp
+	if err := p.withTransientRetry(ctx, "cron anchor", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "cron anchor", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: cron anchor api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: cron anchor failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		return "", err
+	}
+	if resp == nil || resp.Data == nil || resp.Data.MessageId == nil || *resp.Data.MessageId == "" {
+		return "", fmt.Errorf("%s: cron anchor: no message ID returned", p.tag())
+	}
+	return *resp.Data.MessageId, nil
+}
+
+// ChannelKeyForSession satisfies core.SessionChannelKeyResolver. It maps a
+// session_key back to the channel key used for workspace bindings, preserving
+// thread/topic information when thread_isolation is on. Without this, the
+// engine would fall back to extractChannelID which drops the "root:rootID"
+// suffix, making thread-scoped bindings invisible to cron, card renderers,
+// and other lookups that do not have access to the originating Message.
 //
 // Session-key shapes handled:
 //   - "feishu:chatID:userID"        → "chatID"          (DM / non-thread)
@@ -3130,7 +3211,7 @@ func (p *Platform) channelKeyForBinding(chatID, sessionKey string) string {
 //
 // Returns an empty string for non-feishu prefixes or malformed keys; the engine
 // then falls back to extractChannelID.
-func (p *Platform) ChannelKeyForCronSession(sessionKey string) string {
+func (p *Platform) ChannelKeyForSession(sessionKey string) string {
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != p.platformName {
 		return ""

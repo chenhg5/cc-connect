@@ -42,17 +42,21 @@ type CronReplyTargetResolver interface {
 	ResolveCronReplyTarget(sessionKey string, title string) (resolvedSessionKey string, replyCtx any, err error)
 }
 
-// CronChannelKeyResolver is an optional interface for platforms that encode
-// thread/topic information into their session keys. ExecuteCronJob calls this
-// to derive the workspace-binding channel ID (e.g. "chat:thread") when looking
-// up a per-thread workspace binding, instead of falling back to the
-// thread-blind extractChannelID. Platforms that have no thread concept can
-// omit this interface; the engine will use extractChannelID by default.
+// SessionChannelKeyResolver is an optional interface for platforms that encode
+// thread/topic information into their session keys. The engine calls this to
+// derive the workspace-binding channel ID (e.g. "chat:thread") for any code
+// path that has a sessionKey but no live Message — cron triggers, card
+// renderers (/list, /switch, /current cards), background lookups, etc.
 //
+// Without this interface, the engine falls back to extractChannelID, which
+// only returns the chat ID and drops thread/topic information — making any
+// thread-scoped workspace binding invisible to those code paths.
+//
+// Platforms that have no thread concept can omit this interface.
 // Returning an empty string is equivalent to "no thread info" and falls back
 // to extractChannelID.
-type CronChannelKeyResolver interface {
-	ChannelKeyForCronSession(sessionKey string) string
+type SessionChannelKeyResolver interface {
+	ChannelKeyForSession(sessionKey string) string
 }
 
 // SessionEnvInjector is an optional interface for agents that accept

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -745,11 +746,50 @@ func TestChannelKeyForBinding(t *testing.T) {
 	}
 }
 
-// TestChannelKeyForCronSession verifies the CronChannelKeyResolver
-// implementation. ExecuteCronJob calls this to discover thread-scoped
-// workspace bindings; without it the engine would fall back to extractChannelID
-// which strips the "root:rootID" suffix and misses any thread-scoped binding.
-func TestChannelKeyForCronSession(t *testing.T) {
+// TestResolveCronReplyTarget_GatedByThreadIsolation verifies the early-return
+// gates of the CronReplyTargetResolver implementation. When thread_isolation
+// is off, the resolver must return ErrNotSupported so the engine falls back
+// to ReconstructReplyCtx (no topic anchor posted). When the session_key is
+// malformed or platform prefix doesn't match, also returns ErrNotSupported.
+// The on-success path that actually posts to Feishu API is exercised by
+// real-world cron runs, not unit tests.
+func TestResolveCronReplyTarget_GatedByThreadIsolation(t *testing.T) {
+	tests := []struct {
+		name            string
+		platformName    string
+		threadIsolation bool
+		sessionKey      string
+		wantErr         error
+	}{
+		{"isolation off rejects", "feishu", false, "feishu:oc_chat:ou_user", core.ErrNotSupported},
+		{"foreign prefix rejects", "feishu", true, "slack:C1:U1", core.ErrNotSupported},
+		{"empty key rejects", "feishu", true, "", core.ErrNotSupported},
+		{"single segment rejects", "feishu", true, "feishu", core.ErrNotSupported},
+		{"empty chatID rejects", "feishu", true, "feishu::ou_user", core.ErrNotSupported},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{platformName: tt.platformName, threadIsolation: tt.threadIsolation}
+			sk, rctx, err := p.ResolveCronReplyTarget(tt.sessionKey, "test title")
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if sk != "" {
+				t.Errorf("sessionKey = %q, want empty on rejection", sk)
+			}
+			if rctx != nil {
+				t.Errorf("replyCtx = %#v, want nil on rejection", rctx)
+			}
+		})
+	}
+}
+
+// TestChannelKeyForSession verifies the SessionChannelKeyResolver
+// implementation. Cron / card renderers / background lookups call this to
+// discover thread-scoped workspace bindings; without it the engine would fall
+// back to extractChannelID which strips the "root:rootID" suffix and misses
+// any thread-scoped binding.
+func TestChannelKeyForSession(t *testing.T) {
 	tests := []struct {
 		name            string
 		platformName    string
@@ -831,9 +871,9 @@ func TestChannelKeyForCronSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &Platform{platformName: tt.platformName, threadIsolation: tt.threadIsolation}
-			got := p.ChannelKeyForCronSession(tt.sessionKey)
+			got := p.ChannelKeyForSession(tt.sessionKey)
 			if got != tt.want {
-				t.Errorf("ChannelKeyForCronSession(%q) = %q, want %q", tt.sessionKey, got, tt.want)
+				t.Errorf("ChannelKeyForSession(%q) = %q, want %q", tt.sessionKey, got, tt.want)
 			}
 		})
 	}
