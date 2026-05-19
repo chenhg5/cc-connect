@@ -2929,6 +2929,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
 	isResume := startSessionID != ""
+	// Handle fork: if this session has a fork source, set it on the agent
+	// so StartSession will add --fork-session to the spawn command.
+	if session.ForkSourceID != "" {
+		if forker, ok := agent.(SessionForker); ok {
+			forker.ForkSession(session.ForkSourceID)
+			slog.Info("fork: using --fork-session", "source", session.ForkSourceID, "target_session", sessionKey)
+		}
+	}
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
@@ -2969,7 +2977,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
 			pendingName := session.GetName()
 			if pendingName != "" && pendingName != "session" && pendingName != "default" {
-				sessions.SetSessionName(newID, pendingName)
+				e.propagateSessionName(agent, sessions, newID, pendingName)
 			}
 			sessions.Save()
 		}
@@ -3945,7 +3953,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
 					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						sessions.SetSessionName(event.SessionID, pendingName)
+						e.propagateSessionName(e.agent, sessions, event.SessionID, pendingName)
 					}
 					sessions.Save()
 				}
@@ -4040,7 +4048,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
 						pendingName := session.GetName()
 						if pendingName != "" && pendingName != "session" && pendingName != "default" {
-							sessions.SetSessionName(currentID, pendingName)
+							e.propagateSessionName(e.agent, sessions, currentID, pendingName)
 						}
 					}
 					sessions.Save()
@@ -4656,6 +4664,8 @@ var builtinCommands = []struct {
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
+	{[]string{"fork"}, "fork"},
+	{[]string{"rollback", "undo"}, "rollback"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
 	{[]string{"usage", "quota"}, "usage"},
@@ -4827,6 +4837,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdSwitch(p, msg, args)
 	case "name":
 		e.cmdName(p, msg, args)
+	case "fork":
+		e.cmdFork(p, msg, args)
+	case "rollback":
+		e.cmdRollback(p, msg, args)
 	case "current":
 		e.cmdCurrent(p, msg)
 	case "status":
@@ -5301,6 +5315,20 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			displayName := sessions.GetSessionName(s.ID)
 			if displayName != "" {
 				displayName = "📌 " + displayName
+			} else if tp, ok := agent.(SessionTitleProvider); ok {
+				title := tp.GetSessionTitle(s.ID)
+				if title != "" {
+					displayName = title
+				} else {
+					displayName = strings.ReplaceAll(s.Summary, "\n", " ")
+					displayName = strings.Join(strings.Fields(displayName), " ")
+					if displayName == "" {
+						displayName = "(empty)"
+					}
+					if len([]rune(displayName)) > 40 {
+						displayName = string([]rune(displayName)[:40]) + "…"
+					}
+				}
 			} else {
 				displayName = strings.ReplaceAll(s.Summary, "\n", " ")
 				displayName = strings.Join(strings.Fields(displayName), " ")
@@ -6433,6 +6461,18 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
+// propagateSessionName writes the session name to both cc-connect's internal
+// store and the agent's native session storage (if supported).
+func (e *Engine) propagateSessionName(agent Agent, sessions *SessionManager, agentSessionID, name string) {
+	sessions.SetSessionName(agentSessionID, name)
+	if nw, ok := agent.(SessionNameWriter); ok {
+		if err := nw.WriteSessionName(agentSessionID, name); err != nil {
+			slog.Warn("engine: failed to write session name to agent storage",
+				"agent_session_id", agentSessionID, "error", err)
+		}
+	}
+}
+
 func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameUsage))
@@ -6484,7 +6524,9 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sessions.SetSessionName(targetID, name)
+	e.propagateSessionName(agent, sessions, targetID, name)
+	sessions.SetSessionNameOnSession(targetID, name)
+	sessions.Save()
 
 	shortID := targetID
 	if len(shortID) > 12 {
@@ -12447,6 +12489,117 @@ func (e *Engine) cmdAliasDel(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAliasDeleted), name))
 }
 
+func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
+	agent, sessions, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	forker, ok := agent.(SessionForker)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgForkNotSupported))
+		return
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	agentSID := session.GetAgentSessionID()
+	if agentSID == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgForkNoSession))
+		return
+	}
+
+	// Parse args: /fork [name]
+	forkName := strings.TrimSpace(strings.Join(args, " "))
+	if forkName == "" {
+		forkName = "fork of " + session.GetName()
+		if forkName == "fork of " || forkName == "fork of session" || forkName == "fork of default" {
+			// Try getting title from JSONL
+			if tp, ok2 := agent.(SessionTitleProvider); ok2 {
+				title := tp.GetSessionTitle(agentSID)
+				if title != "" {
+					forkName = "fork of " + title
+				} else {
+					forkName = "fork"
+				}
+			} else {
+				forkName = "fork"
+			}
+		}
+	}
+
+	// Create new cc-connect session for the fork
+	forkSession := sessions.NewSideSession(msg.SessionKey, forkName)
+
+	// Set fork source so StartSession knows to add --fork-session
+	forker.ForkSession(agentSID)
+
+	// Set the fork session's AgentSessionID to the source session temporarily
+	// (it will be updated when the new agent session reports its ID after fork)
+	forkSession.SetAgentSessionID(agentSID, agent.Name())
+	forkSession.ForkSourceID = agentSID
+	sessions.Save()
+
+	// Propagate name to agent storage
+	e.propagateSessionName(agent, sessions, agentSID, forkName)
+
+	shortID := forkSession.ID
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
+}
+
+func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	forker, ok := agent.(SessionForker)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRollbackNotSupported))
+		return
+	}
+
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	agentSID := session.GetAgentSessionID()
+	if agentSID == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRollbackNoSession))
+		return
+	}
+
+	// Parse args: /rollback [N] (default 1)
+	turns := 1
+	if len(args) > 0 {
+		if n, err2 := strconv.Atoi(args[0]); err2 == nil && n > 0 {
+			turns = n
+		}
+	}
+
+	// 1. Truncate JSONL (must succeed before we stop the agent)
+	remaining, err := forker.TruncateSessionHistory(agentSID, turns)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgRollbackError, err))
+		return
+	}
+
+	// 2. Stop current agent session
+	e.cleanupInteractiveState(interactiveKey)
+
+	// 3. Trim local History mirror to match
+	history := session.GetHistory(0)
+	totalLocal := len(history)
+	keepEntries := remaining * 2 // user + assistant per turn
+	if totalLocal > keepEntries {
+		session.ClearHistory()
+		for i := 0; i < keepEntries && i < totalLocal; i++ {
+			session.AddHistory(history[i].Role, history[i].Content)
+		}
+	}
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRollbackDone), turns, remaining))
+}
+
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -12622,7 +12775,7 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 
 	// Keep local session snapshot aligned with agent-side deletion.
 	sessions.DeleteByAgentSessionID(matched.ID)
-	sessions.SetSessionName(matched.ID, "")
+	e.propagateSessionName(e.agent, sessions, matched.ID, "")
 	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
 }
 
@@ -12825,7 +12978,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		if session.CompareAndSetAgentSessionID(newID, e.agent.Name()) {
 			pendingName := session.GetName()
 			if pendingName != "" && pendingName != "session" && pendingName != "default" {
-				e.sessions.SetSessionName(newID, pendingName)
+				e.propagateSessionName(e.agent, e.sessions, newID, pendingName)
 			}
 			e.sessions.Save()
 		}
@@ -12847,7 +13000,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
 					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						e.sessions.SetSessionName(event.SessionID, pendingName)
+						e.propagateSessionName(e.agent, e.sessions, event.SessionID, pendingName)
 					}
 					e.sessions.Save()
 				}
@@ -12870,7 +13023,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
 					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						e.sessions.SetSessionName(currentID, pendingName)
+						e.propagateSessionName(e.agent, e.sessions, currentID, pendingName)
 					}
 				}
 				e.sessions.Save()

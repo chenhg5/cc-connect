@@ -464,8 +464,33 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+// SessionNameWriter is an optional interface for agents that can write
+// session display names to their native session storage (e.g., Claude Code's
+// JSONL custom-title entries). When cc-connect sets a session name via /name,
+// it also calls WriteSessionName so the name appears in the agent's own UI
+// (CLI sidebar, VSCode extension, etc.).
+type SessionNameWriter interface {
+	WriteSessionName(sessionID, name string) error
+}
+
+// SessionTitleProvider is an optional interface for agents that can read
+// session display titles from their native session storage. Used by /list
+// to show names for sessions not tracked by cc-connect's session_names map.
 type SessionTitleProvider interface {
 	GetSessionTitle(sessionID string) string
+}
+
+// SessionForker is an optional interface for agents that support forking
+// and rolling back conversations by manipulating their session history.
+type SessionForker interface {
+	// ForkSession creates a fork of the source session. The agent handles
+	// copying history to a new session file. Returns the new session ID.
+	ForkSession(sourceSessionID string) (newSessionID string, err error)
+	// TruncateSessionHistory removes the last N turns from the session's
+	// persistent history. Returns the remaining turn count after truncation.
+	TruncateSessionHistory(sessionID string, turns int) (remaining int, err error)
+	// ReadSessionTurnCount returns the total number of user/assistant turn pairs.
+	ReadSessionTurnCount(sessionID string) (int, error)
 }
 
 // WorkDirSwitcher is an optional interface for agents that support runtime

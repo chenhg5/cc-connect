@@ -51,7 +51,7 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, forkSource string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
@@ -77,6 +77,10 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
 		innerArgs = append(innerArgs, "--resume", sessionID)
+	}
+	if forkSource != "" {
+		// Forking from a source session — the agent copies history to a new session.
+		innerArgs = append(innerArgs, "--fork-session")
 	}
 	if len(allowedTools) > 0 {
 		innerArgs = append(innerArgs, "--allowedTools", strings.Join(allowedTools, ","))
