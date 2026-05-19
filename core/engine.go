@@ -2936,6 +2936,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		if forker, ok := agent.(SessionForker); ok {
 			forker.ForkSession(session.ForkSourceID)
 			slog.Info("fork: using --fork-session", "source", session.ForkSourceID, "target_session", sessionKey)
+			session.ForkSourceID = ""
+			sessions.Save()
 		}
 	}
 	startAt := time.Now()
@@ -12552,8 +12554,6 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 	forkSession.ForkSourceID = agentSID
 	sessions.Save()
 
-	// Propagate name to agent storage
-	e.propagateSessionName(agent, sessions, agentSID, forkName)
 
 	shortID := forkSession.ID
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
