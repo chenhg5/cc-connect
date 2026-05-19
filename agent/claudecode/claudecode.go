@@ -533,11 +533,28 @@ func extractStringContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
+	// Try plain string first (older format: "content": "hello")
 	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return ""
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
 	}
-	return s
+	// Try array of content blocks (newer format: "content": [{"type":"text","text":"hello"}])
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	}
+	return ""
 }
 
 func scanSessionMeta(path string) (string, int) {

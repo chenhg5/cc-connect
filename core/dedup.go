@@ -7,6 +7,13 @@ import (
 
 const dedupTTL = 60 * time.Second
 
+// oldMessageGrace is the window before StartTime where messages are still
+// accepted. After a daemon restart, Feishu re-delivers messages queued during
+// the downtime with their original create_time, which may be minutes before
+// StartTime. A 5-minute grace covers typical restart cycles without
+// re-processing truly stale messages from hours ago.
+const oldMessageGrace = 5 * time.Minute
+
 // StartTime is set at process startup and updated when platforms reconnect.
 // Platforms use it to discard messages created before the current process started,
 // preventing replayed/unacknowledged messages from being re-processed after a restart.
@@ -56,9 +63,9 @@ func (d *MessageDedup) IsDuplicate(msgID string) bool {
 	return false
 }
 
-// IsOldMessage returns true if msgTime is before StartTime.
-// A small grace period (2 seconds) is applied to avoid race conditions
-// with messages sent right at startup or reconnect.
+// IsOldMessage returns true if msgTime is before StartTime minus the grace period.
+// The grace period covers messages queued during a daemon restart that get
+// re-delivered with their original (pre-restart) create_time.
 func IsOldMessage(msgTime time.Time) bool {
-	return msgTime.Before(StartTime.Add(-2 * time.Second))
+	return msgTime.Before(StartTime.Add(-oldMessageGrace))
 }
