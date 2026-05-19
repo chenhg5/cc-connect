@@ -21,7 +21,6 @@ type Session struct {
 	AgentSessionID      string         `json:"agent_session_id"`
 	AgentType           string         `json:"agent_type,omitempty"`
 	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
-	ForkSourceID        string         `json:"fork_source_id,omitempty"` // source agent session ID for fork pending sessions
 	History             []HistoryEntry `json:"history"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`

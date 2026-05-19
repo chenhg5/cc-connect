@@ -468,6 +468,7 @@ const (
 	MsgDeleteModeCancel         MsgKey = "delete_mode_cancel"
 	MsgForkNotSupported         MsgKey = "fork_not_supported"
 	MsgForkNoSession            MsgKey = "fork_no_session"
+	MsgForkError               MsgKey = "fork_error"
 	MsgForkCreated              MsgKey = "fork_created"
 	MsgForkPending              MsgKey = "fork_pending"
 	MsgForkPendingSuffix        MsgKey = "fork_pending_suffix"
@@ -3068,6 +3069,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "沒有活躍會話可以分叉，請先傳送訊息。",
 		LangJapanese:           "forkできるアクティブなセッションがありません。先にメッセージを送信してください。",
 		LangSpanish:            "No hay sesión activa para fork. Envía un mensaje primero.",
+	},
+	MsgForkError: {
+		LangEnglish:            "Fork failed: %s",
+		LangChinese:            "分叉失败：%s",
+		LangTraditionalChinese: "分叉失敗：%s",
+		LangJapanese:           "fork失敗：%s",
+		LangSpanish:            "Fork falló: %s",
 	},
 	MsgForkCreated: {
 		LangEnglish:            "🌿 Fork created: **%s** (%s). Use /switch to start working on it.",
