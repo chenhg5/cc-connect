@@ -1287,6 +1287,20 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
 		})
 
+	case "interactive":
+		text := extractInteractiveCardText(content)
+		if text == "" || text == "[interactive card]" {
+			slog.Debug(p.tag()+": interactive card produced no text", "message_id", messageID)
+			return
+		}
+		text = stripMentions(text, mentions, p.botOpenID)
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+		})
+
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}
@@ -2186,6 +2200,37 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
 			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+
+		case "media":
+			var mediaBody struct {
+				FileKey  string `json:"file_key"`
+				ImageKey string `json:"image_key"`
+				FileName string `json:"file_name"`
+				Duration int    `json:"duration"`
+			}
+			if err := json.Unmarshal([]byte(content), &mediaBody); err == nil {
+				vidText := "[video"
+				if mediaBody.FileName != "" {
+					vidText += ": " + mediaBody.FileName
+				}
+				if mediaBody.Duration > 0 {
+					vidText += fmt.Sprintf(", %ds", mediaBody.Duration/1000)
+				}
+				vidText += "]"
+				if mediaBody.ImageKey != "" {
+					if thumbData, thumbMime, err := p.downloadImage(msgID, mediaBody.ImageKey); err == nil {
+						*images = append(*images, core.ImageAttachment{MimeType: thumbMime, Data: thumbData})
+					}
+				}
+				sb.WriteString(fmt.Sprintf("%s[%s] %s: %s\n", indent, ts, senderName, vidText))
+			}
+
+		case "interactive":
+			cardText := extractInteractiveCardText(content)
+			if cardText == "" {
+				cardText = "[interactive card]"
+			}
+			sb.WriteString(fmt.Sprintf("%s[%s] %s: %s\n", indent, ts, senderName, cardText))
 
 		default:
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [%s message]\n", indent, ts, senderName, msgType))
