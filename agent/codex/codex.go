@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -217,6 +219,9 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := readCodexModelCatalog(); len(models) > 0 {
+		return models
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
@@ -303,19 +308,23 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 }
 
 func readCodexCachedModels() []core.ModelOption {
-	codexHome := os.Getenv("CODEX_HOME")
+	codexHome, _ := resolveCodexHome(nil)
 	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		codexHome = filepath.Join(home, ".codex")
+		return nil
 	}
 	path := filepath.Join(codexHome, "models_cache.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
+	return parseCodexModelsJSON(b)
+}
+
+
+// parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
+// or models_cache.json) into a deduplicated, filtered slice of ModelOption.
+// It is shared by readCodexCachedModels and readCodexModelCatalog.
+func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	var payload struct {
 		Models []struct {
 			Slug           string `json:"slug"`
@@ -325,7 +334,7 @@ func readCodexCachedModels() []core.ModelOption {
 			SupportedInAPI bool   `json:"supported_in_api"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(b, &payload); err != nil {
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil
 	}
 
@@ -357,6 +366,62 @@ func readCodexCachedModels() []core.ModelOption {
 	return models
 }
 
+
+// readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
+// model_catalog_json setting, then reads and parses that JSON file.
+// This is the authoritative source of model metadata for Codex CLI,
+// maintained by the Codex distribution itself.
+func readCodexModelCatalog() []core.ModelOption {
+	codexHome, _ := resolveCodexHome(nil)
+	if codexHome == "" {
+		return nil
+	}
+
+	// Parse CODEX_HOME/config.toml to find model_catalog_json path
+	cfgPath := filepath.Join(codexHome, "config.toml")
+	var cfg struct {
+		ModelCatalogJSON string `toml:"model_catalog_json"`
+	}
+	if _, err := toml.DecodeFile(cfgPath, &cfg); err != nil {
+		slog.Debug("codex: failed to read config.toml for model_catalog_json", "error", err)
+		return nil
+	}
+	if cfg.ModelCatalogJSON == "" {
+		return nil
+	}
+
+	// Expand ~ and resolve relative paths against CODEX_HOME
+	catalogPath := cfg.ModelCatalogJSON
+	switch {
+	case strings.HasPrefix(catalogPath, "~/"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			slog.Debug("codex: cannot resolve home dir for model_catalog_json", "error", err)
+			return nil
+		}
+		catalogPath = filepath.Join(home, catalogPath[2:])
+	case catalogPath == "~":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		catalogPath = home
+	case !filepath.IsAbs(catalogPath):
+		catalogPath = filepath.Join(codexHome, catalogPath)
+	}
+
+	b, err := os.ReadFile(catalogPath)
+	if err != nil {
+		slog.Debug("codex: failed to read model_catalog_json", "path", catalogPath, "error", err)
+		return nil
+	}
+
+	models := parseCodexModelsJSON(b)
+	if models == nil {
+		slog.Debug("codex: failed to parse model_catalog_json", "path", catalogPath)
+	}
+	return models
+}
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
