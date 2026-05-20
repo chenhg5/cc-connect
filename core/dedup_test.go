@@ -49,10 +49,13 @@ func TestIsOldMessage(t *testing.T) {
 	if IsOldMessage(time.Now().Add(1 * time.Minute)) {
 		t.Error("future time should not be considered old")
 	}
-	if !IsOldMessage(StartTime.Add(-10 * time.Second)) {
-		t.Error("message 10s before startup should be old")
+	if IsOldMessage(StartTime.Add(-10 * time.Second)) {
+		t.Error("message 10s before startup should be within 5min grace period")
 	}
-	if IsOldMessage(StartTime.Add(-1 * time.Second)) {
-		t.Error("message 1s before startup should be within grace period")
+	if !IsOldMessage(StartTime.Add(-6 * time.Minute)) {
+		t.Error("message 6min before startup should be old (outside 5min grace)")
+	}
+	if IsOldMessage(StartTime.Add(-4 * time.Minute)) {
+		t.Error("message 4min before startup should be within 5min grace period")
 	}
 }
