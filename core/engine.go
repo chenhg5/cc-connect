@@ -2373,6 +2373,11 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 			}
 		}
 		e.interactiveMu.Unlock()
+		// If multiple cron runs coexist for the same session, pick
+		// the first with a pending permission. In practice only one
+		// cron run per session should be in the pending state at a
+		// time, so this loop is bounded and deterministic for the
+		// expected case.
 		for _, k := range cronKeys {
 			state, pending = e.lookupPending(k)
 			if state != nil && pending != nil {
