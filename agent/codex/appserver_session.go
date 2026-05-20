@@ -1207,9 +1207,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	case "agentMessage":
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) != "" {
-			s.stateMu.Lock()
 			s.emit(core.Event{Type: core.EventText, Content: text})
-			s.stateMu.Unlock()
 		}
 
 	case "commandExecution":
