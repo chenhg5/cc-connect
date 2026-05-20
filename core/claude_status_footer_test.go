@@ -367,8 +367,8 @@ func TestSendChunksWithStatusFooter_FallsBackInlineWhenFooterSenderFails(t *test
 	if len(sent) != 1 {
 		t.Fatalf("expected 1 inline-fallback Send, got %#v", sent)
 	}
-	// Inline fallback applies appendReplyFooter (`---` separator, no markdown italics).
-	if !strings.Contains(sent[0], "hello body") || !strings.Contains(sent[0], "\n---\nmodel · ctx 5%") {
+	// Inline fallback applies appendReplyFooter using the upstream core footer shape.
+	if !strings.Contains(sent[0], "hello body") || !strings.Contains(sent[0], "*model · ctx 5%*") {
 		t.Errorf("inline fallback content = %q, missing body or footer", sent[0])
 	}
 }
@@ -406,31 +406,26 @@ func TestSendChunksWithStatusFooter_PlatformWithoutFooterSender(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("expected 1 send, got %#v", sent)
 	}
-	if !strings.Contains(sent[0], "\n---\nmodel · ctx 5%") {
-		t.Errorf("expected separated footer inline, got %q", sent[0])
+	if !strings.Contains(sent[0], "*model · ctx 5%*") {
+		t.Errorf("expected wrapped footer inline, got %q", sent[0])
 	}
 }
 
-func TestAppendReplyFooter_AddsSeparatorWithoutMarkdownItalics(t *testing.T) {
+func TestAppendReplyFooter_UsesUpstreamWrappedFooterShape(t *testing.T) {
 	got := appendReplyFooter("hello world", "line1 metrics\n~/path/to/ws")
 	wantSubs := []string{
 		"hello world",
-		"\n---\n",
-		"line1 metrics",
-		"~/path/to/ws",
+		"\n\n*line1 metrics\n~/path/to/ws*",
 	}
 	for _, sub := range wantSubs {
 		if !strings.Contains(got, sub) {
 			t.Errorf("appendReplyFooter result missing %q\nfull: %q", sub, got)
 		}
 	}
-	if strings.Contains(got, "*line1 metrics*") || strings.Contains(got, "*~/path/to/ws*") {
-		t.Errorf("appendReplyFooter should not add markdown italics, got %q", got)
-	}
-	// Single-line footer also gets the separator, without markdown italics.
+	// Single-line footer keeps the platform-agnostic wrapped shape.
 	got = appendReplyFooter("body", "single")
-	if got != "body\n\n---\nsingle" {
-		t.Errorf("single-line append = %q, want %q", got, "body\n\n---\nsingle")
+	if got != "body\n\n*single*" {
+		t.Errorf("single-line append = %q, want %q", got, "body\n\n*single*")
 	}
 	// Empty footer is a no-op.
 	if got := appendReplyFooter("body", ""); got != "body" {
