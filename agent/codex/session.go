@@ -44,8 +44,6 @@ type codexSession struct {
 	cmdMu          sync.Mutex
 	cmds           map[*exec.Cmd]struct{}
 
-	pendingMsgs []string // buffered agent_message texts awaiting classification
-
 	runtimeCfgMu       sync.Mutex
 	runtimeCfgModel    string
 	runtimeCfgEffort   string
@@ -384,7 +382,6 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		}
 
 	case "turn.started":
-		cs.pendingMsgs = cs.pendingMsgs[:0]
 		cs.contextMu.Lock()
 		cs.contextUsage = nil
 		cs.contextMu.Unlock()
@@ -398,7 +395,6 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 
 	case "turn.completed":
 		cs.refreshContextUsageFromRollout()
-		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
 		select {
 		case cs.events <- evt:
@@ -435,44 +431,6 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	}
 }
 
-// flushPendingAsThinking emits all buffered agent_messages as EventThinking.
-func (cs *codexSession) flushPendingAsThinking() {
-	if cs.ctx.Err() != nil {
-		return
-	}
-	for _, text := range cs.pendingMsgs {
-		if cs.ctx.Err() != nil {
-			return
-		}
-		evt := core.Event{Type: core.EventThinking, Content: text}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-			return
-		}
-	}
-	cs.pendingMsgs = cs.pendingMsgs[:0]
-}
-
-// flushPendingAsText emits all buffered agent_messages as EventText (final response).
-func (cs *codexSession) flushPendingAsText() {
-	if cs.ctx.Err() != nil {
-		return
-	}
-	for _, text := range cs.pendingMsgs {
-		if cs.ctx.Err() != nil {
-			return
-		}
-		evt := core.Event{Type: core.EventText, Content: text}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-			return
-		}
-	}
-	cs.pendingMsgs = cs.pendingMsgs[:0]
-}
-
 var codexToolNames = map[string]string{
 	"web_search":       "WebSearch",
 	"file_search":      "FileSearch",
@@ -493,9 +451,6 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	if itemType == "agent_message" || itemType == "message" || itemType == "reasoning" {
 		return
 	}
-
-	// Any non-message item is a tool use; flush pending messages as thinking first.
-	cs.flushPendingAsThinking()
 
 	switch itemType {
 	case "command_execution":
@@ -544,7 +499,12 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 	case "agent_message", "message":
 		text := extractItemText(item, "content", "output_text")
 		if text != "" {
-			cs.pendingMsgs = append(cs.pendingMsgs, text)
+			evt := core.Event{Type: core.EventText, Content: text}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
+			}
 		}
 
 	case "command_execution":
@@ -921,7 +881,6 @@ func (cs *codexSession) Close() error {
 			return nil
 		case <-time.After(codexSessionForceKillWait):
 			// Do not close(cs.events) here: readLoop may still be in handleEvent
-			// (e.g. turn.completed -> flushPendingAsText) and would panic on send.
 			slog.Warn("codexSession: force kill wait timed out, deferring events channel close until readLoop exits",
 				"wait", codexSessionForceKillWait)
 			go func() {
