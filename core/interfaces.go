@@ -484,13 +484,23 @@ type SessionTitleProvider interface {
 // and rolling back conversations by manipulating their session history.
 type SessionForker interface {
 	// ForkSession copies the source session's history to a new session ID,
-	// returning the new ID immediately. No activation step required.
-	ForkSession(sourceSessionID string) (newSessionID string, err error)
+	// returning the new ID immediately. If atTurn > 0, only the first atTurn
+	// conversation turns are included in the fork (snapshot at that point).
+	ForkSession(sourceSessionID string, atTurn int) (newSessionID string, err error)
 	// TruncateSessionHistory removes the last N turns from the session's
 	// persistent history. Returns the remaining turn count after truncation.
 	TruncateSessionHistory(sessionID string, turns int) (remaining int, err error)
 	// ReadSessionTurnCount returns the total number of user/assistant turn pairs.
 	ReadSessionTurnCount(sessionID string) (int, error)
+	// ListRecentTurns returns the last N turns with a short summary of each,
+	// so the user can pick which turn to fork from or rollback to.
+	ListRecentTurns(sessionID string, n int) ([]TurnSummary, error)
+}
+
+// TurnSummary describes one conversation turn for display in /fork or /rollback.
+type TurnSummary struct {
+	Index   int    // 1-based position counting from the end (1 = last turn)
+	Summary string // short preview of the user message content
 }
 
 // WorkDirSwitcher is an optional interface for agents that support runtime

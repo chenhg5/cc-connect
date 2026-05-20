@@ -12537,8 +12537,39 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	// Parse args: /fork [name]
-	forkName := strings.TrimSpace(strings.Join(args, " "))
+	// If no args, show recent turns so user can pick a fork point
+	if len(args) == 0 {
+		turns, err2 := forker.ListRecentTurns(agentSID, 10)
+		if err2 != nil || len(turns) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgForkNoTurns))
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgForkTurnListHeader))
+		for _, t := range turns {
+			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTurnListItem), t.Index, t.Summary))
+		}
+		sb.WriteString(e.i18n.T(MsgForkTurnHint))
+		e.reply(p, msg.ReplyCtx, sb.String())
+		return
+	}
+
+	// Parse args: /fork [name] [N]
+	// /fork 测试 → fork entire session with name "测试"
+	// /fork 测试 3 → fork from turn 3 (remove last 3 turns) with name "测试"
+	atTurn := 0
+	nameArgs := args
+	if len(args) >= 2 {
+		// Last arg could be a turn number
+		if n, err2 := strconv.Atoi(args[len(args)-1]); err2 == nil && n > 0 {
+			atTurn = n
+			nameArgs = args[:len(args)-1]
+		}
+	}
+	// Single arg is always a name (not a turn number)
+	// e.g. /fork 测试 = fork entire session
+
+	forkName := strings.TrimSpace(strings.Join(nameArgs, " "))
 	if forkName == "" {
 		forkName = "fork of " + session.GetName()
 		if forkName == "fork of " || forkName == "fork of session" || forkName == "fork of default" {
@@ -12555,25 +12586,26 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 		}
 	}
 
-	// Fork: copy JSONL to a new session ID immediately
-	newAgentSID, err := forker.ForkSession(agentSID)
+	newAgentSID, err := forker.ForkSession(agentSID, atTurn)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkError), err))
 		return
 	}
 
-	// Create new cc-connect session with the new agent session ID
 	forkSession := sessions.NewSideSession(msg.SessionKey, forkName)
 	forkSession.SetAgentSessionID(newAgentSID, agent.Name())
 	sessions.SetSessionName(newAgentSID, forkName)
 	sessions.Save()
 
-	// Propagate name to JSONL if supported
 	e.propagateSessionName(agent, sessions, newAgentSID, forkName)
 
 	shortID := forkSession.ID
-	slog.Info("cmdFork: fork created", "forkName", forkName, "shortID", shortID, "newAgentSID", newAgentSID)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
+	slog.Info("cmdFork: fork created", "forkName", forkName, "shortID", shortID, "newAgentSID", newAgentSID, "atTurn", atTurn)
+	if atTurn > 0 {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreatedAt), forkName, shortID, atTurn))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
+	}
 }
 
 func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
@@ -12596,28 +12628,43 @@ func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	// Parse args: /rollback [N] (default 1)
-	turns := 1
-	if len(args) > 0 {
-		if n, err2 := strconv.Atoi(args[0]); err2 == nil && n > 0 {
-			turns = n
+	// If no args, show recent turns so user can pick a rollback point
+	if len(args) == 0 {
+		turns, err2 := forker.ListRecentTurns(agentSID, 10)
+		if err2 != nil || len(turns) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRollbackNoTurns))
+			return
 		}
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgRollbackTurnListHeader))
+		for _, t := range turns {
+			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTurnListItem), t.Index, t.Summary))
+		}
+		sb.WriteString(e.i18n.T(MsgRollbackTurnHint))
+		e.reply(p, msg.ReplyCtx, sb.String())
+		return
 	}
 
-	// 1. Stop current agent session FIRST (so it stops writing to JSONL)
+	// Parse args: /rollback [N]
+	turns := 1
+	if n, err2 := strconv.Atoi(args[0]); err2 == nil && n > 0 {
+		turns = n
+	}
+
+	// 1. Stop current agent session FIRST
 	e.cleanupInteractiveState(interactiveKey)
 
-	// 2. Truncate JSONL (agent is now stopped, safe to modify)
+	// 2. Truncate JSONL
 	remaining, err := forker.TruncateSessionHistory(agentSID, turns)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgRollbackError, err))
 		return
 	}
 
-	// 3. Trim local History mirror to match
+	// 3. Trim local History
 	history := session.GetHistory(0)
 	totalLocal := len(history)
-	keepEntries := remaining * 2 // user + assistant per turn
+	keepEntries := remaining * 2
 	if totalLocal > keepEntries {
 		session.ClearHistory()
 		for i := 0; i < keepEntries && i < totalLocal; i++ {

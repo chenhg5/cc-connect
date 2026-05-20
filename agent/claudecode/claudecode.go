@@ -762,7 +762,7 @@ func (a *Agent) GetSessionTitle(sessionID string) string {
 
 // ForkSession copies the source session's JSONL to a new UUID-based file,
 // returning the new session ID immediately. No "activation" step needed.
-func (a *Agent) ForkSession(sourceSessionID string) (string, error) {
+func (a *Agent) ForkSession(sourceSessionID string, atTurn int) (string, error) {
 	if sourceSessionID == "" {
 		return "", fmt.Errorf("claudecode: source session ID required for fork")
 	}
@@ -786,17 +786,28 @@ func (a *Agent) ForkSession(sourceSessionID string) (string, error) {
 	newID := generateUUID()
 	dstPath := filepath.Join(projectDir, newID+".jsonl")
 
-	// Copy the JSONL file. Use os.Rename on a temp copy for atomicity.
+	// Copy the JSONL file first
 	tmpPath := dstPath + ".tmp"
 	if err := copyFile(srcPath, tmpPath); err != nil {
 		return "", fmt.Errorf("claudecode: copy JSONL: %w", err)
 	}
 	if err := os.Rename(tmpPath, dstPath); err != nil {
-		os.Remove(tmpPath) // cleanup
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("claudecode: rename JSONL: %w", err)
 	}
 
-	slog.Info("claudecode: forked session", "source", sourceSessionID, "new", newID)
+	// If atTurn > 0, remove the last atTurn turns from the fork
+	// (same logic as rollback — keep earlier part, remove later part)
+	if atTurn > 0 {
+		remaining, truncErr := a.TruncateSessionHistory(newID, atTurn)
+		if truncErr != nil {
+			os.Remove(dstPath)
+			return "", fmt.Errorf("claudecode: truncate fork: %w", truncErr)
+		}
+		slog.Info("claudecode: fork truncated", "newID", newID, "removedTurns", atTurn, "remainingTurns", remaining)
+	}
+
+	slog.Info("claudecode: forked session", "source", sourceSessionID, "new", newID, "atTurn", atTurn)
 	return newID, nil
 }
 
@@ -927,6 +938,78 @@ func (a *Agent) TruncateSessionHistory(sessionID string, turns int) (int, error)
 		}
 	}
 	return remaining, nil
+}
+
+// ListRecentTurns returns the last N turns with a short summary of each.
+// Index is 1-based counting from the end (1 = last/most recent turn).
+func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("claudecode: session ID required")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: home dir: %w", err)
+	}
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: work dir: %w", err)
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: read session file: %w", err)
+	}
+
+	// Collect all user messages with their content
+	var allTurns []core.TurnSummary
+	lines := strings.Split(string(data), "\n")
+	totalUsers := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Type    string          `json:"type"`
+			Message json.RawMessage `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if entry.Type != "user" && entry.Type != "human" {
+			continue
+		}
+		totalUsers++
+		summary := extractStringContent(entry.Message)
+		// Truncate for display
+		if len([]rune(summary)) > 50 {
+			summary = string([]rune(summary)[:50]) + "…"
+		}
+		allTurns = append(allTurns, core.TurnSummary{
+			Index:   totalUsers,
+			Summary: summary,
+		})
+	}
+
+	// Return only the last N, with index re-numbered from the end
+	if len(allTurns) == 0 {
+		return nil, nil
+	}
+	start := len(allTurns) - n
+	if start < 0 {
+		start = 0
+	}
+	result := allTurns[start:]
+	// Re-index: 1 = last turn, 2 = second-to-last, etc.
+	for i := range result {
+		result[i].Index = len(result) - i
+	}
+	return result, nil
 }
 
 func extractTextContent(raw json.RawMessage) string {

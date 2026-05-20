@@ -470,10 +470,18 @@ const (
 	MsgForkNoSession            MsgKey = "fork_no_session"
 	MsgForkError               MsgKey = "fork_error"
 	MsgForkCreated              MsgKey = "fork_created"
+	MsgForkCreatedAt            MsgKey = "fork_created_at"
+	MsgForkNoTurns              MsgKey = "fork_no_turns"
+	MsgForkTurnListHeader       MsgKey = "fork_turn_list_header"
+	MsgForkTurnHint             MsgKey = "fork_turn_hint"
+	MsgTurnListItem             MsgKey = "turn_list_item"
 	MsgForkPending              MsgKey = "fork_pending"
 	MsgForkPendingSuffix        MsgKey = "fork_pending_suffix"
 	MsgRollbackNotSupported     MsgKey = "rollback_not_supported"
 	MsgRollbackNoSession        MsgKey = "rollback_no_session"
+	MsgRollbackNoTurns          MsgKey = "rollback_no_turns"
+	MsgRollbackTurnListHeader   MsgKey = "rollback_turn_list_header"
+	MsgRollbackTurnHint         MsgKey = "rollback_turn_hint"
 	MsgRollbackDone             MsgKey = "rollback_done"
 	MsgRollbackError            MsgKey = "rollback_error"
 	MsgDeleteModeConfirmTitle   MsgKey = "delete_mode_confirm_title"
@@ -3078,12 +3086,47 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Fork falló: %s",
 	},
 	MsgForkCreated: {
-		LangEnglish:            "🌿 Fork created: **%s** (%s). Use /switch to start working on it.",
-		LangChinese:            "🌿 分叉已创建：**%s** (%s)。使用 /switch 切换到分叉会话。",
-		LangTraditionalChinese: "🌿 分叉已建立：**%s** (%s)。使用 /switch 切換到分叉會話。",
-		LangJapanese:           "🌿 fork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
-		LangSpanish:            "🌿 Fork creado: **%s** (%s). Usa /switch para empezar a trabajar en él.",
-	},
+			LangEnglish:            "🌿 Fork created: **%s** (%s). Use /switch to start working on it.",
+			LangChinese:            "🌿 分叉已创建：**%s** (%s)。使用 /switch 切换到分叉会话。",
+			LangTraditionalChinese: "🌿 分叉已建立：**%s** (%s)。使用 /switch 切換到分叉會話。",
+			LangJapanese:           "🌿 fork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
+			LangSpanish:            "🌿 Fork creado: **%s** (%s). Usa /switch para empezar a trabajar en él.",
+		},
+		MsgForkCreatedAt: {
+			LangEnglish:            "🌿 Fork created from turn %d: **%s** (%s). Use /switch to start working on it.",
+			LangChinese:            "🌿 从第 %d 轮分叉：**%s** (%s)。使用 /switch 切换到分叉会话。",
+			LangTraditionalChinese: "🌿 從第 %d 輪分叉：**%s** (%s)。使用 /switch 切換到分叉會話。",
+			LangJapanese:           "🌿 第%dターンからfork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
+			LangSpanish:            "🌿 Fork desde turno %d: **%s** (%s). Usa /switch para empezar.",
+		},
+		MsgForkNoTurns: {
+			LangEnglish:            "No conversation turns found to fork from.",
+			LangChinese:            "没有可分叉的对话轮次。",
+			LangTraditionalChinese: "沒有可分叉的對話輪次。",
+			LangJapanese:           "forkできるターンがありません。",
+			LangSpanish:            "No hay turnos de conversación para fork.",
+		},
+		MsgForkTurnListHeader: {
+			LangEnglish:            "Recent turns (1 = most recent):\n",
+			LangChinese:            "最近几轮对话（1 = 最新一轮）：\n",
+			LangTraditionalChinese: "最近幾輪對話（1 = 最新一輪）：\n",
+			LangJapanese:           "最近のターン（1 = 最新）：\n",
+			LangSpanish:            "Turnos recientes (1 = más reciente):\n",
+		},
+		MsgForkTurnHint: {
+			LangEnglish:            "\nUse /fork [name] [N] to fork from turn N (removing last N turns)",
+			LangChinese:            "\n使用 /fork [名称] [N] 从第 N 轮分叉（去掉最后 N 轮）",
+			LangTraditionalChinese: "\n使用 /fork [名稱] [N] 從第 N 輪分叉（去掉最後 N 輪）",
+			LangJapanese:           "\n/fork [名前] [N] で第Nターンからfork（最後Nターンを削除）",
+			LangSpanish:            "\nUsa /fork [nombre] [N] para fork desde turno N (eliminando últimos N turnos)",
+		},
+		MsgTurnListItem: {
+			LangEnglish:            "%d. %s\n",
+			LangChinese:            "%d. %s\n",
+			LangTraditionalChinese: "%d. %s\n",
+			LangJapanese:           "%d. %s\n",
+			LangSpanish:            "%d. %s\n",
+		},
 	MsgForkPending: {
 		LangEnglish:            "fork pending",
 		LangChinese:            "分叉待激活",
@@ -3119,6 +3162,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "↩️ %dターンrollback完了。残り%dターン。メッセージを送信して続行してください。",
 		LangSpanish:            "↩️ Se han revertido %d turnos. %d restantes. Envía un mensaje para continuar.",
 	},
+		MsgRollbackNoTurns: {
+			LangEnglish:            "No conversation turns found to rollback.",
+			LangChinese:            "没有可回撤的对话轮次。",
+			LangTraditionalChinese: "沒有可回撤的對話輪次。",
+			LangJapanese:           "rollbackできるターンがありません。",
+			LangSpanish:            "No hay turnos para rollback.",
+		},
+		MsgRollbackTurnListHeader: {
+			LangEnglish:            "Recent turns (1 = most recent):\n",
+			LangChinese:            "最近几轮对话（1 = 最新一轮）：\n",
+			LangTraditionalChinese: "最近幾輪對話（1 = 最新一輪）：\n",
+			LangJapanese:           "最近のターン（1 = 最新）：\n",
+			LangSpanish:            "Turnos recientes (1 = más reciente):\n",
+		},
+		MsgRollbackTurnHint: {
+			LangEnglish:            "\nUse /rollback [N] to remove the last N turns",
+			LangChinese:            "\n使用 /rollback [N] 回撤最近 N 轮对话",
+			LangTraditionalChinese: "\n使用 /rollback [N] 回撤最近 N 輪對話",
+			LangJapanese:           "\n/rollback [N] で最後Nターンを撤回",
+			LangSpanish:            "\nUsa /rollback [N] para revertir últimos N turnos",
+		},
 	MsgRollbackError: {
 		LangEnglish:            "Rollback failed: %s",
 		LangChinese:            "回撤失败：%s",
