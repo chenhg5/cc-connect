@@ -12681,6 +12681,43 @@ func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRollbackDone), turns, remaining))
 }
 
+func (e *Engine) renderForkTurnCard(turns []TurnSummary, sessionKey string) *Card {
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "turquoise")
+
+	var opts []CardSelectOption
+	for _, t := range turns {
+		label := fmt.Sprintf("%d. %s", t.Index, t.Summary)
+		value := fmt.Sprintf("act:/fork %d", t.Index)
+		opts = append(opts, CardSelectOption{Text: label, Value: value})
+	}
+	// Add "entire session" option at the end
+	opts = append(opts, CardSelectOption{
+		Text:  e.i18n.T(MsgForkEntireSession),
+		Value: "act:/fork entire",
+	})
+
+	cb.Select(e.i18n.T(MsgForkSelectPlaceholder), opts, "").
+		Buttons(e.cardBackButton())
+	cb.Note(e.i18n.T(MsgForkTurnHint))
+	return cb.Build()
+}
+
+func (e *Engine) renderRollbackTurnCard(turns []TurnSummary, sessionKey string) *Card {
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleRollbackTurns), "orange")
+
+	var opts []CardSelectOption
+	for _, t := range turns {
+		label := fmt.Sprintf("%d. %s", t.Index, t.Summary)
+		value := fmt.Sprintf("act:/rollback %d", t.Index)
+		opts = append(opts, CardSelectOption{Text: label, Value: value})
+	}
+
+	cb.Select(e.i18n.T(MsgRollbackSelectPlaceholder), opts, "").
+		Buttons(e.cardBackButton())
+	cb.Note(e.i18n.T(MsgRollbackTurnHint))
+	return cb.Build()
+}
+
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
