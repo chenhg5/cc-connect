@@ -477,6 +477,11 @@ const (
 	MsgTurnListItem             MsgKey = "turn_list_item"
 	MsgForkPending              MsgKey = "fork_pending"
 	MsgForkPendingSuffix        MsgKey = "fork_pending_suffix"
+	MsgCardTitleForkTurns       MsgKey = "card_title_fork_turns"
+	MsgForkEntireSession        MsgKey = "fork_entire_session"
+	MsgForkSelectPlaceholder    MsgKey = "fork_select_placeholder"
+	MsgCardTitleRollbackTurns   MsgKey = "card_title_rollback_turns"
+	MsgRollbackSelectPlaceholder MsgKey = "rollback_select_placeholder"
 	MsgRollbackNotSupported     MsgKey = "rollback_not_supported"
 	MsgRollbackNoSession        MsgKey = "rollback_no_session"
 	MsgRollbackNoTurns          MsgKey = "rollback_no_turns"
@@ -3168,6 +3173,41 @@ var messages = map[MsgKey]map[Language]string{
 			LangTraditionalChinese: "沒有可回撤的對話輪次。",
 			LangJapanese:           "rollbackできるターンがありません。",
 			LangSpanish:            "No hay turnos para rollback.",
+		},
+		MsgCardTitleForkTurns: {
+			LangEnglish:            "Fork — select turn",
+			LangChinese:            "分叉 — 选择轮次",
+			LangTraditionalChinese: "分叉 — 選擇輪次",
+			LangJapanese:           "fork — ターン選択",
+			LangSpanish:            "Fork — seleccionar turno",
+		},
+		MsgForkEntireSession: {
+			LangEnglish:            "Entire session (no truncation)",
+			LangChinese:            "整个会话（不截断）",
+			LangTraditionalChinese: "整個會話（不截斷）",
+			LangJapanese:           "セッション全体（truncatedなし）",
+			LangSpanish:            "Sesión completa (sin truncar)",
+		},
+		MsgForkSelectPlaceholder: {
+			LangEnglish:            "Select turn to fork from...",
+			LangChinese:            "选择从哪轮分叉...",
+			LangTraditionalChinese: "選擇從哪輪分叉...",
+			LangJapanese:           "forkするターンを選択...",
+			LangSpanish:            "Seleccionar turno para fork...",
+		},
+		MsgCardTitleRollbackTurns: {
+			LangEnglish:            "Rollback — select turn",
+			LangChinese:            "回撤 — 选择轮次",
+			LangTraditionalChinese: "回撤 — 選擇輪次",
+			LangJapanese:           "rollback — ターン選択",
+			LangSpanish:            "Rollback — seleccionar turno",
+		},
+		MsgRollbackSelectPlaceholder: {
+			LangEnglish:            "Select turn to rollback to...",
+			LangChinese:            "选择回撤到哪轮...",
+			LangTraditionalChinese: "選擇回撤到哪輪...",
+			LangJapanese:           "rollbackするターンを選択...",
+			LangSpanish:            "Seleccionar turno para rollback...",
 		},
 		MsgRollbackTurnListHeader: {
 			LangEnglish:            "Recent turns (1 = most recent):\n",
