@@ -906,6 +906,75 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	}
 }
 
+func TestMgmt_AddPlatform_RejectsNonexistentWorkDir(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	called := false
+	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
+		called = true
+		return nil
+	})
+
+	// Non-existent work_dir should be rejected.
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-proj/add-platform", "tok", map[string]any{
+		"type":     "feishu",
+		"work_dir": "/nonexistent/path/that/does/not/exist",
+	})
+	if r.OK {
+		t.Fatal("expected error for non-existent work_dir, got success")
+	}
+	if !strings.Contains(r.Error, "work_dir does not exist") {
+		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+	}
+	if called {
+		t.Fatal("addPlatformToProject should not be called when work_dir is invalid")
+	}
+}
+
+func TestMgmt_AddPlatform_AcceptsValidWorkDir(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	var savedWorkDir string
+	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
+		savedWorkDir = workDir
+		return nil
+	})
+
+	// Valid directory should pass.
+	validDir := t.TempDir()
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-proj/add-platform", "tok", map[string]any{
+		"type":     "feishu",
+		"work_dir": validDir,
+	})
+	if !r.OK {
+		t.Fatalf("expected success for valid work_dir, got: %s", r.Error)
+	}
+	if savedWorkDir != validDir {
+		t.Fatalf("saved work_dir = %q, want %q", savedWorkDir, validDir)
+	}
+}
+
+func TestMgmt_AddPlatform_AcceptsEmptyWorkDir(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	called := false
+	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
+		called = true
+		return nil
+	})
+
+	// Empty work_dir should pass (uses default).
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-proj/add-platform", "tok", map[string]any{
+		"type": "feishu",
+	})
+	if !r.OK {
+		t.Fatalf("expected success for empty work_dir, got: %s", r.Error)
+	}
+	if !called {
+		t.Fatal("addPlatformToProject should be called when work_dir is empty")
+	}
+}
+
 func TestMgmt_OtherRoutesStillRequireEngine(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 

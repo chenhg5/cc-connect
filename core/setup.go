@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -475,6 +477,22 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 	if req.Type == "" {
 		mgmtError(w, http.StatusBadRequest, "type is required")
 		return
+	}
+	if wd := strings.TrimSpace(req.WorkDir); wd != "" {
+		abs, err := filepath.Abs(wd)
+		if err != nil {
+			mgmtError(w, http.StatusBadRequest, fmt.Sprintf("invalid work_dir: %s", err))
+			return
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			mgmtError(w, http.StatusBadRequest, fmt.Sprintf("work_dir does not exist: %s", abs))
+			return
+		}
+		if !info.IsDir() {
+			mgmtError(w, http.StatusBadRequest, fmt.Sprintf("work_dir is not a directory: %s", abs))
+			return
+		}
 	}
 	if m.addPlatformToProject == nil {
 		mgmtError(w, http.StatusServiceUnavailable, "config persistence not available")
