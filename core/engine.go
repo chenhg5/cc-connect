@@ -7320,7 +7320,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
-				{command: "/fork", action: "cmd:/fork"},
+				{command: "/fork", action: "act:/fork"},
 				{command: "/rollback", action: "cmd:/rollback"},
 				{command: "/history", action: "nav:/history"},
 				{command: "/delete", action: "cmd:/delete"},
@@ -9444,6 +9444,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderModeCard()
 	case "/lang":
 		return e.renderLangCard()
+	case "/fork":
+		return e.renderForkCardFromState(sessionKey)
 	case "/status":
 		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
 	case "/list":
@@ -12745,6 +12747,24 @@ func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRollbackDone), turns, remaining))
+}
+
+func (e *Engine) renderForkCardFromState(sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	forker, ok := agent.(SessionForker)
+	if !ok {
+		return NewCard().Title(e.i18n.T(MsgForkNotSupported), "red").Build()
+	}
+	session := sessions.GetOrCreateActive(sessionKey)
+	agentSID := session.GetAgentSessionID()
+	if agentSID == "" {
+		return NewCard().Title(e.i18n.T(MsgForkNoSession), "red").Build()
+	}
+	turns, err := forker.ListRecentTurns(agentSID, 10)
+	if err != nil || len(turns) == 0 {
+		return NewCard().Title(e.i18n.T(MsgForkNoTurns), "red").Build()
+	}
+	return e.renderForkTurnCard(turns, sessionKey)
 }
 
 func (e *Engine) renderForkTurnCard(turns []TurnSummary, sessionKey string) *Card {
