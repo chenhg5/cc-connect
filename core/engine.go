@@ -321,6 +321,7 @@ type interactiveState struct {
 	modelSwitch            *modelSwitchState
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
+	rollbackResult         *rollbackResultState
 	lastAutoCompressTokens int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
@@ -358,6 +359,11 @@ type modelSwitchState struct {
 	phase  string
 	target string
 	result string
+}
+
+type rollbackResultState struct {
+	turns     int
+	remaining int
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -8768,8 +8774,6 @@ func (e *Engine) setPendingProviderAdd(sessionKey string, pa *pendingProviderAdd
 	state.pendingProviderAdd = pa
 	state.mu.Unlock()
 }
-
-// getPendingProviderAdd retrieves pending provider add state without removing it.
 func (e *Engine) getPendingProviderAdd(sessionKey string) *pendingProviderAddState {
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
@@ -9499,6 +9503,30 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
 		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
+	case "/rollback":
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		e.interactiveMu.Lock()
+		state, ok := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		if !ok || state == nil || state.rollbackResult == nil {
+			return e.renderRollbackTurnCardFromState(sessionKey)
+		}
+		state.mu.Lock()
+		result := state.rollbackResult
+		state.rollbackResult = nil
+		state.mu.Unlock()
+		return e.renderRollbackResultCard(result.turns, result.remaining)
+
+	case "/fork-prompt":
+		atTurn := 0
+		if args != "entire" {
+			n, err := strconv.Atoi(args)
+			if err == nil && n > 0 {
+				atTurn = n
+			}
+		}
+		return e.executeForkAutoName(sessionKey, atTurn)
+
 	case "/upgrade":
 		return e.renderUpgradeCard()
 	}
@@ -9710,6 +9738,53 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/provider/link":
 		e.executeProviderLink(sessionKey, args)
+
+	case "/rollback":
+		if args == "" {
+			return
+		}
+		turns, err := strconv.Atoi(args)
+		if err != nil || turns <= 0 {
+			return
+		}
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		forker, ok := agent.(SessionForker)
+		if !ok {
+			return
+		}
+		session := sessions.GetOrCreateActive(sessionKey)
+		agentSID := session.GetAgentSessionID()
+		if agentSID == "" {
+			return
+		}
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		e.cleanupInteractiveState(interactiveKey)
+		remaining, truncErr := forker.TruncateSessionHistory(agentSID, turns)
+		if truncErr != nil {
+			return
+		}
+		keepEntries := len(session.GetHistory(0)) - turns*2
+		if keepEntries < 0 {
+			keepEntries = 0
+		}
+		session.ClearHistory()
+		history := session.GetHistory(0)
+		for i := 0; i < keepEntries && i < len(history); i++ {
+			session.AddHistory(history[i].Role, history[i].Content)
+		}
+		sessions.Save()
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[interactiveKey]
+		if state == nil {
+			state = &interactiveState{}
+			e.interactiveStates[interactiveKey] = state
+		}
+		e.interactiveMu.Unlock()
+		state.mu.Lock()
+		state.rollbackResult = &rollbackResultState{turns: turns, remaining: remaining}
+		state.mu.Unlock()
+
+	case "/fork-prompt":
 
 	case "/new":
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -12544,10 +12619,14 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgForkNoTurns))
 			return
 		}
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderForkTurnCard(turns, msg.SessionKey))
+			return
+		}
 		var sb strings.Builder
 		sb.WriteString(e.i18n.T(MsgForkTurnListHeader))
 		for _, t := range turns {
-			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTurnListItem), t.Index, t.Summary))
+			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTurnOptionLabel), t.Index, t.Summary))
 		}
 		sb.WriteString(e.i18n.T(MsgForkTurnHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
@@ -12571,19 +12650,7 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 
 	forkName := strings.TrimSpace(strings.Join(nameArgs, " "))
 	if forkName == "" {
-		forkName = "fork of " + session.GetName()
-		if forkName == "fork of " || forkName == "fork of session" || forkName == "fork of default" {
-			if tp, ok2 := agent.(SessionTitleProvider); ok2 {
-				title := tp.GetSessionTitle(agentSID)
-				if title != "" {
-					forkName = "fork of " + title
-				} else {
-					forkName = "fork"
-				}
-			} else {
-				forkName = "fork"
-			}
-		}
+		forkName = e.forkAutoName(msg.SessionKey)
 	}
 
 	newAgentSID, err := forker.ForkSession(agentSID, atTurn)
@@ -12602,7 +12669,7 @@ func (e *Engine) cmdFork(p Platform, msg *Message, args []string) {
 	shortID := forkSession.ID
 	slog.Info("cmdFork: fork created", "forkName", forkName, "shortID", shortID, "newAgentSID", newAgentSID, "atTurn", atTurn)
 	if atTurn > 0 {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreatedAt), forkName, shortID, atTurn))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreatedAt), atTurn, forkName, shortID))
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID))
 	}
@@ -12635,10 +12702,14 @@ func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRollbackNoTurns))
 			return
 		}
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderRollbackTurnCard(turns, msg.SessionKey))
+			return
+		}
 		var sb strings.Builder
 		sb.WriteString(e.i18n.T(MsgRollbackTurnListHeader))
 		for _, t := range turns {
-			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTurnListItem), t.Index, t.Summary))
+			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTurnOptionLabel), t.Index, t.Summary))
 		}
 		sb.WriteString(e.i18n.T(MsgRollbackTurnHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
@@ -12681,14 +12752,14 @@ func (e *Engine) renderForkTurnCard(turns []TurnSummary, sessionKey string) *Car
 
 	var opts []CardSelectOption
 	for _, t := range turns {
-		label := fmt.Sprintf("%d. %s", t.Index, t.Summary)
-		value := fmt.Sprintf("act:/fork %d", t.Index)
+		label := fmt.Sprintf(e.i18n.T(MsgTurnOptionLabel), t.Index, t.Summary)
+		value := fmt.Sprintf("act:/fork-prompt %d", t.Index)
 		opts = append(opts, CardSelectOption{Text: label, Value: value})
 	}
 	// Add "entire session" option at the end
 	opts = append(opts, CardSelectOption{
 		Text:  e.i18n.T(MsgForkEntireSession),
-		Value: "act:/fork entire",
+		Value: "act:/fork-prompt entire",
 	})
 
 	cb.Select(e.i18n.T(MsgForkSelectPlaceholder), opts, "").
@@ -12702,7 +12773,7 @@ func (e *Engine) renderRollbackTurnCard(turns []TurnSummary, sessionKey string) 
 
 	var opts []CardSelectOption
 	for _, t := range turns {
-		label := fmt.Sprintf("%d. %s", t.Index, t.Summary)
+		label := fmt.Sprintf(e.i18n.T(MsgTurnOptionLabel), t.Index, t.Summary)
 		value := fmt.Sprintf("act:/rollback %d", t.Index)
 		opts = append(opts, CardSelectOption{Text: label, Value: value})
 	}
@@ -12712,6 +12783,97 @@ func (e *Engine) renderRollbackTurnCard(turns []TurnSummary, sessionKey string) 
 	cb.Note(e.i18n.T(MsgRollbackTurnHint))
 	return cb.Build()
 }
+
+func (e *Engine) renderRollbackResultCard(turns, remaining int) *Card {
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleRollbackTurns), "orange")
+	cb.Markdown(fmt.Sprintf(e.i18n.T(MsgRollbackDone), turns, remaining))
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
+}
+
+
+func (e *Engine) renderRollbackTurnCardFromState(sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	forker, ok := agent.(SessionForker)
+	if !ok {
+		return nil
+	}
+	session := sessions.GetOrCreateActive(sessionKey)
+	agentSID := session.GetAgentSessionID()
+	if agentSID == "" {
+		return nil
+	}
+	turns, err := forker.ListRecentTurns(agentSID, 10)
+	if err != nil || len(turns) == 0 {
+		return nil
+	}
+	return e.renderRollbackTurnCard(turns, sessionKey)
+}
+
+func (e *Engine) forkAutoName(sessionKey string) string {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	session := sessions.GetOrCreateActive(sessionKey)
+	currentName := session.GetName()
+	if currentName == "" || currentName == "default" || currentName == "session" {
+		if tp, ok := agent.(SessionTitleProvider); ok {
+			title := tp.GetSessionTitle(session.GetAgentSessionID())
+			if title != "" {
+				currentName = title
+			}
+		}
+	}
+	if currentName == "" || currentName == "default" || currentName == "session" {
+		currentName = "session"
+	}
+
+	// Count existing forks named "fork ... of currentName" to determine N
+	forkCount := 0
+	for _, s := range sessions.ListSessions(sessionKey) {
+		if strings.HasPrefix(s.GetName(), "fork ") && strings.Contains(s.GetName(), " of "+currentName) {
+			forkCount++
+		}
+	}
+	return fmt.Sprintf("fork %d of %s", forkCount+1, currentName)
+}
+
+func (e *Engine) executeForkAutoName(sessionKey string, atTurn int) *Card {
+	return e.executeForkWithName(sessionKey, atTurn, e.forkAutoName(sessionKey))
+}
+
+func (e *Engine) executeForkWithName(sessionKey string, atTurn int, forkName string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	forker, ok := agent.(SessionForker)
+	if !ok {
+		return NewCard().Title(e.i18n.T(MsgForkNotSupported), "red").Build()
+	}
+	session := sessions.GetOrCreateActive(sessionKey)
+	agentSID := session.GetAgentSessionID()
+	if agentSID == "" {
+		return NewCard().Title(e.i18n.T(MsgForkNoSession), "red").Build()
+	}
+
+	newAgentSID, err := forker.ForkSession(agentSID, atTurn)
+	if err != nil {
+		return NewCard().Title(fmt.Sprintf(e.i18n.T(MsgForkError), err), "red").Build()
+	}
+
+	forkSession := sessions.NewSideSession(sessionKey, forkName)
+	forkSession.SetAgentSessionID(newAgentSID, agent.Name())
+	sessions.SetSessionName(newAgentSID, forkName)
+	sessions.Save()
+
+	e.propagateSessionName(agent, sessions, newAgentSID, forkName)
+
+	shortID := forkSession.ID
+	resultMsg := fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID)
+	if atTurn > 0 {
+		resultMsg = fmt.Sprintf(e.i18n.T(MsgForkCreatedAt), atTurn, forkName, shortID)
+	}
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "turquoise")
+	cb.Markdown(resultMsg)
+	return cb.Build()
+}
+
 
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)

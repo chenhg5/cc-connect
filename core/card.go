@@ -74,6 +74,15 @@ func (CardActions) cardElement()  {}
 func (CardNote) cardElement()     {}
 func (CardListItem) cardElement() {}
 func (CardSelect) cardElement()   {}
+func (CardInput) cardElement()    {}
+
+// CardInput renders a single-line text input field inside a form.
+// On Feishu this maps to tag: "input" inside a form element.
+type CardInput struct {
+	Name        string // unique key for form value extraction
+	Placeholder string // hint text shown when empty
+	Required    bool   // whether the field must be filled before submit
+}
 
 // CardButton represents a clickable button inside a CardActions element.
 type CardButton struct {
@@ -197,6 +206,14 @@ func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, ini
 			Placeholder: placeholder, Options: options, InitValue: initValue,
 		})
 	}
+	return b
+}
+
+// Input appends a text input field element.
+func (b *CardBuilder) Input(name, placeholder string, required bool) *CardBuilder {
+	b.card.Elements = append(b.card.Elements, CardInput{
+		Name: name, Placeholder: placeholder, Required: required,
+	})
 	return b
 }
 
