@@ -25,6 +25,11 @@ var runLaunchctl = func(args ...string) (string, error) {
 
 type launchdManager struct{}
 
+// CheckLinger is a no-op on macOS; launchd persists across logout sessions by default.
+func CheckLinger() (enabled bool, user string) {
+	return true, ""
+}
+
 func newPlatformManager() (Manager, error) {
 	return &launchdManager{}, nil
 }

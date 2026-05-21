@@ -1287,6 +1287,20 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
 		})
 
+	case "interactive":
+		text := extractInteractiveCardText(content)
+		slog.Info(p.tag()+": interactive card received", "message_id", messageID, "user", userID, "text_len", len(text))
+		if text == "" || text == "[interactive card]" {
+			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
+			return
+		}
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+		})
+
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}
