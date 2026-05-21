@@ -2,6 +2,8 @@
 # Binary outputs
 # ============================================================================
 /cc-connect
+/cc-connect-arm64
+/cc-connect-amd64
 cc-connect.bak-*
 *.exe
 *.exe~
@@ -141,3 +143,5 @@ secrets/
 credentials/
 
 .codex
+
+.claude/settings.local.json
