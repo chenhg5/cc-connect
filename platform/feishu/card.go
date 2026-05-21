@@ -243,6 +243,37 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				"tag":     "action",
 				"actions": []map[string]any{selectElem},
 			})
+		case core.CardInput:
+			inputElem := map[string]any{
+				"tag":         "input",
+				"name":        e.Name,
+				"placeholder": plainText(e.Placeholder),
+				"required":    e.Required,
+			}
+			formName := "form_" + e.Name
+			valMap := map[string]string{"action": "act:/fork-name-form-submit", "input_name": e.Name}
+			if sessionKey != "" {
+				valMap["session_key"] = sessionKey
+			}
+			submitBtn := map[string]any{
+				"tag":              "button",
+				"text":             plainText(e.Placeholder),
+				"type":             "primary",
+				"name":             formName + "_submit",
+				"form_action_type": "submit",
+				"value":            valMap,
+			}
+			elements = append(elements, map[string]any{
+				"tag":      "form",
+				"name":     formName,
+				"elements": []map[string]any{
+					inputElem,
+					map[string]any{
+						"tag":     "action",
+						"actions": []map[string]any{submitBtn},
+					},
+				},
+			})
 		case core.CardNote:
 			elements = append(elements, map[string]any{
 				"tag":      "note",

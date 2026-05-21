@@ -493,8 +493,8 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 //   - act:/xxx   — execute an action, then render and update the card in-place
 //   - cmd:/xxx   — legacy: dispatch as a user command (sends a new message)
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-	if event.Event == nil || event.Event.Action == nil {
-		return nil, nil
+		if event.Event == nil || event.Event.Action == nil {
+				return nil, nil
 	}
 
 	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
@@ -505,7 +505,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	actionVal, _ := event.Event.Action.Value["action"].(string)
-
+	
 	// select_static callbacks put the chosen value in event.Event.Action.Option
 	if actionVal == "" && event.Event.Action.Option != "" {
 		actionVal = event.Event.Action.Option

@@ -482,6 +482,13 @@ const (
 	MsgForkSelectPlaceholder    MsgKey = "fork_select_placeholder"
 	MsgCardTitleRollbackTurns   MsgKey = "card_title_rollback_turns"
 	MsgRollbackSelectPlaceholder MsgKey = "rollback_select_placeholder"
+	MsgTurnOptionLabel          MsgKey = "turn_option_label"
+	MsgForkNamePrompt          MsgKey = "fork_name_prompt"
+	MsgForkNamePromptEntire    MsgKey = "fork_name_prompt_entire"
+	MsgForkCustomName          MsgKey = "fork_custom_name"
+	MsgForkCustomNamePrompt    MsgKey = "fork_custom_name_prompt"
+	MsgForkCustomNamePromptEntire MsgKey = "fork_custom_name_prompt_entire"
+	MsgForkCustomNamePromptChat  MsgKey = "fork_custom_name_prompt_chat"
 	MsgRollbackNotSupported     MsgKey = "rollback_not_supported"
 	MsgRollbackNoSession        MsgKey = "rollback_no_session"
 	MsgRollbackNoTurns          MsgKey = "rollback_no_turns"
@@ -578,6 +585,8 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 	MsgBuiltinCmdPs        MsgKey = "ps"
+	MsgBuiltinCmdFork      MsgKey = "fork"
+	MsgBuiltinCmdRollback  MsgKey = "rollback"
 
 	MsgDiffEmpty       MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
@@ -1015,6 +1024,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
+				"/fork [名称] [N]\n  从指定轮次分叉会话\n\n" +
+				"/rollback [N]\n  回滚会话到指定轮次\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
@@ -1058,6 +1069,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
+				"/fork [名稱] [N]\n  從指定輪次分叉會話\n\n" +
+				"/rollback [N]\n  回滾會話到指定輪次\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
@@ -3209,6 +3222,48 @@ var messages = map[MsgKey]map[Language]string{
 			LangJapanese:           "rollbackするターンを選択...",
 			LangSpanish:            "Seleccionar turno para rollback...",
 		},
+		MsgTurnOptionLabel: {
+			LangEnglish:            "#%d: %s",
+			LangChinese:            "倒数第%d轮: %s",
+			LangTraditionalChinese: "倒數第%d輩: %s",
+			LangJapanese:           "下から%d番目: %s",
+			LangSpanish:            "#%d desde el final: %s",
+		},
+		MsgForkNamePrompt: {
+			LangEnglish:            "You selected turn #%d. Please type a name for this fork:",
+			LangChinese:            "你选择了倒数第%d轮。请输入分叉名称：",
+			LangTraditionalChinese: "你選擇了倒數第%d輩。請輸入分叉名稱：",
+			LangJapanese:           "下から%d番目を選択しました。fork名を入力してください：",
+			LangSpanish:            "Seleccionaste turno #%d. Ingresa un nombre para este fork:",
+		},
+		MsgForkNamePromptEntire: {
+			LangEnglish:            "You selected entire session. Please type a name for this fork:",
+			LangChinese:            "你选择了整个会话。请输入分叉名称：",
+			LangTraditionalChinese: "你選擇了整個會話。請輸入分叉名稱：",
+			LangJapanese:           "セッション全体を選択しました。fork名を入力してください：",
+			LangSpanish:            "Seleccionaste sesión completa. Ingresa un nombre para este fork:",
+		},
+		MsgForkCustomName: {
+			LangEnglish:            "Enter fork name",
+			LangChinese:            "输入分叉名称",
+			LangTraditionalChinese: "輸入分叉名稱",
+			LangJapanese:           "fork名を入力",
+			LangSpanish:            "Ingresa nombre del fork",
+		},
+		MsgForkCustomNamePrompt: {
+			LangEnglish:            "You selected turn #%d with custom name. Please type the fork name in chat:",
+			LangChinese:            "你选择了倒数第%d轮，自定义名称。请在聊天中输入分叉名称：",
+			LangTraditionalChinese: "你選擇了倒數第%d輩，自定義名稱。請在聊天中輸入分叉名稱：",
+			LangJapanese:           "下から%d番目を選択しました。チャットでfork名を入力してください：",
+			LangSpanish:            "Seleccionaste turno #%d con nombre personalizado. Ingresa el nombre en chat:",
+		},
+		MsgForkCustomNamePromptEntire: {
+			LangEnglish:            "You selected entire session with custom name. Please type the fork name in chat:",
+			LangChinese:            "你选择了整个会话，自定义名称。请在聊天中输入分叉名称：",
+			LangTraditionalChinese: "你選擇了整個會話，自定義名稱。請在聊天中輸入分叉名稱：",
+			LangJapanese:           "セッション全体を選択しました。チャットでfork名を入力してください：",
+			LangSpanish:            "Seleccionaste sesión completa con nombre personalizado. Ingresa el nombre en chat:",
+		},
 		MsgRollbackTurnListHeader: {
 			LangEnglish:            "Recent turns (1 = most recent):\n",
 			LangChinese:            "最近几轮对话（1 = 最新一轮）：\n",
@@ -3752,6 +3807,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "向正在執行的任務追加補充資訊",
 		LangJapanese:           "実行中のタスクに補足情報を送信",
 		LangSpanish:            "Enviar un P.S. a la tarea en curso",
+	},
+	MsgBuiltinCmdFork: {
+		LangEnglish:            "Fork session from a specific turn",
+		LangChinese:            "从指定轮次分叉会话",
+		LangTraditionalChinese: "從指定輪次分叉會話",
+		LangJapanese:           "指定ターンからセッションをフォーク",
+		LangSpanish:            "Bifurcar sesión desde un turno específico",
+	},
+	MsgBuiltinCmdRollback: {
+		LangEnglish:            "Rollback session to a previous turn",
+		LangChinese:            "回滚会话到之前的轮次",
+		LangTraditionalChinese: "回滾會話到之前的輪次",
+		LangJapanese:           "セッションを前のターンにロールバック",
+		LangSpanish:            "Revertir sesión a un turno anterior",
 	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",

@@ -22,6 +22,17 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// expandHome replaces a leading ~/ in path with the user's home directory.
+// Go's exec.Cmd does not expand ~, so this must be done explicitly.
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
 func init() {
 	core.RegisterAgent("claudecode", New)
 }
@@ -119,13 +130,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	workDir = expandHome(workDir)
 	cliBin := "claude"
 	var cliExtraArgs []string
 	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
 		// NOTE: paths containing spaces are not supported because Fields
 		// splits on whitespace. Use a symlink or wrapper script instead.
+		cliPath = expandHome(cliPath)
 		parts := strings.Fields(cliPath)
-		cliBin = parts[0]
+		cliBin = expandHome(parts[0])
 		if len(parts) > 1 {
 			cliExtraArgs = parts[1:]
 		}
@@ -555,6 +568,27 @@ func extractStringContent(raw json.RawMessage) string {
 	}
 	return ""
 }
+// isToolResult checks whether a content block is a tool_result (agent internal response),
+// not a genuine user query. tool_result entries have a "tool_use_id" field.
+func isToolResult(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	// Array format: [{"tool_use_id": "...", "type": "tool_result", ...}]
+	var blocks []struct {
+		ToolUseID string `json:"tool_use_id"`
+		Type      string `json:"type"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil && len(blocks) > 0 {
+		for _, b := range blocks {
+			if b.ToolUseID != "" || b.Type == "tool_result" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
@@ -965,7 +999,7 @@ func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, er
 		return nil, fmt.Errorf("claudecode: read session file: %w", err)
 	}
 
-	// Collect all user messages with their content
+	// Collect all user messages with their content, skipping tool_result entries
 	var allTurns []core.TurnSummary
 	lines := strings.Split(string(data), "\n")
 	totalUsers := 0
@@ -975,8 +1009,10 @@ func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, er
 			continue
 		}
 		var entry struct {
-			Type    string          `json:"type"`
-			Message json.RawMessage `json:"message"`
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
 		}
 		if json.Unmarshal([]byte(line), &entry) != nil {
 			continue
@@ -984,11 +1020,15 @@ func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, er
 		if entry.Type != "user" && entry.Type != "human" {
 			continue
 		}
+		// Skip tool_result entries — they are agent internal responses, not user queries
+		if isToolResult(entry.Message.Content) {
+			continue
+		}
 		totalUsers++
-		summary := extractStringContent(entry.Message)
+		summary := extractStringContent(entry.Message.Content)
 		// Truncate for display
-		if len([]rune(summary)) > 50 {
-			summary = string([]rune(summary)[:50]) + "…"
+		if len([]rune(summary)) > 80 {
+			summary = string([]rune(summary)[:80]) + "…"
 		}
 		allTurns = append(allTurns, core.TurnSummary{
 			Index:   totalUsers,
