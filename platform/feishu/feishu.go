@@ -128,6 +128,8 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	autoThread                 bool   // when true, reply with ReplyInThread(true) to auto-create Feishu threads
+	threadAckMessage           string // first reply text when creating thread (e.g. "收到，正在处理中...")
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -208,6 +210,11 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	autoThread, _ := opts["auto_thread"].(bool)
+	threadAckMessage, _ := opts["thread_ack_message"].(string)
+	if autoThread && threadAckMessage == "" {
+		threadAckMessage = "收到，正在处理中..."
+	}
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -271,6 +278,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		autoThread:                 autoThread,
+		threadAckMessage:           threadAckMessage,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1099,6 +1108,13 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
+		if p.autoThread {
+			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
+			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+			if err := p.replyMessage(ctx, rc, ackMsgType, ackMsgBody); err != nil {
+				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
+			}
+		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1294,6 +1310,13 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		if text == "" || text == "[interactive card]" {
 			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
 			return
+		}
+		if p.autoThread {
+			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
+			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+			if err := p.replyMessage(ctx, rc, ackMsgType, ackMsgBody); err != nil {
+				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
+			}
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
@@ -2920,6 +2943,9 @@ func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[str
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
+	}
+	if p.autoThread {
+		return true
 	}
 	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
 }

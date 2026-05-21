@@ -931,6 +931,11 @@ app_secret = "your-feishu-app-secret"
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
+# auto_thread = false       # If true, auto-create Feishu threads for replies (first reply creates thread, subsequent replies stay in it).
+#                           # For group @mention and P2P. Works with or without thread_isolation.
+#                           # 设为 true 时，回复自动创建飞书话题（群聊@和私聊均生效），后续对话在话题内进行。
+# thread_ack_message = “”   # First reply text when auto_thread creates a thread. Default: “收到，正在处理中...”
+#                           # auto_thread 创建话题时的首条礼貌回复，留空使用默认值
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
