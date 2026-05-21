@@ -428,13 +428,13 @@ func extractNew(baseline, current string) string {
 
 	// Scroll path: baseline has partially scrolled off the top; try progressively
 	// shorter anchors from the end of baseline to find where new content begins.
-	maxAnchor := 5
+	maxAnchor := 10
 	if len(baseLines) < maxAnchor {
 		maxAnchor = len(baseLines)
 	}
 	for n := maxAnchor; n >= 1; n-- {
 		anchor := strings.Join(baseLines[len(baseLines)-n:], "\n")
-		if idx := strings.Index(current, anchor); idx >= 0 {
+		if idx := strings.LastIndex(current, anchor); idx >= 0 {
 			rest := strings.TrimLeft(current[idx+len(anchor):], "\n")
 			if rest != "" {
 				return rest
