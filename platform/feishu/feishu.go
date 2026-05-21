@@ -1289,6 +1289,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	case "interactive":
 		text := extractInteractiveCardText(content)
+		text = stripCardAtTags(text)
 		slog.Info(p.tag()+": interactive card received", "message_id", messageID, "user", userID, "text_len", len(text))
 		if text == "" || text == "[interactive card]" {
 			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
@@ -2098,6 +2099,14 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 			*parts = append(*parts, "- "+strings.Join(itemParts, " "))
 		}
 	}
+}
+
+var atTagRe = regexp.MustCompile(`<at[^>]+></at>`)
+
+// stripCardAtTags removes Feishu <at id=...></at> tags from extracted card text,
+// replacing each with a compact "@" to indicate a mention without the verbose ID.
+func stripCardAtTags(text string) string {
+	return atTagRe.ReplaceAllString(text, "@")
 }
 
 // parseMergeForward fetches sub-messages of a merge_forward message via the
