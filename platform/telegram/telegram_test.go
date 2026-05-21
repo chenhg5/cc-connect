@@ -69,19 +69,19 @@ func (t *stubTypingTicker) C() <-chan time.Time {
 func (t *stubTypingTicker) Stop() {}
 
 type stubTelegramBot struct {
-	mu                    sync.Mutex
-	sendMessageCalls      int
-	sendPhotoCalls        int
-	sendDocumentCalls     int
-	sendVoiceCalls        int
-	sendAudioCalls        int
-	sendChatActionCalls   int
-	editMessageTextCalls  int
-	deleteMessageCalls    int
-	answerCallbackCalls   int
-	setMyCommandsCalls    int
-	getFileCalls          int
-	setReactionCalls      int
+	mu                   sync.Mutex
+	sendMessageCalls     int
+	sendPhotoCalls       int
+	sendDocumentCalls    int
+	sendVoiceCalls       int
+	sendAudioCalls       int
+	sendChatActionCalls  int
+	editMessageTextCalls int
+	deleteMessageCalls   int
+	answerCallbackCalls  int
+	setMyCommandsCalls   int
+	getFileCalls         int
+	setReactionCalls     int
 
 	sendErr    error
 	getFileErr error
@@ -229,7 +229,6 @@ func (b *stubTelegramBot) GetFileCallCount() int {
 	defer b.mu.Unlock()
 	return b.getFileCalls
 }
-
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	var attempts atomic.Int32
@@ -593,13 +592,13 @@ func TestTruncateTelegramBotDescription_UTF8Safe(t *testing.T) {
 	if !utf8.ValidString(out) {
 		t.Fatal("invalid UTF-8 from CJK description")
 	}
-	if got, max := utf8.RuneCountInString(out), 256; got > max {
+	if got, max := utf8.RuneCountInString(out), telegramBotCommandDescriptionLimit; got > max {
 		t.Fatalf("rune count %d > %d", got, max)
 	}
 
-	long := strings.Repeat("b", 260)
+	long := strings.Repeat("b", 60)
 	out2 := truncateTelegramBotDescription(long)
-	if want := 256; utf8.RuneCountInString(out2) != want {
+	if want := telegramBotCommandDescriptionLimit; utf8.RuneCountInString(out2) != want {
 		t.Fatalf("ascii truncation: got %d runes want %d", utf8.RuneCountInString(out2), want)
 	}
 	if !utf8.ValidString(out2) {
@@ -896,7 +895,7 @@ func TestHandleMessageWithForumTopic(t *testing.T) {
 	}
 }
 
-func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
+func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	p := &Platform{
 		token:         "token",
@@ -912,14 +911,13 @@ func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
 
 	msg := &models.Message{
 		ID:              10,
-		MessageThreadID: 55, // set but not a forum
+		MessageThreadID: 55,
 		Text:            "hello",
 		Date:            int(time.Now().Unix()),
 		From:            &models.User{ID: 7, Username: "alice"},
 		Chat: models.Chat{
 			ID:      100,
-			Type:    models.ChatTypeGroup,
-			Title:   "Test Group",
+			Type:    models.ChatTypePrivate,
 			IsForum: false,
 		},
 	}
@@ -928,12 +926,12 @@ func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
 
 	select {
 	case got := <-handled:
-		if got.SessionKey != "telegram:100:7" {
-			t.Fatalf("SessionKey = %q, want %q (no thread)", got.SessionKey, "telegram:100:7")
+		if got.SessionKey != "telegram:100:55:7" {
+			t.Fatalf("SessionKey = %q, want %q", got.SessionKey, "telegram:100:55:7")
 		}
 		rc := got.ReplyCtx.(replyContext)
-		if rc.threadID != 0 {
-			t.Fatalf("threadID = %d, want 0", rc.threadID)
+		if rc.threadID != 55 {
+			t.Fatalf("threadID = %d, want 55", rc.threadID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("message not handled")

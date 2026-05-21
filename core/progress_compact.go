@@ -227,6 +227,10 @@ type compactProgressWriter struct {
 	truncated  bool
 	lastSent   string
 	maxEntries int
+
+	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
+	minUpdateInterval time.Duration
+	lastUpdateAt      time.Time
 }
 
 func normalizeProgressStyle(style string) string {
@@ -250,6 +254,31 @@ func progressStyleForPlatform(p Platform) string {
 	return ps
 }
 
+type progressStyleHintProvider interface {
+	progressStyleHint() string
+}
+
+type progressCardPayloadHintProvider interface {
+	supportsProgressCardPayloadHint() bool
+}
+
+func progressStyleForTarget(p Platform, replyCtx any) string {
+	if hint, ok := replyCtx.(progressStyleHintProvider); ok {
+		return normalizeProgressStyle(hint.progressStyleHint())
+	}
+	return progressStyleForPlatform(p)
+}
+
+func progressCardPayloadForTarget(p Platform, replyCtx any) bool {
+	if hint, ok := replyCtx.(progressCardPayloadHintProvider); ok {
+		return hint.supportsProgressCardPayloadHint()
+	}
+	if cap, ok := p.(ProgressCardPayloadSupport); ok {
+		return cap.SupportsProgressCardPayload()
+	}
+	return false
+}
+
 // SuppressStandaloneToolResultEvent is true when a platform opts into progress
 // styling (ProgressStyleProvider) but uses legacy mode. In that case tool_use
 // lines are still shown, but a separate chat message for EventToolResult is
@@ -269,11 +298,14 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		platform:   p,
 		replyCtx:   replyCtx,
 		transform:  transform,
-		style:      progressStyleForPlatform(p),
+		style:      progressStyleForTarget(p, replyCtx),
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
 		maxEntries: 10,
+	}
+	if throttler, ok := p.(ProgressUpdateThrottler); ok {
+		w.minUpdateInterval = throttler.ProgressUpdateInterval()
 	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
 		slog.Debug("progress writer disabled: unsupported style", "platform", p.Name(), "style", w.style)
@@ -290,7 +322,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		w.starter = starter
 	}
 	if w.style == progressStyleCard {
-		if cap, ok := p.(ProgressCardPayloadSupport); ok && cap.SupportsProgressCardPayload() {
+		if progressCardPayloadForTarget(p, replyCtx) {
 			w.usePayload = true
 		}
 	}
@@ -428,6 +460,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			}
 			w.handle = handle
 			w.lastSent = w.content
+			w.lastUpdateAt = time.Now()
 			return true
 		}
 		callCtx, cancel := w.withAPITimeout()
@@ -440,6 +473,11 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		}
 		w.handle = w.replyCtx
 		w.lastSent = w.content
+		w.lastUpdateAt = time.Now()
+		return true
+	}
+
+	if w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
 		return true
 	}
 
@@ -452,6 +490,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		return false
 	}
 	w.lastSent = w.content
+	w.lastUpdateAt = time.Now()
 	return true
 }
 

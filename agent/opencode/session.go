@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,17 +24,18 @@ import (
 // Each Send() launches a new `opencode run --format json` process
 // with --session for conversation continuity.
 type opencodeSession struct {
-	cmd      string
-	workDir  string
-	model    string
-	mode     string
-	extraEnv []string
-	events   chan core.Event
-	chatID   atomic.Value // stores string — OpenCode session ID
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	alive    atomic.Bool
+	cmd               string
+	workDir           string
+	model             string
+	mode              string
+	extraEnv          []string
+	events            chan core.Event
+	chatID            atomic.Value // stores string — OpenCode session ID
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	alive             atomic.Bool
+	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 }
 
 func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -62,6 +65,10 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 		filePaths := core.SaveFilesToDisk(s.workDir, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
+	prompt, imagePaths, err := s.stageImages(prompt, images)
+	if err != nil {
+		return err
+	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -69,23 +76,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
 
-	args := []string{"run", "--format", "json"}
-
-	if isResume {
-		args = append(args, "--session", chatID)
-	}
-	if s.model != "" {
-		args = append(args, "--model", s.model)
-	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
-
-	// Enable thinking blocks
-	args = append(args, "--thinking")
-
-	// Append prompt as positional arg
-	args = append(args, prompt)
+	args := s.buildRunArgs(prompt, imagePaths, chatID)
 
 	slog.Debug("opencodeSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
@@ -104,6 +95,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
+	cmd.Stdin = strings.NewReader(prompt)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opencodeSession: start: %w", err)
@@ -115,22 +107,76 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	return nil
 }
 
+func (s *opencodeSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
+	if len(images) == 0 {
+		return prompt, nil, nil
+	}
+
+	imgDir := filepath.Join(s.workDir, ".cc-connect", "images")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("opencodeSession: create image dir: %w", err)
+	}
+
+	imagePaths := make([]string, 0, len(images))
+	for i, img := range images {
+		ext := opencodeImageExt(img.MimeType)
+		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		fpath := filepath.Join(imgDir, fname)
+		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+			return "", nil, fmt.Errorf("opencodeSession: save image: %w", err)
+		}
+		imagePaths = append(imagePaths, fpath)
+	}
+
+	if prompt == "" {
+		prompt = "Please analyze the attached image(s)."
+	}
+
+	return prompt, imagePaths, nil
+}
+
+func opencodeImageExt(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
+}
+
+func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatID string) []string {
+	args := []string{"run", "--format", "json"}
+
+	if chatID != "" {
+		args = append(args, "--session", chatID)
+	}
+	if s.model != "" {
+		args = append(args, "--model", s.model)
+	}
+	if s.workDir != "" {
+		args = append(args, "--dir", s.workDir)
+	}
+
+	// Enable thinking blocks.
+	args = append(args, "--thinking")
+
+	for _, imagePath := range imagePaths {
+		if imagePath == "" {
+			continue
+		}
+		args = append(args, "--file", imagePath)
+	}
+
+	return args
+}
+
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := stderrBuf.String()
-			if stderrMsg != "" {
-				slog.Error("opencodeSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-					return
-				}
-			}
-		}
-	}()
+	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -158,10 +204,36 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		case <-s.ctx.Done():
 			return
 		}
+		return
+	}
+
+	stderrMsg := stderrBuf.String()
+	if stderrMsg != "" {
+		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+		if strings.Contains(stderrMsg, "Session not found") {
+			s.chatID.Store("")
+			slog.Warn("opencodeSession: cleared stale session ID")
+		}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
+
+	// Check if we received compaction_continue before readLoop ended.
+	// If so, OpenCode will continue with a new turn - do NOT send EventResult.
+	// The subsequent process will send its own EventResult when it finishes.
+	if s.expectingContinue.Load() {
+		slog.Info("opencodeSession: readLoop ended after compaction_continue, skipping EventResult", "session_id", s.CurrentSessionID())
+		s.expectingContinue.Store(false)
+		return
 	}
 
 	// Emit EventResult after all steps are done and the process has finished writing.
 	sid := s.CurrentSessionID()
+	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", sid)
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
 	case s.events <- evt:
@@ -201,8 +273,25 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		return
 	}
 	text, _ := part["text"].(string)
+
+	// Extract metadata and synthetic flags to identify compaction_continue
+	metadata, _ := part["metadata"].(map[string]any)
+	synthetic, _ := part["synthetic"].(bool)
+
+	// Check for compaction_continue: this is OpenCode's auto-continuation signal.
+	// When received, we should NOT send EventText to engine, but mark that we expect
+	// a continuation (next step_start will start a new turn without EventResult).
+	if synthetic && metadata != nil {
+		if cc, ok := metadata["compaction_continue"].(bool); ok && cc {
+			slog.Info("opencodeSession: compaction_continue detected, marking expectingContinue", "session_id", s.CurrentSessionID())
+			s.expectingContinue.Store(true)
+			// Do NOT send EventText - this is internal continuation signal
+			return
+		}
+	}
+
 	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text}
+		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -393,10 +482,10 @@ func (s *opencodeSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(s.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
 	}
-	close(s.events)
 	return nil
 }
 

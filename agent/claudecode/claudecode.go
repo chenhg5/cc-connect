@@ -35,7 +35,12 @@ func init() {
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
 	workDir          string
+	cliBin           string   // CLI binary name or path (default: "claude")
+	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
+	reasoningEffort  string // "low" | "medium" | "high" | "max"
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools     []string
 	disallowedTools  []string
@@ -45,6 +50,7 @@ type Agent struct {
 	sessionEnv       []string
 	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey     string // Claude Code Router API key (optional)
+	systemPrompt     string // Custom system prompt to pass to Claude CLI
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -57,14 +63,77 @@ type Agent struct {
 	mu sync.RWMutex
 }
 
+var claudeProviderManagedEnvVars = map[string]struct{}{
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
+	"CLAUDE_CODE_USE_BEDROCK":                               {},
+	"CLAUDE_CODE_USE_VERTEX":                                {},
+	"CLAUDE_CODE_USE_FOUNDRY":                               {},
+	"ANTHROPIC_BASE_URL":                                    {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
+	"ANTHROPIC_VERTEX_BASE_URL":                             {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
+	"CLOUD_ML_REGION":                                       {},
+	"ANTHROPIC_API_KEY":                                     {},
+	"ANTHROPIC_AUTH_TOKEN":                                  {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
+	"AWS_BEARER_TOKEN_BEDROCK":                              {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
+	"ANTHROPIC_MODEL":                                       {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+
+	// Provider-specific base URL env vars for thinking rewrite proxy routing.
+	// These are set by cc-connect when thinking override is needed for
+	// Bedrock/Vertex/Foundry providers that don't use base_url config.
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_SMALL_FAST_MODEL":                            {},
+	"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION":                 {},
+	"CLAUDE_CODE_SUBAGENT_MODEL":                            {},
+}
+
+var claudeProviderManagedEnvPrefixes = []string{
+	"VERTEX_REGION_CLAUDE_",
+}
+
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
 		workDir = "."
 	}
+	cliBin := "claude"
+	var cliExtraArgs []string
+	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
+		// NOTE: paths containing spaces are not supported because Fields
+		// splits on whitespace. Use a symlink or wrapper script instead.
+		parts := strings.Fields(cliPath)
+		cliBin = parts[0]
+		if len(parts) > 1 {
+			cliExtraArgs = parts[1:]
+		}
+	}
+	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
+	systemPrompt, _ := opts["system_prompt"].(string)
 
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
@@ -122,23 +191,62 @@ func New(opts map[string]any) (core.Agent, error) {
 	// skip the supervisor-side LookPath check and let spawn fail loudly
 	// at runtime if the target doesn't have claude installed.
 	if !spawnOpts.IsolationMode() {
-		if _, err := exec.LookPath("claude"); err != nil {
-			return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH, please install Claude Code first")
+		if _, err := exec.LookPath(cliBin); err != nil {
+			return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install it first", cliBin)
+		}
+	}
+
+	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
+	// Stored separately from runtime sessionEnv so SetSessionEnv calls cannot overwrite it.
+	var configEnv []string
+	if envMap, ok := opts["env"].(map[string]string); ok {
+		for k, v := range envMap {
+			configEnv = append(configEnv, k+"="+v)
+		}
+	} else if envMap, ok := opts["env"].(map[string]any); ok {
+		for k, v := range envMap {
+			if s, ok := v.(string); ok {
+				configEnv = append(configEnv, k+"="+s)
+			}
 		}
 	}
 
 	return &Agent{
 		workDir:          workDir,
+		cliBin:           cliBin,
+		cliExtraArgs:     cliExtraArgs,
+		cliArgsFlag:      cliArgsFlag,
 		model:            model,
+		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
+		systemPrompt:     systemPrompt,
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
+		configEnv:        configEnv,
 		activeIdx:        -1,
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
 		spawnOpts:        spawnOpts,
 	}, nil
+}
+
+// normalizeEffort maps user-friendly aliases to Claude CLI --effort values.
+func normalizeEffort(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "low":
+		return "low"
+	case "medium", "med":
+		return "medium"
+	case "high":
+		return "high"
+	case "max":
+		return "max"
+	default:
+		return ""
+	}
 }
 
 // normalizePermissionMode maps user-friendly aliases to Claude CLI values.
@@ -161,7 +269,7 @@ func normalizePermissionMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "claudecode" }
-func (a *Agent) CLIBinaryName() string  { return "claude" }
+func (a *Agent) CLIBinaryName() string  { return a.cliBin }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -190,6 +298,23 @@ func (a *Agent) GetModel() string {
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
+func (a *Agent) SetReasoningEffort(effort string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reasoningEffort = normalizeEffort(effort)
+	slog.Info("claudecode: reasoning effort changed", "effort", a.reasoningEffort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reasoningEffort
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	return []string{"low", "medium", "high", "max"}
+}
+
 func (a *Agent) configuredModels() []core.ModelOption {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -204,9 +329,10 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		return models
 	}
 	return []core.ModelOption{
-		{Name: "sonnet", Desc: "Claude Sonnet 4 (balanced)"},
-		{Name: "opus", Desc: "Claude Opus 4 (most capable)"},
-		{Name: "haiku", Desc: "Claude Haiku 3.5 (fastest)"},
+		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
+		{Name: "opus", Desc: "Claude Opus (most capable)"},
+		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
+		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
 	}
 }
 
@@ -289,34 +415,33 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	copy(disTools, a.disallowedTools)
 	maxTok := a.maxContextTokens
 	model := a.model
-	extraEnv := a.providerEnvLocked()
-	extraEnv = append(extraEnv, a.sessionEnv...)
+	effort := a.reasoningEffort
+	workDir := a.workDir
+	mode := a.mode
+	extraEnv := a.runtimeEnvLocked()
 
-	// Add Claude Code Router environment variables if configured
-	if a.routerURL != "" {
-		extraEnv = append(extraEnv, "ANTHROPIC_BASE_URL="+a.routerURL)
-		// When using router, we need to prevent proxy interference
-		extraEnv = append(extraEnv, "NO_PROXY=127.0.0.1")
-		// Disable telemetry and cost warnings for cleaner router integration
-		extraEnv = append(extraEnv, "DISABLE_TELEMETRY=true")
-		extraEnv = append(extraEnv, "DISABLE_COST_WARNINGS=true")
-	}
-	if a.routerAPIKey != "" {
-		extraEnv = append(extraEnv, "ANTHROPIC_API_KEY="+a.routerAPIKey)
-	}
-
-	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
-		if m := a.providers[a.activeIdx].Model; m != "" {
+	activeIdx := a.activeIdx
+	var activeProviderName string
+	if activeIdx >= 0 && activeIdx < len(a.providers) {
+		activeProviderName = a.providers[activeIdx].Name
+		if m := a.providers[activeIdx].Model; m != "" {
 			model = m
 		}
 	}
+	slog.Debug("claudecode: StartSession provider state",
+		"activeIdx", activeIdx,
+		"activeProvider", activeProviderName,
+		"model", model,
+		"sessionID", sessionID,
+		"providerCount", len(a.providers))
 	platformPrompt := a.platformPrompt
+	systemPrompt := a.systemPrompt
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -325,7 +450,10 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
 	}
 
-	absWorkDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
@@ -378,7 +506,10 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
 	}
-	absWorkDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
@@ -391,6 +522,19 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
 	return os.Remove(path)
+}
+
+// extractStringContent attempts to extract a plain string from a json.RawMessage.
+// Returns empty string if the raw message is not a JSON string.
+func extractStringContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 func scanSessionMeta(path string) (string, int) {
@@ -410,7 +554,7 @@ func scanSessionMeta(path string) (string, int) {
 		var entry struct {
 			Type    string `json:"type"`
 			Message struct {
-				Content string `json:"content"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
@@ -418,8 +562,10 @@ func scanSessionMeta(path string) (string, int) {
 		}
 		if entry.Type == "user" || entry.Type == "assistant" {
 			count++
-			if entry.Type == "user" && entry.Message.Content != "" {
-				summary = entry.Message.Content
+			if entry.Type == "user" {
+				if s := extractStringContent(entry.Message.Content); s != "" {
+					summary = s
+				}
 			}
 		}
 	}
@@ -443,7 +589,10 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 	if err != nil {
 		return nil, err
 	}
-	absWorkDir, _ := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
 	projectDir := findProjectDir(homeDir, absWorkDir)
 	if projectDir == "" {
 		return nil, fmt.Errorf("claudecode: project dir not found")
@@ -576,6 +725,95 @@ func (a *Agent) GetRunAsEnv() []string {
 	return out
 }
 
+// WorkspaceAgentOptions returns a snapshot of user-configured options that
+// must propagate to per-workspace agent instances created lazily by
+// core.Engine.getOrCreateWorkspaceAgent. Without this snapshot, the engine
+// constructs workspace agents from a fresh opts map and silently drops
+// every claudecode field except mode/model — so cli_path, allowed_tools,
+// and friends would only take effect on the project-level agent.
+//
+// Runtime-only state (providers, sessionEnv, providerProxy, platformPrompt)
+// is intentionally omitted: providers are rewired separately by the engine
+// after construction; the rest is per-session and recomputed.
+//
+// configEnv IS included because it comes from the static config file and must
+// propagate to every workspace agent. sessionEnv is excluded (runtime-only).
+//
+// run_as_user / run_as_env are also omitted because the engine has its own
+// dedicated propagation path via GetRunAsUser/GetRunAsEnv (see cc-connect#496).
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode": a.mode,
+	}
+	if len(a.configEnv) > 0 {
+		envMap := make(map[string]string, len(a.configEnv))
+		for _, kv := range a.configEnv {
+			k, v, _ := strings.Cut(kv, "=")
+			envMap[k] = v
+		}
+		opts["env"] = envMap
+	}
+	if cliPath := snapshotCLIPath(a.cliBin, a.cliExtraArgs); cliPath != "" {
+		opts["cli_path"] = cliPath
+	}
+	if a.cliArgsFlag != "" {
+		opts["cli_args_flag"] = a.cliArgsFlag
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if len(a.allowedTools) > 0 {
+		opts["allowed_tools"] = stringsToAny(a.allowedTools)
+	}
+	if len(a.disallowedTools) > 0 {
+		opts["disallowed_tools"] = stringsToAny(a.disallowedTools)
+	}
+	if a.maxContextTokens > 0 {
+		opts["max_context_tokens"] = a.maxContextTokens
+	}
+	if a.routerURL != "" {
+		opts["router_url"] = a.routerURL
+	}
+	if a.routerAPIKey != "" {
+		opts["router_api_key"] = a.routerAPIKey
+	}
+	return opts
+}
+
+// snapshotCLIPath rebuilds the cli_path opts string from cliBin and the
+// extra-args tail captured at construction. Returns "" when only the
+// default "claude" binary is in use, so we don't pollute the workspace
+// opts with a redundant default.
+func snapshotCLIPath(cliBin string, cliExtraArgs []string) string {
+	// Normalise empty to the default binary so we can reason about extra args.
+	if cliBin == "" {
+		cliBin = "claude"
+	}
+	if cliBin == "claude" && len(cliExtraArgs) == 0 {
+		return "" // default binary, no extra args — no need to persist
+	}
+	if len(cliExtraArgs) == 0 {
+		return cliBin
+	}
+	return cliBin + " " + strings.Join(cliExtraArgs, " ")
+}
+
+// stringsToAny copies a []string into a fresh []any so it round-trips
+// through New()'s opts["..."].([]any) type assertion.
+func stringsToAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
 // PermissionModes returns all supported permission modes.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
@@ -628,9 +866,12 @@ func (a *Agent) GetDisallowedTools() []string {
 // ── CommandProvider implementation ────────────────────────────
 
 func (a *Agent) CommandDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	dirs := []string{filepath.Join(absDir, ".claude", "commands")}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -642,27 +883,111 @@ func (a *Agent) CommandDirs() []string {
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
-	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
-	}
-	return dirs
+	return appendProjectClaudeSkillDirs(absDir, claudeConfigHomeDir())
 }
 
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "/compact" }
 
+func claudeConfigHomeDir() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+func appendProjectClaudeSkillDirs(workDir, configHome string) []string {
+	home, _ := os.UserHomeDir()
+	projectDirs := walkUpClaudeSkillDirs(workDir, home)
+	if configHome == "" {
+		return projectDirs
+	}
+	return uniqueSkillDirs(append(projectDirs, filepath.Join(configHome, "skills")))
+}
+
+func walkUpClaudeSkillDirs(workDir, home string) []string {
+	current := filepath.Clean(workDir)
+	home = filepath.Clean(home)
+	stopAt := findGitRoot(current)
+
+	var dirs []string
+	for {
+		if home != "" && samePath(current, home) {
+			break
+		}
+		dirs = append(dirs, filepath.Join(current, ".claude", "skills"))
+		if stopAt != "" && samePath(current, stopAt) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueSkillDirs(dirs)
+}
+
+func findGitRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		gitPath := filepath.Join(current, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func uniqueSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
+
 // ── MemoryFileProvider implementation ─────────────────────────
 
 func (a *Agent) ProjectMemoryFile() string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return filepath.Join(absDir, "CLAUDE.md")
 }
@@ -731,6 +1056,10 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 //  2. If the provider sets thinking (e.g. "disabled"), a local reverse proxy
 //     rewrites the thinking parameter for compatibility with providers that
 //     don't support adaptive thinking.
+//
+// For env-only providers (Bedrock, Vertex, Foundry) that don't set base_url
+// but use CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY env vars, the thinking
+// rewrite proxy routes via ANTHROPIC_*_BASE_URL override env vars.
 func (a *Agent) providerEnvLocked() []string {
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
 		a.stopProviderProxyLocked()
@@ -756,8 +1085,36 @@ func (a *Agent) providerEnvLocked() []string {
 			env = append(env, "ANTHROPIC_AUTH_TOKEN="+p.APIKey)
 			env = append(env, "ANTHROPIC_API_KEY=")
 		}
+		if p.Model != "" {
+			env = append(env, "ANTHROPIC_MODEL="+p.Model)
+		}
 	} else {
-		a.stopProviderProxyLocked()
+		// Check for env-only providers (Bedrock, Vertex, Foundry) that need thinking rewrite.
+		if p.Thinking != "" {
+			providerType := detectEnvOnlyProviderType(p.Env)
+			if providerType != "" {
+				targetURL := getDefaultEndpointForProviderType(providerType)
+				if targetURL != "" {
+					if err := a.ensureProviderProxyLocked(targetURL, p.Thinking); err != nil {
+						slog.Error("providerproxy: failed to start for "+providerType, "error", err)
+						a.stopProviderProxyLocked()
+					} else {
+						// Route the provider-specific requests through our proxy.
+						baseURLEnvVar := getBaseURLEnvVarForProviderType(providerType)
+						env = append(env, baseURLEnvVar+"="+a.proxyLocalURL)
+						env = append(env, "NO_PROXY=127.0.0.1")
+						slog.Info("claudecode: thinking rewrite proxy enabled for "+providerType,
+							"target", targetURL, "local", a.proxyLocalURL, "thinking", p.Thinking)
+					}
+				} else {
+					a.stopProviderProxyLocked()
+				}
+			} else {
+				a.stopProviderProxyLocked()
+			}
+		} else {
+			a.stopProviderProxyLocked()
+		}
 		if p.APIKey != "" {
 			env = append(env, "ANTHROPIC_API_KEY="+p.APIKey)
 		}
@@ -766,7 +1123,54 @@ func (a *Agent) providerEnvLocked() []string {
 	for k, v := range p.Env {
 		env = append(env, k+"="+v)
 	}
+	slog.Debug("claudecode: providerEnv",
+		"provider", p.Name,
+		"model", p.Model,
+		"env", core.RedactEnv(env))
 	return env
+}
+
+func (a *Agent) runtimeEnvLocked() []string {
+	// configEnv (from config.toml [env]) is lower priority than provider keys or
+	// session-injected vars, but must survive SetSessionEnv calls (which only
+	// overwrite sessionEnv). Prepend it so later entries win on conflict.
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
+	env = append(env, a.sessionEnv...)
+
+	if a.routerURL != "" {
+		env = append(env, "ANTHROPIC_BASE_URL="+a.routerURL)
+		env = append(env, "NO_PROXY=127.0.0.1")
+		env = append(env, "DISABLE_TELEMETRY=true")
+		env = append(env, "DISABLE_COST_WARNINGS=true")
+	}
+	if a.routerAPIKey != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+a.routerAPIKey)
+	}
+
+	if !claudeEnvManagesProviderRouting(env) {
+		return env
+	}
+	return core.MergeEnv(env, []string{"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1"})
+}
+
+func claudeEnvManagesProviderRouting(env []string) bool {
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if _, ok := claudeProviderManagedEnvVars[upper]; ok {
+			return true
+		}
+		for _, prefix := range claudeProviderManagedEnvPrefixes {
+			if strings.HasPrefix(upper, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Agent) ensureProviderProxyLocked(targetURL, thinkingOverride string) error {
@@ -788,6 +1192,59 @@ func (a *Agent) stopProviderProxyLocked() {
 		a.providerProxy.Close()
 		a.providerProxy = nil
 		a.proxyLocalURL = ""
+	}
+}
+
+// detectEnvOnlyProviderType checks if the provider uses Bedrock, Vertex, or Foundry
+// via environment variables (without base_url). Returns "bedrock", "vertex", "foundry",
+// or empty string if not detected.
+func detectEnvOnlyProviderType(env map[string]string) string {
+	if env == nil {
+		return ""
+	}
+	if env["CLAUDE_CODE_USE_BEDROCK"] == "1" {
+		return "bedrock"
+	}
+	if env["CLAUDE_CODE_USE_VERTEX"] == "1" {
+		return "vertex"
+	}
+	if env["CLAUDE_CODE_USE_FOUNDRY"] == "1" {
+		return "foundry"
+	}
+	return ""
+}
+
+// getDefaultEndpointForProviderType returns the default API endpoint for Bedrock/Vertex/Foundry.
+// Used as the proxy target when thinking rewrite is needed for env-only providers.
+func getDefaultEndpointForProviderType(providerType string) string {
+	switch providerType {
+	case "bedrock":
+		// Bedrock cross-region inference endpoint; works with AWS SDK auth.
+		// User can override region via AWS_REGION or CLOUD_ML_REGION env var.
+		return "https://bedrock-runtime.us-east-1.amazonaws.com"
+	case "vertex":
+		// Vertex AI endpoint; requires CLOUD_ML_REGION env var for region.
+		return "https://us-east1-aiplatform.googleapis.com"
+	case "foundry":
+		// Anthropic Foundry internal endpoint (rarely used externally).
+		return "https://api.anthropic.com"
+	default:
+		return ""
+	}
+}
+
+// getBaseURLEnvVarForProviderType returns the environment variable name that
+// Claude Code uses to override the base URL for Bedrock/Vertex/Foundry providers.
+func getBaseURLEnvVarForProviderType(providerType string) string {
+	switch providerType {
+	case "bedrock":
+		return "ANTHROPIC_BEDROCK_BASE_URL"
+	case "vertex":
+		return "ANTHROPIC_VERTEX_BASE_URL"
+	case "foundry":
+		return "ANTHROPIC_FOUNDRY_BASE_URL"
+	default:
+		return ""
 	}
 }
 
@@ -875,10 +1332,12 @@ func boolVal(m map[string]any, key string) bool {
 
 // encodeClaudeProjectKey converts an absolute path to Claude Code's project key format.
 // Claude Code encodes paths by:
-// 1. Replacing path separators (/ or \) with "-"
-// 2. Replacing colons (:) with "-" (Windows drive letters)
-// 3. Replacing underscores (_) with "-"
-// 4. Replacing all non-ASCII characters with "-"
+//  1. Replacing path separators (/ or \) with "-"
+//  2. Replacing colons (:) with "-" (Windows drive letters)
+//  3. Replacing underscores (_) with "-"
+//  4. Replacing spaces and tildes (~) with "-" (common in macOS iCloud paths like
+//     "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+//  5. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
@@ -886,7 +1345,7 @@ func encodeClaudeProjectKey(absPath string) string {
 	// Build the encoded key character by character
 	var result strings.Builder
 	for _, r := range normalized {
-		if r == '/' || r == ':' || r == '_' {
+		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' {
 			result.WriteRune('-')
 		} else if r < 128 { // ASCII range (0-127)
 			result.WriteRune(r)

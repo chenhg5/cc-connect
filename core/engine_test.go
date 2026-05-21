@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- stubs for Engine tests ---
@@ -81,6 +83,27 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Lock()
 	p.sent = nil
 	p.mu.Unlock()
+}
+
+type recallCheckingPlatform struct {
+	stubPlatformEngine
+	recalled bool
+	checked  []any
+}
+
+func (p *recallCheckingPlatform) IsMessageRecalled(_ context.Context, replyCtx any) (bool, error) {
+	p.mu.Lock()
+	p.checked = append(p.checked, replyCtx)
+	p.mu.Unlock()
+	return p.recalled, nil
+}
+
+func (p *recallCheckingPlatform) checkedReplyCtxs() []any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]any, len(p.checked))
+	copy(out, p.checked)
+	return out
 }
 
 type stubCronReplyTargetPlatform struct {
@@ -174,11 +197,12 @@ func (s *resultAgentSession) Close() error                                      
 
 type stubLifecyclePlatform struct {
 	stubPlatformEngine
-	handler         PlatformLifecycleHandler
-	registerCalls   int
-	cardNavSetCalls int
-	startCalls      int
-	stopCalls       int
+	handler            PlatformLifecycleHandler
+	registerCalls      int
+	registeredCommands []BotCommandInfo
+	cardNavSetCalls    int
+	startCalls         int
+	stopCalls          int
 }
 
 func (p *stubLifecyclePlatform) Start(MessageHandler) error {
@@ -195,8 +219,9 @@ func (p *stubLifecyclePlatform) SetLifecycleHandler(h PlatformLifecycleHandler) 
 	p.handler = h
 }
 
-func (p *stubLifecyclePlatform) RegisterCommands([]BotCommandInfo) error {
+func (p *stubLifecyclePlatform) RegisterCommands(commands []BotCommandInfo) error {
 	p.registerCalls++
+	p.registeredCommands = append([]BotCommandInfo(nil), commands...)
 	return nil
 }
 
@@ -271,12 +296,16 @@ func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, con
 
 type stubCardPlatform struct {
 	stubPlatformEngine
-	repliedCards []*Card
-	sentCards    []*Card
-	cardErr      error
+	mu             sync.Mutex
+	repliedCards   []*Card
+	sentCards      []*Card
+	refreshedCards []*Card
+	cardErr        error
 }
 
 func (p *stubCardPlatform) ReplyCard(_ context.Context, _ any, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.cardErr != nil {
 		return p.cardErr
 	}
@@ -285,11 +314,35 @@ func (p *stubCardPlatform) ReplyCard(_ context.Context, _ any, card *Card) error
 }
 
 func (p *stubCardPlatform) SendCard(_ context.Context, _ any, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.cardErr != nil {
 		return p.cardErr
 	}
 	p.sentCards = append(p.sentCards, card)
 	return nil
+}
+
+func (p *stubCardPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	return "reconstructed-ctx:" + sessionKey, nil
+}
+
+func (p *stubCardPlatform) RefreshCard(_ context.Context, _ string, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cardErr != nil {
+		return p.cardErr
+	}
+	p.refreshedCards = append(p.refreshedCards, card)
+	return nil
+}
+
+func (p *stubCardPlatform) getRefreshedCards() []*Card {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	dst := make([]*Card, len(p.refreshedCards))
+	copy(dst, p.refreshedCards)
+	return dst
 }
 
 type stubCompactProgressPlatform struct {
@@ -324,6 +377,18 @@ func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, co
 	p.previewEdits = append(p.previewEdits, content)
 	p.previewMu.Unlock()
 	return nil
+}
+
+func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "rich status=%s title=%s streaming=%t elapsed=%s\n", status, title, streaming, elapsed)
+	for _, step := range steps {
+		fmt.Fprintf(&b, "step=%+v\n", step)
+	}
+	if markdown != "" {
+		fmt.Fprintf(&b, "markdown=%s\n", markdown)
+	}
+	return b.String()
 }
 
 func (p *stubCompactProgressPlatform) getPreviewStarts() []string {
@@ -462,6 +527,32 @@ func (a *namedStubModelModeAgent) Name() string {
 	return a.name
 }
 
+type namedStubWorkspaceOptionAgent struct {
+	namedStubModelModeAgent
+	opts      map[string]any
+	runAsUser string
+	runAsEnv  []string
+}
+
+func (a *namedStubWorkspaceOptionAgent) WorkspaceAgentOptions() map[string]any {
+	out := make(map[string]any, len(a.opts))
+	for k, v := range a.opts {
+		out[k] = v
+	}
+	return out
+}
+
+func (a *namedStubWorkspaceOptionAgent) GetRunAsUser() string { return a.runAsUser }
+
+func (a *namedStubWorkspaceOptionAgent) GetRunAsEnv() []string {
+	if len(a.runAsEnv) == 0 {
+		return nil
+	}
+	out := make([]string, len(a.runAsEnv))
+	copy(out, a.runAsEnv)
+	return out
+}
+
 type stubWorkDirAgent struct {
 	stubAgent
 	workDir string
@@ -510,6 +601,21 @@ func (a *stubDeleteAgent) DeleteSession(_ context.Context, sessionID string) err
 	return nil
 }
 
+// waitDeleteModePhase polls the delete-mode state for the given session key
+// until it reaches the target phase or the timeout expires.
+func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		dm := e.getDeleteModeState(sessionKey)
+		if dm != nil && dm.phase == targetPhase {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
+}
+
 type stubProviderAgent struct {
 	stubAgent
 	providers []ProviderConfig
@@ -554,6 +660,25 @@ type stubUsageAgent struct {
 }
 
 func (a *stubUsageAgent) GetUsage(_ context.Context) (*UsageReport, error) {
+	return a.report, a.err
+}
+
+type stubReplyFooterAgent struct {
+	stubModelModeAgent
+	workDir string
+	report  *UsageReport
+	err     error
+}
+
+func (a *stubReplyFooterAgent) SetWorkDir(dir string) {
+	a.workDir = dir
+}
+
+func (a *stubReplyFooterAgent) GetWorkDir() string {
+	return a.workDir
+}
+
+func (a *stubReplyFooterAgent) GetUsage(_ context.Context) (*UsageReport, error) {
 	return a.report, a.err
 }
 
@@ -869,6 +994,36 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 }
 
+func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextIndicator(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	sideText := "已发送 AGENTS.md 文件给你。"
+	if err := e.SendToSessionWithAttachments(sessionKey, sideText, nil, []FileAttachment{{
+		MimeType: "text/markdown",
+		Data:     []byte("body"),
+		FileName: "AGENTS.md",
+	}}); err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: sideText, InputTokens: 52000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
+		t.Fatalf("sent text = %#v, want only the side-channel message without duplicate ctx reply", got)
+	}
+}
+
 func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -899,6 +1054,308 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 	if got := p.getSent()[1]; got != finalText {
 		t.Fatalf("final sent text = %q, want %q", got, finalText)
+	}
+}
+
+func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "gpt-5.4",
+			reasoningEffort: "xhigh",
+		},
+		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+		report: &UsageReport{
+			Buckets: []UsageBucket{{
+				Name: "Rate limit",
+				Windows: []UsageWindow{{
+					Name:          "Primary",
+					UsedPercent:   0,
+					WindowSeconds: 18000,
+				}},
+			}},
+		},
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-context"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-context")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-context",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 28000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-context", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-tool-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-tool-footer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-tool-footer",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "已处理完成。"}
+	agentSession.events <- Event{Type: EventResult, Content: "已处理完成。", InputTokens: 28000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-tool-footer", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("sent = nil, want final reply")
+	}
+	final := sent[len(sent)-1]
+	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	if final != want {
+		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
+	}
+}
+
+func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-ellipsis"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-ellipsis")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-ellipsis",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "..."}
+	agentSession.events <- Event{Type: EventText, Content: "..."}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ellipsis", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("sent = %#v, want only final answer without standalone ellipsis progress", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "gpt-5.4",
+			reasoningEffort: "xhigh",
+		},
+		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+		report: &UsageReport{
+			Buckets: []UsageBucket{{
+				Name: "Rate limit",
+				Windows: []UsageWindow{{
+					Name:          "Primary",
+					UsedPercent:   0,
+					WindowSeconds: 18000,
+				}},
+			}},
+		},
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(false)
+
+	sessionKey := "telegram:user-footer-off"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-off")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-off",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-off", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if sent[0] != "answer" {
+		t.Fatalf("final reply = %q, want plain answer without footer", sent[0])
+	}
+}
+
+func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "agent-model",
+			reasoningEffort: "medium",
+		},
+		workDir: filepath.Join(homeDir, "codes", "agent-default"),
+		report: &UsageReport{
+			Buckets: []UsageBucket{{
+				Name: "Rate limit",
+				Windows: []UsageWindow{{
+					Name:          "Primary",
+					UsedPercent:   80,
+					WindowSeconds: 18000,
+				}},
+			}},
+		},
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-runtime"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-runtime")
+	agentSession.model = "gpt-5.4"
+	agentSession.reasoningEffort = "xhigh"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.report = &UsageReport{
+		Buckets: []UsageBucket{{
+			Name: "Rate limit",
+			Windows: []UsageWindow{{
+				Name:          "Primary",
+				UsedPercent:   0,
+				WindowSeconds: 18000,
+			}},
+		}},
+	}
+	agentSession.contextUsage = &ContextUsage{
+		UsedTokens:     181424,
+		BaselineTokens: 12000,
+		TotalTokens:    50821769,
+		ContextWindow:  258400,
+	}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-runtime",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-runtime", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+// Regression: an agent that only exposes a workdir (no model/effort/usage)
+// must not emit a footer at all. Previously this produced a footer like
+// "*~*" when the agent was running in the user's home directory, which
+// rendered as a bare "~" on Feishu/Weixin.
+func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubWorkDirAgent{workDir: homeDir}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-workdir-only"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-workdir-only")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-workdir-only",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-workdir-only", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	if sent[0] != "answer" {
+		t.Fatalf("final reply = %q, want plain answer without footer", sent[0])
 	}
 }
 
@@ -1219,6 +1676,90 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 	if finalPayload.State != ProgressCardStateCompleted {
 		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "rich",
+	})
+	sessionKey := "feishu:user-rich-thinking"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-thinking")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-thinking",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Inspecting event routing"}
+	agentSession.events <- Event{Type: EventText, Content: "answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-thinking", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.Contains(starts[0], "Inspecting event routing") {
+		t.Fatalf("rich card start should contain thinking content, got %q", starts[0])
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "rich",
+	})
+	sessionKey := "feishu:user-rich-tool-result"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-tool-result")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-tool-result",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	code := 0
+	success := true
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi", ToolStatus: "completed", ToolExitCode: &code, ToolSuccess: &success}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-tool-result", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want only the rich card start and no separate progress card", len(starts))
+	}
+	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
+	for _, want := range []string{"echo hi", "completed", "hi"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, rendered)
+		}
 	}
 }
 
@@ -1973,7 +2514,7 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: sessionKey, ReplyCtx: "ctx"}
 
-	if !e.handlePendingPermission(p, msg, "allow") {
+	if !e.handlePendingPermission(p, msg, "allow", "") {
 		t.Fatal("expected pending permission to be handled")
 	}
 
@@ -2004,6 +2545,139 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	}
 	if session.lastResult.Behavior != "allow" {
 		t.Fatalf("RespondPermission behavior = %q, want %q", session.lastResult.Behavior, "allow")
+	}
+}
+
+// Regression for the Discord thread_isolation + multi-workspace auto-bind
+// path: workspace binding is keyed by the *parent* channel ID, but the
+// sessionKey driving follow-up lookups is the *thread* ID.
+//
+// sessionContextForKey must follow the same fallback as
+// interactiveKeyForSessionKey, otherwise commands like /compress would
+// resolve the workspace state correctly via interactiveKeyForSessionKey
+// (live-state scan finds it) but lock the *global* session manager via
+// sessionContextForKey (channel-binding misses, falls through to
+// e.agent/e.sessions). That mismatch lets a normal thread message run
+// concurrently against the same workspace agent session — the exact
+// race we just fixed in interactiveKeyForSessionKey.
+func TestSessionContextForKey_RecoversWorkspaceFromLiveState(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+
+	// Workspace dir must exist so getOrCreateWorkspaceAgent can build under it.
+	wsDir := filepath.Join(baseDir, "ws-thread")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	threadSessionKey := "discord:T-thread"
+	storedKey := normalizeWorkspacePath(wsDir) + ":" + threadSessionKey
+
+	// Live state is keyed under the workspace prefix but no binding exists
+	// for the thread channel — exactly the Discord thread_isolation shape.
+	e.interactiveMu.Lock()
+	e.interactiveStates[storedKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	agent, sessions := e.sessionContextForKey(threadSessionKey)
+	if agent == e.agent {
+		t.Fatal("sessionContextForKey returned the global agent; live-state recovery did not engage")
+	}
+	if sessions == e.sessions {
+		t.Fatal("sessionContextForKey returned the global session manager; live-state recovery did not engage")
+	}
+}
+
+// Same shape as the case above, but exercising interactiveKeyForSessionKey.
+func TestInteractiveKeyForSessionKey_RecoversByLiveStateScan(t *testing.T) {
+	e := newTestEngine()
+	wsDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	parentChannel := "C-parent"
+	threadID := "T-thread"
+	// Bind the workspace under the *parent* channel — mirrors what the
+	// Discord platform does when thread_isolation is on.
+	e.workspaceBindings.Bind("project:test", "discord:"+parentChannel, "chan", wsDir)
+
+	// Live interactive state is stored under the workspace-prefixed thread
+	// session key, exactly how processInteractiveMessageWith would key it.
+	threadSessionKey := "discord:" + threadID
+	storedInteractiveKey := normalizeWorkspacePath(wsDir) + ":" + threadSessionKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[storedInteractiveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	got := e.interactiveKeyForSessionKey(threadSessionKey)
+	if got != storedInteractiveKey {
+		t.Errorf("interactiveKeyForSessionKey(%q) = %q, want %q (suffix-scan fallback failed)",
+			threadSessionKey, got, storedInteractiveKey)
+	}
+}
+
+func TestInteractiveKeyForSessionKey_PrefersCurrentBindingOverStaleState(t *testing.T) {
+	// When a channel is rebound to a new workspace while old workspace state
+	// hasn't been cleaned up, the *current* binding must win. Otherwise the
+	// rebinding silently strands sessions on the old workspace, and a map-
+	// iteration race could send /stop or pending replies to the wrong state.
+	e := newTestEngine()
+	wsBound := t.TempDir()
+	wsStale := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	channelID := "C1"
+	sessionKey := "slack:" + channelID + ":U1"
+	e.workspaceBindings.Bind("project:test", "slack:"+channelID, "chan", wsBound)
+
+	// Stale state from before rebinding is still in the map.
+	staleKey := normalizeWorkspacePath(wsStale) + ":" + sessionKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[staleKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	want := normalizeWorkspacePath(wsBound) + ":" + sessionKey
+	if got := e.interactiveKeyForSessionKey(sessionKey); got != want {
+		t.Errorf("interactiveKeyForSessionKey = %q, want current-binding key %q", got, want)
+	}
+}
+
+func TestFindInteractiveKeyForSession(t *testing.T) {
+	e := newTestEngine()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+
+	cases := []struct {
+		name     string
+		stored   []string
+		query    string
+		expected string
+	}{
+		{"empty-query", []string{}, "", ""},
+		{"no-matches", []string{"/ws:slack:C1:U1"}, "discord:T1", ""},
+		{"exact-match", []string{"slack:C1:U1"}, "slack:C1:U1", "slack:C1:U1"},
+		{"suffix-match", []string{"/ws:discord:T1"}, "discord:T1", "/ws:discord:T1"},
+		{"first-of-multiple", []string{"/wsA:discord:T1", "/wsB:slack:C1:U1"}, "slack:C1:U1", "/wsB:slack:C1:U1"},
+		// Precedence: exact key beats suffix-matched workspace-prefixed key.
+		// Without this, map iteration order would be visible to callers, making
+		// /stop and pending-permission routing non-deterministic when both
+		// raw and workspace-prefixed states coexist.
+		{"exact-beats-prefixed", []string{"slack:C1:U1", "/ws:slack:C1:U1"}, "slack:C1:U1", "slack:C1:U1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e.interactiveMu.Lock()
+			e.interactiveStates = make(map[string]*interactiveState)
+			for _, k := range tc.stored {
+				e.interactiveStates[k] = &interactiveState{}
+			}
+			e.interactiveMu.Unlock()
+
+			if got := e.findInteractiveKeyForSession(tc.query); got != tc.expected {
+				t.Errorf("findInteractiveKeyForSession(%q) = %q, want %q", tc.query, got, tc.expected)
+			}
+		})
 	}
 }
 
@@ -2369,8 +3043,8 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.Name = "Focus"
 	session.SetAgentSessionID("session-123", "test")
+	e.sessions.SetSessionName("session-123", "Focus")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -2381,9 +3055,161 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Current session") {
 		t.Fatalf("current text = %q, want legacy current session text", p.sent[0])
 	}
+	if !strings.Contains(p.sent[0], "Focus") {
+		t.Fatalf("current text = %q, want session name 'Focus'", p.sent[0])
+	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
 	}
+}
+
+func TestCmdCurrent_ShowsAgentSummaryWhenNoCustomName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-abc", Summary: "Fix the login bug", MessageCount: 5},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Fix the login bug") {
+		t.Fatalf("current text = %q, want agent summary 'Fix the login bug'", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_ShowsUntitledWhenNoNameOrSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-xyz", Summary: "", MessageCount: 0},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-xyz", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "(untitled)") {
+		t.Fatalf("current text = %q, want '(untitled)' fallback", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_CustomNameOverridesSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-override", Summary: "Agent summary", MessageCount: 3},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-override", "test")
+	e.sessions.SetSessionName("session-override", "MyCustomName")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "MyCustomName") {
+		t.Fatalf("current text = %q, want custom name 'MyCustomName'", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Agent summary") {
+		t.Fatalf("current text = %q, should not contain agent summary when custom name set", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_NotStartedSessionShowsUntitled(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "(untitled)") {
+		t.Fatalf("current text = %q, want '(untitled)' for not-started session", p.sent[0])
+	}
+}
+
+type stubTitleAgent struct {
+	stubAgent
+	titles map[string]string
+}
+
+func (a *stubTitleAgent) GetSessionTitle(sessionID string) string {
+	if a.titles == nil {
+		return ""
+	}
+	return a.titles[sessionID]
+}
+
+func TestCmdCurrent_SessionTitleProviderFallback(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubTitleAgent{
+		titles: map[string]string{
+			"session-not-in-list": "Title from DB",
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-not-in-list", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Title from DB") {
+		t.Fatalf("current text = %q, want 'Title from DB' from SessionTitleProvider", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_SessionTitleProviderNotUsedWhenListMatches(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgentWithTitle{
+		stubTitleAgent: stubTitleAgent{
+			titles: map[string]string{
+				"session-abc": "DB Title (should not appear)",
+			},
+		},
+		sessions: []AgentSessionInfo{
+			{ID: "session-abc", Summary: "List Summary", MessageCount: 5},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "List Summary") {
+		t.Fatalf("current text = %q, want 'List Summary' from ListSessions", p.sent[0])
+	}
+}
+
+type stubListAgentWithTitle struct {
+	stubTitleAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *stubListAgentWithTitle) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
 }
 
 func TestCmdDelete_BatchCommaList(t *testing.T) {
@@ -2612,13 +3438,21 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card after submit")
+		t.Fatal("expected deleting card after submit")
 	}
+	// Submit is now async; the returned card is a "deleting" indicator.
+	// Wait for the background goroutine to complete and push the result card.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	if !strings.Contains(resultCard.RenderText(), "Session deleted: One") {
-		t.Fatalf("result text = %q, want delete result", resultCard.RenderText())
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	pushedCard := refreshed[len(refreshed)-1]
+	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
+		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
 	}
 }
 
@@ -2643,9 +3477,16 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card after submit")
+		t.Fatal("expected deleting card after submit")
 	}
-	resultText := resultCard.RenderText()
+	// Wait for async deletion to complete.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	pushedCard := refreshed[len(refreshed)-1]
+	resultText := pushedCard.RenderText()
 	if !strings.Contains(resultText, "Session deleted: One") {
 		t.Fatalf("result text = %q, want deleted session line", resultText)
 	}
@@ -2738,13 +3579,19 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card")
+		t.Fatal("expected deleting card")
 	}
+	// Wait for async deletion to complete.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
-	if !strings.Contains(resultCard.RenderText(), "Cannot delete the currently active session") {
-		t.Fatalf("result text = %q, want active-session warning", resultCard.RenderText())
+	if len(p.getRefreshedCards()) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
+	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
+		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
 	}
 }
 
@@ -2808,13 +3655,20 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 
 	resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey)
 	if resultCard == nil {
-		t.Fatal("expected result card after submit")
+		t.Fatal("expected deleting card after submit")
 	}
+	// Wait for async deletion to complete.
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	if !strings.Contains(resultCard.RenderText(), "Session deleted: One") {
-		t.Fatalf("result text = %q, want delete result", resultCard.RenderText())
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected pushed result card via RefreshCard")
+	}
+	pushedCard := refreshed[len(refreshed)-1]
+	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
+		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
 	}
 }
 
@@ -2943,8 +3797,8 @@ func TestCmdModel_UpdatesActiveProviderModel(t *testing.T) {
 	if savedProvider != "openai" || savedModel != "gpt-4.1" {
 		t.Fatalf("saved provider/model = %q/%q, want openai/gpt-4.1", savedProvider, savedModel)
 	}
-	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "" {
-		t.Fatalf("session id = %q, want cleared after model switch", active.AgentSessionID)
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "existing-session" {
+		t.Fatalf("session id = %q, want preserved after model switch", active.AgentSessionID)
 	}
 }
 
@@ -3112,8 +3966,8 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 	if globalAgent.model != "gpt-4.1-mini" {
 		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
 	}
-	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "workspace-session" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
@@ -3155,6 +4009,35 @@ func TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel(t *testing.T) {
 	}
 	if got := wsAgent.GetActiveProvider(); got == nil || got.Model != "gpt-4.1-mini" {
 		t.Fatalf("workspace active provider = %#v, want unchanged model gpt-4.1-mini", got)
+	}
+}
+
+func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{
+		model: "gpt-4.1-mini",
+		providers: []ProviderConfig{
+			{
+				Name:   "openai",
+				Model:  "gpt-4.1-mini",
+				Models: []ModelOption{{Name: "gpt-4.1", Alias: "gpt"}, {Name: "gpt-4.1-mini", Alias: "mini"}},
+			},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session-id", "test")
+	s.AddHistory("user", "hello")
+
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if got := s.GetAgentSessionID(); got != "existing-session-id" {
+		t.Fatalf("session id = %q, want existing-session-id (should be preserved)", got)
+	}
+	if got := len(s.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want 1 (original entry preserved)", got)
 	}
 }
 
@@ -3200,6 +4083,85 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	}
 	if got := wsAgent.GetActiveProvider(); got == nil || got.Name != "azure" {
 		t.Fatalf("workspace active provider = %#v, want azure", got)
+	}
+}
+
+func TestGetOrCreateWorkspaceAgent_InheritsSnapshotOptions(t *testing.T) {
+	agentName := "test-workspace-option-snapshot"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		snapshot := make(map[string]any, len(opts))
+		for k, v := range opts {
+			snapshot[k] = v
+		}
+		return &namedStubWorkspaceOptionAgent{
+			namedStubModelModeAgent: namedStubModelModeAgent{
+				name: agentName,
+				stubModelModeAgent: stubModelModeAgent{
+					model:           "gpt-5.4",
+					mode:            "yolo",
+					reasoningEffort: "high",
+				},
+			},
+			opts: snapshot,
+		}, nil
+	})
+
+	globalAgent := &namedStubWorkspaceOptionAgent{
+		namedStubModelModeAgent: namedStubModelModeAgent{
+			name: agentName,
+			stubModelModeAgent: stubModelModeAgent{
+				model:           "gpt-5.4",
+				mode:            "yolo",
+				reasoningEffort: "high",
+			},
+		},
+		opts: map[string]any{
+			"backend":          "app_server",
+			"app_server_url":   "ws://127.0.0.1:3846",
+			"codex_home":       "/tmp/codex-home",
+			"reasoning_effort": "high",
+			"mode":             "yolo",
+			"model":            "gpt-5.4",
+			"run_as_user":      "workspace-snapshot-user",
+			"run_as_env":       []string{"SNAPSHOT_ONLY"},
+		},
+		runAsUser: "fallback-user",
+		runAsEnv:  []string{"FALLBACK_ONLY"},
+	}
+	e := NewEngine("test", globalAgent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+
+	workspace := normalizeWorkspacePath(t.TempDir())
+	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent returned error: %v", err)
+	}
+
+	wsAgent, ok := wsAgentRaw.(*namedStubWorkspaceOptionAgent)
+	if !ok {
+		t.Fatalf("workspace agent type = %T, want *namedStubWorkspaceOptionAgent", wsAgentRaw)
+	}
+	if got := wsAgent.opts["backend"]; got != "app_server" {
+		t.Fatalf("workspace backend = %#v, want app_server", got)
+	}
+	if got := wsAgent.opts["app_server_url"]; got != "ws://127.0.0.1:3846" {
+		t.Fatalf("workspace app_server_url = %#v, want ws://127.0.0.1:3846", got)
+	}
+	if got := wsAgent.opts["codex_home"]; got != "/tmp/codex-home" {
+		t.Fatalf("workspace codex_home = %#v, want /tmp/codex-home", got)
+	}
+	if got := wsAgent.opts["reasoning_effort"]; got != "high" {
+		t.Fatalf("workspace reasoning_effort = %#v, want high", got)
+	}
+	if got := wsAgent.opts["work_dir"]; got != workspace {
+		t.Fatalf("workspace work_dir = %#v, want %q", got, workspace)
+	}
+	if got := wsAgent.opts["run_as_user"]; got != "workspace-snapshot-user" {
+		t.Fatalf("workspace run_as_user = %#v, want snapshot value", got)
+	}
+	gotRunAsEnv, _ := wsAgent.opts["run_as_env"].([]string)
+	if len(gotRunAsEnv) != 1 || gotRunAsEnv[0] != "SNAPSHOT_ONLY" {
+		t.Fatalf("workspace run_as_env = %#v, want snapshot value", wsAgent.opts["run_as_env"])
 	}
 }
 
@@ -3714,6 +4676,162 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 }
 
+// TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions is a regression test
+// for the bug where cmdReasoning called e.sessions.Save() (global) instead of
+// sessions.Save() (workspace-resolved), leaving workspace session state unsaved.
+func TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-reasoning-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("ws-session-id", "test")
+	wsSession.AddHistory("user", "hello")
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session-id", "test")
+
+	e.cmdReasoning(p, msg, []string{"3"}) // selects "high"
+
+	if wsAgent.reasoningEffort != "high" {
+		t.Fatalf("workspace agent reasoning effort = %q, want high", wsAgent.reasoningEffort)
+	}
+	if got := wsSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+}
+
+// TestCmdProvider_ClearMultiWorkspaceUsesWorkspaceSessions is a regression test
+// for the bug where cmdProvider "clear" used e.sessions (global) instead of
+// the workspace-resolved sessions, and called providerSaveFunc in workspace mode.
+func TestCmdProvider_ClearMultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}},
+		active:    "openai",
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	var savedProvider string
+	e.SetProviderSaveFunc(func(name string) error {
+		savedProvider = name
+		return nil
+	})
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-provider-clear-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}},
+		active:    "openai",
+	}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("ws-session-id", "test")
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session-id", "test")
+
+	e.cmdProvider(p, msg, []string{"clear"})
+
+	if got := wsSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+	// providerSaveFunc must not be called when operating on a workspace agent.
+	if savedProvider != "" {
+		t.Fatalf("providerSaveFunc was called with %q in workspace mode, want no call", savedProvider)
+	}
+}
+
+// TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions is a regression test
+// for the bug where switchProvider used e.sessions (global) instead of the
+// workspace-resolved sessions, and called providerSaveFunc in workspace mode.
+func TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}, {Name: "azure"}},
+		active:    "openai",
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	var savedProvider string
+	e.SetProviderSaveFunc(func(name string) error {
+		savedProvider = name
+		return nil
+	})
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-provider-switch-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}, {Name: "azure"}},
+		active:    "openai",
+	}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("ws-session-id", "test")
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session-id", "test")
+
+	e.cmdProvider(p, msg, []string{"switch", "azure"})
+
+	if wsAgent.active != "azure" {
+		t.Fatalf("workspace agent active provider = %q, want azure", wsAgent.active)
+	}
+	if got := wsSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+	// providerSaveFunc must not be called when operating on a workspace agent.
+	if savedProvider != "" {
+		t.Fatalf("providerSaveFunc was called with %q in workspace mode, want no call", savedProvider)
+	}
+}
+
 func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	agent := &stubModelModeAgent{}
@@ -3791,28 +4909,46 @@ func TestCmdStatus_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 func TestCmdQuiet_TogglesDisplay(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	// First /quiet: both on → both off (quiet ON)
+	// 1st /quiet: full → quiet
 	e.cmdQuiet(p, msg, nil)
-	if e.display.ThinkingMessages || e.display.ToolMessages {
-		t.Fatalf("after first /quiet: ThinkingMessages=%v, ToolMessages=%v, want both false",
-			e.display.ThinkingMessages, e.display.ToolMessages)
+	if e.display.Mode != "quiet" || e.display.ThinkingMessages || e.display.ToolMessages {
+		t.Fatalf("after 1st /quiet: Mode=%q, TM=%v, Tool=%v, want quiet/false/false",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode ON") {
 		t.Fatalf("sent = %q, want quiet ON message", p.sent)
 	}
 
-	// Second /quiet: both off → both on (quiet OFF)
+	// 2nd /quiet: quiet → compact
 	p.sent = nil
 	e.cmdQuiet(p, msg, nil)
-	if !e.display.ThinkingMessages || !e.display.ToolMessages {
-		t.Fatalf("after second /quiet: ThinkingMessages=%v, ToolMessages=%v, want both true",
-			e.display.ThinkingMessages, e.display.ToolMessages)
+	if e.display.Mode != "compact" || e.display.ThinkingMessages || e.display.ToolMessages {
+		t.Fatalf("after 2nd /quiet: Mode=%q, TM=%v, Tool=%v, want compact/false/false",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Compact mode") {
+		t.Fatalf("sent = %q, want compact mode message", p.sent)
+	}
+
+	// 3rd /quiet: compact → full
+	p.sent = nil
+	e.cmdQuiet(p, msg, nil)
+	if e.display.Mode != "full" || !e.display.ThinkingMessages || !e.display.ToolMessages {
+		t.Fatalf("after 3rd /quiet: Mode=%q, TM=%v, Tool=%v, want full/true/true",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode OFF") {
 		t.Fatalf("sent = %q, want quiet OFF message", p.sent)
+	}
+
+	// /quiet with explicit argument
+	p.sent = nil
+	e.cmdQuiet(p, msg, []string{"compact"})
+	if e.display.Mode != "compact" {
+		t.Fatalf("after /quiet compact: Mode=%q, want compact", e.display.Mode)
 	}
 }
 
@@ -4106,6 +5242,85 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdSkills_UsesTelegramSafeNamesOnTelegramPlatform(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	skillDir := temp + "/telegram-codex-bot"
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(skillDir+"/SKILL.md", []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "/telegram_codex_bot") {
+		t.Fatalf("skills text = %q, want Telegram-safe skill command", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "/telegram-codex-bot") {
+		t.Fatalf("skills text = %q, should not show raw hyphenated command", p.sent[0])
+	}
+}
+
+func TestMenuCommandsForPlatform_TelegramOmitsAllSkillsWhenMenuWouldOverflow(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	temp := t.TempDir()
+	for i := 0; i < 80; i++ {
+		name := fmt.Sprintf("skill-%02d", i)
+		skillDir := filepath.Join(temp, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatalf("mkdir skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+			t.Fatalf("write skill file: %v", err)
+		}
+	}
+	e.skills.SetDirs([]string{temp})
+
+	commands, skillsOmitted := e.menuCommandsForPlatform("telegram")
+
+	if !skillsOmitted {
+		t.Fatalf("expected Telegram menu planner to omit skill commands when command menu overflows")
+	}
+	for _, cmd := range commands {
+		if cmd.IsSkill {
+			t.Fatalf("menu commands should omit skills when overflowed, got %+v", cmd)
+		}
+	}
+}
+
+func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	temp := t.TempDir()
+	for i := 0; i < 80; i++ {
+		name := fmt.Sprintf("skill-%02d", i)
+		skillDir := filepath.Join(temp, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatalf("mkdir skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
+			t.Fatalf("write skill file: %v", err)
+		}
+	}
+	e.skills.SetDirs([]string{temp})
+
+	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"})
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "command menu is full") {
+		t.Fatalf("skills text = %q, want Telegram overflow hint", p.sent[0])
+	}
+}
+
 func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	sessions := make([]AgentSessionInfo, 0, 7)
 	base := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
@@ -4339,16 +5554,16 @@ func TestBuildAskQuestionResponse(t *testing.T) {
 		"questions": []any{map[string]any{"question": "Which?"}},
 	}
 	collected := map[int]string{0: "PostgreSQL", 1: "Gin"}
-	result := buildAskQuestionResponse(input, testQuestions(), collected)
+	result := buildAskQuestionResponse(input, testMultiQuestions(), collected)
 	answers, ok := result["answers"].(map[string]any)
 	if !ok {
 		t.Fatal("expected answers map")
 	}
-	if answers["0"] != "PostgreSQL" {
-		t.Errorf("expected answer[0]=PostgreSQL, got %v", answers["0"])
+	if answers["Which database?"] != "PostgreSQL" {
+		t.Errorf("expected answer[Which database?]=PostgreSQL, got %v", answers["Which database?"])
 	}
-	if answers["1"] != "Gin" {
-		t.Errorf("expected answer[1]=Gin, got %v", answers["1"])
+	if answers["Which framework?"] != "Gin" {
+		t.Errorf("expected answer[Which framework?]=Gin, got %v", answers["Which framework?"])
 	}
 	if _, ok := result["questions"]; !ok {
 		t.Error("expected original questions to be preserved")
@@ -4446,7 +5661,7 @@ func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 		UserID:     "user1",
 		Content:    "2",
 		ReplyCtx:   "ctx",
-	}, "2")
+	}, "2", "")
 
 	if !handled {
 		t.Fatal("expected handlePendingPermission to return true")
@@ -4458,8 +5673,8 @@ func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 	if !ok {
 		t.Fatal("expected answers in updatedInput")
 	}
-	if answers["0"] != "SQLite" {
-		t.Errorf("expected answer=SQLite, got %v", answers["0"])
+	if answers["Which database?"] != "SQLite" {
+		t.Errorf("expected answer=SQLite, got %v", answers["Which database?"])
 	}
 
 	state.mu.Lock()
@@ -4497,7 +5712,7 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 		UserID:     "user1",
 		Content:    "1",
 		ReplyCtx:   "ctx",
-	}, "1")
+	}, "1", "")
 	if !handled {
 		t.Fatal("expected handled=true for question 0")
 	}
@@ -4519,7 +5734,7 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 		UserID:     "user1",
 		Content:    "2",
 		ReplyCtx:   "ctx",
-	}, "2")
+	}, "2", "")
 	if !handled {
 		t.Fatal("expected handled=true for question 1")
 	}
@@ -4530,11 +5745,11 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 	if !ok {
 		t.Fatal("expected answers in updatedInput")
 	}
-	if answers["0"] != "PostgreSQL" {
-		t.Errorf("expected answer[0]=PostgreSQL, got %v", answers["0"])
+	if answers["Which database?"] != "PostgreSQL" {
+		t.Errorf("expected answer[Which database?]=PostgreSQL, got %v", answers["Which database?"])
 	}
-	if answers["1"] != "Echo" {
-		t.Errorf("expected answer[1]=Echo, got %v", answers["1"])
+	if answers["Which framework?"] != "Echo" {
+		t.Errorf("expected answer[Which framework?]=Echo, got %v", answers["Which framework?"])
 	}
 
 	state.mu.Lock()
@@ -4573,7 +5788,7 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 		UserID:     "user1",
 		Content:    "allow",
 		ReplyCtx:   "ctx",
-	}, "allow")
+	}, "allow", "")
 
 	if !handled {
 		t.Fatal("expected handled=true")
@@ -4582,8 +5797,8 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("expected answers in updatedInput")
 	}
-	if answers["0"] != "allow" {
-		t.Errorf("expected free text 'allow' as answer, got %v", answers["0"])
+	if answers["Which database?"] != "allow" {
+		t.Errorf("expected free text 'allow' as answer, got %v", answers["Which database?"])
 	}
 }
 
@@ -4594,10 +5809,16 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 // controllableAgentSession is an AgentSession stub whose session ID, liveness,
 // and events channel can be controlled by the test.
 type controllableAgentSession struct {
-	sessionID string
-	alive     bool
-	events    chan Event
-	closed    chan struct{} // closed when Close() is called
+	sessionID       string
+	alive           bool
+	events          chan Event
+	closed          chan struct{} // closed when Close() is called
+	model           string
+	reasoningEffort string
+	workDir         string
+	report          *UsageReport
+	contextUsage    *ContextUsage
+	usageErr        error
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -4615,7 +5836,17 @@ func (s *controllableAgentSession) Send(_ string, _ []ImageAttachment, _ []FileA
 func (s *controllableAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
 func (s *controllableAgentSession) Events() <-chan Event                                 { return s.events }
 func (s *controllableAgentSession) CurrentSessionID() string                             { return s.sessionID }
-func (s *controllableAgentSession) Alive() bool                                          { return s.alive }
+func (s *controllableAgentSession) GetModel() string                                     { return s.model }
+func (s *controllableAgentSession) GetReasoningEffort() string                           { return s.reasoningEffort }
+func (s *controllableAgentSession) GetWorkDir() string                                   { return s.workDir }
+func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, error) {
+	if s.report == nil && s.usageErr == nil {
+		return nil, fmt.Errorf("usage unavailable")
+	}
+	return s.report, s.usageErr
+}
+func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
+func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
 	s.alive = false
 	close(s.events)
@@ -4630,6 +5861,7 @@ func (s *controllableAgentSession) Close() error {
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession AgentSession
+	listFn      func() ([]AgentSessionInfo, error)
 }
 
 func (a *controllableAgent) Name() string { return "controllable" }
@@ -4640,6 +5872,9 @@ func (a *controllableAgent) StartSession(_ context.Context, _ string) (AgentSess
 	return newControllableSession("default"), nil
 }
 func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	if a.listFn != nil {
+		return a.listFn()
+	}
 	return nil, nil
 }
 func (a *controllableAgent) Stop() error { return nil }
@@ -4718,6 +5953,50 @@ func TestCleanupCAS_UnconditionalWithoutExpected(t *testing.T) {
 	if current != nil {
 		t.Fatal("expected unconditional cleanup to delete state")
 	}
+}
+
+// TestCleanupCAS_ConcurrentUnconditionalCloseOnce verifies that two concurrent
+// unconditional cleanups for the same key only Close() the agent session once.
+func TestCleanupCAS_ConcurrentUnconditionalCloseOnce(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	var closeCount atomic.Int32
+	sess := newControllableSession("s1")
+	origClose := sess.Close
+	_ = origClose
+	state := &interactiveState{agentSession: sess}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			e.cleanupInteractiveState(key)
+		}()
+	}
+	wg.Wait()
+
+	// The session's Close() should have been called at most once because
+	// the first cleanup nil's out state.agentSession under the lock.
+	select {
+	case <-sess.closed:
+		closeCount.Add(1)
+	default:
+	}
+	if closeCount.Load() > 1 {
+		t.Fatalf("expected at most 1 close, got %d", closeCount.Load())
+	}
+
+	e.interactiveMu.Lock()
+	if e.interactiveStates[key] != nil {
+		t.Fatal("expected state to be deleted after cleanup")
+	}
+	e.interactiveMu.Unlock()
 }
 
 // TestSessionMismatch_RecyclesStaleAgent verifies that getOrCreateInteractiveStateWith
@@ -4840,6 +6119,26 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 
 	if got != "agent-uuid-123" {
 		t.Fatalf("AgentSessionID = %q, want %q — immediate writeback not working", got, "agent-uuid-123")
+	}
+}
+
+// TestSessionIDWriteback_MapsSessionName verifies that when startOrResumeSession
+// sets the AgentSessionID, it also maps the session's pending name via
+// SetSessionName so that /list displays the custom name from /new.
+func TestSessionIDWriteback_MapsSessionName(t *testing.T) {
+	sess := newControllableSession("agent-uuid-456")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.NewSession(key, "我的自定义会话")
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	got := e.sessions.GetSessionName("agent-uuid-456")
+	if got != "我的自定义会话" {
+		t.Fatalf("GetSessionName = %q, want %q — name not mapped during startOrResumeSession", got, "我的自定义会话")
 	}
 }
 
@@ -5546,7 +6845,7 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 		t.Fatal("permission inline buttons not sent while Send blocked")
 	}
 
-	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow") {
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow", "") {
 		t.Fatal("expected handlePendingPermission to resolve pending request")
 	}
 	close(sess.unblock)
@@ -5689,7 +6988,7 @@ func TestReapIdleWorkspaces_SkipsWorkspaceWaitingForPermission(t *testing.T) {
 		UserID:     "user2",
 		Content:    "allow",
 		ReplyCtx:   "ctx",
-	}, "allow") {
+	}, "allow", "") {
 		t.Fatal("expected pending permission to be handled")
 	}
 	close(sess.unblock)
@@ -5845,6 +7144,114 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// replyCtxRecordingPlatform records (replyCtx, content) for each Send/Reply
+// so tests can assert which trigger context was used for which message.
+type replyCtxRecordingPlatform struct {
+	stubPlatformEngine
+	mu     sync.Mutex
+	events []replyCtxCall
+}
+
+type replyCtxCall struct {
+	op       string
+	replyCtx any
+	content  string
+}
+
+func (p *replyCtxRecordingPlatform) Reply(_ context.Context, replyCtx any, content string) error {
+	p.mu.Lock()
+	p.events = append(p.events, replyCtxCall{op: "reply", replyCtx: replyCtx, content: content})
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *replyCtxRecordingPlatform) Send(_ context.Context, replyCtx any, content string) error {
+	p.mu.Lock()
+	p.events = append(p.events, replyCtxCall{op: "send", replyCtx: replyCtx, content: content})
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *replyCtxRecordingPlatform) recordedEvents() []replyCtxCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]replyCtxCall, len(p.events))
+	copy(out, p.events)
+	return out
+}
+
+// TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx verifies that
+// when a queued message is dequeued mid-loop, subsequent Send/Reply calls use
+// the queued message's reply context (not the original turn's). Without this,
+// platforms that derive the parent message_id from replyCtx (e.g. feishu Reply
+// API for the reply quote) would quote the wrong message.
+func TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx(t *testing.T) {
+	p := &replyCtxRecordingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	sess := newQueuingSession("qs-replyctx")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() {
+		// Turn 1 result — final reply should use ctx-turn1.
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		// Wait for the queued message's Send() before pushing turn 2.
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		// Turn 2 result — final reply should use ctx-turn2.
+		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	// Map each recorded send to the responsible turn by content match.
+	for _, ev := range p.recordedEvents() {
+		switch ev.content {
+		case "response1":
+			if ev.replyCtx != "ctx-turn1" {
+				t.Errorf("turn1 reply used replyCtx=%v, want ctx-turn1", ev.replyCtx)
+			}
+		case "response2":
+			if ev.replyCtx != "ctx-turn2" {
+				t.Errorf("turn2 reply used replyCtx=%v, want ctx-turn2 (regression: msg2's reply quoted msg1)", ev.replyCtx)
+			}
+		}
+	}
+}
+
 // TestDrainOrphanedQueue_UsesWorkspaceSessionManager verifies that
 // drainOrphanedQueue saves session history through the passed sessions
 // manager (workspace-specific) rather than e.sessions (global).
@@ -5926,33 +7333,29 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 
 // ── executeCardAction interactiveKey tests ───────────────────
 
-func TestExecuteCardAction_ModelCleansUpWithInteractiveKey(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
+func TestHandleCardNav_ModelSwitchesAndRefreshesCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubModelModeAgent{model: "old"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	sessionKey := "feishu:channel1:user1"
-
-	e.interactiveMu.Lock()
-	e.interactiveStates[sessionKey] = &interactiveState{}
-	e.interactiveMu.Unlock()
-
-	e.executeCardAction("/model", "new-model", sessionKey)
-
-	if agent.model != "new-model" {
-		t.Errorf("model = %q, want new-model", agent.model)
+	card := e.handleCardNav("act:/model new-model", sessionKey)
+	if card == nil {
+		t.Fatal("expected immediate result card")
 	}
-
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[sessionKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected interactive state to be cleaned up after /model")
+	if text := card.RenderText(); !strings.Contains(text, "Model switched to `new-model`.") {
+		t.Fatalf("result card = %q", text)
+	}
+	if agent.model != "new-model" {
+		t.Fatalf("model = %q, want new-model", agent.model)
+	}
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
+		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
 	}
 }
 
-func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
-	p := &stubPlatformEngine{n: "plain"}
+func TestHandleCardNav_ModelUsesWorkspaceContext(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	globalAgent := &stubModelModeAgent{model: "global-old"}
 	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
 
@@ -5980,7 +7383,13 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	wsSession := ws.sessions.GetOrCreateActive(sessionKey)
 	wsSession.SetAgentSessionID("workspace-session", "test")
 
-	e.executeCardAction("/model", "switch 1", sessionKey)
+	card := e.handleCardNav("act:/model switch 1", sessionKey)
+	if card == nil {
+		t.Fatal("expected immediate result card")
+	}
+	if text := card.RenderText(); !strings.Contains(text, "gpt-4.1") {
+		t.Fatalf("result card = %q, want switched workspace model", text)
+	}
 
 	if wsAgent.model != "gpt-4.1" {
 		t.Fatalf("workspace agent model = %q, want gpt-4.1", wsAgent.model)
@@ -5988,18 +7397,58 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 	if globalAgent.model != "global-old" {
 		t.Fatalf("global agent model = %q, want unchanged", globalAgent.model)
 	}
-	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	if got := ws.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "workspace-session" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID; got != "global-session" {
 		t.Fatalf("global session id = %q, want untouched", got)
 	}
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
+		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
+	}
+}
 
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[interactiveKey]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Error("expected workspace interactive state to be cleaned up after /model")
+func TestHandleCardNav_ModelSwitchFailureRefreshesCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubModelModeAgent{model: "old"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.modelSaveFunc = func(string) error { return errors.New("save failed") }
+
+	sessionKey := "feishu:channel1:user1"
+	card := e.handleCardNav("act:/model broken-model", sessionKey)
+	if card == nil {
+		t.Fatal("expected immediate failure card")
+	}
+	if text := card.RenderText(); !strings.Contains(text, "Failed to switch model: save model: save failed") {
+		t.Fatalf("failure card = %q", text)
+	}
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
+		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
+	}
+}
+
+func TestHandleCardNav_ModelResultBackReturnsModelCard(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{model: "gpt-5.4"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+	result := e.renderModelSwitchResultCard("gpt-5.4", nil)
+	buttons := result.CollectButtons()
+	if len(buttons) != 1 || len(buttons[0]) != 1 {
+		t.Fatalf("result buttons = %#v, want single back button", buttons)
+	}
+	if buttons[0][0].Data != "nav:/model" {
+		t.Fatalf("back button value = %q, want nav:/model", buttons[0][0].Data)
+	}
+
+	card := e.handleCardNav(buttons[0][0].Data, sessionKey)
+	if card == nil {
+		t.Fatal("expected /model card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "Current model: gpt-5.4") {
+		t.Fatalf("model card text = %q", text)
 	}
 }
 
@@ -6078,8 +7527,8 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	// Fill the queue to maxQueuedMessages (5).
-	for i := 0; i < maxQueuedMessages; i++ {
+	// Fill the queue to defaultMaxQueuedMessages (5).
+	for i := 0; i < defaultMaxQueuedMessages; i++ {
 		msg := &Message{SessionKey: key, Content: fmt.Sprintf("msg-%d", i), ReplyCtx: fmt.Sprintf("ctx-%d", i)}
 		ok := e.queueMessageForBusySession(p, msg, key)
 		if !ok {
@@ -6088,22 +7537,22 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 
 	state.mu.Lock()
-	if len(state.pendingMessages) != maxQueuedMessages {
-		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	if len(state.pendingMessages) != defaultMaxQueuedMessages {
+		t.Fatalf("queue depth = %d, want %d", len(state.pendingMessages), defaultMaxQueuedMessages)
 	}
 	state.mu.Unlock()
 
-	// The 6th message should be rejected (returns false).
+	// The 6th message should be handled (returns true) but not queued — MsgQueueFull sent.
 	overflow := &Message{SessionKey: key, Content: "msg-overflow", ReplyCtx: "ctx-overflow"}
 	ok := e.queueMessageForBusySession(p, overflow, key)
-	if ok {
-		t.Fatal("expected 6th message to be rejected (queue full)")
+	if !ok {
+		t.Fatal("expected 6th message to be handled (queue-full reply), got false")
 	}
 
-	// Queue should still have exactly maxQueuedMessages items (the original 5).
+	// Queue should still have exactly defaultMaxQueuedMessages items (the original 5).
 	state.mu.Lock()
-	if len(state.pendingMessages) != maxQueuedMessages {
-		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), maxQueuedMessages)
+	if len(state.pendingMessages) != defaultMaxQueuedMessages {
+		t.Fatalf("queue depth after overflow = %d, want %d", len(state.pendingMessages), defaultMaxQueuedMessages)
 	}
 	// First message should still be msg-0 (FIFO preserved, no silent drop).
 	if state.pendingMessages[0].content != "msg-0" {
@@ -6111,10 +7560,10 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 	state.mu.Unlock()
 
-	// Platform should have received the MsgMessageQueued replies for the 5 accepted + nothing for rejected.
+	// Platform should have received MsgMessageQueued for 5 accepted + MsgQueueFull for the overflow.
 	sent := p.getSent()
-	if len(sent) != maxQueuedMessages {
-		t.Fatalf("platform replies = %d, want %d (one per accepted queue)", len(sent), maxQueuedMessages)
+	if len(sent) != defaultMaxQueuedMessages+1 {
+		t.Fatalf("platform replies = %d, want %d (queued + queue-full)", len(sent), defaultMaxQueuedMessages+1)
 	}
 }
 
@@ -6501,6 +7950,103 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	}
 }
 
+// --- cmdPs ---
+
+func TestCmdPs_EmptyArgs_RepliesUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/ps", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, nil)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsEmpty)) {
+		t.Fatalf("expected MsgPsEmpty, got %v", sent)
+	}
+}
+
+func TestCmdPs_NoAgentSession_RepliesNoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{SessionKey: "test:user1", Content: "/ps hello", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"hello"})
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsNoSession)) {
+		t.Fatalf("expected MsgPsNoSession, got %v", sent)
+	}
+}
+
+func TestCmdPs_IdleSession_RepliesNoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-idle")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Session is alive but idle (not locked by an in-flight turn).
+	msg := &Message{SessionKey: key, Content: "/ps hello", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"hello"})
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsNoSession)) {
+		t.Fatalf("expected MsgPsNoSession on idle session, got %v", sent)
+	}
+
+	sess.sendMu.Lock()
+	n := len(sess.sendCalls)
+	sess.sendMu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected no Send on idle session, got %d call(s)", n)
+	}
+}
+
+func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-busy")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Simulate a turn in flight.
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/ps add unit tests", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"add", "unit", "tests"})
+
+	sess.sendMu.Lock()
+	calls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(calls) != 1 || calls[0] != "add unit tests" {
+		t.Fatalf("expected Send(\"add unit tests\"), got %v", calls)
+	}
+
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, e.i18n.T(MsgPsSent)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MsgPsSent reply, got %v", sent)
+	}
+}
+
 // --- 3. executeCardAction routing ---
 
 func TestExecuteCardAction_CronEnable(t *testing.T) {
@@ -6722,6 +8268,150 @@ func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
 	}
 }
 
+func TestHandleMessageRecallStopsCurrentMessageSilently(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingCloseSession("recall-active")
+	defer close(sess.releaseClose)
+
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx-active",
+		currentMessageID: "msg-active",
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-queued", platform: p, replyCtx: "ctx-queued", content: "queued"},
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	e.ReceiveMessage(p, &Message{
+		Platform:  "test",
+		MessageID: "msg-active",
+		Recalled:  true,
+	})
+
+	select {
+	case <-sess.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Close to start after recalling the active message")
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected interactive state to be removed after active message recall")
+	}
+
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent messages = %v, want no user-visible stop reply for recall", sent)
+	}
+}
+
+func TestHandleMessageRecallRemovesQueuedMessageSilently(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: newControllableSession("recall-queued"),
+		platform:     p,
+		replyCtx:     "ctx-active",
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-1", platform: p, replyCtx: "ctx-1", content: "first"},
+			{messageID: "msg-2", platform: p, replyCtx: "ctx-2", content: "second"},
+			{messageID: "msg-3", platform: p, replyCtx: "ctx-3", content: "third"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.ReceiveMessage(p, &Message{
+		Platform:  "test",
+		MessageID: "msg-2",
+		Recalled:  true,
+	})
+
+	state.mu.Lock()
+	got := make([]string, len(state.pendingMessages))
+	for i, queued := range state.pendingMessages {
+		got[i] = queued.messageID
+	}
+	state.mu.Unlock()
+
+	want := []string{"msg-1", "msg-3"}
+	if len(got) != len(want) {
+		t.Fatalf("pending message IDs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pending message IDs = %v, want %v", got, want)
+		}
+	}
+
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent messages = %v, want no user-visible queue removal reply for recall", sent)
+	}
+}
+
+func TestHandleMessageBusyRecalledCurrentStopsAndProcessesNewMessage(t *testing.T) {
+	p := &recallCheckingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		recalled:           true,
+	}
+	newAgentSession := newResultAgentSession("new message processed")
+	e := NewEngine("test", &resultAgent{session: newAgentSession}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected to lock session for busy setup")
+	}
+
+	oldState := &interactiveState{
+		agentSession:     newControllableSession("old-current"),
+		platform:         p,
+		replyCtx:         "old-reply-ctx",
+		currentMessageID: "old-msg",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = oldState
+	e.interactiveMu.Unlock()
+
+	oldStopped := oldState.stopSignal()
+	go func() {
+		<-oldStopped
+		session.Unlock()
+	}()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "new-msg",
+		Content:    "please handle this",
+		ReplyCtx:   "new-reply-ctx",
+	})
+
+	sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 3*time.Second)
+	if len(sent) == 0 || sent[0] != "new message processed" {
+		t.Fatalf("sent = %v, want new message processed", sent)
+	}
+	for _, line := range sent {
+		if strings.Contains(line, e.i18n.T(MsgMessageQueued)) {
+			t.Fatalf("unexpected queued reply after recalled active message: %v", sent)
+		}
+	}
+	checked := p.checkedReplyCtxs()
+	if len(checked) == 0 || checked[0] != "old-reply-ctx" {
+		t.Fatalf("checked reply contexts = %v, want old-reply-ctx first", checked)
+	}
+	if len(newAgentSession.sentPrompts) != 1 || !strings.Contains(newAgentSession.sentPrompts[0], "please handle this") {
+		t.Fatalf("new session prompts = %#v, want new message prompt", newAgentSession.sentPrompts)
+	}
+}
+
 func TestExecuteCardAction_NewCleansUpAndCreatesSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -6829,8 +8519,8 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello world", "user123", "feishu", "feishu:channel42:user123")
-	expected := "[cc-connect sender_id=user123 platform=feishu chat_id=channel42]\nhello world"
+	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123", "")
+	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -6840,7 +8530,7 @@ func TestBuildSenderPrompt_Disabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(false)
 
-	result := e.buildSenderPrompt("hello", "user1", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when disabled, got %q", result)
 	}
@@ -6850,9 +8540,31 @@ func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "", "telegram", "telegram:ch:user1")
+	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when userID is empty, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1", "")
+	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
+	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
 	}
 }
 
@@ -6865,7 +8577,14 @@ func TestExtractChannelID(t *testing.T) {
 		{"telegram:group123:user2", "group123"},
 		{"plain", ""},
 		{"a:b", "b"},
-		{"a:b:c:d", "b"},
+		{"a:bb:c:d", "bb"},
+		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
+		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
+		// 3-segment shared-session keys with single-char type tag — used by
+		// dingtalk/qq/qqbot when share_session_in_channel is enabled.
+		{"dingtalk:g:cidZZZ", "cidZZZ"},
+		{"qq:g:12345", "12345"},
+		{"qqbot:g:openid_abc", "openid_abc"},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -6889,13 +8608,84 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 		{"slack", "slack:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
-		result := e.buildSenderPrompt("msg", "uid", tc.platform, tc.sessionKey)
+		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey, "")
 		if !strings.Contains(result, "platform="+tc.platform) {
 			t.Errorf("missing platform=%s in %q", tc.platform, result)
 		}
 		if !strings.Contains(result, "chat_id="+tc.wantChat) {
 			t.Errorf("missing chat_id=%s in %q", tc.wantChat, result)
 		}
+	}
+}
+
+func TestBuildSenderPrompt_SanitizesSpecialChars(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1", "")
+	if strings.Contains(result, `"Name`) || strings.Contains(result, "\n"+`Inject`) {
+		t.Fatalf("quotes/newlines should be sanitized, got %q", result)
+	}
+	if !strings.Contains(result, `sender_name="Evil'Name Inject"`) {
+		t.Fatalf("expected sanitized name, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_ChannelKeyOverridesSessionKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is provided, it should be used as chat_id instead of
+	// extracting from sessionKey (which would give "g" for dingtalk).
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "cidXXX")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_FallbackWithoutChannelKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is empty, extractChannelID heuristic should detect
+	// the 4-segment format and extract the correct channel.
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestResolveLocalDirPath_RejectsTraversal(t *testing.T) {
+	base := t.TempDir()
+	_, err := resolveLocalDirPath("../../etc", base)
+	if err == nil {
+		t.Fatal("expected error for path traversal")
+	}
+}
+
+func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
+	base := t.TempDir()
+	sub := filepath.Join(base, "project")
+	os.MkdirAll(sub, 0755)
+	got, err := resolveLocalDirPath("project", base)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != sub {
+		t.Fatalf("expected %q, got %q", sub, got)
+	}
+}
+
+func TestResolveLocalDirPath_AbsoluteAllowed(t *testing.T) {
+	dir := t.TempDir()
+	got, err := resolveLocalDirPath(dir, "/some/base")
+	if err != nil {
+		t.Fatalf("absolute path should be allowed: %v", err)
+	}
+	if got == "" {
+		t.Fatal("expected non-empty path")
 	}
 }
 
@@ -7190,12 +8980,267 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 	for {
 		sent := p.getSent()
 		if len(sent) > 0 {
-			output := sent[0]
+			// With streaming progress, the final result is the last sent message
+			output := sent[len(sent)-1]
 			if !strings.Contains(output, agent.workDir) && !strings.Contains(output, expectedResolved) {
 				t.Fatalf("expected shell output to fall back to agent work dir %q (resolved %q), got %q", agent.workDir, expectedResolved, output)
 			}
 			if strings.Contains(output, missingDir) || strings.Contains(output, missingResolved) {
 				t.Fatalf("expected shell output to ignore missing shared workspace %q, got %q", missingDir, output)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// --- truncateRunes tests ---
+
+func TestTruncateRunes(t *testing.T) {
+	t.Run("short string unchanged", func(t *testing.T) {
+		if got := truncateRunes("hello", 10); got != "hello" {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("exact limit unchanged", func(t *testing.T) {
+		if got := truncateRunes("abcde", 5); got != "abcde" {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("ascii truncation", func(t *testing.T) {
+		got := truncateRunes("abcdefghij", 7)
+		if got != "abcd..." {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("multi-byte truncation at rune boundary", func(t *testing.T) {
+		input := strings.Repeat("中", 10)
+		got := truncateRunes(input, 7)
+		if !utf8.ValidString(got) {
+			t.Errorf("produced invalid UTF-8: %q", got)
+		}
+		runes := []rune(got)
+		if len(runes) != 7 {
+			t.Errorf("expected 7 runes, got %d (%q)", len(runes), got)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("expected trailing ..., got %q", got)
+		}
+	})
+	t.Run("exact max multi-byte unchanged", func(t *testing.T) {
+		input := strings.Repeat("中", 5)
+		got := truncateRunes(input, 5)
+		if got != input {
+			t.Errorf("expected no truncation, got %q", got)
+		}
+	})
+	t.Run("max less than 4 clamped", func(t *testing.T) {
+		// Should not panic when max < 4
+		got := truncateRunes("abcdefgh", 2)
+		runes := []rune(got)
+		if len(runes) != 4 {
+			t.Errorf("expected 4 runes (clamped), got %d (%q)", len(runes), got)
+		}
+	})
+}
+
+// --- runShellWithProgress tests ---
+
+func TestRunShellWithProgress_BasicOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "echo hello", t.TempDir(), 5*time.Second, 4000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "hello") {
+				t.Errorf("expected output to contain 'hello', got %q", last)
+			}
+			if !strings.Contains(last, "✅") {
+				t.Errorf("expected success emoji, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_FailedCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "exit 42", t.TempDir(), 5*time.Second, 4000)
+	if err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "❌") {
+				t.Errorf("expected failure emoji, got %q", last)
+			}
+			if !strings.Contains(last, "42") {
+				t.Errorf("expected exit code 42 in output, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_Timeout(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "sleep 30", t.TempDir(), 200*time.Millisecond, 4000)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected 'timed out' in error, got %q", err.Error())
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "⚠️") && !strings.Contains(last, "timeout") {
+				t.Errorf("expected timeout indicator, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for timeout message")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_EmptyOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "true", t.TempDir(), 5*time.Second, 4000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "(no output)") {
+				t.Errorf("expected '(no output)', got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_StderrOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "echo err >&2", t.TempDir(), 5*time.Second, 4000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "err") {
+				t.Errorf("expected stderr output 'err', got %q", last)
+			}
+			if !strings.Contains(last, "✅") {
+				t.Errorf("expected success emoji, got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_LongOutputTruncated(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	// Generate output longer than maxOutput
+	err := e.runShellWithProgress(p, "ctx", "python3 -c 'print(\"x\" * 5000)'", t.TempDir(), 5*time.Second, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !utf8.ValidString(last) {
+				t.Errorf("output contains invalid UTF-8")
+			}
+			// Should be truncated — the code block content should end with "..."
+			if !strings.Contains(last, "...") {
+				t.Errorf("expected truncation marker '...', got %q", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	err := e.runShellWithProgress(p, "ctx", "nonexistent_command_xyz_12345", t.TempDir(), 5*time.Second, 4000)
+	if err == nil {
+		t.Fatal("expected error for nonexistent command")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last := sent[len(sent)-1]
+			if !strings.Contains(last, "❌") {
+				t.Errorf("expected failure emoji, got %q", last)
+			}
+			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") {
+				t.Errorf("expected start failure message, got %q", last)
 			}
 			return
 		}
@@ -7999,6 +10044,120 @@ func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Init_LocalDirAbsolute(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init " + wsDir,
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	projectKey := "project:test"
+	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected init binding %q, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_Init_LocalDirRelative(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
+
+	// Use relative name — should resolve under baseDir.
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init my-project",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	normalizedWsDir := normalizeWorkspacePath(wsDir)
+	projectKey := "project:test"
+	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got == nil || got.Workspace != normalizedWsDir {
+		t.Fatalf("expected init binding %q, got %+v", normalizedWsDir, got)
+	}
+}
+
+func TestWorkspace_Init_LocalDirNotFound(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init nonexistent-dir",
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "nonexistent-dir") {
+		t.Fatalf("expected error mentioning missing dir, got %v", sent)
+	}
+
+	projectKey := "project:test"
+	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding for nonexistent dir, got %+v", got)
+	}
+}
+
+func TestWorkspace_Init_LocalDirDisabledByDefault(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init " + wsDir,
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "workspace_init_allow_local_paths") {
+		t.Fatalf("expected local-path disabled reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding when local init paths are disabled, got %+v", got)
+	}
+}
+
 func TestWorkspace_Unbind_SharedBindingShowsHint(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -8752,7 +10911,7 @@ func TestEngine_SetterMethods(t *testing.T) {
 	})
 
 	// Test SetDisplaySaveFunc
-	e.SetDisplaySaveFunc(func(thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
+	e.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
 		return nil
 	})
 
@@ -8952,6 +11111,91 @@ func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
 	}
 }
 
+func TestExecuteCronJob_ExpandsSlashSkillPrompt(t *testing.T) {
+	tests := []struct {
+		name          string
+		prompt        string
+		wantContains  []string
+		wantNotExpand bool // true = expected to be passed through literally
+	}{
+		{
+			name:         "registered skill expands with args",
+			prompt:       "/daily-brief today",
+			wantContains: []string{"## Skill:", "daily-brief", "Prompt body", "today"},
+		},
+		{
+			name:         "registered skill expands with no args",
+			prompt:       "/daily-brief",
+			wantContains: []string{"## Skill:", "daily-brief", "Prompt body"},
+		},
+		{
+			name:          "unknown slash command passes through literally",
+			prompt:        "/no-such-skill arg",
+			wantContains:  []string{"/no-such-skill arg"},
+			wantNotExpand: true,
+		},
+		{
+			name:          "non-slash prompt passes through unchanged",
+			prompt:        "summarize today's activity",
+			wantContains:  []string{"summarize today's activity"},
+			wantNotExpand: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			skillRoot := t.TempDir()
+			writeSkillFile(t, filepath.Join(skillRoot, "daily-brief", "SKILL.md"), "Daily brief skill")
+
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatalf("NewCronStore() error = %v", err)
+			}
+
+			platform := &stubCronReplyTargetPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			}
+			agentSession := newResultAgentSession("ok")
+			agent := &resultAgent{session: agentSession}
+
+			e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+			defer e.cancel()
+			e.skills.SetDirs([]string{skillRoot})
+
+			job := &CronJob{
+				ID:         "job-skill",
+				SessionKey: "discord:channel-1:user-1",
+				Prompt:     tt.prompt,
+			}
+			if err := store.Add(job); err != nil {
+				t.Fatalf("store.Add() error = %v", err)
+			}
+
+			if err := e.ExecuteCronJob(job); err != nil {
+				t.Fatalf("ExecuteCronJob() error = %v", err)
+			}
+
+			if len(agentSession.sentPrompts) != 1 {
+				t.Fatalf("sentPrompts = %d, want 1: %#v", len(agentSession.sentPrompts), agentSession.sentPrompts)
+			}
+			got := agentSession.sentPrompts[0]
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("agent prompt does not contain %q\ngot: %s", want, got)
+				}
+			}
+			if tt.wantNotExpand && strings.Contains(got, "## Skill Instructions:") {
+				t.Errorf("expected raw passthrough, but prompt was skill-expanded\ngot: %s", got)
+			}
+			// Stored prompt must not be rewritten on the job itself.
+			if job.Prompt != tt.prompt {
+				t.Errorf("job.Prompt = %q, want %q (unchanged)", job.Prompt, tt.prompt)
+			}
+		})
+	}
+}
+
 func TestExtractSessionKeyParts(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -8967,6 +11211,9 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"single colon", "discord:channel1", "discord", "channel1", "discord:channel1", ""},
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
+		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
+		{"three-segment with type tag (shared session)", "dingtalk:g:cidZZZ", "dingtalk", "cidZZZ", "dingtalk:cidZZZ", ""},
+		{"three-segment qq group", "qq:g:12345", "qq", "12345", "qq:12345", ""},
 	}
 
 	for _, tt := range tests {
@@ -9033,4 +11280,1633 @@ type stubPlatformWithObserve struct {
 
 func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
 	return nil
+}
+
+// --- Instant Reply tests ---
+
+// stubStreamingCardPlatform simulates a platform that supports StreamingCardPlatform
+// (e.g. DingTalk with AI Card configured), so instant reply should be skipped.
+type stubStreamingCardPlatform struct {
+	stubPlatformEngine
+	cardCreated bool
+	cardFail    bool // when true, CreateStreamingCard returns an error
+}
+
+func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	if p.cardFail {
+		return nil, fmt.Errorf("stub: card_template_id not configured")
+	}
+	p.cardCreated = true
+	return &stubStreamingCard{}, nil
+}
+
+// stubStreamingCard is a minimal StreamingCard for tests.
+type stubStreamingCard struct{}
+
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
+func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Failed() bool                               { return false }
+
+func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for async processing to complete
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply '🤔 Thinking...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_UsesDefaultI18nWhenContentEmpty(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true}) // Content empty → use MsgStarting
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "⏳ 处理中..." {
+		t.Fatalf("first reply = %q, want i18n default '⏳ 处理中...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedWhenDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// InstantReply not set (default: disabled)
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	// The only reply should be the agent result, no instant reply
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want exactly 1 (no instant reply), got: %v", len(sent), sent)
+	}
+	if sent[0] != "agent reply" {
+		t.Fatalf("first reply = %q, want 'agent reply'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// When streaming card succeeds, the agent reply goes through streamCard.Finalize,
+	// not p.Send. Wait briefly then verify no instant reply was sent via p.Send.
+	time.Sleep(500 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_InstantReply_SentWhenStreamingCardFails(t *testing.T) {
+	p := &stubStreamingCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "dingtalk"},
+		cardFail:           true,
+	}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply when card creation fails", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedForSlashCommands(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "/help",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Give a short time for any async processing
+	time.Sleep(200 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for slash commands, but got: %v", sent)
+		}
+	}
+}
+
+// ===========================================================================
+// Unsolicited events tests
+// ===========================================================================
+
+// waitForPlatformSend polls until the platform has at least n messages or timeout.
+func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []string {
+	deadline := time.After(timeout)
+	for {
+		sent := p.getSent()
+		if len(sent) >= n {
+			return sent
+		}
+		select {
+		case <-deadline:
+			return sent
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
+// goroutine relays EventResult content to the platform.
+func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-relay")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch1:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// Send only EventResult (no EventText) to ensure the reader uses EventResult.Content.
+	sess.events <- Event{Type: EventResult, Content: "All 5 campaigns created successfully"}
+
+	sent := waitForPlatformSend(p, 1, 5*time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected unsolicited reader to relay EventResult to platform, got nothing")
+	}
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "5 campaigns created successfully") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected relayed content to contain '5 campaigns created successfully', got %v", sent)
+	}
+
+	// Verify eventsNeedResync is false after clean EventResult.
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if resync {
+		t.Error("expected eventsNeedResync=false after clean unsolicited EventResult")
+	}
+}
+
+// TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader
+// cleanly stops the reader goroutine and waits for it to exit.
+func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-cancel")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:ch1:u1", "")
+
+	// Capture the done channel before stop nils it.
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	if doneCh == nil {
+		t.Fatal("expected unsolicitedDone to be set after startUnsolicitedReader")
+	}
+
+	start := time.Now()
+	e.stopUnsolicitedReader(state)
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Errorf("stopUnsolicitedReader took too long: %v", elapsed)
+	}
+
+	// Verify the goroutine actually exited by checking the done channel.
+	select {
+	case <-doneCh:
+		// Good — goroutine exited.
+	default:
+		t.Error("expected unsolicited reader goroutine to have exited (done channel not closed)")
+	}
+}
+
+// TestUnsolicitedReader_SetsResyncOnChannelClose verifies that when the agent
+// process exits (events channel closed), eventsNeedResync is set to true.
+func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-close")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:close:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:close:u1", "")
+
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	// Close the events channel (simulates agent process exit).
+	close(sess.events)
+
+	// Wait for reader to detect the close.
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unsolicited reader did not exit after channel close")
+	}
+
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !resync {
+		t.Error("expected eventsNeedResync=true after channel close")
+	}
+}
+
+// TestUnsolicitedReader_SetsResyncOnEventError verifies that EventError
+// sets eventsNeedResync to true and relays the error.
+func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-error")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:error:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:error:u1", "")
+
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	// Send an error event.
+	sess.events <- Event{Type: EventError, Error: errors.New("something broke")}
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unsolicited reader did not exit after EventError")
+	}
+
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !resync {
+		t.Error("expected eventsNeedResync=true after EventError")
+	}
+
+	// Verify error was relayed to platform.
+	sent := p.getSent()
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "something broke") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected error to be relayed to platform, got %v", sent)
+	}
+}
+
+// TestUnsolicitedReader_PermissionDeny verifies that unsolicited permission
+// requests are denied when approveAll is false.
+func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sess := newControllableSession("unsol-perm")
+	permRecorder := &permRecordingSession{
+		controllableAgentSession: *sess,
+	}
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:perm:u1")
+
+	state := &interactiveState{
+		agentSession:     permRecorder,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+		approveAll:       false,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:perm:u1", "")
+
+	// Send a permission request.
+	permRecorder.events <- Event{
+		Type:      EventPermissionRequest,
+		RequestID: "req-1",
+		ToolName:  "Bash",
+	}
+
+	// Wait for the response.
+	deadline := time.After(5 * time.Second)
+	for {
+		permRecorder.mu.Lock()
+		calls := permRecorder.permCalls
+		permRecorder.mu.Unlock()
+		if calls > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for permission response")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	permRecorder.mu.Lock()
+	result := permRecorder.lastPermResult
+	permRecorder.mu.Unlock()
+
+	if result.Behavior != "deny" {
+		t.Errorf("expected deny, got %q", result.Behavior)
+	}
+
+	e.stopUnsolicitedReader(state)
+}
+
+// permRecordingSession wraps controllableAgentSession and records permission responses.
+type permRecordingSession struct {
+	controllableAgentSession
+	mu             sync.Mutex
+	permCalls      int
+	lastPermResult PermissionResult
+}
+
+func (s *permRecordingSession) RespondPermission(_ string, res PermissionResult) error {
+	s.mu.Lock()
+	s.permCalls++
+	s.lastPermResult = res
+	s.mu.Unlock()
+	return nil
+}
+
+// TestEventsNeedResync_DefaultTrue verifies that new interactiveState
+// constructors set eventsNeedResync to true.
+func TestEventsNeedResync_DefaultTrue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	e.ensureInteractiveStateForQueueing("key1", p, "ctx")
+
+	e.interactiveMu.Lock()
+	state := e.interactiveStates["key1"]
+	e.interactiveMu.Unlock()
+
+	if state == nil {
+		t.Fatal("expected state to be created")
+	}
+	if !state.eventsNeedResync {
+		t.Error("expected eventsNeedResync to be true for new state")
+	}
+}
+
+// TestEventsNeedResync_ClearedOnCleanResult verifies that eventsNeedResync
+// is cleared after a clean EventResult in processInteractiveEvents.
+func TestEventsNeedResync_ClearedOnCleanResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("resync-clean")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:resync:u1")
+	session.TryLock()
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: true,
+	}
+
+	// Send EventResult to trigger clean exit.
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "done"}
+	}()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	e.processInteractiveEvents(state, session, sessions, "test:resync:u1", "", time.Now(), nil, sendDone, "ctx")
+
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+
+	if resync {
+		t.Error("expected eventsNeedResync to be false after clean EventResult")
+	}
+}
+
+// TestCleanupInteractiveState_StopsUnsolicitedReader verifies that cleanup
+// stops the unsolicited reader goroutine and waits for it to exit.
+func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("cleanup-unsol")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:cleanup:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:cleanup:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+
+	// Capture the done channel before cleanup nils it.
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+
+	// Cleanup should stop the reader and close the session.
+	e.cleanupInteractiveState(iKey)
+
+	// Verify the goroutine actually exited.
+	select {
+	case <-doneCh:
+		// Good.
+	case <-time.After(5 * time.Second):
+		t.Fatal("unsolicited reader goroutine did not exit after cleanup")
+	}
+}
+
+// TestWorkspaceIdleTimeout_Configurable verifies that SetWorkspaceIdleTimeout
+// changes the workspace pool's idle timeout.
+func TestWorkspaceIdleTimeout_Configurable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	tmpDir := t.TempDir()
+	e.SetMultiWorkspace(tmpDir, filepath.Join(tmpDir, "bindings.json"))
+
+	// Default should be DefaultWorkspaceIdleTimeout
+	e.workspacePool.mu.RLock()
+	defaultTimeout := e.workspacePool.idleTimeout
+	e.workspacePool.mu.RUnlock()
+	if defaultTimeout != DefaultWorkspaceIdleTimeout {
+		t.Errorf("expected default timeout %v, got %v", DefaultWorkspaceIdleTimeout, defaultTimeout)
+	}
+
+	// Set custom timeout
+	e.SetWorkspaceIdleTimeout(30 * time.Minute)
+	e.workspacePool.mu.RLock()
+	newTimeout := e.workspacePool.idleTimeout
+	e.workspacePool.mu.RUnlock()
+	if newTimeout != 30*time.Minute {
+		t.Errorf("expected 30m timeout, got %v", newTimeout)
+	}
+
+	// Disable reaping
+	e.SetWorkspaceIdleTimeout(0)
+	e.workspacePool.mu.RLock()
+	zeroTimeout := e.workspacePool.idleTimeout
+	e.workspacePool.mu.RUnlock()
+	if zeroTimeout != 0 {
+		t.Errorf("expected 0 timeout, got %v", zeroTimeout)
+	}
+}
+
+// TestReapIdle_DisabledWhenZeroTimeout verifies that ReapIdle returns nil
+// when idleTimeout is zero.
+func TestReapIdle_DisabledWhenZeroTimeout(t *testing.T) {
+	pool := newWorkspacePool(0)
+	ws := pool.GetOrCreate("/test/workspace")
+	ws.Touch()
+	// Even with an existing workspace, zero timeout disables reaping.
+	reaped := pool.ReapIdle()
+	if len(reaped) != 0 {
+		t.Errorf("expected no reaping with zero timeout, got %v", reaped)
+	}
+}
+
+func TestIsSilentReply(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"exact marker", "NO_REPLY", true},
+		{"lowercase", "no_reply", true},
+		{"mixed case", "No_Reply", true},
+		{"leading/trailing spaces", "  NO_REPLY  ", true},
+		{"surrounding newlines", "\nNO_REPLY\n", true},
+		{"tabs around", "\tNO_REPLY\t", true},
+
+		{"empty", "", false},
+		{"whitespace only", "   ", false},
+		{"mixed with content", "Hello NO_REPLY", false},
+		{"marker with suffix", "NO_REPLY_EXTRA", false},
+		{"marker with prefix", "X NO_REPLY", false},
+		{"missing underscore", "NO REPLY", false},
+		{"partial", "NO_REPL", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSilentReply(tc.in); got != tc.want {
+				t.Errorf("isSilentReply(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStripTrailingSilent(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"trailing on new line", "Hello\nNO_REPLY", "Hello", true},
+		{"trailing lowercase on new line", "Hello\nno_reply", "Hello", true},
+		{"trailing after space", "Some reasoning here NO_REPLY", "Some reasoning here", true},
+		{"multi-line then marker", "Line1\nLine2\nNO_REPLY", "Line1\nLine2", true},
+		{"trailing with markdown emphasis", "Done. *NO_REPLY*", "Done. *NO_REPLY*", false},
+		{"trailing preceded by asterisks", "Done.**NO_REPLY", "Done.", true},
+		{"trailing with crlf", "Hello\r\nNO_REPLY", "Hello", true},
+		{"marker followed by trailing whitespace", "Hello NO_REPLY   ", "Hello", true},
+
+		{"no marker", "Hello world", "Hello world", false},
+		{"marker not at end", "NO_REPLY then more", "NO_REPLY then more", false},
+		{"marker with suffix token", "Hello NO_REPLY_EXTRA", "Hello NO_REPLY_EXTRA", false},
+		{"marker touching prior letters", "somethingNO_REPLY", "somethingNO_REPLY", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := stripTrailingSilent(tc.in)
+			if ok != tc.wantOK {
+				t.Errorf("stripTrailingSilent(%q) ok=%v, want %v", tc.in, ok, tc.wantOK)
+			}
+			if got != tc.want {
+				t.Errorf("stripTrailingSilent(%q) got=%q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCouldBeSilentPrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", true},
+		{"whitespace only", "   ", true},
+		{"one letter", "N", true},
+		{"two letters", "NO", true},
+		{"underscore partial", "NO_", true},
+		{"five letters", "NO_RE", true},
+		{"almost full", "NO_REPL", true},
+		{"full marker", "NO_REPLY", true},
+		{"lowercase partial", "no_r", true},
+		{"mixed case partial", "No_Re", true},
+		{"trimmed surrounding whitespace", "  NO_  ", true},
+
+		{"non-N start", "Hello", false},
+		{"one wrong letter", "X", false},
+		{"longer than marker", "NO_REPLYX", false},
+		{"similar but divergent", "NO-REPLY", false},
+		{"partial then wrong", "NO_Q", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := couldBeSilentPrefix(tc.in); got != tc.want {
+				t.Errorf("couldBeSilentPrefix(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests for /list visibility after /new and provider switches
+// ---------------------------------------------------------------------------
+
+// TestCmdList_AllSessionsVisibleAfterRepeatedNew verifies that /list shows ALL
+// sessions after multiple /new cycles. This is the exact reproduction scenario
+// reported by users: /new clears the active session's AgentSessionID, causing
+// filterOwnedSessions to progressively hide older sessions.
+func TestCmdList_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	agentSessions := make([]AgentSessionInfo, 5)
+	for i := range agentSessions {
+		agentSessions[i] = AgentSessionInfo{
+			ID:           fmt.Sprintf("codex-thread-%d", i+1),
+			Summary:      fmt.Sprintf("Session %d summary", i+1),
+			MessageCount: (i + 1) * 2,
+			ModifiedAt:   base.Add(time.Duration(i) * time.Hour),
+		}
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	for i, as := range agentSessions {
+		if i > 0 {
+			old := e.sessions.GetOrCreateActive(userKey)
+			old.SetAgentSessionID("", "")
+			old.ClearHistory()
+			e.sessions.Save()
+			e.sessions.NewSession(userKey, fmt.Sprintf("session-%d", i+1))
+		}
+		s := e.sessions.GetOrCreateActive(userKey)
+		s.SetAgentSessionID(as.ID, "codex")
+		e.sessions.Save()
+	}
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	for _, as := range agentSessions {
+		if !strings.Contains(p.sent[0], as.Summary) {
+			t.Errorf("/list output missing session %q:\n%s", as.ID, p.sent[0])
+		}
+	}
+}
+
+// TestCmdList_AllSessionsVisibleAfterResetAllSessions simulates a management
+// API provider switch (resetAllSessions) followed by creating a new session.
+// All previously tracked sessions must remain visible in /list.
+func TestCmdList_AllSessionsVisibleAfterResetAllSessions(t *testing.T) {
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	agentSessions := make([]AgentSessionInfo, 4)
+	for i := range agentSessions {
+		agentSessions[i] = AgentSessionInfo{
+			ID:           fmt.Sprintf("thread-%d", i+1),
+			Summary:      fmt.Sprintf("Chat %d", i+1),
+			MessageCount: 5,
+			ModifiedAt:   base.Add(time.Duration(i) * time.Hour),
+		}
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	for _, as := range agentSessions[:3] {
+		s := e.sessions.NewSession(userKey, "")
+		s.SetAgentSessionID(as.ID, "codex")
+	}
+	e.sessions.Save()
+
+	e.resetAllSessions()
+
+	newS := e.sessions.NewSession(userKey, "fresh")
+	newS.SetAgentSessionID(agentSessions[3].ID, "codex")
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	for _, as := range agentSessions {
+		if !strings.Contains(p.sent[0], as.Summary) {
+			t.Errorf("/list output missing session %q after resetAllSessions:\n%s", as.ID, p.sent[0])
+		}
+	}
+}
+
+// TestCmdList_SessionVisibleDuringAgentProcessing simulates the window where
+// a new session has been created (/new) and a message sent, but the agent
+// has not yet responded with a session ID. During this window, the active
+// session has no AgentSessionID. Previously this caused filterOwnedSessions
+// to either return all sessions (empty known set) or hide sessions (if other
+// sessions also had cleared IDs). The fix ensures deterministic behavior.
+func TestCmdList_SessionVisibleDuringAgentProcessing(t *testing.T) {
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	agentSessions := []AgentSessionInfo{
+		{ID: "old-thread-1", Summary: "Old session 1", MessageCount: 10, ModifiedAt: base},
+		{ID: "old-thread-2", Summary: "Old session 2", MessageCount: 8, ModifiedAt: base.Add(time.Hour)},
+		{ID: "new-thread-3", Summary: "Processing...", MessageCount: 1, ModifiedAt: base.Add(2 * time.Hour)},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("old-thread-1", "codex")
+	e.sessions.Save()
+
+	s1.SetAgentSessionID("", "")
+	s2 := e.sessions.NewSession(userKey, "session-2")
+	s2.SetAgentSessionID("old-thread-2", "codex")
+	e.sessions.Save()
+
+	s2.SetAgentSessionID("", "")
+	e.sessions.NewSession(userKey, "processing")
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Old session 1") {
+		t.Errorf("/list missing 'Old session 1' during processing:\n%s", reply)
+	}
+	if !strings.Contains(reply, "Old session 2") {
+		t.Errorf("/list missing 'Old session 2' during processing:\n%s", reply)
+	}
+}
+
+// TestRenderListCard_AllSessionsVisibleAfterRepeatedNew is the card-based
+// variant of the /new regression test.
+func TestRenderListCard_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	agentSessions := make([]AgentSessionInfo, 6)
+	for i := range agentSessions {
+		agentSessions[i] = AgentSessionInfo{
+			ID:           fmt.Sprintf("thread-%d", i+1),
+			Summary:      fmt.Sprintf("Session %d", i+1),
+			MessageCount: 3,
+			ModifiedAt:   base.Add(time.Duration(i) * time.Minute),
+		}
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	userKey := "test:user1"
+
+	for i, as := range agentSessions {
+		if i > 0 {
+			old := e.sessions.GetOrCreateActive(userKey)
+			old.SetAgentSessionID("", "")
+			old.ClearHistory()
+			e.sessions.NewSession(userKey, fmt.Sprintf("s%d", i+1))
+		}
+		s := e.sessions.GetOrCreateActive(userKey)
+		s.SetAgentSessionID(as.ID, "codex")
+	}
+	e.sessions.Save()
+
+	card, err := e.renderListCard(userKey, 1)
+	if err != nil {
+		t.Fatalf("renderListCard error: %v", err)
+	}
+
+	switchActions := countCardActionValues(card, "act:/switch ")
+	if switchActions != len(agentSessions) {
+		t.Fatalf("card switch actions = %d, want %d (some sessions hidden by filter)",
+			switchActions, len(agentSessions))
+	}
+}
+
+// TestCmdList_ProviderSwitchThenNewDoesNotHideSessions simulates the full
+// real-world scenario: user has sessions → switches provider → creates new
+// sessions → all sessions (old and new) must remain visible.
+func TestCmdList_ProviderSwitchThenNewDoesNotHideSessions(t *testing.T) {
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	allAgentSessions := []AgentSessionInfo{
+		{ID: "old-1", Summary: "Before switch 1", MessageCount: 5, ModifiedAt: base},
+		{ID: "old-2", Summary: "Before switch 2", MessageCount: 3, ModifiedAt: base.Add(time.Hour)},
+		{ID: "new-1", Summary: "After switch 1", MessageCount: 2, ModifiedAt: base.Add(2 * time.Hour)},
+		{ID: "new-2", Summary: "After switch 2", MessageCount: 1, ModifiedAt: base.Add(3 * time.Hour)},
+	}
+	agent := &stubListAgent{sessions: allAgentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	for _, as := range allAgentSessions[:2] {
+		s := e.sessions.NewSession(userKey, "")
+		s.SetAgentSessionID(as.ID, "codex")
+	}
+	e.sessions.Save()
+
+	e.resetAllSessions()
+
+	for i, as := range allAgentSessions[2:] {
+		if i > 0 {
+			old := e.sessions.GetOrCreateActive(userKey)
+			old.SetAgentSessionID("", "")
+		}
+		s := e.sessions.NewSession(userKey, "")
+		s.SetAgentSessionID(as.ID, "codex")
+	}
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	for _, as := range allAgentSessions {
+		if !strings.Contains(p.sent[0], as.Summary) {
+			t.Errorf("/list missing %q after provider switch + new:\n%s", as.Summary, p.sent[0])
+		}
+	}
+}
+
+// TestCmdList_RealWorldLegacyDataFullFlow is a precise reproduction of the
+// user-reported bug using data shaped exactly like the real qa-release project:
+//   - 15 internal sessions, 14 with lost AgentSessionIDs (old code damage)
+//   - 1 active session (s15) with a valid AgentSessionID
+//   - 37 codex sessions on disk
+//
+// Steps (matching user's exact reproduction):
+//  1. /list → must show all 37 sessions (legacy data, no filtering)
+//  2. /new "我的新会话" → create named session
+//  3. send message (agent hasn't replied yet) → /list → must STILL show all sessions
+//  4. agent replies with SessionID → /list → must show all sessions + new one
+//  5. session name "我的新会话" must appear in the list
+func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
+	dir := t.TempDir()
+	sessPath := filepath.Join(dir, "sessions.json")
+
+	// Write legacy session data (no past_id_tracking, simulates pre-fix data)
+	legacyJSON := `{
+		"sessions": {
+			"s1":  {"id":"s1", "name":"default",    "agent_session_id":"", "history":null, "created_at":"2026-03-26T22:25:56Z", "updated_at":"2026-03-26T22:25:56Z"},
+			"s2":  {"id":"s2", "name":"default",    "agent_session_id":"", "history":null, "created_at":"2026-04-18T09:02:57Z", "updated_at":"2026-04-18T09:02:57Z"},
+			"s3":  {"id":"s3", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T09:03:07Z", "updated_at":"2026-04-18T09:03:07Z"},
+			"s4":  {"id":"s4", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T09:07:15Z", "updated_at":"2026-04-18T09:07:15Z"},
+			"s5":  {"id":"s5", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T11:14:14Z", "updated_at":"2026-04-18T11:14:14Z"},
+			"s6":  {"id":"s6", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T11:39:15Z", "updated_at":"2026-04-18T11:39:15Z"},
+			"s7":  {"id":"s7", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T11:42:27Z", "updated_at":"2026-04-18T11:42:27Z"},
+			"s8":  {"id":"s8", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T12:01:02Z", "updated_at":"2026-04-18T12:01:22Z"},
+			"s9":  {"id":"s9", "name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T12:06:31Z", "updated_at":"2026-04-18T12:08:37Z"},
+			"s10": {"id":"s10","name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T12:18:55Z", "updated_at":"2026-04-18T12:18:55Z"},
+			"s11": {"id":"s11","name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T14:07:03Z", "updated_at":"2026-04-18T14:07:47Z"},
+			"s12": {"id":"s12","name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T14:07:59Z", "updated_at":"2026-04-18T14:18:49Z"},
+			"s13": {"id":"s13","name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T15:50:39Z", "updated_at":"2026-04-20T21:44:37Z"},
+			"s14": {"id":"s14","name":"今天",       "agent_session_id":"", "history":null, "created_at":"2026-04-20T21:44:58Z", "updated_at":"2026-04-20T21:44:58Z"},
+			"s15": {"id":"s15","name":"新的会话",   "agent_session_id":"019dab28-1a0f-7f60-87ed-b4fda306ebef", "agent_type":"codex", "history":null, "created_at":"2026-04-20T21:50:14Z", "updated_at":"2026-04-20T21:50:14Z"}
+		},
+		"active_session": {"feishu:chat:user1":"s15"},
+		"user_sessions":  {"feishu:chat:user1":["s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","s12","s13","s14","s15"]},
+		"counter": 15
+	}`
+	if err := os.WriteFile(sessPath, []byte(legacyJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC)
+	agentSessions := make([]AgentSessionInfo, 37)
+	for i := range agentSessions {
+		agentSessions[i] = AgentSessionInfo{
+			ID:           fmt.Sprintf("codex-thread-%03d", i+1),
+			Summary:      fmt.Sprintf("Codex session %d", i+1),
+			MessageCount: 3,
+			ModifiedAt:   base.Add(time.Duration(i) * 30 * time.Minute),
+		}
+	}
+	// s15's actual codex session is at index 36 (most recent)
+	agentSessions[36].ID = "019dab28-1a0f-7f60-87ed-b4fda306ebef"
+	agentSessions[36].Summary = "陈奕迅最有名是那首歌"
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.sessions = NewSessionManager(sessPath) // load real data
+	userKey := "feishu:chat:user1"
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+
+	// ── Step 1: /list on startup ───────────────────────────────
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("step1: expected 1 reply, got %d", len(p.sent))
+	}
+	step1Count := strings.Count(p.sent[0], "msgs")
+	if step1Count != 20 {
+		t.Fatalf("step1: /list should show first page (20 sessions), got %d", step1Count)
+	}
+
+	// ── Step 2: /new "我的新会话" ──────────────────────────────
+	e.cmdNew(p, msg, []string{"我的新会话"})
+
+	// ── Step 3: send message, agent not yet replied → /list ────
+	// (agent process started but hasn't returned SessionID yet)
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("step3: expected 1 reply, got %d", len(p.sent))
+	}
+	step3Count := strings.Count(p.sent[0], "msgs")
+	if step3Count < 20 {
+		t.Fatalf("step3: /list BEFORE agent reply should still show all sessions (page 1 = 20), got %d\nreply:\n%s",
+			step3Count, p.sent[0])
+	}
+
+	// ── Step 4: agent replies → set SessionID → /list ──────────
+	newSession := e.sessions.GetOrCreateActive(userKey)
+	newThreadID := "codex-thread-new-038"
+	newSession.CompareAndSetAgentSessionID(newThreadID, "codex")
+	// Engine maps the pending name to the new agent session ID
+	pendingName := newSession.GetName()
+	if pendingName != "" && pendingName != "session" && pendingName != "default" {
+		e.sessions.SetSessionName(newThreadID, pendingName)
+	}
+	e.sessions.Save()
+
+	// Agent now reports this new session in ListSessions
+	agent.sessions = append(agent.sessions, AgentSessionInfo{
+		ID:           newThreadID,
+		Summary:      "我的新消息内容",
+		MessageCount: 2,
+		ModifiedAt:   time.Now(),
+	})
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("step4: expected 1 reply, got %d", len(p.sent))
+	}
+	step4Count := strings.Count(p.sent[0], "msgs")
+	if step4Count < 20 {
+		t.Fatalf("step4: /list AFTER agent reply should show all sessions (page 1 = 20), got %d\nreply:\n%s",
+			step4Count, p.sent[0])
+	}
+
+	// ── Step 5: verify session name on page 2 ─────────────────
+	// The newest session is at the end of the list; check page 2.
+	p.sent = nil
+	e.cmdList(p, msg, []string{"2"})
+	if len(p.sent) != 1 {
+		t.Fatalf("step5: expected 1 reply for page 2, got %d", len(p.sent))
+	}
+	// The new session should show "我的新会话" (the name from /new), not the message content
+	if !strings.Contains(p.sent[0], "我的新会话") {
+		t.Errorf("step5: /list page 2 should display session name '我的新会话' but it's missing:\n%s", p.sent[0])
+	}
+}
+
+// TestCmdList_FilterExternalSessionsEnabled verifies that when
+// filter_external_sessions is enabled, only cc-connect-tracked sessions
+// appear in /list.
+func TestCmdList_FilterExternalSessionsEnabled(t *testing.T) {
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked 1", MessageCount: 5},
+		{ID: "tracked-2", Summary: "Tracked 2", MessageCount: 3},
+		{ID: "external-1", Summary: "External CLI session", MessageCount: 10},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetFilterExternalSessions(true)
+	userKey := "test:user1"
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("tracked-1", "codex")
+	e.sessions.Save()
+	s1.SetAgentSessionID("", "")
+	s2 := e.sessions.NewSession(userKey, "session2")
+	s2.SetAgentSessionID("tracked-2", "codex")
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Tracked 1") {
+		t.Errorf("filter enabled: should show tracked session 'Tracked 1':\n%s", reply)
+	}
+	if !strings.Contains(reply, "Tracked 2") {
+		t.Errorf("filter enabled: should show tracked session 'Tracked 2':\n%s", reply)
+	}
+	if strings.Contains(reply, "External CLI session") {
+		t.Errorf("filter enabled: should NOT show external session:\n%s", reply)
+	}
+}
+
+// TestCmdList_DefaultShowsAllSessions verifies that with default config
+// (filter_external_sessions=false), all sessions including external ones appear.
+func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked session", MessageCount: 5},
+		{ID: "external-1", Summary: "External session", MessageCount: 10},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	s := e.sessions.GetOrCreateActive(userKey)
+	s.SetAgentSessionID("tracked-1", "codex")
+	e.sessions.Save()
+
+	p.sent = nil
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Tracked session") {
+		t.Errorf("default mode: should show tracked session:\n%s", reply)
+	}
+	if !strings.Contains(reply, "External session") {
+		t.Errorf("default mode: should show external session:\n%s", reply)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// filter_external_sessions integration test suite
+// Covers /list, /switch, /delete, renderListCard under both modes.
+// ---------------------------------------------------------------------------
+
+// setupFilterTestEngine creates a test Engine with 3 agent sessions, 2 tracked
+// by cc-connect and 1 external. Returns (engine, platform, userKey, agentSessions).
+func setupFilterTestEngine(t *testing.T, filterEnabled bool) (*Engine, *stubPlatformEngine, string, []AgentSessionInfo) {
+	t.Helper()
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked session 1", MessageCount: 5, ModifiedAt: time.Now().Add(-2 * time.Hour)},
+		{ID: "tracked-2", Summary: "Tracked session 2", MessageCount: 3, ModifiedAt: time.Now().Add(-time.Hour)},
+		{ID: "external-1", Summary: "External CLI session", MessageCount: 10, ModifiedAt: time.Now()},
+	}
+	agent := &stubDeleteAgent{
+		stubListAgent: stubListAgent{sessions: agentSessions},
+		errByID:       map[string]error{},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetFilterExternalSessions(filterEnabled)
+	userKey := "test:filter-user"
+
+	s1 := e.sessions.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("tracked-1", "codex")
+	e.sessions.Save()
+	s1.SetAgentSessionID("", "")
+	s2 := e.sessions.NewSession(userKey, "session2")
+	s2.SetAgentSessionID("tracked-2", "codex")
+	e.sessions.Save()
+
+	return e, p, userKey, agentSessions
+}
+
+func TestFilterExternalSessions_SwitchByIndex(t *testing.T) {
+	t.Run("disabled: index 3 reaches external session", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, false)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if !strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("default mode: /switch 3 should reach external session:\n%s", p.sent[0])
+		}
+	})
+
+	t.Run("enabled: index 3 out of range", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, true)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("filter enabled: /switch 3 should NOT reach external session:\n%s", p.sent[0])
+		}
+	})
+}
+
+func TestFilterExternalSessions_SwitchByIDPrefix(t *testing.T) {
+	t.Run("disabled: can switch to external by ID prefix", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, false)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"external"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if !strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("default mode: /switch external should find external session:\n%s", p.sent[0])
+		}
+	})
+
+	t.Run("enabled: external ID prefix not found", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, true)
+		p.sent = nil
+		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"external"})
+		if len(p.sent) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(p.sent))
+		}
+		if strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("filter enabled: /switch external should NOT find external session:\n%s", p.sent[0])
+		}
+	})
+}
+
+func TestFilterExternalSessions_DeleteByIndex(t *testing.T) {
+	t.Run("disabled: /delete 3 hits external session", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, false)
+		p.sent = nil
+		e.cmdDelete(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) == 0 {
+			t.Fatal("expected reply from /delete")
+		}
+		reply := strings.Join(p.sent, "\n")
+		if !strings.Contains(reply, "external-1") && !strings.Contains(reply, "External CLI session") {
+			t.Errorf("default mode: /delete 3 should target external session:\n%s", reply)
+		}
+	})
+
+	t.Run("enabled: /delete 3 out of range", func(t *testing.T) {
+		e, p, userKey, _ := setupFilterTestEngine(t, true)
+		p.sent = nil
+		e.cmdDelete(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
+		if len(p.sent) == 0 {
+			t.Fatal("expected reply from /delete")
+		}
+		reply := strings.Join(p.sent, "\n")
+		if strings.Contains(reply, "external-1") || strings.Contains(reply, "External CLI session") {
+			t.Errorf("filter enabled: /delete 3 should NOT target external session:\n%s", reply)
+		}
+	})
+}
+
+func TestFilterExternalSessions_RenderListCard(t *testing.T) {
+	t.Run("disabled: card shows all sessions", func(t *testing.T) {
+		e, _, userKey, agentSessions := setupFilterTestEngine(t, false)
+		card, err := e.renderListCard(userKey, 1)
+		if err != nil {
+			t.Fatalf("renderListCard: %v", err)
+		}
+		switchActions := countCardActionValues(card, "act:/switch ")
+		if switchActions != len(agentSessions) {
+			t.Errorf("default mode: card should show %d sessions, got %d", len(agentSessions), switchActions)
+		}
+	})
+
+	t.Run("enabled: card hides external sessions", func(t *testing.T) {
+		e, _, userKey, _ := setupFilterTestEngine(t, true)
+		card, err := e.renderListCard(userKey, 1)
+		if err != nil {
+			t.Fatalf("renderListCard: %v", err)
+		}
+		switchActions := countCardActionValues(card, "act:/switch ")
+		if switchActions != 2 {
+			t.Errorf("filter enabled: card should show 2 tracked sessions, got %d", switchActions)
+		}
+	})
+}
+
+func TestFilterExternalSessions_DynamicToggle(t *testing.T) {
+	e, p, userKey, agentSessions := setupFilterTestEngine(t, false)
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	count1 := strings.Count(p.sent[0], "msgs")
+	if count1 != len(agentSessions) {
+		t.Fatalf("before toggle: expected %d sessions, got %d", len(agentSessions), count1)
+	}
+
+	e.SetFilterExternalSessions(true)
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	count2 := strings.Count(p.sent[0], "msgs")
+	if count2 != 2 {
+		t.Fatalf("after enabling filter: expected 2 sessions, got %d\nreply:\n%s", count2, p.sent[0])
+	}
+
+	e.SetFilterExternalSessions(false)
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	count3 := strings.Count(p.sent[0], "msgs")
+	if count3 != len(agentSessions) {
+		t.Fatalf("after disabling filter: expected %d sessions, got %d", len(agentSessions), count3)
+	}
+}
+
+// codexLikeSession simulates real codex agent behavior:
+// - CurrentSessionID() returns "" until Send() is called
+// - Send() sets the thread ID and pushes an EventResult with the SessionID
+type codexLikeSession struct {
+	threadID  string
+	events    chan Event
+	alive     bool
+	hasSentID bool
+}
+
+func newCodexLikeSession(threadID string) *codexLikeSession {
+	return &codexLikeSession{
+		threadID: threadID,
+		events:   make(chan Event, 8),
+		alive:    true,
+	}
+}
+
+func (s *codexLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.hasSentID = true
+	s.events <- Event{Type: EventText, Content: "Agent reply to: " + prompt}
+	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
+	return nil
+}
+func (s *codexLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *codexLikeSession) Events() <-chan Event                                 { return s.events }
+func (s *codexLikeSession) CurrentSessionID() string {
+	if s.hasSentID {
+		return s.threadID
+	}
+	return ""
+}
+func (s *codexLikeSession) Alive() bool  { return s.alive }
+func (s *codexLikeSession) Close() error { s.alive = false; return nil }
+
+// TestSessionName_CodexLikeFlow does an end-to-end test simulating real codex
+// behavior: CurrentSessionID()="" initially, thread ID only available after Send().
+// This is the exact bug: /new xxx → send message → agent replies with SessionID
+// in EventResult → name "xxx" must appear in /list.
+func TestSessionName_CodexLikeFlow(t *testing.T) {
+	sess := newCodexLikeSession("codex-thread-new-001")
+	listSessions := []AgentSessionInfo{
+		{ID: "codex-thread-old", Summary: "Old session", MessageCount: 5, ModifiedAt: time.Now().Add(-time.Hour)},
+	}
+	agent := &controllableAgent{
+		nextSession: sess,
+		listFn: func() ([]AgentSessionInfo, error) {
+			return listSessions, nil
+		},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	// Setup: create initial session with a known agent session ID
+	initial := e.sessions.GetOrCreateActive(userKey)
+	initial.SetAgentSessionID("codex-thread-old", "codex")
+	e.sessions.Save()
+
+	// Step 1: /new "我的新会话"
+	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"我的新会话"})
+
+	// Step 2: send a message (this triggers startOrResumeSession + processInteractiveEvents)
+	e.ReceiveMessage(p, &Message{
+		SessionKey: userKey,
+		Content:    "请帮我做个功能",
+		ReplyCtx:   "ctx2",
+	})
+
+	// Wait for the event loop to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 3: verify session name was mapped
+	newSession := e.sessions.GetOrCreateActive(userKey)
+	agentID := newSession.GetAgentSessionID()
+	if agentID != "codex-thread-new-001" {
+		t.Fatalf("AgentSessionID = %q, want %q", agentID, "codex-thread-new-001")
+	}
+
+	gotName := e.sessions.GetSessionName("codex-thread-new-001")
+	if gotName != "我的新会话" {
+		t.Fatalf("GetSessionName(%q) = %q, want %q", "codex-thread-new-001", gotName, "我的新会话")
+	}
+
+	// Step 4: verify /list displays the name
+	listSessions = append(listSessions, AgentSessionInfo{
+		ID:           "codex-thread-new-001",
+		Summary:      "请帮我做个功能",
+		MessageCount: 2,
+		ModifiedAt:   time.Now(),
+	})
+	p.sent = nil
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "我的新会话") {
+		t.Errorf("/list should show session name '我的新会话':\n%s", p.sent[0])
+	}
+}
+
+// claudeCodeLikeSession simulates claudecode/gemini/cursor behavior:
+// - CurrentSessionID() returns "" at creation
+// - Send() emits an early EventText with SessionID (system/init event)
+// - Then normal EventText without SessionID
+// - Finally EventResult with SessionID
+type claudeCodeLikeSession struct {
+	threadID  string
+	events    chan Event
+	alive     bool
+	hasSentID bool
+}
+
+func newClaudeCodeLikeSession(threadID string) *claudeCodeLikeSession {
+	return &claudeCodeLikeSession{
+		threadID: threadID,
+		events:   make(chan Event, 8),
+		alive:    true,
+	}
+}
+
+func (s *claudeCodeLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.hasSentID = true
+	// claudecode sends an early system event with SessionID (empty content)
+	s.events <- Event{Type: EventText, Content: "", SessionID: s.threadID}
+	// Normal streaming text (no SessionID)
+	s.events <- Event{Type: EventText, Content: "Reply to: " + prompt}
+	// Final result
+	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
+	return nil
+}
+func (s *claudeCodeLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *claudeCodeLikeSession) Events() <-chan Event                                 { return s.events }
+func (s *claudeCodeLikeSession) CurrentSessionID() string {
+	if s.hasSentID {
+		return s.threadID
+	}
+	return ""
+}
+func (s *claudeCodeLikeSession) Alive() bool  { return s.alive }
+func (s *claudeCodeLikeSession) Close() error { s.alive = false; return nil }
+
+// TestSessionName_ClaudeCodeLikeFlow tests the claudecode/gemini/cursor pattern:
+// CurrentSessionID()="" initially, but an early EventText carries SessionID.
+func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
+	sess := newClaudeCodeLikeSession("claude-session-001")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	initial := e.sessions.GetOrCreateActive(userKey)
+	initial.SetAgentSessionID("claude-session-old", "claudecode")
+	e.sessions.Save()
+
+	// /new with a custom name
+	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"Claude任务"})
+
+	// Send message
+	e.ReceiveMessage(p, &Message{
+		SessionKey: userKey,
+		Content:    "帮我重构代码",
+		ReplyCtx:   "ctx2",
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify session name mapped via EventText path
+	gotName := e.sessions.GetSessionName("claude-session-001")
+	if gotName != "Claude任务" {
+		t.Fatalf("GetSessionName(%q) = %q, want %q — claudecode-like EventText name mapping failed",
+			"claude-session-001", gotName, "Claude任务")
+	}
+}
+
+// acpLikeSession simulates ACP behavior:
+//   - CurrentSessionID() returns the thread ID immediately after creation
+//     (ACP does handshake before returning from StartSession)
+type acpLikeSession struct {
+	threadID string
+	events   chan Event
+	alive    bool
+}
+
+func newACPLikeSession(threadID string) *acpLikeSession {
+	return &acpLikeSession{
+		threadID: threadID,
+		events:   make(chan Event, 8),
+		alive:    true,
+	}
+}
+
+func (s *acpLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.events <- Event{Type: EventText, Content: "Reply", SessionID: s.threadID}
+	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
+	return nil
+}
+func (s *acpLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *acpLikeSession) Events() <-chan Event                                 { return s.events }
+func (s *acpLikeSession) CurrentSessionID() string                             { return s.threadID }
+func (s *acpLikeSession) Alive() bool                                          { return s.alive }
+func (s *acpLikeSession) Close() error                                         { s.alive = false; return nil }
+
+// TestSessionName_ACPLikeFlow tests ACP pattern: CurrentSessionID() is non-empty
+// immediately at creation, so name mapping happens in startOrResumeSession.
+func TestSessionName_ACPLikeFlow(t *testing.T) {
+	sess := newACPLikeSession("acp-session-001")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	// /new with a custom name
+	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"ACP任务"})
+
+	// Send message — startOrResumeSession should map the name immediately
+	e.ReceiveMessage(p, &Message{
+		SessionKey: userKey,
+		Content:    "帮我部署",
+		ReplyCtx:   "ctx2",
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	gotName := e.sessions.GetSessionName("acp-session-001")
+	if gotName != "ACP任务" {
+		t.Fatalf("GetSessionName(%q) = %q, want %q — ACP-like immediate ID name mapping failed",
+			"acp-session-001", gotName, "ACP任务")
+	}
+}
+
+// TestBtwAlias_ResolvesToPs verifies that /btw is accepted as an alias for /ps.
+func TestBtwAlias_ResolvesToPs(t *testing.T) {
+	id := matchPrefix("btw", builtinCommands)
+	if id != "ps" {
+		t.Fatalf("matchPrefix(\"btw\") = %q, want \"ps\"", id)
+	}
+	id2 := matchPrefix("ps", builtinCommands)
+	if id2 != "ps" {
+		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
 }

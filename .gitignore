@@ -8,6 +8,7 @@
 # Rollback snapshot written by restart.sh --deploy. Same bytes as a past
 # $BINARY, so same reasons to never commit it.
 /cc-connect.known-good
+cc-connect.bak-*
 *.exe
 *.exe~
 *.dll
@@ -15,6 +16,7 @@
 *.dylib
 *.test
 *.out
+*.old
 
 # ============================================================================
 # Go workspace & tooling
@@ -42,8 +44,13 @@ vendor/
 # ============================================================================
 # Runtime configuration (contains secrets)
 config.toml
+config.*.toml
+!config.example.toml
 .env
 *.local.toml
+
+# Instance lock files (created at startup, released on shutdown)
+*.toml.lock
 
 # CC-Connect runtime state
 .cc-connect/
@@ -127,6 +134,11 @@ ehthumbs.db
 Desktop.ini
 
 # ============================================================================
+# AI agent planning artifacts
+# ============================================================================
+.planning/
+
+# ============================================================================
 # Security
 # ============================================================================
 # Never commit secrets or credentials
@@ -136,3 +148,5 @@ Desktop.ini
 *.pfx
 secrets/
 credentials/
+
+.codex

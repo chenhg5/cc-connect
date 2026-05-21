@@ -11,11 +11,41 @@ import (
 
 const sharedWorkspaceBindingsKey = "shared"
 
+// FlexTime wraps time.Time with lenient JSON unmarshaling.
+type FlexTime struct{ time.Time }
+
+func (ft *FlexTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		ft.Time = time.Time{}
+		return nil
+	}
+	if s == "" {
+		ft.Time = time.Time{}
+		return nil
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			ft.Time = t
+			return nil
+		}
+	}
+	slog.Warn("workspace bindings: unparseable bound_at, treating as zero", "value", s)
+	ft.Time = time.Time{}
+	return nil
+}
+
 // WorkspaceBinding maps a channel to a workspace directory.
 type WorkspaceBinding struct {
-	ChannelName string    `json:"channel_name"`
-	Workspace   string    `json:"workspace"`
-	BoundAt     time.Time `json:"bound_at"`
+	ChannelName string   `json:"channel_name"`
+	Workspace   string   `json:"workspace"`
+	BoundAt     FlexTime `json:"bound_at"`
 }
 
 // WorkspaceBindingManager persists channel->workspace mappings.
@@ -80,7 +110,7 @@ func (m *WorkspaceBindingManager) Bind(projectKey, channelKey, channelName, work
 	m.bindings[projectKey][channelKey] = &WorkspaceBinding{
 		ChannelName: channelName,
 		Workspace:   workspace,
-		BoundAt:     time.Now(),
+		BoundAt:     FlexTime{time.Now()},
 	}
 	m.saveLocked()
 }

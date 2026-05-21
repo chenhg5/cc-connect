@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -112,6 +113,24 @@ func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item me
 	return p.sendSingleItemWithRetry(ctx, rc, item)
 }
 
+func mediaFromUploadRef(ref *cdnUploadedRef) *cdnMedia {
+	return &cdnMedia{
+		EncryptQueryParam: ref.downloadParam,
+		AESKey:            formatAesKeyForAPI(ref.aesKey),
+		EncryptType:       1,
+	}
+}
+
+func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
+	return messageItem{
+		Type: messageItemVideo,
+		VideoItem: &videoItem{
+			Media:     mediaFromUploadRef(ref),
+			VideoSize: ref.cipherSize,
+		},
+	}
+}
+
 // sendSingleItemWithRetry sends a media item with retry mechanism for ret=-2 errors.
 func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
 	var lastErr error
@@ -196,6 +215,15 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 	if name == "" {
 		name = "file.bin"
 	}
+
+	if isVideoFile(file) {
+		ref, err := p.uploadToWeixinCDN(ctx, rc.peerUserID, file.Data, uploadMediaVideo, "SendFileVideo")
+		if err != nil {
+			return err
+		}
+		return p.sendSingleItem(ctx, rc, buildVideoMessageItem(ref))
+	}
+
 	ref, err := p.uploadToWeixinCDN(ctx, rc.peerUserID, file.Data, uploadMediaFile, "SendFile")
 	if err != nil {
 		return err
@@ -210,6 +238,70 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 			},
 			FileName: name,
 			Len:      fmt.Sprintf("%d", ref.rawSize),
+		},
+	}
+	return p.sendSingleItem(ctx, rc, item)
+}
+
+func isVideoFile(file core.FileAttachment) bool {
+	mime := strings.ToLower(strings.TrimSpace(file.MimeType))
+	if strings.HasPrefix(mime, "video/") {
+		return true
+	}
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(file.FileName)), ".")
+	switch ext {
+	case "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm":
+		return true
+	default:
+		return false
+	}
+}
+
+// SendAudio implements core.AudioSender.
+// Weixin voice messages require AMR or SILK format. Since SILK encoding is not
+// widely supported, we convert to AMR format using ffmpeg.
+func (p *Platform) SendAudio(ctx context.Context, replyCtx any, audio []byte, format string) error {
+	rc, err := p.resolveReplyContext(replyCtx)
+	if err != nil {
+		return err
+	}
+	if len(audio) == 0 {
+		return fmt.Errorf("weixin: empty audio")
+	}
+
+	// Convert to AMR format if not already AMR
+	sendData := audio
+	sendFormat := strings.ToLower(strings.TrimSpace(format))
+	if sendFormat == "" {
+		sendFormat = "wav" // TTS typically outputs WAV
+	}
+	if sendFormat != "amr" {
+		converted, err := core.ConvertAudioToAMR(ctx, audio, sendFormat)
+		if err != nil {
+			return fmt.Errorf("weixin: convert %s to AMR: %w", sendFormat, err)
+		}
+		sendData = converted
+		sendFormat = "amr"
+	}
+
+	slog.Debug("weixin: audio converted", "format", sendFormat, "size", len(sendData))
+
+	// Upload to CDN as file type (voice uses same CDN upload mechanism)
+	ref, err := p.uploadToWeixinCDN(ctx, rc.peerUserID, sendData, uploadMediaFile, "SendAudio")
+	if err != nil {
+		return err
+	}
+
+	// Send as voice message
+	item := messageItem{
+		Type: messageItemVoice,
+		VoiceItem: &voiceItem{
+			Media: &cdnMedia{
+				EncryptQueryParam: ref.downloadParam,
+				AESKey:            formatAesKeyForAPI(ref.aesKey),
+				EncryptType:       1,
+			},
+			EncodeType: 0, // 0 = AMR format, 1 = SILK format
 		},
 	}
 	return p.sendSingleItem(ctx, rc, item)

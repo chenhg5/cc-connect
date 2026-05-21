@@ -211,17 +211,12 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	// Simulate a tool/thinking event → freeze
 	sp.freeze()
 
-	// finish should return false (degraded) and delete the stale preview
+	// With degraded recovery, finish attempts UpdateMessage on the degraded
+	// preview. Since mockCleanerPlatform embeds mockUpdaterPlatform,
+	// UpdateMessage succeeds and finish returns true (recovered).
 	ok := sp.finish("Hello World Final")
-	if ok {
-		t.Error("finish should return false when degraded")
-	}
-
-	mp.mu.Lock()
-	deletedCount := len(mp.deleted)
-	mp.mu.Unlock()
-	if deletedCount != 1 {
-		t.Errorf("expected 1 delete call, got %d", deletedCount)
+	if !ok {
+		t.Error("finish should return true when degraded recovery via UpdateMessage succeeds")
 	}
 }
 
@@ -291,6 +286,83 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	}
 	if len(msgs) < 2 || msgs[len(msgs)-1] != "update:Hello World Final" {
 		t.Fatalf("messages = %#v, want final update in place", msgs)
+	}
+}
+
+func TestStreamPreview_NeedsDoneReaction_TrueAfterUpdate(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false before any send")
+	}
+
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false after only SendPreviewStart (no UpdateMessage yet)")
+	}
+
+	sp.appendText(" more text to trigger update")
+	time.Sleep(100 * time.Millisecond)
+
+	msgs := mp.getMessages()
+	hasUpdate := false
+	for _, m := range msgs {
+		if len(m) > 7 && m[:7] == "update:" {
+			hasUpdate = true
+			break
+		}
+	}
+	if !hasUpdate {
+		t.Fatal("expected at least one UpdateMessage call")
+	}
+
+	if !sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be true after UpdateMessage was used")
+	}
+}
+
+func TestStreamPreview_NeedsDoneReaction_FalseAfterDiscard(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+	sp.appendText(" more text")
+	time.Sleep(100 * time.Millisecond)
+
+	sp.discard()
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false after discard (previewMsgID cleared)")
+	}
+}
+
+func TestStreamPreview_NeedsDoneReaction_FalseWhenDisabled(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{Enabled: false}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello")
+	time.Sleep(100 * time.Millisecond)
+
+	if sp.needsDoneReaction() {
+		t.Error("needsDoneReaction should be false when preview is disabled")
 	}
 }
 

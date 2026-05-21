@@ -146,8 +146,8 @@ func TestVerifyRunAsUserCheap_Success(t *testing.T) {
 	ResetVerifyCache()
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/bin/true"):                           {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/bin/true"):             {[]byte("a password is required"), &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):                           {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):             {[]byte("a password is required"), &exec.ExitError{}},
 		},
 	}
 	if err := VerifyRunAsUserCheap(context.Background(), runner, "target"); err != nil {
@@ -162,7 +162,7 @@ func TestVerifyRunAsUserCheap_NoPasswordlessSudoToTarget(t *testing.T) {
 	ResetVerifyCache()
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/bin/true"): {[]byte("a password is required"), &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"): {[]byte("a password is required"), &exec.ExitError{}},
 		},
 	}
 	err := VerifyRunAsUserCheap(context.Background(), runner, "target")
@@ -178,8 +178,8 @@ func TestVerifyRunAsUserCheap_TargetCanEscalate(t *testing.T) {
 	ResetVerifyCache()
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/bin/true"):               {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/bin/true"): {nil, nil}, // BAD — escalation succeeded
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):               {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"): {nil, nil}, // BAD — escalation succeeded
 		},
 	}
 	err := VerifyRunAsUserCheap(context.Background(), runner, "target")
@@ -203,8 +203,8 @@ func TestVerifyRunAsUserCheap_CacheHit(t *testing.T) {
 	ResetVerifyCache()
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/bin/true"):               {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/bin/true"): {nil, &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):               {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"): {nil, &exec.ExitError{}},
 		},
 	}
 	// First call populates the cache with 2 runner calls.

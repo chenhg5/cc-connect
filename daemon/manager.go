@@ -18,7 +18,8 @@ type Config struct {
 	WorkDir    string
 	LogFile    string
 	LogMaxSize int64
-	EnvPATH    string // capture user's PATH so agents are accessible
+	EnvPATH    string            // capture user's PATH so agents are accessible
+	EnvExtra   map[string]string // selected environment variables needed by the service runtime
 }
 
 type Status struct {
@@ -128,5 +129,23 @@ func Resolve(cfg *Config) error {
 	if cfg.EnvPATH == "" {
 		cfg.EnvPATH = os.Getenv("PATH")
 	}
+	if len(cfg.EnvExtra) == 0 {
+		cfg.EnvExtra = captureDaemonEnv()
+	}
 	return nil
+}
+
+func captureDaemonEnv() map[string]string {
+	keys := []string{
+		"http_proxy", "https_proxy", "no_proxy",
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+		"all_proxy", "ALL_PROXY",
+	}
+	env := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			env[key] = value
+		}
+	}
+	return env
 }

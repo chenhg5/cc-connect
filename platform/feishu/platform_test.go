@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -443,7 +444,7 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T) {
+func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -453,15 +454,11 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
 
-	cardNavCalled := make(chan struct{}, 1)
+	var gotAction, gotSessionKey string
 	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
-		cardNavCalled <- struct{}{}
-		return core.NewCard().Markdown("unexpected").Build()
-	}
-
-	msgCh := make(chan *core.Message, 1)
-	ip.handler = func(_ core.Platform, msg *core.Message) {
-		msgCh <- msg
+		gotAction = action
+		gotSessionKey = sessionKey
+		return core.NewCard().Markdown("switching").Build()
 	}
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
@@ -474,23 +471,20 @@ func TestInteractivePlatform_ModelCardActionDispatchesCommandAsync(t *testing.T)
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
-	if resp == nil || resp.Toast == nil {
-		t.Fatalf("expected toast response, got %#v", resp)
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
 	}
-
-	select {
-	case <-cardNavCalled:
-		t.Fatal("expected model card action to skip synchronous card nav")
-	default:
+	if gotAction != "act:/model switch 1" {
+		t.Fatalf("action = %q, want act:/model switch 1", gotAction)
 	}
-
-	select {
-	case msg := <-msgCh:
-		if msg.Content != "/model switch 1" {
-			t.Fatalf("message content = %q, want /model switch 1", msg.Content)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected model card action message")
+	if gotSessionKey == "" {
+		t.Fatal("expected non-empty session key")
+	}
+	ip.cardActionMsgMu.Lock()
+	tracked := ip.cardActionMsgIDs[gotSessionKey]
+	ip.cardActionMsgMu.Unlock()
+	if tracked != "om_test_message" {
+		t.Fatalf("tracked message id = %q, want om_test_message", tracked)
 	}
 }
 
@@ -510,6 +504,29 @@ func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	}
 	if ip.domain != lark.LarkBaseUrl {
 		t.Fatalf("domain = %q, want %q", ip.domain, lark.LarkBaseUrl)
+	}
+}
+
+func TestPlatformShouldUseWebhookMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		platform   string
+		encryptKey string
+		want       bool
+	}{
+		{name: "lark defaults to websocket", platform: "lark", want: false},
+		{name: "lark webhook when encrypt key set", platform: "lark", encryptKey: "enc-key", want: true},
+		{name: "feishu defaults to websocket", platform: "feishu", want: false},
+		{name: "feishu webhook when encrypt key set", platform: "feishu", encryptKey: "enc-key", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{platformName: tt.platform, encryptKey: tt.encryptKey}
+			if got := p.shouldUseWebhookMode(); got != tt.want {
+				t.Fatalf("shouldUseWebhookMode() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -812,6 +829,22 @@ func TestLark_ReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestUserIDFromEventFallsBackToUserID(t *testing.T) {
+	userID := "uid_user123"
+	if got := userIDFromEvent(&larkim.UserId{UserId: &userID}); got != userID {
+		t.Fatalf("userIDFromEvent() = %q, want %q", got, userID)
+	}
+}
+
+func TestResolveUserNameSkipsInvalidLookupID(t *testing.T) {
+	p := &Platform{}
+	for _, id := range []string{"", "feishu:oc_chat:ou_user", "ou user"} {
+		if got := p.resolveUserName(id); got != id {
+			t.Fatalf("resolveUserName(%q) = %q, want unchanged", id, got)
+		}
+	}
+}
+
 func stringPtr(s string) *string { return &s }
 
 func TestSanitizeMarkdownURLs(t *testing.T) {
@@ -912,6 +945,33 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
+	code := 0
+	success := true
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Name: "Thinking", Summary: "Inspecting event routing"},
+		{
+			Kind:     core.ToolStepKindTool,
+			Name:     "Bash",
+			Summary:  "echo hi",
+			Result:   "hi",
+			Status:   "completed",
+			ExitCode: &code,
+			Success:  &success,
+			Done:     true,
+		},
+	}, "done", true, time.Second)
+
+	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
+		if !strings.Contains(cardJSON, want) {
+			t.Fatalf("rich card should contain %q, got %q", want, cardJSON)
+		}
+	}
+	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
+		t.Fatalf("rich card should not contain progress payload prefix, got %q", cardJSON)
+	}
+}
+
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
@@ -924,9 +984,9 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 
 func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantContains []string
+		name            string
+		input           string
+		wantContains    []string
 		notWantContains []string
 	}{
 		{
@@ -936,23 +996,23 @@ func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
 				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
 			]}`,
-			wantContains: []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			wantContains:    []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
 			notWantContains: []string{"```"},
 		},
 		{
-			name:  "todos without activeForm",
-			input: `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
-			wantContains: []string{"⏳", "Simple task"},
+			name:            "todos without activeForm",
+			input:           `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
+			wantContains:    []string{"⏳", "Simple task"},
 			notWantContains: []string{"(", ")"},
 		},
 		{
-			name:     "invalid JSON falls back to default",
-			input:    `not valid json`,
+			name:         "invalid JSON falls back to default",
+			input:        `not valid json`,
 			wantContains: []string{"```text"},
 		},
 		{
-			name:     "empty todos array",
-			input:    `{"todos": []}`,
+			name:         "empty todos array",
+			input:        `{"todos": []}`,
 			wantContains: []string{"```text"},
 		},
 	}
@@ -985,5 +1045,335 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 	result = formatProgressToolInput("TodoWrite", "not json")
 	if !strings.Contains(result, "```text") {
 		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
+	}
+}
+
+func TestAllowChat_FiltersGroupMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowChat string
+		chatID    string
+		chatType  string
+		wantPass  bool
+	}{
+		{"empty allow_chat permits all groups", "", "oc_abc", "group", true},
+		{"wildcard permits all groups", "*", "oc_abc", "group", true},
+		{"matching chat_id passes", "oc_abc", "oc_abc", "group", true},
+		{"non-matching chat_id blocked", "oc_abc", "oc_xyz", "group", false},
+		{"multiple chat_ids, match second", "oc_abc,oc_xyz", "oc_xyz", "group", true},
+		{"multiple chat_ids, no match", "oc_abc,oc_def", "oc_xyz", "group", false},
+		{"private chat bypasses allow_chat filter", "oc_abc", "oc_xyz", "p2p", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+				"app_id": "cli_xxx", "app_secret": "secret",
+				"enable_feishu_card": true,
+				"group_reply_all":    true,
+				"allow_chat":         tt.allowChat,
+			})
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			ip := p.(*interactivePlatform)
+
+			messageID := "om_test_" + tt.name
+			openID := "ou_test"
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+			msgCh := make(chan *core.Message, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) {
+				msgCh <- msg
+			}
+
+			if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: &openID},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   &messageID,
+						ChatId:      &tt.chatID,
+						ChatType:    &tt.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case <-msgCh:
+				if !tt.wantPass {
+					t.Fatal("expected message to be blocked by allow_chat, but it was delivered")
+				}
+			case <-time.After(2 * time.Second):
+				if tt.wantPass {
+					t.Fatal("expected message to pass allow_chat filter, but it was blocked")
+				}
+			}
+		})
+	}
+}
+
+// --- Mention resolution tests ---
+
+func TestResolveMentions_ReplacesKnownMember(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "巡检完成，@张三 @李四 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, `<at user_id="ou_zhangsan">张三</at>`) {
+		t.Fatalf("expected 张三 to be resolved, got %q", result)
+	}
+	if !strings.Contains(result, `<at user_id="ou_lisi">李四</at>`) {
+		t.Fatalf("expected 李四 to be resolved, got %q", result)
+	}
+}
+
+func TestResolveMentions_UnknownMemberKeptAsIs(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	input := "@不存在的人 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, "<at") {
+		t.Fatalf("unknown member should not be replaced, got %q", result)
+	}
+}
+
+func TestResolveMentions_LongestMatchFirst(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan", "张三丰": "ou_zhangsanfeng"},
+		fetchedAt: time.Now(),
+	})
+	input := "@张三丰请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "ou_zhangsanfeng") {
+		t.Fatalf("should match 张三丰 (longest), got %q", result)
+	}
+}
+
+func TestResolveMentions_CardFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	// Content with complex markdown triggers card format
+	input := "# 巡检报告\n\n@张三 请查看\n\n```\nstatus: ok\n```"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
+		t.Fatalf("card format should use <at id=...>, got %q", result)
+	}
+}
+
+func TestResolveMentions_DisabledByConfig(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: false}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	input := "@张三 请查看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if result != input {
+		t.Fatalf("resolve_mentions=false should not replace, got %q", result)
+	}
+}
+
+func TestResolveMentions_NoAtSign(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	input := "普通消息没有at"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if result != input {
+		t.Fatalf("no @ should return unchanged, got %q", result)
+	}
+}
+
+func TestResolveMentions_DuplicateNameSkipped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "", "李四": "ou_lisi"},
+		fetchedAt: time.Now(),
+	})
+	input := "请 @张三 和 @李四 看看"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, "@张三") {
+		t.Fatal("ambiguous name should be kept as-is")
+	}
+	if strings.Contains(result, "@李四") {
+		t.Fatal("unique name should be resolved")
+	}
+}
+
+func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{`A<"B">`: "ou_special"},
+		fetchedAt: time.Now(),
+	})
+	input := `@A<"B"> 你好`
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if strings.Contains(result, `<"B">`) {
+		t.Fatalf("special chars should be escaped, got %q", result)
+	}
+	if !strings.Contains(result, "A&lt;") {
+		t.Fatalf("expected HTML-escaped name, got %q", result)
+	}
+}
+
+type mockRefreshPlatform struct {
+	*Platform
+	refreshCalled atomic.Int32
+	refreshDone   chan struct{}
+	refreshCard   func(ctx context.Context, sessionKey string, card *core.Card) error
+}
+
+func newMockRefreshPlatform(p *Platform) *mockRefreshPlatform {
+	return &mockRefreshPlatform{Platform: p, refreshDone: make(chan struct{})}
+}
+
+func (m *mockRefreshPlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
+	m.refreshCalled.Add(1)
+	close(m.refreshDone)
+	if m.refreshCard != nil {
+		return m.refreshCard(ctx, sessionKey, card)
+	}
+	return nil
+}
+
+func TestCardAction_NavFast_ReturnsCard(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		return core.NewCard().Markdown("list content").Build()
+	}
+
+	start := time.Now()
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
+	}
+	if elapsed >= cardNavTimeout {
+		t.Fatalf("fast nav should return within cardNavTimeout, took %v", elapsed)
+	}
+	if resp.Toast != nil {
+		t.Fatalf("expected no toast for fast response, got %q", resp.Toast.Content)
+	}
+}
+
+func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	mock := newMockRefreshPlatform(ip.Platform)
+	ip.Platform.self = mock
+
+	handlerDone := make(chan struct{})
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 200*time.Millisecond)
+		close(handlerDone)
+		return core.NewCard().Markdown("async list content").Build()
+	}
+
+	start := time.Now()
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("should return within feishu timeout, took %v", elapsed)
+	}
+	if resp.Card != nil {
+		t.Fatalf("expected no card for timeout response, got non-nil card")
+	}
+
+	select {
+	case <-mock.refreshDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RefreshCard should have been called")
+	}
+
+	if got := mock.refreshCalled.Load(); got != 1 {
+		t.Fatalf("RefreshCard called %d times, want 1", got)
+	}
+}
+
+func TestCardAction_NavSlow_NilCard_NoRefresh(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	mock := newMockRefreshPlatform(ip.Platform)
+	ip.Platform.self = mock
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 200*time.Millisecond)
+		return nil
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	time.Sleep(cardNavTimeout + 500*time.Millisecond)
+
+	if got := mock.refreshCalled.Load(); got != 0 {
+		t.Fatalf("RefreshCard should not be called for nil card, called %d times", got)
 	}
 }

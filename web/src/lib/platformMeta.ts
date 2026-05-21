@@ -62,6 +62,7 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'callback_aes_key', labelKey: 'fields.callbackAesKey', required: true, hintKey: 'fields.callbackAesKeyHint' },
       { key: 'port', labelKey: 'fields.port', required: true, placeholder: '8081' },
       { key: 'callback_path', labelKey: 'fields.callbackPath', placeholder: '/wecom/callback', group: 'advanced' },
+      { key: 'api_base_url', labelKey: 'fields.apiBaseUrl', placeholder: 'https://qyapi.weixin.qq.com', group: 'advanced' },
       { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
     ],
   },
@@ -91,6 +92,14 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'channel_token', labelKey: 'fields.channelToken', required: true, type: 'password' },
       { key: 'port', labelKey: 'fields.port', required: true, placeholder: '8080' },
       { key: 'callback_path', labelKey: 'fields.callbackPath', placeholder: '/callback', group: 'advanced' },
+      { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+    ],
+  },
+  weibo: {
+    label: 'Weibo (微博)',
+    fields: [
+      { key: 'app_id', labelKey: 'fields.appId', required: true, placeholder: '1234567890' },
+      { key: 'app_secret', labelKey: 'fields.appSecret', required: true, type: 'password' },
       { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
     ],
   },

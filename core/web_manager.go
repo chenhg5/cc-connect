@@ -7,11 +7,6 @@ import (
 	"time"
 )
 
-const (
-	defaultMgmtPort   = 9820
-	defaultBridgePort = 9810
-)
-
 // GenerateToken creates a random hex token.
 func GenerateToken(n int) string {
 	b := make([]byte, n)

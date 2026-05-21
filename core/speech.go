@@ -49,7 +49,7 @@ func NewOpenAIWhisper(apiKey, baseURL, model string) *OpenAIWhisper {
 		APIKey:  apiKey,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Model:   model,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
@@ -130,7 +130,7 @@ func NewQwenASR(apiKey, baseURL, model string) *QwenASR {
 		APIKey:  apiKey,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Model:   model,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
@@ -298,7 +298,9 @@ func (g *GeminiSTT) Transcribe(ctx context.Context, audio []byte, format string,
 
 // ConvertAudioToMP3 uses ffmpeg to convert audio from unsupported formats to mp3.
 // Returns the mp3 bytes. If ffmpeg is not installed, returns an error.
-func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
+// The ctx is honored: cancellation kills the ffmpeg subprocess, matching the
+// behavior of the other Convert* helpers in this file.
+func ConvertAudioToMP3(ctx context.Context, audio []byte, srcFormat string) ([]byte, error) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable voice message support")
@@ -306,7 +308,7 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 
 	var cmd *exec.Cmd
 	if srcFormat == "amr" || srcFormat == "silk" {
-		cmd = exec.Command(ffmpegPath,
+		cmd = exec.CommandContext(ctx, ffmpegPath,
 			"-f", srcFormat,
 			"-i", "pipe:0",
 			"-f", "mp3",
@@ -316,7 +318,7 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 			"pipe:1",
 		)
 	} else {
-		cmd = exec.Command(ffmpegPath,
+		cmd = exec.CommandContext(ctx, ffmpegPath,
 			"-i", "pipe:0",
 			"-f", "mp3",
 			"-ac", "1",
@@ -357,6 +359,40 @@ func ConvertAudioToOpus(ctx context.Context, audio []byte, srcFormat string) ([]
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ffmpeg opus conversion failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
+// ConvertAudioToAMR uses ffmpeg to convert audio to AMR-NB format.
+// AMR is a common voice codec for mobile messaging platforms.
+// Returns the AMR bytes. If ffmpeg is not installed, returns an error.
+func ConvertAudioToAMR(ctx context.Context, audio []byte, srcFormat string) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable audio conversion")
+	}
+
+	args := []string{
+		"-i", "pipe:0",
+		"-c:a", "amr_nb",
+		"-ar", "8000",   // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1",      // mono
+		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
+		"-f", "amr",
+		"-y",
+		"pipe:1",
+	}
+	if srcFormat == "amr" || srcFormat == "silk" {
+		args = append([]string{"-f", srcFormat}, args...)
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(audio)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg AMR conversion failed: %w (stderr: %s)", err, stderr.String())
 	}
 	return stdout.Bytes(), nil
 }
@@ -484,7 +520,7 @@ func TranscribeAudio(ctx context.Context, stt SpeechToText, audio *AudioAttachme
 
 	if NeedsConversion(format) {
 		slog.Debug("speech: converting audio", "from", format, "to", "mp3")
-		converted, err := ConvertAudioToMP3(data, format)
+		converted, err := ConvertAudioToMP3(ctx, data, format)
 		if err != nil {
 			return "", err
 		}
