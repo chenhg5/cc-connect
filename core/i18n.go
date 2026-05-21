@@ -471,6 +471,7 @@ const (
 	MsgForkError               MsgKey = "fork_error"
 	MsgForkCreated              MsgKey = "fork_created"
 	MsgForkCreatedAt            MsgKey = "fork_created_at"
+	MsgForkLoading              MsgKey = "fork_loading"
 	MsgForkNoTurns              MsgKey = "fork_no_turns"
 	MsgForkTurnListHeader       MsgKey = "fork_turn_list_header"
 	MsgForkTurnHint             MsgKey = "fork_turn_hint"
@@ -3109,6 +3110,13 @@ var messages = map[MsgKey]map[Language]string{
 			LangTraditionalChinese: "🌿 分叉已建立：**%s** (%s)。使用 /switch 切換到分叉會話。",
 			LangJapanese:           "🌿 fork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
 			LangSpanish:            "🌿 Fork creado: **%s** (%s). Usa /switch para empezar a trabajar en él.",
+		},
+		MsgForkLoading: {
+			LangEnglish:            "Forking...",
+			LangChinese:            "正在分叉...",
+			LangTraditionalChinese: "正在分叉...",
+			LangJapanese:           "フォーク中...",
+			LangSpanish:            "Bifurcando...",
 		},
 		MsgForkCreatedAt: {
 			LangEnglish:            "🌿 Fork created from turn %d: **%s** (%s). Use /switch to start working on it.",
