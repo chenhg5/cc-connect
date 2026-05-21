@@ -9532,7 +9532,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 				atTurn = n
 			}
 		}
-		return e.executeForkAutoName(sessionKey, atTurn)
+		// Show loading card immediately, then async execute and refresh
+		loadingCard := NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "turquoise").
+			Markdown(e.i18n.T(MsgForkLoading)).Build()
+		go e.executeForkAutoNameAsync(sessionKey, atTurn)
+		return loadingCard
 
 	case "/upgrade":
 		return e.renderUpgradeCard()
@@ -12864,6 +12868,22 @@ func (e *Engine) forkAutoName(sessionKey string) string {
 
 func (e *Engine) executeForkAutoName(sessionKey string, atTurn int) *Card {
 	return e.executeForkWithName(sessionKey, atTurn, e.forkAutoName(sessionKey))
+}
+
+func (e *Engine) executeForkAutoNameAsync(sessionKey string, atTurn int) {
+	resultCard := e.executeForkAutoName(sessionKey, atTurn)
+	if resultCard == nil {
+		return
+	}
+	// Refresh the card in-place using CardRefresher
+	for _, p := range e.platforms {
+		if refresher, ok := p.(CardRefresher); ok {
+			if err := refresher.RefreshCard(e.ctx, sessionKey, resultCard); err != nil {
+				slog.Warn("engine: failed to refresh fork result card", "error", err, "session", sessionKey)
+			}
+			return
+		}
+	}
 }
 
 func (e *Engine) executeForkWithName(sessionKey string, atTurn int, forkName string) *Card {
