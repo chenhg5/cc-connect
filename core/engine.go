@@ -12749,6 +12749,7 @@ func (e *Engine) cmdRollback(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRollbackDone), turns, remaining))
 }
 
+
 func (e *Engine) renderForkCardFromState(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	forker, ok := agent.(SessionForker)
