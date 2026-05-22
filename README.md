@@ -186,6 +186,13 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 - **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
 - **New Agents** — Kimi CLI and Pi agent support added.
 
+### 🆕 Latest: Session Fork & Rollback
+
+- **`/fork`** — Branch a conversation at a specific turn into a new side session. Original session stays untouched. Auto-names `fork 1 of <currentName>`. Card-based selection on Feishu/Slack/Telegram.
+- **`/rollback`** — Remove the last N turns from the current session, truncating agent context. Card selection or `/rollback N` directly.
+- **Session name preservation** — Rollback truncation re-writes `custom-title` to JSONL, preventing VSCode from reverting to a stale name.
+- *Full docs → [docs/fork-rollback.md](docs/fork-rollback.md)*
+
 
 ## 🧩 Platform feature snapshot
 
