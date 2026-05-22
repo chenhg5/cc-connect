@@ -39,7 +39,15 @@
       "mcp__chrome-devtools__evaluate_script",
       "mcp__troubleshooting-mcp__query_service_logs",
       "Skill(flink-task-exception-diagnosis)",
-      "Bash(go list:*)"
+      "Bash(go list:*)",
+      "Bash(xxd /Users/zengbin/IdeaProjects/cc-connect/core/engine.go)",
+      "Bash(~/.kimi-webbridge/bin/kimi-webbridge status *)",
+      "Bash(curl *)",
+      "Bash(git stash *)",
+      "Bash(open *)",
+      "mcp__mcp_server_mysql_dsp__mysql_query",
+      "Bash(xxd)",
+      "Bash(git checkout *)"
     ]
   }
 }

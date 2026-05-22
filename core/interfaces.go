@@ -171,6 +171,13 @@ type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
 }
 
+// CompletionNotifier is an optional interface for platforms that can send
+// an urgent completion notification to the user after processing finishes
+// (e.g. DingTalk's "DING" feature).
+type CompletionNotifier interface {
+	SendCompletionNotification(ctx context.Context, replyCtx any)
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error

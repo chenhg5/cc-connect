@@ -1335,6 +1335,69 @@ func (p *Platform) AddDoneReaction(rctx any) {
 
 var _ core.TypingIndicator = (*Platform)(nil)
 var _ core.TypingIndicatorDone = (*Platform)(nil)
+var _ core.CompletionNotifier = (*Platform)(nil)
+
+// SendCompletionNotification implements core.CompletionNotifier.
+// Sends a DingTalk "DING" notification to the user after processing completes,
+// so the user gets a push alert even if they're not watching the chat.
+func (p *Platform) SendCompletionNotification(ctx context.Context, rctx any) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.senderStaffId == "" {
+		return
+	}
+
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		slog.Info("ready to dingtalk: sending DING notification", "user", rc.senderStaffId, "robot_code", p.robotCode)
+
+		token, err := p.getAccessToken()
+		if err != nil {
+			slog.Debug("dingtalk: DING get access token failed", "error", err)
+			return
+		}
+
+		slog.Info("dingtalk: sending DING notification", "user", rc.senderStaffId, "robot_code", p.robotCode)
+
+		reqBody := map[string]any{
+			"robotCode":          p.robotCode,
+			"remindType":         1,
+			"receiverUserIdList": []string{rc.senderStaffId},
+			"content":            "你的请求处理完了",
+		}
+
+		bodyBytes, err := json.Marshal(reqBody)
+		if err != nil {
+			slog.Debug("dingtalk: DING marshal request failed", "error", err)
+			return
+		}
+
+		req, err := http.NewRequestWithContext(bgCtx, http.MethodPost,
+			"https://api.dingtalk.com/v1.0/robot/ding/send", bytes.NewReader(bodyBytes))
+		if err != nil {
+			slog.Debug("dingtalk: DING create request failed", "error", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-acs-dingtalk-access-token", token)
+
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			slog.Debug("dingtalk: DING send request failed", "error", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Info("dingtalk: DING API response", "status", resp.StatusCode, "body", string(respBody))
+		if resp.StatusCode != http.StatusOK {
+			slog.Debug("dingtalk: DING send failed", "status", resp.StatusCode, "body", string(respBody))
+			return
+		}
+
+		slog.Info("dingtalk: DING notification sent", "user", rc.senderStaffId)
+	}()
+}
 
 func (p *Platform) Stop() error {
 	if p.streamCtxCancel != nil {

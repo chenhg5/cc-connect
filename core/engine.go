@@ -3353,12 +3353,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// doneReaction stores a function to add a "done" emoji after stopTyping.
 	// Set during EventResult handling for multi-round quiet turns.
 	var doneReaction func()
+	// completionNotify stores a function to send a completion notification
+	// (e.g. DingTalk DING) after processing finishes.
+	var completionNotify func()
 	defer func() {
 		if stopTyping != nil {
 			stopTyping()
 		}
 		if doneReaction != nil {
 			doneReaction()
+		}
+		if completionNotify != nil {
+			completionNotify()
 		}
 	}()
 
@@ -4209,6 +4215,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 				}
 			}
+
+			// Send a completion notification (e.g. DingTalk DING) after
+			// the last message, so the user gets a push alert.
+// 			if !isSilent {
+// 				if cn, ok := p.(CompletionNotifier); ok {
+// 					completionNotify = func() { cn.SendCompletionNotification(e.ctx, replyCtx) }
+// 				}
+// 			}
 
 			return
 
