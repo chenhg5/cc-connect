@@ -322,6 +322,7 @@ type interactiveState struct {
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	rollbackResult         *rollbackResultState
+		forkResult             *forkResultState
 	lastAutoCompressTokens int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
@@ -364,6 +365,13 @@ type modelSwitchState struct {
 type rollbackResultState struct {
 	turns     int
 	remaining int
+}
+
+type forkResultState struct {
+	forkName string
+	shortID  string
+	atTurn   int
+	err      error
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -9520,18 +9528,27 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderRollbackResultCard(result.turns, result.remaining)
 
 	case "/fork-prompt":
-		atTurn := 0
-		if args != "entire" {
-			n, err := strconv.Atoi(args)
-			if err == nil && n > 0 {
-				atTurn = n
-			}
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		e.interactiveMu.Lock()
+		state, ok := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		if !ok || state == nil || state.forkResult == nil {
+			return e.renderForkCardFromState(sessionKey)
 		}
-		// Show loading card immediately, then async execute and refresh
-		loadingCard := NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "turquoise").
-			Markdown(e.i18n.T(MsgForkLoading)).Build()
-		go e.executeForkAutoNameAsync(sessionKey, atTurn)
-		return loadingCard
+		state.mu.Lock()
+		result := state.forkResult
+		state.forkResult = nil
+		state.mu.Unlock()
+		if result.err != nil {
+			return NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "red").
+				Markdown(fmt.Sprintf(e.i18n.T(MsgForkError), result.err)).Build()
+		}
+		resultMsg := fmt.Sprintf(e.i18n.T(MsgForkCreated), result.forkName, result.shortID)
+		if result.atTurn > 0 {
+			resultMsg = fmt.Sprintf(e.i18n.T(MsgForkCreatedAt), result.atTurn, result.forkName, result.shortID)
+		}
+		return NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "turquoise").
+			Markdown(resultMsg).Buttons(e.cardBackButton()).Build()
 
 	case "/upgrade":
 		return e.renderUpgradeCard()
@@ -9769,6 +9786,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if truncErr != nil {
 			return
 		}
+		// Re-propagate session name after truncation so JSONL retains the
+		// current custom-title (truncation may remove it from the end).
+		currentName := session.GetName()
+		if currentName != "" && currentName != "default" && currentName != "session" {
+			e.propagateSessionName(agent, sessions, agentSID, currentName)
+		}
 		keepEntries := len(session.GetHistory(0)) - turns*2
 		if keepEntries < 0 {
 			keepEntries = 0
@@ -9791,6 +9814,49 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		state.mu.Unlock()
 
 	case "/fork-prompt":
+			atTurn := 0
+			if args != "entire" {
+				n, err := strconv.Atoi(args)
+				if err == nil && n > 0 {
+					atTurn = n
+				}
+			}
+			agent, sessions := e.sessionContextForKey(sessionKey)
+			forker, ok := agent.(SessionForker)
+			if !ok {
+				return
+			}
+			session := sessions.GetOrCreateActive(sessionKey)
+			agentSID := session.GetAgentSessionID()
+			if agentSID == "" {
+				return
+			}
+			forkName := e.forkAutoName(sessionKey)
+			newAgentSID, forkErr := forker.ForkSession(agentSID, atTurn)
+			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+			e.interactiveMu.Lock()
+			state := e.interactiveStates[interactiveKey]
+			if state == nil {
+				state = &interactiveState{}
+				e.interactiveStates[interactiveKey] = state
+			}
+			e.interactiveMu.Unlock()
+			if forkErr != nil {
+				state.mu.Lock()
+				state.forkResult = &forkResultState{err: forkErr, atTurn: atTurn}
+				state.mu.Unlock()
+				return
+			}
+			forkSession := sessions.NewSideSession(sessionKey, forkName)
+			forkSession.SetAgentSessionID(newAgentSID, agent.Name())
+			sessions.SetSessionName(newAgentSID, forkName)
+			sessions.Save()
+			e.propagateSessionName(agent, sessions, newAgentSID, forkName)
+			shortID := forkSession.ID
+			slog.Info("engine: fork created via card action", "forkName", forkName, "shortID", shortID, "newAgentSID", newAgentSID, "atTurn", atTurn)
+			state.mu.Lock()
+			state.forkResult = &forkResultState{forkName: forkName, shortID: shortID, atTurn: atTurn}
+			state.mu.Unlock()
 
 	case "/new":
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -12766,6 +12832,7 @@ func (e *Engine) renderForkCardFromState(sessionKey string) *Card {
 		return NewCard().Title(e.i18n.T(MsgForkNoSession), "red").Build()
 	}
 	turns, err := forker.ListRecentTurns(agentSID, 10)
+	slog.Debug("engine: renderForkCardFromState", "agentSID", agentSID, "turns", len(turns), "err", err)
 	if err != nil || len(turns) == 0 {
 		return NewCard().Title(e.i18n.T(MsgForkNoTurns), "red").Build()
 	}
@@ -12863,22 +12930,6 @@ func (e *Engine) forkAutoName(sessionKey string) string {
 
 func (e *Engine) executeForkAutoName(sessionKey string, atTurn int) *Card {
 	return e.executeForkWithName(sessionKey, atTurn, e.forkAutoName(sessionKey))
-}
-
-func (e *Engine) executeForkAutoNameAsync(sessionKey string, atTurn int) {
-	resultCard := e.executeForkAutoName(sessionKey, atTurn)
-	if resultCard == nil {
-		return
-	}
-	// Refresh the card in-place using CardRefresher
-	for _, p := range e.platforms {
-		if refresher, ok := p.(CardRefresher); ok {
-			if err := refresher.RefreshCard(e.ctx, sessionKey, resultCard); err != nil {
-				slog.Warn("engine: failed to refresh fork result card", "error", err, "session", sessionKey)
-			}
-			return
-		}
-	}
 }
 
 func (e *Engine) executeForkWithName(sessionKey string, atTurn int, forkName string) *Card {

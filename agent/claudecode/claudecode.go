@@ -998,6 +998,7 @@ func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, er
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: read session file: %w", err)
 	}
+	slog.Debug("claudecode: ListRecentTurns", "jsonlPath", jsonlPath, "lines", len(strings.Split(string(data), "\n")), "requestN", n)
 
 	// Collect all user messages with their content, skipping tool_result entries
 	var allTurns []core.TurnSummary
@@ -1026,6 +1027,7 @@ func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, er
 		}
 		totalUsers++
 		summary := extractStringContent(entry.Message.Content)
+		slog.Debug("claudecode: ListRecentTurns user entry", "totalUsers", totalUsers, "summaryLen", len(summary))
 		// Truncate for display
 		if len([]rune(summary)) > 80 {
 			summary = string([]rune(summary)[:80]) + "…"
@@ -1049,6 +1051,7 @@ func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, er
 	for i := range result {
 		result[i].Index = len(result) - i
 	}
+	slog.Debug("claudecode: ListRecentTurns result", "allTurns", len(allTurns), "returned", len(result))
 	return result, nil
 }
 
