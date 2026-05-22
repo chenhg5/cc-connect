@@ -12933,43 +12933,6 @@ func (e *Engine) forkAutoName(sessionKey string) string {
 	return fmt.Sprintf("fork %d of %s", forkCount+1, currentName)
 }
 
-func (e *Engine) executeForkAutoName(sessionKey string, atTurn int) *Card {
-	return e.executeForkWithName(sessionKey, atTurn, e.forkAutoName(sessionKey))
-}
-
-func (e *Engine) executeForkWithName(sessionKey string, atTurn int, forkName string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
-	forker, ok := agent.(SessionForker)
-	if !ok {
-		return NewCard().Title(e.i18n.T(MsgForkNotSupported), "red").Build()
-	}
-	session := sessions.GetOrCreateActive(sessionKey)
-	agentSID := session.GetAgentSessionID()
-	if agentSID == "" {
-		return NewCard().Title(e.i18n.T(MsgForkNoSession), "red").Build()
-	}
-
-	newAgentSID, err := forker.ForkSession(agentSID, atTurn)
-	if err != nil {
-		return NewCard().Title(fmt.Sprintf(e.i18n.T(MsgForkError), err), "red").Build()
-	}
-
-	forkSession := sessions.NewSideSession(sessionKey, forkName)
-	forkSession.SetAgentSessionID(newAgentSID, agent.Name())
-	sessions.SetSessionName(newAgentSID, forkName)
-	sessions.Save()
-
-	e.propagateSessionName(agent, sessions, newAgentSID, forkName)
-
-	shortID := forkSession.ID
-	resultMsg := fmt.Sprintf(e.i18n.T(MsgForkCreated), forkName, shortID)
-	if atTurn > 0 {
-		resultMsg = fmt.Sprintf(e.i18n.T(MsgForkCreatedAt), atTurn, forkName, shortID)
-	}
-	cb := NewCard().Title(e.i18n.T(MsgCardTitleForkTurns), "turquoise")
-	cb.Markdown(resultMsg)
-	return cb.Build()
-}
 
 
 func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
