@@ -289,6 +289,86 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	}
 }
 
+// TestStreamPreview_PreviewMsgID_NilBeforeFlush verifies the new getter
+// returns nil before any text is appended / first flush occurs. This is the
+// precondition engine relies on for "attach editing emoji only after first
+// preview message exists" logic (REQ-20260522 T-003 + T-004).
+func TestStreamPreview_PreviewMsgID_NilBeforeFlush(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	if got := sp.PreviewMsgID(); got != nil {
+		t.Errorf("PreviewMsgID() before flush = %v, want nil", got)
+	}
+}
+
+// TestStreamPreview_PreviewMsgID_NonNilAfterFirstFlush verifies the getter
+// returns the platform handle once flush succeeds. This is the trigger
+// engine watches each event tick to AddReaction.
+func TestStreamPreview_PreviewMsgID_NonNilAfterFirstFlush(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	sp.appendText("Hello")
+	// Wait past throttle interval so flush runs.
+	time.Sleep(150 * time.Millisecond)
+
+	got := sp.PreviewMsgID()
+	if got == nil {
+		t.Fatal("PreviewMsgID() after flush = nil, want non-nil handle")
+	}
+	if s, ok := got.(string); !ok || s != "preview-handle" {
+		t.Errorf("PreviewMsgID() = %v (%T), want 'preview-handle' (string)", got, got)
+	}
+}
+
+// TestStreamPreview_PreviewMsgID_NilAfterDiscard verifies discard clears
+// the previewMsgID so the getter goes back to nil. Important for engine's
+// re-attach guard on stopCh / errored turns.
+func TestStreamPreview_PreviewMsgID_NilAfterDiscard(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hi")
+	time.Sleep(150 * time.Millisecond)
+	if sp.PreviewMsgID() == nil {
+		t.Fatal("precondition: PreviewMsgID should be non-nil after flush")
+	}
+	sp.discard()
+	if got := sp.PreviewMsgID(); got != nil {
+		t.Errorf("PreviewMsgID() after discard = %v, want nil", got)
+	}
+}
+
+// TestStreamPreview_PreviewMsgID_NilWhenDisabled verifies that with a
+// disabled stream config, the getter stays nil (no flushes happen).
+func TestStreamPreview_PreviewMsgID_NilWhenDisabled(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{Enabled: false}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("text")
+	time.Sleep(50 * time.Millisecond)
+	if got := sp.PreviewMsgID(); got != nil {
+		t.Errorf("PreviewMsgID() when disabled = %v, want nil", got)
+	}
+}
+
 func TestStreamPreview_NeedsDoneReaction_TrueAfterUpdate(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{

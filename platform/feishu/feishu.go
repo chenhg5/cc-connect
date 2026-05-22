@@ -112,22 +112,30 @@ type replyContext struct {
 }
 
 type Platform struct {
-	platformName               string
-	domain                     string
-	appID                      string
-	appSecret                  string
-	progressStyle              string
-	useInteractiveCard         bool
-	self                       core.Platform
-	reactionEmoji              string
-	doneEmoji                  string
-	allowFrom                  string
-	allowChat                  string
-	groupOnly                  bool
-	groupReplyAll              bool
-	respondToAtEveryoneAndHere bool
-	shareSessionInChannel      bool
-	threadIsolation            bool
+	platformName       string
+	domain             string
+	appID              string
+	appSecret          string
+	progressStyle      string
+	useInteractiveCard bool
+	self               core.Platform
+	reactionEmoji      string
+	doneEmoji          string
+	// bot streaming reply message emoji lifecycle (see ReactionSender):
+	//   editing: attached when bot reply msg first appears (streamPreview first flush)
+	//   failed: applied via Swap on EventError / channelClosed (empty → just Remove)
+	//   completed: applied via Swap on EventResult (empty → just Remove)
+	// "none" in config maps to "" here (disabled).
+	streamingReplyEditingEmoji   string
+	streamingReplyFailedEmoji    string
+	streamingReplyCompletedEmoji string
+	allowFrom                    string
+	allowChat                    string
+	groupOnly                    bool
+	groupReplyAll                bool
+	respondToAtEveryoneAndHere   bool
+	shareSessionInChannel        bool
+	threadIsolation              bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -200,6 +208,24 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if doneEmoji == "none" {
 		doneEmoji = ""
 	}
+	streamingReplyEditingEmoji, _ := opts["streaming_reply_editing_emoji"].(string)
+	if streamingReplyEditingEmoji == "" {
+		streamingReplyEditingEmoji = "OnIt"
+	}
+	if streamingReplyEditingEmoji == "none" {
+		streamingReplyEditingEmoji = ""
+	}
+	streamingReplyFailedEmoji, _ := opts["streaming_reply_failed_emoji"].(string)
+	if streamingReplyFailedEmoji == "" {
+		streamingReplyFailedEmoji = "Cry"
+	}
+	if streamingReplyFailedEmoji == "none" {
+		streamingReplyFailedEmoji = ""
+	}
+	streamingReplyCompletedEmoji, _ := opts["streaming_reply_completed_emoji"].(string)
+	if streamingReplyCompletedEmoji == "none" {
+		streamingReplyCompletedEmoji = ""
+	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
@@ -256,30 +282,33 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 
 	base := &Platform{
-		platformName:               name,
-		domain:                     domain,
-		appID:                      appID,
-		appSecret:                  appSecret,
-		progressStyle:              progressStyle,
-		useInteractiveCard:         useInteractiveCard,
-		reactionEmoji:              reactionEmoji,
-		doneEmoji:                  doneEmoji,
-		allowFrom:                  allowFrom,
-		allowChat:                  allowChat,
-		groupOnly:                  groupOnly,
-		groupReplyAll:              groupReplyAll,
-		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
-		shareSessionInChannel:      shareSessionInChannel,
-		threadIsolation:            threadIsolation,
-		resolveMentions:            resolveMentionsOpt,
-		noReplyToTrigger:           noReplyToTrigger,
-		client:                     lark.NewClient(appID, appSecret, clientOpts...),
-		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
-		dedup:                      &core.MessageDedup{},
-		port:                       port,
-		callbackPath:               callbackPath,
-		encryptKey:                 encryptKey,
-		peerBots:                   peerBots,
+		platformName:                 name,
+		domain:                       domain,
+		appID:                        appID,
+		appSecret:                    appSecret,
+		progressStyle:                progressStyle,
+		useInteractiveCard:           useInteractiveCard,
+		reactionEmoji:                reactionEmoji,
+		doneEmoji:                    doneEmoji,
+		streamingReplyEditingEmoji:   streamingReplyEditingEmoji,
+		streamingReplyFailedEmoji:    streamingReplyFailedEmoji,
+		streamingReplyCompletedEmoji: streamingReplyCompletedEmoji,
+		allowFrom:                    allowFrom,
+		allowChat:                    allowChat,
+		groupOnly:                    groupOnly,
+		groupReplyAll:                groupReplyAll,
+		respondToAtEveryoneAndHere:   respondToAtEveryoneAndHere,
+		shareSessionInChannel:        shareSessionInChannel,
+		threadIsolation:              threadIsolation,
+		resolveMentions:              resolveMentionsOpt,
+		noReplyToTrigger:             noReplyToTrigger,
+		client:                       lark.NewClient(appID, appSecret, clientOpts...),
+		replayClient:                 newFeishuReplayClient(appID, appSecret, domain),
+		dedup:                        &core.MessageDedup{},
+		port:                         port,
+		callbackPath:                 callbackPath,
+		encryptKey:                   encryptKey,
+		peerBots:                     peerBots,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -745,6 +774,64 @@ func (p *Platform) AddDoneReaction(rctx any) {
 		return
 	}
 	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
+}
+
+// Compile-time assertion: feishu Platform implements core.ReactionSender so
+// engine can dispatch via the capability interface without type-switch on
+// platform name. If signature drifts this fails at build time.
+var _ core.ReactionSender = (*Platform)(nil)
+
+// AddReaction implements core.ReactionSender. Returns the zero handle (and
+// nil error) when emojiCode or messageID is empty so callers can chain
+// Remove/Swap unconditionally.
+func (p *Platform) AddReaction(ctx context.Context, messageID, emojiCode string) (core.ReactionHandle, error) {
+	if messageID == "" || emojiCode == "" {
+		return core.ReactionHandle{}, nil
+	}
+	reactionID := p.addReactionWithEmoji(messageID, emojiCode)
+	if reactionID == "" {
+		// addReactionWithEmoji already logged via slog.Debug; treat as no-op
+		// to keep streaming flow unaffected.
+		return core.ReactionHandle{}, nil
+	}
+	return core.ReactionHandle{
+		MessageID:  messageID,
+		ReactionID: reactionID,
+		EmojiCode:  emojiCode,
+	}, nil
+}
+
+// RemoveReaction implements core.ReactionSender. No-op on zero handle.
+// Always returns nil (errors are logged at Debug level inside removeReaction).
+func (p *Platform) RemoveReaction(ctx context.Context, h core.ReactionHandle) error {
+	if h.MessageID == "" || h.ReactionID == "" {
+		return nil
+	}
+	p.removeReaction(h.MessageID, h.ReactionID)
+	return nil
+}
+
+// SwapReaction implements core.ReactionSender. Removes the existing handle
+// then adds newEmojiCode. When newEmojiCode == "" behaves like
+// RemoveReaction and returns the zero handle. When the old handle is zero,
+// behaves like AddReaction(h.MessageID is empty so caller must have set it
+// — engine always passes a handle with MessageID populated).
+func (p *Platform) SwapReaction(ctx context.Context, h core.ReactionHandle, newEmojiCode string) (core.ReactionHandle, error) {
+	if h.MessageID == "" {
+		return core.ReactionHandle{}, nil
+	}
+	if h.ReactionID != "" {
+		p.removeReaction(h.MessageID, h.ReactionID)
+	}
+	if newEmojiCode == "" {
+		return core.ReactionHandle{}, nil
+	}
+	return p.AddReaction(ctx, h.MessageID, newEmojiCode)
+}
+
+// StreamingEmojis implements core.ReactionSender.
+func (p *Platform) StreamingEmojis() (editing, failed, completed string) {
+	return p.streamingReplyEditingEmoji, p.streamingReplyFailedEmoji, p.streamingReplyCompletedEmoji
 }
 
 const recalledMessageTTL = 10 * time.Minute
@@ -3035,6 +3122,18 @@ type feishuPreviewHandle struct {
 	chatID      string
 	status      core.CardStatus
 	lastContent string
+}
+
+// MessageID implements core.MessageIDProvider so engine can extract the
+// platform message ID via sp.PreviewMsgID() without type-switching on the
+// concrete handle type.
+func (h *feishuPreviewHandle) MessageID() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.messageID
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.

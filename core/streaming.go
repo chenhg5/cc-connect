@@ -461,3 +461,18 @@ func (sp *streamPreview) needsDoneReaction() bool {
 	defer sp.mu.Unlock()
 	return sp.previewMsgID != nil && sp.lastSentViaUpdate
 }
+
+// PreviewMsgID returns the platform-specific preview message handle once
+// the first flush has produced it (i.e. after streamPreview.flushLocked
+// first successful SendPreviewStart). Returns nil before the first flush
+// succeeds or after streamPreview enters degraded state without having
+// produced a handle.
+//
+// Caller MUST NOT hold any lock when invoking; this method acquires sp.mu
+// internally (same pattern as needsDoneReaction). Engine polls this in
+// the event loop to know when to attach the bot-reply-msg editing reaction.
+func (sp *streamPreview) PreviewMsgID() any {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.previewMsgID
+}

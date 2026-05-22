@@ -905,6 +905,12 @@ app_secret = "your-feishu-app-secret"
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # done_emoji = "none"       # Emoji reaction when agent finishes a reply (e.g. "Done"); set to "none" to disable
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
+# streaming_reply_editing_emoji = "OnIt"      # Emoji attached to bot's streaming reply WHILE editing; "none" to disable
+#                                              # 流式回复编辑期间附加到机器人回复消息的表情；"none" 可禁用
+# streaming_reply_failed_emoji = "Cry"         # Emoji swapped in when stream fails (EventError / channel closed); "none" → just remove editing
+#                                              # 流式失败时替换 editing 的表情；"none" 表示仅移除 editing
+# streaming_reply_completed_emoji = ""         # Emoji swapped in on success (EventResult); empty → just remove editing
+#                                              # 流式成功完成后替换 editing 的表情；空 → 仅移除 editing
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
@@ -943,6 +949,9 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
+# streaming_reply_editing_emoji = "OnIt"
+# streaming_reply_failed_emoji = "Cry"
+# streaming_reply_completed_emoji = ""
 # progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
