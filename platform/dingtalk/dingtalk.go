@@ -639,6 +639,50 @@ func (p *Platform) getAccessToken() (string, error) {
 	return p.accessToken, nil
 }
 
+// ReplyWithAt sends a reply with @mention support. Uses text msgtype (not markdown)
+// because only text type supports highlighted/blue @mentions in DingTalk.
+func (p *Platform) ReplyWithAt(ctx context.Context, rctx any, content string, atUsers []string, atAll bool) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
+	}
+	if rc.proactive || rc.sessionWebhook == "" {
+		return p.sendProactiveMessage(ctx, rc, content)
+	}
+
+	payload := map[string]any{
+		"msgtype": "text",
+		"text":    map[string]string{"content": content},
+	}
+	if len(atUsers) > 0 || atAll {
+		payload["at"] = map[string]any{
+			"atUserIds": atUsers,
+			"isAtAll":   atAll,
+		}
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal reply: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send reply: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {

@@ -109,6 +109,19 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			filePaths = append(filePaths, args[i])
 		case "--stdin":
 			useStdin = true
+		case "--at-users":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--at-users requires a value")
+			}
+			i++
+			for _, uid := range strings.Split(args[i], ",") {
+				uid = strings.TrimSpace(uid)
+				if uid != "" {
+					req.AtUsers = append(req.AtUsers, uid)
+				}
+			}
+		case "--at-all":
+			req.AtAll = true
 		case "--data-dir":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--data-dir requires a value")
@@ -261,6 +274,8 @@ Options:
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --stdin              Read message from stdin (best for long/special-char messages)
+      --at-users <ids>     @ user IDs, comma-separated (DingTalk)
+      --at-all             @ everyone (DingTalk)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
       --data-dir <path>    Data directory (default: ~/.cc-connect)
