@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (magicmatrix-aigen)
+
+### New Features
+- **Feishu streaming reply emoji reaction**: bot's streaming reply message gets a lifecycle emoji (default editing=`OnIt`, failed=`Cry`, completed=`""`); engine attaches on first preview flush and swaps on EventResult / EventError / channel-closed. New `ReactionSender` capability interface in `core` allows any platform to opt in — feishu is the first implementer. Config: `streaming_reply_editing_emoji` / `streaming_reply_failed_emoji` / `streaming_reply_completed_emoji` (see `docs/feishu.md`). Multi-round queued turns swap each turn's editing→completed mid-flight. (REQ-20260522)
+
 ## v1.3.3-beta.2 (2026-05-09)
 
 Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.

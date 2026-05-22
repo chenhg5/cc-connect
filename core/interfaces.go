@@ -177,6 +177,72 @@ type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
 }
 
+// ReactionHandle identifies an existing reaction on a specific message,
+// used for later removal or replacement. The struct is opaque to engine —
+// fields are inspected only by ReactionSender implementations.
+//
+// Zero-value handle (all fields empty) is a no-op marker for failed Add
+// operations: subsequent Remove/Swap on a zero handle MUST silently return.
+type ReactionHandle struct {
+	MessageID  string // platform-internal message ID
+	ReactionID string // platform-internal reaction ID returned by Add
+	EmojiCode  string // emoji currently applied (for debugging / swap diffing)
+}
+
+// ReactionSender is an optional platform capability for managing
+// message-level emoji reactions on arbitrary messages (including bot reply
+// messages). It is a superset of TypingIndicator: TypingIndicator only
+// manages reactions on the user-prompt message at turn boundaries, whereas
+// ReactionSender allows engine to attach reactions to any specific
+// message ID.
+//
+// Implementations MUST:
+//   - be safe for concurrent calls
+//   - swallow non-fatal API errors and log via slog.Debug
+//     (reaction is a nice-to-have UI signal; MUST NOT disrupt main turn flow)
+//   - treat zero-value ReactionHandle as a no-op (return nil, zero handle)
+//
+// StreamingEmojis exposes the platform's configured emoji codes for the
+// streaming reply message lifecycle so the engine can drive the state
+// machine without hardcoding any platform-specific config field. Empty
+// string means "skip that transition":
+//   - editing == ""   → do not attach any editing reaction
+//   - failed == ""    → on EventError/channelClosed just Remove (no swap)
+//   - completed == "" → on EventResult just Remove (no swap)
+type ReactionSender interface {
+	// AddReaction attaches emojiCode to messageID. Returns a handle for
+	// later Remove/Swap. Returns the zero handle and nil error when
+	// emojiCode or messageID is empty (no-op).
+	AddReaction(ctx context.Context, messageID, emojiCode string) (ReactionHandle, error)
+
+	// RemoveReaction removes the reaction identified by handle. No-op on
+	// zero handle. Implementations swallow non-fatal API errors.
+	RemoveReaction(ctx context.Context, handle ReactionHandle) error
+
+	// SwapReaction removes the current reaction and adds a new one with
+	// newEmojiCode on the same message. Returns the new handle. No-op on
+	// zero handle; returns zero handle when newEmojiCode is empty
+	// (equivalent to RemoveReaction without re-adding).
+	SwapReaction(ctx context.Context, handle ReactionHandle, newEmojiCode string) (ReactionHandle, error)
+
+	// StreamingEmojis returns the configured emoji codes for the bot
+	// streaming reply message lifecycle. See type doc for empty-string
+	// semantics.
+	StreamingEmojis() (editing, failed, completed string)
+}
+
+// MessageIDProvider is an optional interface that PreviewStarter handles
+// implement to expose the underlying platform message ID without forcing
+// core to do a type switch on the concrete handle type. Engine uses this
+// to fetch the bot reply message ID once streamPreview has produced its
+// first preview (see streamPreview.PreviewMsgID).
+//
+// Returning empty string means "no message ID available yet" (engine
+// silently skips the bot-reply-msg reaction lifecycle for this turn).
+type MessageIDProvider interface {
+	MessageID() string
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error

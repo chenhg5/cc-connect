@@ -112,6 +112,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
+# streaming_reply_editing_emoji = "OnIt"   # 可选：流式回复编辑期间在 bot 回复消息上挂的表情；默认 "OnIt"，"none" 禁用
+# streaming_reply_failed_emoji = "Cry"     # 可选：流式失败时替换 editing 表情；默认 "Cry"，"none" → 仅移除
+# streaming_reply_completed_emoji = ""     # 可选：成功完成时替换 editing；默认 ""（仅移除 editing），可填 "Done" 等
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
@@ -119,6 +122,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先移除 "OnIt" 表情（如果有），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
+>
+> 流式回复消息表情指示（REQ-20260522）：`streaming_reply_editing_emoji` / `streaming_reply_failed_emoji` / `streaming_reply_completed_emoji` 三件套针对的是 **bot 自己的流式回复消息**（不是用户的 prompt 消息）。流程：bot 首次发出流式预览 → engine 自动在该消息上挂 `editing_emoji`；流式正常完成（EventResult）→ 替换为 `completed_emoji`（空字符串则仅移除）；失败 / 进程退出 / idle timeout → 替换为 `failed_emoji`（默认 `Cry`）。任意一项填 `"none"` 即可关闭对应阶段，全部不配置时使用默认 `editing="OnIt", failed="Cry", completed=""`。该能力仅在飞书生效；其他平台未实现 `ReactionSender` 时会静默 no-op，无副作用。
 
 ---
 

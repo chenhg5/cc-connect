@@ -3405,6 +3405,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// doneReaction stores a function to add a "done" emoji after stopTyping.
 	// Set during EventResult handling for multi-round quiet turns.
 	var doneReaction func()
+
+	// Bot-reply streaming emoji lifecycle (REQ-20260522): editing emoji is
+	// attached to the bot's streaming reply message once sp.PreviewMsgID()
+	// resolves, then swapped to completed/failed in this defer based on
+	// outcome. All state below is single-goroutine (event loop) so plain
+	// types are sufficient. sync.Once is used in the resolve defer to make
+	// the swap idempotent against any future explicit early-return path
+	// that might also want to finalize (e.g. a /cancel handler).
+	const (
+		botReplyOutcomeFailed    = 0 // default: any abnormal exit
+		botReplyOutcomeCompleted = 1 // clean EventResult only
+	)
+	var (
+		botReplyEditingHandle  ReactionHandle
+		botReplyAttached       bool // true once AddReaction has been attempted (success or fail)
+		botReplyOutcome        = botReplyOutcomeFailed
+		botReplyResolveOnce    sync.Once
+		botReplyRS             ReactionSender
+		botReplyEditingEmoji   string
+		botReplyFailedEmoji    string
+		botReplyCompletedEmoji string
+	)
 	defer func() {
 		if stopTyping != nil {
 			stopTyping()
@@ -3412,6 +3434,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if doneReaction != nil {
 			doneReaction()
 		}
+		// Resolve bot-reply emoji lifecycle. botReplyResolveOnce keeps this
+		// idempotent. Attach-failure leaves handle.MessageID empty so
+		// SwapReaction silently no-ops (see feishu.SwapReaction).
+		botReplyResolveOnce.Do(func() {
+			if !botReplyAttached || botReplyRS == nil || botReplyEditingHandle.MessageID == "" {
+				return
+			}
+			target := botReplyFailedEmoji
+			if botReplyOutcome == botReplyOutcomeCompleted {
+				target = botReplyCompletedEmoji
+			}
+			// 5s timeout — defer runs after function returns; longer than
+			// the 2s attach timeout because we accept slightly slower
+			// finalization in exchange for higher success rate on flaky
+			// connections.
+			finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer finalCancel()
+			if _, err := botReplyRS.SwapReaction(finalCtx, botReplyEditingHandle, target); err != nil {
+				slog.Debug("bot reply reaction final swap failed",
+					"outcome", botReplyOutcome, "target", target, "error", err)
+			}
+		})
 	}()
 
 	state.mu.Lock()
@@ -3446,6 +3490,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	// Capability-based dispatch: cache ReactionSender once under state.mu
+	// (state.platform doesn't change mid-turn). nil cap → engine silently
+	// skips the bot-reply emoji lifecycle (e.g. discord, slack today).
+	if rs, ok := state.platform.(ReactionSender); ok {
+		botReplyRS = rs
+		botReplyEditingEmoji, botReplyFailedEmoji, botReplyCompletedEmoji = rs.StreamingEmojis()
+	}
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -3550,6 +3601,40 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()
+
+		// Attach editing emoji to the bot reply message once sp has
+		// produced its first preview message ID (set during the first
+		// successful SendPreviewStart flush). Synchronous w/ 2s timeout —
+		// AddReaction is a no-op when emoji or msgID is empty, so we
+		// don't gate on the streamCard path explicitly; if streamCard
+		// owns the reply, sp.PreviewMsgID() stays nil and we silently
+		// skip.
+		if botReplyRS != nil && botReplyEditingEmoji != "" && !botReplyAttached {
+			if h := sp.PreviewMsgID(); h != nil {
+				if provider, ok := h.(MessageIDProvider); ok {
+					if msgID := provider.MessageID(); msgID != "" {
+						attachCtx, attachCancel := context.WithTimeout(context.Background(), 2*time.Second)
+						handle, err := botReplyRS.AddReaction(attachCtx, msgID, botReplyEditingEmoji)
+						attachCancel()
+						if err != nil {
+							slog.Debug("bot reply reaction attach failed",
+								"msg_id", msgID, "emoji", botReplyEditingEmoji, "error", err)
+						}
+						botReplyEditingHandle = handle
+						// Mark attached unconditionally: avoid hammering the API
+						// on per-event polling if Add itself returned an error.
+						// Defer-resolve uses handle.MessageID == "" guard to
+						// no-op cleanly when attach failed.
+						botReplyAttached = true
+					}
+				} else {
+					// Platform's preview handle doesn't implement
+					// MessageIDProvider — can't get a message ID, give up
+					// for this turn so we don't poll forever.
+					botReplyAttached = true
+				}
+			}
+		}
 
 		// main codebase has no per-session quiet flag; pr309 referenced
 		// sessionQuiet which we drop. e.display.ThinkingMessages /
@@ -4316,6 +4401,38 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
+				// Multi-round (queued continue): resolve current turn's bot
+				// reply emoji as completed NOW (the just-finished turn was
+				// successful) and reset per-turn state so the next iteration
+				// re-attaches editing to the new turn's preview message.
+				// Without this, the editing emoji would stay until function
+				// return (potentially many turns later) and the next turn
+				// would skip its own attach (botReplyAttached still true).
+				botReplyResolveOnce.Do(func() {
+					if !botReplyAttached || botReplyRS == nil || botReplyEditingHandle.MessageID == "" {
+						return
+					}
+					target := botReplyCompletedEmoji
+					midCtx, midCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer midCancel()
+					if _, err := botReplyRS.SwapReaction(midCtx, botReplyEditingHandle, target); err != nil {
+						slog.Debug("bot reply reaction mid-turn swap failed (queued continue)",
+							"target", target, "error", err)
+					}
+				})
+				// Reset for the next queued turn: re-arm Once + clear state.
+				botReplyResolveOnce = sync.Once{}
+				botReplyEditingHandle = ReactionHandle{}
+				botReplyAttached = false
+				botReplyOutcome = botReplyOutcomeFailed
+				// Re-cache RS / emojis from the queued turn's platform.
+				botReplyRS = nil
+				botReplyEditingEmoji, botReplyFailedEmoji, botReplyCompletedEmoji = "", "", ""
+				if rs, ok := queued.platform.(ReactionSender); ok {
+					botReplyRS = rs
+					botReplyEditingEmoji, botReplyFailedEmoji, botReplyCompletedEmoji = rs.StreamingEmojis()
+				}
+
 				// Reset streaming card state for the next turn
 				streamCard = nil
 				cardToolCalls = nil
@@ -4376,6 +4493,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+			// Mark outcome so the defer's botReplyResolveOnce swaps the bot
+			// reply editing emoji to the completed emoji (or removes it when
+			// completed emoji is empty).
+			botReplyOutcome = botReplyOutcomeCompleted
 			return
 
 		case EventError:

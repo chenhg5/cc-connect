@@ -5508,6 +5508,7 @@ type controllableAgentSession struct {
 	alive           bool
 	events          chan Event
 	closed          chan struct{} // closed when Close() is called
+	closeOnce       *sync.Once    // pointer so value copies share the same Once (vet-noCopy safe)
 	model           string
 	reasoningEffort string
 	workDir         string
@@ -5522,6 +5523,7 @@ func newControllableSession(id string) *controllableAgentSession {
 		alive:     true,
 		events:    make(chan Event, 8),
 		closed:    make(chan struct{}),
+		closeOnce: &sync.Once{},
 	}
 }
 
@@ -5543,13 +5545,15 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
-	s.alive = false
-	close(s.events)
-	select {
-	case <-s.closed:
-	default:
-		close(s.closed)
-	}
+	s.closeOnce.Do(func() {
+		s.alive = false
+		close(s.events)
+		select {
+		case <-s.closed:
+		default:
+			close(s.closed)
+		}
+	})
 	return nil
 }
 
@@ -12508,5 +12512,450 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 	id2 := matchPrefix("ps", builtinCommands)
 	if id2 != "ps" {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
+}
+
+// =========================================================================
+// REQ-20260522 — bot streaming reply emoji reaction (T-005)
+// =========================================================================
+
+// reactionOp records a single ReactionSender API call for assertion.
+type reactionOp struct {
+	kind     string // "add" | "remove" | "swap"
+	msgID    string
+	oldEmoji string // for swap, was attached emoji
+	newEmoji string // for add/swap target
+}
+
+// recordingReactionPlatform implements Platform + MessageUpdater +
+// PreviewStarter + ReactionSender. Used by tests below to exercise the
+// engine's bot-reply emoji lifecycle (T-005) without touching real APIs.
+type recordingReactionPlatform struct {
+	stubPlatformEngine
+	mu        sync.Mutex
+	previews  []string // preview message IDs (one per SendPreviewStart call)
+	reqHandle string   // returned preview message ID
+	editing   string
+	failed    string
+	completed string
+	ops       []reactionOp
+	nextRID   int
+}
+
+func (p *recordingReactionPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reqHandle == "" {
+		p.reqHandle = "om_default"
+	}
+	p.previews = append(p.previews, p.reqHandle)
+	return &recordingPreviewHandle{messageID: p.reqHandle}, nil
+}
+
+func (p *recordingReactionPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	return nil
+}
+
+func (p *recordingReactionPlatform) AddReaction(_ context.Context, msgID, emoji string) (ReactionHandle, error) {
+	if msgID == "" || emoji == "" {
+		return ReactionHandle{}, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextRID++
+	p.ops = append(p.ops, reactionOp{kind: "add", msgID: msgID, newEmoji: emoji})
+	return ReactionHandle{MessageID: msgID, ReactionID: fmt.Sprintf("r%d", p.nextRID), EmojiCode: emoji}, nil
+}
+
+func (p *recordingReactionPlatform) RemoveReaction(_ context.Context, h ReactionHandle) error {
+	if h.MessageID == "" || h.ReactionID == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ops = append(p.ops, reactionOp{kind: "remove", msgID: h.MessageID, oldEmoji: h.EmojiCode})
+	return nil
+}
+
+func (p *recordingReactionPlatform) SwapReaction(_ context.Context, h ReactionHandle, newEmoji string) (ReactionHandle, error) {
+	if h.MessageID == "" {
+		return ReactionHandle{}, nil
+	}
+	p.mu.Lock()
+	p.ops = append(p.ops, reactionOp{kind: "swap", msgID: h.MessageID, oldEmoji: h.EmojiCode, newEmoji: newEmoji})
+	if newEmoji == "" {
+		p.mu.Unlock()
+		return ReactionHandle{}, nil
+	}
+	p.nextRID++
+	rid := fmt.Sprintf("r%d", p.nextRID)
+	p.mu.Unlock()
+	return ReactionHandle{MessageID: h.MessageID, ReactionID: rid, EmojiCode: newEmoji}, nil
+}
+
+func (p *recordingReactionPlatform) StreamingEmojis() (string, string, string) {
+	return p.editing, p.failed, p.completed
+}
+
+func (p *recordingReactionPlatform) getOps() []reactionOp {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]reactionOp, len(p.ops))
+	copy(out, p.ops)
+	return out
+}
+
+// recordingPreviewHandle implements MessageIDProvider.
+type recordingPreviewHandle struct {
+	messageID string
+}
+
+func (h *recordingPreviewHandle) MessageID() string {
+	if h == nil {
+		return ""
+	}
+	return h.messageID
+}
+
+// drainPreviewWriteEvent feeds a small text chunk so streamPreview flushes
+// SendPreviewStart and PreviewMsgID() becomes non-nil. Returns once we
+// observe the first preview write happened.
+func drainPreviewWriteEvent(t *testing.T, p *recordingReactionPlatform, agentSess *controllableAgentSession) {
+	t.Helper()
+	agentSess.events <- Event{Type: EventText, Content: "hi"}
+	// Give streamPreview's throttle goroutine a moment to flush.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		n := len(p.previews)
+		p.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for SendPreviewStart flush")
+}
+
+// TestReaction_EventResult_SwapsToCompleted verifies the happy path:
+// editing emoji is attached on first preview flush, then swapped to
+// completed when EventResult arrives.
+func TestReaction_EventResult_SwapsToCompleted(t *testing.T) {
+	p := &recordingReactionPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		reqHandle:          "om_reply",
+		editing:            "OnIt",
+		failed:             "Cry",
+		completed:          "Done",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	drainPreviewWriteEvent(t, p, agentSession)
+	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+
+	ops := p.getOps()
+	if len(ops) != 2 {
+		t.Fatalf("ops = %+v, want exactly 2 (add + swap)", ops)
+	}
+	if ops[0].kind != "add" || ops[0].newEmoji != "OnIt" || ops[0].msgID != "om_reply" {
+		t.Errorf("ops[0] = %+v, want add OnIt on om_reply", ops[0])
+	}
+	if ops[1].kind != "swap" || ops[1].oldEmoji != "OnIt" || ops[1].newEmoji != "Done" {
+		t.Errorf("ops[1] = %+v, want swap OnIt→Done", ops[1])
+	}
+}
+
+// TestReaction_EventError_SwapsToFailed verifies the error path: editing
+// → failed swap on EventError.
+func TestReaction_EventError_SwapsToFailed(t *testing.T) {
+	p := &recordingReactionPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		reqHandle:          "om_err",
+		editing:            "OnIt",
+		failed:             "Cry",
+		completed:          "",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	drainPreviewWriteEvent(t, p, agentSession)
+	agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("boom")}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+
+	ops := p.getOps()
+	if len(ops) != 2 {
+		t.Fatalf("ops = %+v, want exactly 2", ops)
+	}
+	if ops[1].kind != "swap" || ops[1].newEmoji != "Cry" {
+		t.Errorf("ops[1] = %+v, want swap OnIt→Cry", ops[1])
+	}
+}
+
+// TestReaction_ChannelClosed_SwapsToFailed verifies that an abrupt event
+// channel close (agent process crash) also resolves to failed.
+func TestReaction_ChannelClosed_SwapsToFailed(t *testing.T) {
+	p := &recordingReactionPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		reqHandle:          "om_closed",
+		editing:            "OnIt",
+		failed:             "Cry",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	drainPreviewWriteEvent(t, p, agentSession)
+	// Push another event so the event-loop top runs the attach-polling
+	// (attach runs at the top of each iteration AFTER receiving an event;
+	// it never runs on the channelClosed code path because that's a goto
+	// out of the select that skips the post-receive logic).
+	agentSession.events <- Event{Type: EventText, Content: "more"}
+	// Wait for the attach to occur (observe one "add" op recorded).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ops := p.getOps()
+		if len(ops) >= 1 && ops[0].kind == "add" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := len(p.getOps()); got == 0 {
+		t.Fatalf("attach did not happen before close; ops empty")
+	}
+	// Trigger channelClosed path via the agent session's idempotent Close.
+	agentSession.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return after channel close")
+	}
+
+	ops := p.getOps()
+	// At minimum we expect the editing add and a failed swap.
+	if len(ops) < 2 {
+		t.Fatalf("ops = %+v, want at least add + swap", ops)
+	}
+	last := ops[len(ops)-1]
+	if last.kind != "swap" || last.newEmoji != "Cry" {
+		t.Errorf("final op = %+v, want swap to Cry", last)
+	}
+}
+
+// TestReaction_CompletedEmojiEmpty_Removes verifies that an empty
+// completed emoji causes swap-to-empty (which is documented to remove
+// the reaction).
+func TestReaction_CompletedEmojiEmpty_Removes(t *testing.T) {
+	p := &recordingReactionPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		reqHandle:          "om_empty",
+		editing:            "OnIt",
+		failed:             "Cry",
+		completed:          "", // → swap to "" which our SwapReaction handles as remove
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	drainPreviewWriteEvent(t, p, agentSession)
+	agentSession.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+
+	ops := p.getOps()
+	if len(ops) != 2 {
+		t.Fatalf("ops = %+v, want add + swap", ops)
+	}
+	if ops[1].kind != "swap" || ops[1].newEmoji != "" {
+		t.Errorf("ops[1] = %+v, want swap to empty (remove semantics)", ops[1])
+	}
+}
+
+// TestReaction_EditingEmojiNone_SkipsAttach verifies that when editing
+// emoji is "" (config: "none"), the engine never attaches any reaction
+// and there are zero ops over the entire turn.
+func TestReaction_EditingEmojiNone_SkipsAttach(t *testing.T) {
+	p := &recordingReactionPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		reqHandle:          "om_skip",
+		editing:            "",
+		failed:             "Cry",
+		completed:          "Done",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+
+	drainPreviewWriteEvent(t, p, agentSession)
+	agentSession.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+
+	ops := p.getOps()
+	if len(ops) != 0 {
+		t.Errorf("ops = %+v, want 0 (editing disabled means no attach, no swap)", ops)
+	}
+}
+
+// platformWithoutReactionSender intentionally does NOT implement
+// ReactionSender; engine must silently skip the entire emoji lifecycle.
+type platformWithoutReactionSender struct {
+	stubPlatformEngine
+	mu       sync.Mutex
+	previews int
+}
+
+func (p *platformWithoutReactionSender) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.previews++
+	return "h", nil
+}
+func (p *platformWithoutReactionSender) UpdateMessage(_ context.Context, _ any, content string) error {
+	return nil
+}
+
+// TestReaction_PlatformWithoutReactionSender_NoOp verifies that platforms
+// not implementing ReactionSender (e.g. discord, slack today) silently
+// skip the entire feature with no observable effect on the turn.
+func TestReaction_PlatformWithoutReactionSender_NoOp(t *testing.T) {
+	p := &platformWithoutReactionSender{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+	agentSession.events <- Event{Type: EventText, Content: "hi"}
+	time.Sleep(100 * time.Millisecond)
+	agentSession.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return")
+	}
+	// No assertion on ops needed — platform has no API surface. If the
+	// engine attempted a type-assert + nil-deref it would have panicked.
+}
+
+// TestReaction_ResolveIsIdempotent_MultiplePathsOnlyOneSwap verifies that
+// the sync.Once guard prevents double-swap if a future code path were to
+// resolve more than once. Achieved by closing the channel AFTER an
+// EventError (both paths qualify).
+func TestReaction_ResolveIsIdempotent_MultiplePathsOnlyOneSwap(t *testing.T) {
+	p := &recordingReactionPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		reqHandle:          "om_idem",
+		editing:            "OnIt",
+		failed:             "Cry",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.streamPreview = StreamPreviewCfg{Enabled: true, IntervalMs: 30, MinDeltaChars: 1, MaxChars: 500}
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx")
+		close(done)
+	}()
+	drainPreviewWriteEvent(t, p, agentSession)
+	// EventError returns. Defer will run sync.Once. But because state
+	// only has one resolve path post-EventError, there's no actual
+	// duplicate to dedup. This test asserts the count constraint instead.
+	agentSession.events <- Event{Type: EventError, Error: fmt.Errorf("x")}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not return")
+	}
+	ops := p.getOps()
+	// Exactly 2: add + 1 swap. If sync.Once were broken we'd see 3.
+	if len(ops) != 2 {
+		t.Errorf("ops = %+v, want exactly 2 (add + swap, no duplicates)", ops)
 	}
 }

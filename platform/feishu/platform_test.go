@@ -1233,3 +1233,183 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 		t.Fatalf("expected HTML-escaped name, got %q", result)
 	}
 }
+
+// REQ-20260522 — bot streaming reply emoji reaction (T-002 / T-007)
+
+// TestNew_StreamingReplyEmoji_Defaults verifies New() applies the
+// documented defaults (editing="OnIt", failed="Cry", completed="") when no
+// opt is provided.
+func TestNew_StreamingReplyEmoji_Defaults(t *testing.T) {
+	pAny, err := New(map[string]any{"app_id": "cli_x", "app_secret": "s"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := unwrapPlatform(pAny)
+	editing, failed, completed := p.StreamingEmojis()
+	if editing != "OnIt" {
+		t.Errorf("editing = %q, want OnIt", editing)
+	}
+	if failed != "Cry" {
+		t.Errorf("failed = %q, want Cry", failed)
+	}
+	if completed != "" {
+		t.Errorf("completed = %q, want empty", completed)
+	}
+}
+
+// TestNew_StreamingReplyEmoji_NoneDisables verifies that opt == "none"
+// maps to empty string (disabled state).
+func TestNew_StreamingReplyEmoji_NoneDisables(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"app_id":                          "cli_x",
+		"app_secret":                      "s",
+		"streaming_reply_editing_emoji":   "none",
+		"streaming_reply_failed_emoji":    "none",
+		"streaming_reply_completed_emoji": "none",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := unwrapPlatform(pAny)
+	editing, failed, completed := p.StreamingEmojis()
+	if editing != "" || failed != "" || completed != "" {
+		t.Errorf("with all 'none': got (%q,%q,%q), want all empty", editing, failed, completed)
+	}
+}
+
+// TestNew_StreamingReplyEmoji_CustomValues verifies custom emoji codes are
+// preserved.
+func TestNew_StreamingReplyEmoji_CustomValues(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"app_id":                          "cli_x",
+		"app_secret":                      "s",
+		"streaming_reply_editing_emoji":   "Thinking",
+		"streaming_reply_failed_emoji":    "X",
+		"streaming_reply_completed_emoji": "Done",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := unwrapPlatform(pAny)
+	editing, failed, completed := p.StreamingEmojis()
+	if editing != "Thinking" || failed != "X" || completed != "Done" {
+		t.Errorf("custom: got (%q,%q,%q), want (Thinking,X,Done)", editing, failed, completed)
+	}
+}
+
+// TestReactionSender_ImplementsInterface uses a compile-time-via-runtime
+// check (the var _ assert in feishu.go already enforces this at build
+// time; this test is a safety net against an accidental swap).
+func TestReactionSender_ImplementsInterface(t *testing.T) {
+	pAny, err := New(map[string]any{"app_id": "cli_x", "app_secret": "s"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, ok := pAny.(core.ReactionSender); !ok {
+		t.Fatal("feishu Platform should implement core.ReactionSender")
+	}
+}
+
+// TestReactionSender_AddReaction_EmptyMessageID verifies the documented
+// no-op behavior: empty messageID returns the zero handle and nil error.
+func TestReactionSender_AddReaction_EmptyMessageID(t *testing.T) {
+	p := mustNewPlatform(t)
+	h, err := p.AddReaction(context.Background(), "", "OnIt")
+	if err != nil {
+		t.Fatalf("AddReaction(empty msgID) error = %v, want nil", err)
+	}
+	if h.MessageID != "" || h.ReactionID != "" {
+		t.Errorf("AddReaction(empty msgID) handle = %+v, want zero", h)
+	}
+}
+
+// TestReactionSender_AddReaction_EmptyEmoji verifies no-op on empty emoji.
+func TestReactionSender_AddReaction_EmptyEmoji(t *testing.T) {
+	p := mustNewPlatform(t)
+	h, err := p.AddReaction(context.Background(), "om_x", "")
+	if err != nil {
+		t.Fatalf("AddReaction(empty emoji) error = %v, want nil", err)
+	}
+	if h.MessageID != "" || h.ReactionID != "" {
+		t.Errorf("AddReaction(empty emoji) handle = %+v, want zero", h)
+	}
+}
+
+// TestReactionSender_RemoveReaction_ZeroHandle verifies no-op + nil error
+// on zero handle.
+func TestReactionSender_RemoveReaction_ZeroHandle(t *testing.T) {
+	p := mustNewPlatform(t)
+	if err := p.RemoveReaction(context.Background(), core.ReactionHandle{}); err != nil {
+		t.Errorf("RemoveReaction(zero) = %v, want nil", err)
+	}
+}
+
+// TestReactionSender_SwapReaction_ZeroHandle verifies SwapReaction on a
+// zero handle returns zero + nil (per interface doc).
+func TestReactionSender_SwapReaction_ZeroHandle(t *testing.T) {
+	p := mustNewPlatform(t)
+	h, err := p.SwapReaction(context.Background(), core.ReactionHandle{}, "Done")
+	if err != nil {
+		t.Errorf("SwapReaction(zero, Done) error = %v, want nil", err)
+	}
+	if h.MessageID != "" {
+		t.Errorf("SwapReaction(zero, Done) handle = %+v, want zero", h)
+	}
+}
+
+// TestReactionSender_SwapReaction_EmptyNewEmoji verifies SwapReaction with
+// empty new emoji removes (does not re-add) and returns zero handle.
+// Cannot make real API call here; we use a handle with empty ReactionID
+// so the internal removeReaction call is itself a no-op.
+func TestReactionSender_SwapReaction_EmptyNewEmoji(t *testing.T) {
+	p := mustNewPlatform(t)
+	h, err := p.SwapReaction(context.Background(),
+		core.ReactionHandle{MessageID: "om_x", ReactionID: "", EmojiCode: "OnIt"},
+		"")
+	if err != nil {
+		t.Errorf("SwapReaction(h, empty) error = %v, want nil", err)
+	}
+	if h.MessageID != "" || h.ReactionID != "" {
+		t.Errorf("SwapReaction(h, empty) handle = %+v, want zero", h)
+	}
+}
+
+// TestFeishuPreviewHandle_MessageID verifies the MessageIDProvider
+// implementation (T-002): returns stored messageID, empty for nil handle.
+func TestFeishuPreviewHandle_MessageID(t *testing.T) {
+	var nilH *feishuPreviewHandle
+	if got := nilH.MessageID(); got != "" {
+		t.Errorf("nil handle MessageID() = %q, want empty", got)
+	}
+	h := &feishuPreviewHandle{messageID: "om_abc", chatID: "oc_x"}
+	if got := h.MessageID(); got != "om_abc" {
+		t.Errorf("MessageID() = %q, want om_abc", got)
+	}
+	// Verify it implements core.MessageIDProvider.
+	var _ core.MessageIDProvider = h
+}
+
+// unwrapPlatform handles both interactivePlatform wrapper and bare
+// *Platform return values from New().
+func unwrapPlatform(p core.Platform) *Platform {
+	if wrapped, ok := p.(*interactivePlatform); ok {
+		return wrapped.Platform
+	}
+	if bare, ok := p.(*Platform); ok {
+		return bare
+	}
+	return nil
+}
+
+func mustNewPlatform(t *testing.T) *Platform {
+	t.Helper()
+	pAny, err := New(map[string]any{"app_id": "cli_x", "app_secret": "s"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := unwrapPlatform(pAny)
+	if p == nil {
+		t.Fatalf("unwrapPlatform returned nil, type=%T", pAny)
+	}
+	return p
+}
