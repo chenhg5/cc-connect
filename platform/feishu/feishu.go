@@ -128,6 +128,8 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	autoThread                 bool   // when true, reply with ReplyInThread(true) to auto-create Feishu threads
+	threadAckMessage           string // first reply text when creating thread (e.g. "收到，正在处理中...")
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -208,6 +210,11 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	autoThread, _ := opts["auto_thread"].(bool)
+	threadAckMessage, _ := opts["thread_ack_message"].(string)
+	if autoThread && threadAckMessage == "" {
+		threadAckMessage = "收到，正在处理中..."
+	}
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -271,6 +278,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		autoThread:                 autoThread,
+		threadAckMessage:           threadAckMessage,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1099,6 +1108,13 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
+		if p.autoThread {
+			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
+			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+			if err := p.replyMessage(ctx, rc, ackMsgType, ackMsgBody); err != nil {
+				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
+			}
+		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1285,6 +1301,28 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
+		})
+
+	case "interactive":
+		text := extractInteractiveCardText(content)
+		text = stripCardAtTags(text)
+		slog.Info(p.tag()+": interactive card received", "message_id", messageID, "user", userID, "text_len", len(text))
+		if text == "" || text == "[interactive card]" {
+			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
+			return
+		}
+		if p.autoThread {
+			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
+			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+			if err := p.replyMessage(ctx, rc, ackMsgType, ackMsgBody); err != nil {
+				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
+			}
+		}
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
 		})
 
 	default:
@@ -1787,7 +1825,7 @@ func extractPostPlainText(content string) string {
 
 // extractInteractiveCardText extracts readable text from a Feishu interactive card JSON.
 // With raw_card_content, the response wraps the card in {"json_card": "...", ...}.
-// Supports schema 2.0 (body.property.elements with recursive nesting) and
+// Supports schema 2.0 (user_dsl / body.property.elements with recursive nesting) and
 // legacy format (top-level title + elements).
 func extractInteractiveCardText(content string) string {
 	// Try raw_card_content format: {"json_card": "<escaped JSON>", ...}
@@ -1806,20 +1844,56 @@ func extractInteractiveCardText(content string) string {
 
 	var parts []string
 
-	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
-	if raw, ok := card["body"]; ok {
-		var body struct {
-			Tag      string            `json:"tag"`
-			Elements []json.RawMessage `json:"elements"`
-			Property struct {
-				Elements []json.RawMessage `json:"elements"`
-			} `json:"property"`
+	// Check for user_dsl first — the modern Feishu card DSL format.
+	// user_dsl is a JSON-encoded string containing the full card definition.
+	if raw, ok := card["user_dsl"]; ok {
+		var userDSL string
+		if json.Unmarshal(raw, &userDSL) == nil && userDSL != "" {
+			var dsl struct {
+				Body   json.RawMessage `json:"body"`
+				Header json.RawMessage `json:"header"`
+			}
+			if json.Unmarshal([]byte(userDSL), &dsl) == nil {
+				// Extract header title from DSL.
+				if len(dsl.Header) > 0 {
+					var header struct {
+						Title struct {
+							Content string `json:"content"`
+						} `json:"title"`
+					}
+					if json.Unmarshal(dsl.Header, &header) == nil && header.Title.Content != "" {
+						parts = append(parts, strings.TrimSpace(header.Title.Content))
+					}
+				}
+				// Extract body elements from DSL.
+				if len(dsl.Body) > 0 {
+					var body struct {
+						Elements []json.RawMessage `json:"elements"`
+					}
+					if json.Unmarshal(dsl.Body, &body) == nil && len(body.Elements) > 0 {
+						extractCardElements(body.Elements, &parts)
+					}
+				}
+			}
 		}
-		if json.Unmarshal(raw, &body) == nil {
-			if body.Tag == "body" && len(body.Property.Elements) > 0 {
-				extractCardElements(body.Property.Elements, &parts)
-			} else if len(body.Elements) > 0 {
-				extractCardElements(body.Elements, &parts)
+	}
+
+	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
+	if len(parts) == 0 {
+		if raw, ok := card["body"]; ok {
+			var body struct {
+				Tag      string            `json:"tag"`
+				Elements []json.RawMessage `json:"elements"`
+				Property struct {
+					Elements []json.RawMessage `json:"elements"`
+				} `json:"property"`
+			}
+			if json.Unmarshal(raw, &body) == nil {
+				if body.Tag == "body" && len(body.Property.Elements) > 0 {
+					extractCardElements(body.Property.Elements, &parts)
+				} else if len(body.Elements) > 0 {
+					extractCardElements(body.Elements, &parts)
+				}
 			}
 		}
 	}
@@ -1880,6 +1954,7 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 		var elem struct {
 			Tag      string `json:"tag"`
 			Content  string `json:"content"`
+			Columns  json.RawMessage `json:"columns"`  // user_dsl format: columns at element level
 			Property struct {
 				Content  string            `json:"content"`
 				Contents json.RawMessage   `json:"contents"`
@@ -1930,6 +2005,15 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			extractCardTable(elem.Property.Columns, elem.Property.Rows, parts)
 		case "list":
 			extractCardListItems(elem.Property.Items, parts)
+		case "column_set":
+			columns := elem.Columns
+			if len(columns) == 0 {
+				columns = elem.Property.Columns
+			}
+			extractCardColumns(columns, parts)
+		case "div":
+			// div may have text or nested elements; process recursively
+			extractCardColumns(elem.Columns, parts)
 		default:
 			content := elem.Property.Content
 			if content == "" {
@@ -1959,6 +2043,30 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 // Table structure: property.columns defines column names/headers,
 // property.rows is an array of row objects where each key is the column name
 // and the value has a "data" field containing a markdown/plain_text element.
+// extractCardColumns recursively extracts text from column_set columns.
+// Handles both user_dsl format (elements at column top-level) and property-wrapped format.
+func extractCardColumns(columnsRaw json.RawMessage, parts *[]string) {
+	if len(columnsRaw) == 0 {
+		return
+	}
+	var columns []struct {
+		Elements []json.RawMessage `json:"elements"`
+		Property struct {
+			Elements []json.RawMessage `json:"elements"`
+		} `json:"property"`
+	}
+	if json.Unmarshal(columnsRaw, &columns) != nil {
+		return
+	}
+	for _, col := range columns {
+		if len(col.Elements) > 0 {
+			extractCardElements(col.Elements, parts)
+		} else if len(col.Property.Elements) > 0 {
+			extractCardElements(col.Property.Elements, parts)
+		}
+	}
+}
+
 func extractCardTable(columnsRaw, rowsRaw json.RawMessage, parts *[]string) {
 	var columns []struct {
 		DisplayName string `json:"displayName"`
@@ -2014,6 +2122,14 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 			*parts = append(*parts, "- "+strings.Join(itemParts, " "))
 		}
 	}
+}
+
+var atTagRe = regexp.MustCompile(`<at[^>]+></at>`)
+
+// stripCardAtTags removes Feishu <at id=...></at> tags from extracted card text,
+// replacing each with a compact "@" to indicate a mention without the verbose ID.
+func stripCardAtTags(text string) string {
+	return atTagRe.ReplaceAllString(text, "@")
 }
 
 // parseMergeForward fetches sub-messages of a merge_forward message via the
@@ -2827,6 +2943,9 @@ func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[str
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
+	}
+	if p.autoThread {
+		return true
 	}
 	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
 }

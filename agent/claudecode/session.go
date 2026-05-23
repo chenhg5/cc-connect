@@ -675,7 +675,7 @@ func isClaudeEditTool(toolName string) bool {
 
 func (cs *claudeSession) setPermissionMode(mode string) {
 	cs.permissionMode.Store(mode)
-	cs.autoApprove.Store(mode == "bypassPermissions")
+	cs.autoApprove.Store(mode == "bypassPermissions" || mode == "auto")
 	cs.acceptEditsOnly.Store(mode == "acceptEdits")
 	cs.dontAsk.Store(mode == "dontAsk")
 }
