@@ -1273,14 +1273,6 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			text += fmt.Sprintf(", %ds", mediaBody.Duration/1000)
 		}
 		text += "]"
-		var images []core.ImageAttachment
-		if mediaBody.ImageKey != "" {
-			if thumbData, thumbMime, err := p.downloadImage(messageID, mediaBody.ImageKey); err == nil {
-				images = append(images, core.ImageAttachment{MimeType: thumbMime, Data: thumbData})
-			} else {
-				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
-			}
-		}
 		var video *core.VideoAttachment
 		if mediaBody.FileKey != "" {
 			videoData, err := p.downloadResource(messageID, mediaBody.FileKey, "file")
@@ -1294,6 +1286,15 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 					Duration: mediaBody.Duration / 1000,
 				}
 				slog.Info(p.tag()+": video downloaded", "file_name", mediaBody.FileName, "size", len(videoData))
+			}
+		}
+		// Only download thumbnail as fallback when video download failed
+		var images []core.ImageAttachment
+		if mediaBody.ImageKey != "" && video == nil {
+			if thumbData, thumbMime, err := p.downloadImage(messageID, mediaBody.ImageKey); err == nil {
+				images = append(images, core.ImageAttachment{MimeType: thumbMime, Data: thumbData})
+			} else {
+				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
 		p.dispatchCoreMessage(&core.Message{
