@@ -345,6 +345,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	}
 	return []core.ModelOption{
 		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
+		{Name: "sonnet[1m]", Desc: "Claude Sonnet (1M context)"},
 		{Name: "opus", Desc: "Claude Opus (most capable)"},
 		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
 		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
