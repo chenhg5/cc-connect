@@ -307,7 +307,7 @@ func TestSendToSessionWithAttachmentsDeliversTextImagesAndFiles(t *testing.T) {
 	err := engine.SendToSessionWithAttachments(
 		msg.SessionKey,
 		"delivery ready",
-		[]core.ImageAttachment{{MimeType: "image/png", FileName: "chart.png", Data: []byte("chart")}},
+		[]core.ImageAttachment{{MimeType: "image/png", FileName: "chart.png", Data: []byte("chart", nil, false)}},
 		[]core.FileAttachment{{MimeType: "text/plain", FileName: "report.txt", Data: []byte("report")}},
 	)
 	if err != nil {
@@ -344,7 +344,7 @@ func TestSendToSessionWithAttachmentsDoesNotDuplicateEchoedFinalTextWithContextI
 		msg.SessionKey,
 		sideText,
 		nil,
-		[]core.FileAttachment{{MimeType: "text/plain", FileName: "report.txt", Data: []byte("report")}},
+		[]core.FileAttachment{{MimeType: "text/plain", FileName: "report.txt", Data: []byte("report", nil, false)}},
 	)
 	if err != nil {
 		t.Fatalf("SendToSessionWithAttachments() error = %v", err)
@@ -399,7 +399,7 @@ func TestSendToSessionWithAttachmentsRespectsDisabledAttachmentSend(t *testing.T
 		msg.SessionKey,
 		"should not send",
 		nil,
-		[]core.FileAttachment{{MimeType: "text/plain", FileName: "blocked.txt", Data: []byte("blocked")}},
+		[]core.FileAttachment{{MimeType: "text/plain", FileName: "blocked.txt", Data: []byte("blocked", nil, false)}},
 	)
 	if !errors.Is(err, core.ErrAttachmentSendDisabled) {
 		t.Fatalf("err = %v, want ErrAttachmentSendDisabled", err)
@@ -426,7 +426,7 @@ func TestSendToSessionWithAttachmentsRequiresSessionWhenMultipleSessionsHaveAtta
 	err := engine.SendToSessionWithAttachments(
 		"",
 		"ambiguous",
-		[]core.ImageAttachment{{MimeType: "image/png", FileName: "ambiguous.png", Data: []byte("img")}},
+		[]core.ImageAttachment{{MimeType: "image/png", FileName: "ambiguous.png", Data: []byte("img", nil, false)}},
 		nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "multiple active sessions") {
