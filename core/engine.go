@@ -1972,6 +1972,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
+
+	// Video message: convert to FileAttachment so the agent can read it
+	if msg.Video != nil && len(msg.Video.Data) > 0 {
+		msg.Files = append(msg.Files, FileAttachment{
+			MimeType: msg.Video.MimeType,
+			Data:     msg.Video.Data,
+			FileName: msg.Video.FileName,
+		})
+	}
+
 	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
 		return
 	}

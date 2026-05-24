@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1280,11 +1281,26 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
+		var video *core.VideoAttachment
+		if mediaBody.FileKey != "" {
+			videoData, err := p.downloadResource(messageID, mediaBody.FileKey, "file")
+			if err != nil {
+				slog.Warn(p.tag()+": download video failed", "error", err, "file_key", mediaBody.FileKey)
+			} else {
+				video = &core.VideoAttachment{
+					MimeType: detectVideoMime(mediaBody.FileName, videoData),
+					Data:     videoData,
+					FileName: mediaBody.FileName,
+					Duration: mediaBody.Duration / 1000,
+				}
+				slog.Info(p.tag()+": video downloaded", "file_name", mediaBody.FileName, "size", len(videoData))
+			}
+		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text, Images: images, Video: video, ReplyCtx: rctx,
 		})
 
 	default:
@@ -2405,6 +2421,36 @@ func detectMimeType(data []byte) string {
 		}
 	}
 	return "image/png"
+}
+
+// detectVideoMime returns the video MIME type based on filename extension and content sniffing.
+func detectVideoMime(fileName string, data []byte) string {
+	// First try filename extension
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(fileName), "."))
+	switch ext {
+	case "mp4":
+		return "video/mp4"
+	case "mov":
+		return "video/quicktime"
+	case "avi":
+		return "video/x-msvideo"
+	case "webm":
+		return "video/webm"
+	case "mkv":
+		return "video/x-matroska"
+	}
+	// Fall back to content sniffing
+	if len(data) >= 12 {
+		// MP4: ftyp box at offset 4
+		if string(data[4:8]) == "ftyp" {
+			return "video/mp4"
+		}
+		// WebM: EBML header
+		if data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3 {
+			return "video/webm"
+		}
+	}
+	return "video/mp4" // default
 }
 
 // predictMsgType returns the message type that buildReplyContent will choose,
