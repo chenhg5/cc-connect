@@ -249,3 +249,8 @@ Unregister-ScheduledTask -TaskName %s -Confirm:$false
 	}
 	return nil
 }
+
+// CheckLinger is a no-op on Windows (linger is a systemd concept).
+func CheckLinger() (enabled bool, user string) {
+	return false, ""
+}
