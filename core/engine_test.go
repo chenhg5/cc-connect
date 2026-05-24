@@ -686,7 +686,7 @@ func newTestEngine() *Engine {
 	return NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 }
 
-func TestEngineSendToSessionWithAttachments(t *testing.T, nil, false) {
+func TestEngineSendToSessionWithAttachments(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.interactiveStates["session-1"] = &interactiveState{
@@ -697,9 +697,9 @@ func TestEngineSendToSessionWithAttachments(t *testing.T, nil, false) {
 	err := e.SendToSessionWithAttachments(
 		"session-1",
 		"delivery ready",
-		[]ImageAttachment{{MimeType: "image/png", Data: []byte("img", nil, false), FileName: "chart.png"}},
+		[]ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "chart.png"}},
 		[]FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
-	)
+		nil, false)
 	if err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
@@ -726,9 +726,8 @@ func TestEngineSendToSessionWithAttachments_UnsupportedPlatform(t *testing.T) {
 	err := e.SendToSessionWithAttachments(
 		"session-1",
 		"delivery ready",
-		[]ImageAttachment{{MimeType: "image/png", Data: []byte("img", nil, false), FileName: "chart.png"}},
-		nil,
-	)
+		[]ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "chart.png"}},
+		nil, nil, false)
 	if err == nil {
 		t.Fatal("expected unsupported attachment send to fail")
 	}
@@ -750,8 +749,8 @@ func TestEngineSendToSessionWithAttachments_DisabledByConfig(t *testing.T) {
 		"session-1",
 		"delivery ready",
 		nil,
-		[]FileAttachment{{MimeType: "text/plain", Data: []byte("doc", nil, false), FileName: "report.txt"}},
-	)
+		[]FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
+		nil, false)
 	if err == nil {
 		t.Fatal("expected attachment send to be blocked")
 	}
@@ -980,9 +979,9 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	sideText := "已发送 AGENTS.md 文件给你。"
 	if err := e.SendToSessionWithAttachments(sessionKey, sideText, nil, []FileAttachment{{
 		MimeType: "text/markdown",
-		Data:     []byte("body", nil, false),
+		Data:     []byte("body"),
 		FileName: "AGENTS.md",
-	}}); err != nil {
+	}}, nil, false); err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
 
@@ -1010,9 +1009,9 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextI
 	sideText := "已发送 AGENTS.md 文件给你。"
 	if err := e.SendToSessionWithAttachments(sessionKey, sideText, nil, []FileAttachment{{
 		MimeType: "text/markdown",
-		Data:     []byte("body", nil, false),
+		Data:     []byte("body"),
 		FileName: "AGENTS.md",
-	}}); err != nil {
+	}}, nil, false); err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
 
@@ -1039,9 +1038,9 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 
 	if err := e.SendToSessionWithAttachments(sessionKey, "已发送 AGENTS.md 文件给你。", nil, []FileAttachment{{
 		MimeType: "text/markdown",
-		Data:     []byte("body", nil, false),
+		Data:     []byte("body"),
 		FileName: "AGENTS.md",
-	}}); err != nil {
+	}}, nil, false); err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
 
