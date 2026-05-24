@@ -2423,6 +2423,7 @@ func predictMsgType(content string) string {
 func buildReplyContent(content string) (msgType string, body string) {
 	if !containsMarkdown(content) {
 		b, _ := json.Marshal(map[string]string{"text": content})
+		slog.Debug("feishu send debug", "msg_type", larkim.MsgTypeText, "body", string(b))
 		return larkim.MsgTypeText, string(b)
 	}
 	// Prefer card for all markdown content — card schema 2.0 has the best
@@ -2430,9 +2431,13 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// strikethrough, etc.). Only fall back to post md tag when the content
 	// exceeds the card table limit (Feishu API error 11310: max 5 tables).
 	if countMarkdownTables(content) > maxCardTables {
-		return larkim.MsgTypePost, buildPostMdJSON(content)
+		body = buildPostMdJSON(content)
+		slog.Debug("feishu send debug", "msg_type", larkim.MsgTypePost, "body", body)
+		return larkim.MsgTypePost, body
 	}
-	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+	body = buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+	slog.Debug("feishu send debug", "msg_type", larkim.MsgTypeInteractive, "body", body)
+	return larkim.MsgTypeInteractive, body
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
