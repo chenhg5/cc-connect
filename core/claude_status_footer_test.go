@@ -256,7 +256,7 @@ func TestBuildReplyFooter_LegacyAllSegments(t *testing.T) {
 	}
 }
 
-func TestCompactReplyFooterPath_HomeRelativeDeepPathKeepsTail(t *testing.T) {
+func TestCompactReplyFooterPath_HomeRelativeDeepPathStaysFull(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
@@ -266,7 +266,7 @@ func TestCompactReplyFooterPath_HomeRelativeDeepPathKeepsTail(t *testing.T) {
 	}
 
 	deepPath := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
-	if got, want := compactReplyFooterPath(deepPath), "…/agents/ceo"; got != want {
+	if got, want := compactReplyFooterPath(deepPath), "~/code/TechStudio/projects/core/agents/ceo"; got != want {
 		t.Fatalf("deep home path = %q, want %q", got, want)
 	}
 }
