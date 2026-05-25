@@ -1460,7 +1460,43 @@ func saveConfig(cfg *Config) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, ConfigPath)
+
+	// Try atomic rename first; fall back to WriteFile on "device busy" errors
+	// (can happen with NFS mounts, containers, or when the target file is held open)
+	if err := os.Rename(tmpPath, ConfigPath); err != nil {
+		// Clean up the temp file on failure
+		os.Remove(tmpPath)
+
+		// If the error is not a "device busy" type, report it immediately
+		if !isBusyError(err) {
+			return fmt.Errorf("rename config: %w", err)
+		}
+
+		// Fallback: write directly to the target file
+		slog.Warn("config: atomic rename failed (device busy), falling back to WriteFile",
+			"path", ConfigPath, "error", err)
+
+		if err := os.WriteFile(ConfigPath, []byte(formatted), 0644); err != nil {
+			return fmt.Errorf("write config (fallback): %w", err)
+		}
+		slog.Info("config: saved via WriteFile fallback", "path", ConfigPath)
+		return nil
+	}
+	return nil
+}
+
+// isBusyError returns true if err indicates the file is busy (EBUSY on POSIX,
+// "device or resource busy", or similar). Used to detect when atomic rename
+// will fail and a direct WriteFile fallback is needed.
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "device or resource busy") ||
+		strings.Contains(errStr, "EBUSY") ||
+		strings.Contains(errStr, "resource busy") ||
+		strings.Contains(errStr, " text file busy")
 }
 
 // formatTOML post-processes raw TOML encoder output to improve readability:
