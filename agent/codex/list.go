@@ -59,7 +59,6 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 	for _, f := range files {
 		info := parseCodexSessionFile(f, absWorkDir)
 		if info != nil {
-			patchSessionSource(info.ID, codexHome)
 			sessions = append(sessions, *info)
 		}
 	}
@@ -89,6 +88,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	var sessionCwd string
 	var summary string
 	var msgCount int
+	var modifiedAt time.Time
 	userMsgSeen := 0
 
 	scanner := bufio.NewScanner(f)
@@ -101,11 +101,17 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		}
 
 		var entry struct {
-			Type    string          `json:"type"`
-			Payload json.RawMessage `json:"payload"`
+			Timestamp string          `json:"timestamp"`
+			Type      string          `json:"type"`
+			Payload   json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
+		}
+		if entry.Timestamp != "" {
+			if ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err == nil && ts.After(modifiedAt) {
+				modifiedAt = ts
+			}
 		}
 
 		switch entry.Type {
@@ -158,12 +164,15 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	if len([]rune(summary)) > 60 {
 		summary = string([]rune(summary)[:60]) + "..."
 	}
+	if modifiedAt.IsZero() {
+		modifiedAt = stat.ModTime()
+	}
 
 	return &core.AgentSessionInfo{
 		ID:           sessionID,
 		Summary:      summary,
 		MessageCount: msgCount,
-		ModifiedAt:   stat.ModTime(),
+		ModifiedAt:   modifiedAt,
 	}
 }
 
