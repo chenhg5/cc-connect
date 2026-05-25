@@ -6090,49 +6090,40 @@ func compactReplyFooterPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	cleanPath := filepath.Clean(path)
-	path = normalizeWorkspacePath(cleanPath)
+	cleaned := filepath.Clean(path)
+	normalized := normalizeWorkspacePath(cleaned)
 	if home, err := os.UserHomeDir(); err == nil {
-		cleanHome := filepath.Clean(home)
-		normalizedHome := normalizeWorkspacePath(cleanHome)
-		if path == normalizedHome || cleanPath == cleanHome {
-			return "~"
-		}
-		prefix := normalizedHome + string(os.PathSeparator)
-		if strings.HasPrefix(path, prefix) {
-			return compactHomeRelativeReplyFooterPath("~" + filepath.ToSlash(strings.TrimPrefix(path, normalizedHome)))
-		}
-		cleanPrefix := cleanHome + string(os.PathSeparator)
-		if strings.HasPrefix(cleanPath, cleanPrefix) {
-			return compactHomeRelativeReplyFooterPath("~" + filepath.ToSlash(strings.TrimPrefix(cleanPath, cleanHome)))
+		homeCleaned := filepath.Clean(home)
+		homeNormalized := normalizeWorkspacePath(homeCleaned)
+		for _, candidate := range []struct {
+			path string
+			home string
+		}{
+			{cleaned, homeCleaned},
+			{normalized, homeNormalized},
+			{cleaned, homeNormalized},
+			{normalized, homeCleaned},
+		} {
+			if display, ok := replyFooterHomeRelativePath(candidate.path, candidate.home); ok {
+				return display
+			}
 		}
 	}
-
-	slash := filepath.ToSlash(path)
-	if filepath.IsAbs(path) {
-		trimmed := strings.Trim(slash, "/")
-		if trimmed == "" {
-			return "/"
-		}
-		parts := strings.Split(trimmed, "/")
-		if len(parts) == 1 {
-			return parts[0]
-		}
-		start := len(parts) - 2
-		if start < 0 {
-			start = 0
-		}
-		return "…/" + strings.Join(parts[start:], "/")
-	}
-	return slash
+	return filepath.ToSlash(normalized)
 }
 
-func compactHomeRelativeReplyFooterPath(path string) string {
-	parts := strings.Split(strings.TrimPrefix(path, "~/"), "/")
-	if len(parts) <= 2 {
-		return path
+func replyFooterHomeRelativePath(path, home string) (string, bool) {
+	if path == "" || home == "" {
+		return "", false
 	}
-	return "…/" + strings.Join(parts[len(parts)-2:], "/")
+	if path == home {
+		return "~", true
+	}
+	prefix := home + string(os.PathSeparator)
+	if strings.HasPrefix(path, prefix) {
+		return "~" + filepath.ToSlash(strings.TrimPrefix(path, home)), true
+	}
+	return "", false
 }
 
 // buildClaudeStatusLineFooter renders a CCD-statusline-style footer for the
