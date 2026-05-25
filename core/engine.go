@@ -630,7 +630,6 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
 
-
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
@@ -5764,35 +5763,40 @@ func compactReplyFooterPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	path = normalizeWorkspacePath(path)
+	cleaned := filepath.Clean(path)
+	normalized := normalizeWorkspacePath(cleaned)
 	if home, err := os.UserHomeDir(); err == nil {
-		home = normalizeWorkspacePath(home)
-		if path == home {
-			return "~"
-		}
-		prefix := home + string(os.PathSeparator)
-		if strings.HasPrefix(path, prefix) {
-			return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
+		homeCleaned := filepath.Clean(home)
+		homeNormalized := normalizeWorkspacePath(homeCleaned)
+		for _, candidate := range []struct {
+			path string
+			home string
+		}{
+			{cleaned, homeCleaned},
+			{normalized, homeNormalized},
+			{cleaned, homeNormalized},
+			{normalized, homeCleaned},
+		} {
+			if display, ok := replyFooterHomeRelativePath(candidate.path, candidate.home); ok {
+				return display
+			}
 		}
 	}
+	return filepath.ToSlash(normalized)
+}
 
-	slash := filepath.ToSlash(path)
-	if filepath.IsAbs(path) {
-		trimmed := strings.Trim(slash, "/")
-		if trimmed == "" {
-			return "/"
-		}
-		parts := strings.Split(trimmed, "/")
-		if len(parts) == 1 {
-			return parts[0]
-		}
-		start := len(parts) - 2
-		if start < 0 {
-			start = 0
-		}
-		return "…/" + strings.Join(parts[start:], "/")
+func replyFooterHomeRelativePath(path, home string) (string, bool) {
+	if path == "" || home == "" {
+		return "", false
 	}
-	return slash
+	if path == home {
+		return "~", true
+	}
+	prefix := home + string(os.PathSeparator)
+	if strings.HasPrefix(path, prefix) {
+		return "~" + filepath.ToSlash(strings.TrimPrefix(path, home)), true
+	}
+	return "", false
 }
 
 func appendReplyFooter(content, footer string) string {
