@@ -406,6 +406,10 @@ type ProjectConfig struct {
 	Display    *DisplayConfig  `toml:"display,omitempty"`
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
+	// AgentTypes lists alternative agent type configurations that can be switched
+	// at runtime via the /agent command. Each entry is a complete agent config
+	// (type + options + providers) that replaces the active [projects.agent] on switch.
+	AgentTypes []AgentTypeConfig `toml:"agent_types,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
@@ -418,6 +422,10 @@ type AgentConfig struct {
 	ProviderRefs []string         `toml:"provider_refs,omitempty"` // references to global [[providers]] by name
 	Providers    []ProviderConfig `toml:"providers"`
 }
+
+// AgentTypeConfig is an alias for AgentConfig, used for alternate agent configs
+// that can be switched at runtime via the /agent command.
+type AgentTypeConfig = AgentConfig
 
 // ProviderModelConfig defines a selectable model entry for a provider,
 // with an optional short alias used by the /model command.
@@ -980,6 +988,104 @@ func SaveActiveProvider(projectName, providerName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	return patchProjectAgentOption(projectName, "provider", providerName)
+}
+
+// SaveActiveAgentType swaps the active agent configuration with an alternate one
+// from AgentTypes[]. The old active config is stored back into AgentTypes at the
+// position of the new config, preserving all entries. Uses full config rewrite
+// since this is a multi-field swap (type + options + providers + provider_refs).
+func SaveActiveAgentType(projectName, agentType string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	// Find the project
+	projIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projIdx = i
+			break
+		}
+	}
+	if projIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+	proj := &cfg.Projects[projIdx]
+
+	// Check for duplicate agent types in AgentTypes
+	seenTypes := make(map[string]int)
+	for i, at := range proj.AgentTypes {
+		if prevIdx, exists := seenTypes[at.Type]; exists {
+			slog.Warn("SaveActiveAgentType: duplicate agent type in AgentTypes",
+				"project", projectName, "type", at.Type,
+				"first_index", prevIdx, "duplicate_index", i)
+		}
+		seenTypes[at.Type] = i
+	}
+
+	// Find the alternate agent type config
+	altIdx := -1
+	for i := range proj.AgentTypes {
+		if proj.AgentTypes[i].Type == agentType {
+			altIdx = i
+			break
+		}
+	}
+	if altIdx < 0 {
+		return fmt.Errorf("agent type %q not found in project %q AgentTypes", agentType, projectName)
+	}
+
+	// Check if the old agent type is already in the alternate list (besides altIdx)
+	oldAgentType := proj.Agent.Type
+	for i, at := range proj.AgentTypes {
+		if i != altIdx && at.Type == oldAgentType {
+			slog.Info("SaveActiveAgentType: old agent type already in AgentTypes, will be overwritten on next swap",
+				"project", projectName, "old_type", oldAgentType)
+			break
+		}
+	}
+
+	// Deep copy the Options maps to avoid map reference aliasing
+	oldOptionsCopy := make(map[string]any, len(proj.Agent.Options))
+	for k, v := range proj.Agent.Options {
+		oldOptionsCopy[k] = v
+	}
+	newOptionsCopy := make(map[string]any, len(proj.AgentTypes[altIdx].Options))
+	for k, v := range proj.AgentTypes[altIdx].Options {
+		newOptionsCopy[k] = v
+	}
+
+	// Save references to Providers and ProviderRefs before overwriting
+	oldProviderRefs := proj.Agent.ProviderRefs
+	oldProviders := proj.Agent.Providers
+	newProviderRefs := proj.AgentTypes[altIdx].ProviderRefs
+	newProviders := proj.AgentTypes[altIdx].Providers
+
+	// Perform the swap with deep-copied Options maps
+	proj.Agent = AgentConfig{
+		Type:         proj.AgentTypes[altIdx].Type,
+		Options:      newOptionsCopy,
+		ProviderRefs: newProviderRefs,
+		Providers:    newProviders,
+	}
+	proj.AgentTypes[altIdx] = AgentConfig{
+		Type:         oldAgentType,
+		Options:      oldOptionsCopy,
+		ProviderRefs: oldProviderRefs,
+		Providers:    oldProviders,
+	}
+
+	return saveConfig(cfg)
 }
 
 // SaveProviderModel persists the selected model for a provider in a project.

@@ -862,6 +862,33 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # name = "bedrock"
 # env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 
+# Alternate Agent Types — switch between different agent types at runtime
+# 备用 Agent 类型 — 支持在运行时通过 /agent 命令切换不同的 Agent 类型
+#
+# When configured, administrators can use /agent list/switch to change the active
+# agent type without restarting cc-connect. The current agent config is swapped with
+# the target agent_types entry, enabling switch-back.
+# 配置后，管理员可使用 /agent list/switch 命令在不重启 cc-connect 的情况下切换
+# Agent 类型。当前 Agent 配置会与目标 agent_types 条目互换，支持切换回来。
+#
+# Example: switch between Claude Code, Codex, and OpenCode based on quota:
+# 示例：在 Claude Code、Codex 和 OpenCode 之间切换（根据额度情况）：
+#
+# [projects.agent]
+# type = "claudecode"
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+#
+# [[projects.agent_types]]
+# type = "codex"
+# [projects.agent_types.options]
+# work_dir = "/path/to/project"
+#
+# [[projects.agent_types]]
+# type = "opencode"
+# [projects.agent_types.options]
+# work_dir = "/path/to/project"
+
 # Reference normalization and rendering / 本地引用标准化与展示优化
 # Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
 # local file references (paths, line refs, markdown file links) and re-render them

@@ -778,6 +778,20 @@ func main() {
 			return config.SaveAgentModel(projName, model)
 		})
 
+		// Wire agent type switching
+		if len(proj.AgentTypes) > 0 {
+			// Build list of alternate agent type names
+			agentTypes := make([]string, 0, len(proj.AgentTypes))
+			for _, at := range proj.AgentTypes {
+				agentTypes = append(agentTypes, at.Type)
+			}
+			engine.SetAlternateAgentTypes(agentTypes)
+			engine.SetCurrentAgentType(proj.Agent.Type)
+			engine.SetAgentTypeSaveFunc(func(agentType string) error {
+				return config.SaveActiveAgentType(projName, agentType)
+			})
+		}
+
 		// Wire config reload
 		capturedEngine := engine
 		capturedProjName := projName

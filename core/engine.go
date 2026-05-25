@@ -178,6 +178,7 @@ type Engine struct {
 	providerRefsSaveFunc    func(refs []string) error
 	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
 	modelSaveFunc           func(model string) error
+	agentTypeSaveFunc       func(agentType string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -218,6 +219,11 @@ type Engine struct {
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
+
+	// Agent type switching - list of alternate agent types from config
+	alternateAgentTypes []string
+	// currentAgentType is the type name of the currently active agent config
+	currentAgentType string
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -835,6 +841,18 @@ func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]Provide
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
+}
+
+func (e *Engine) SetAlternateAgentTypes(types []string) {
+	e.alternateAgentTypes = types
+}
+
+func (e *Engine) SetCurrentAgentType(t string) {
+	e.currentAgentType = t
+}
+
+func (e *Engine) SetAgentTypeSaveFunc(fn func(agentType string) error) {
+	e.agentTypeSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -4742,6 +4760,7 @@ var builtinCommands = []struct {
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
+	{[]string{"agent"}, "agent"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
@@ -4924,6 +4943,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
@@ -8520,6 +8541,130 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	default:
 		e.switchProvider(p, msg, switcher, args[0])
+	}
+}
+
+func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
+	// Agent type switching requires admin privileges - check admin_from
+	if !e.isAdmin(msg.UserID) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAdminRequired))
+		return
+	}
+
+	if len(args) == 0 {
+		e.cmdAgentList(p, msg)
+		return
+	}
+
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"list", "switch", "current"})
+	switch sub {
+	case "list":
+		e.cmdAgentList(p, msg)
+	case "switch":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, "Usage: /agent switch <type>")
+			return
+		}
+		e.switchAgentType(p, msg, args[1])
+	case "current":
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAgentCurrent), e.agent.Name()))
+	default:
+		// Treat arg as agent type name to switch to
+		e.switchAgentType(p, msg, args[0])
+	}
+}
+
+func (e *Engine) cmdAgentList(p Platform, msg *Message) {
+	// Show current agent type and available alternate types from config
+	var sb strings.Builder
+	currentType := e.agent.Name()
+	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgAgentCurrent), currentType))
+	sb.WriteString("\n\n")
+	sb.WriteString(e.i18n.T(MsgAgentListTitle))
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("▶ %s (current)\n", currentType))
+
+	// Check if current type is already in the alternate list
+	currentInList := false
+	for _, alt := range e.alternateAgentTypes {
+		if alt == currentType {
+			currentInList = true
+			break
+		}
+	}
+
+	if len(e.alternateAgentTypes) == 0 && !currentInList {
+		sb.WriteString(e.i18n.T(MsgAgentListEmpty))
+		sb.WriteString("\n\n" + e.i18n.T(MsgAgentSwitchHint))
+		e.reply(p, msg.ReplyCtx, sb.String())
+		return
+	}
+
+	// Build a set of unique alternates (excluding current if present)
+	seen := make(map[string]bool)
+	if currentInList {
+		seen[currentType] = true
+	}
+
+	for _, alt := range e.alternateAgentTypes {
+		if seen[alt] {
+			continue
+		}
+		seen[alt] = true
+		sb.WriteString(fmt.Sprintf("  %s\n", alt))
+	}
+
+	// If current was not in list, show it with (original) marker
+	if !currentInList && currentType != "" {
+		sb.WriteString(fmt.Sprintf("  %s (original, not in config)\n", currentType))
+		slog.Info("agent list: current agent type not in agent_types config, showing as original",
+			"current_type", currentType)
+	}
+
+	sb.WriteString("\n" + e.i18n.T(MsgAgentSwitchHint))
+	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) switchAgentType(p Platform, msg *Message, agentType string) {
+	// Validate the target type is in our alternate list
+	found := false
+	for _, alt := range e.alternateAgentTypes {
+		if alt == agentType {
+			found = true
+			break
+		}
+	}
+	if !found {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAgentNotFound), agentType))
+		return
+	}
+
+	// Save the new agent type to config - this also swaps the current agent
+	// config into AgentTypes so we can switch back later
+	if e.agentTypeSaveFunc != nil {
+		if err := e.agentTypeSaveFunc(agentType); err != nil {
+			slog.Error("failed to save agent type", "error", err)
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to save agent type: %v", err))
+			return
+		}
+	}
+
+	// Clean up the current agent session
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	e.sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAgentSwitched), agentType))
+
+	// Signal restart to pick up the new agent type
+	select {
+	case RestartCh <- RestartRequest{
+		SessionKey: msg.SessionKey,
+		Platform:   p.Name(),
+	}:
+	default:
 	}
 }
 

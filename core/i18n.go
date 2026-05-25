@@ -203,6 +203,15 @@ const (
 	MsgProviderLinkGlobal        MsgKey = "provider_link_global"
 	MsgProviderLinked            MsgKey = "provider_linked"
 
+	MsgAgentNotSupported        MsgKey = "agent_not_supported"
+	MsgAgentNone                MsgKey = "agent_none"
+	MsgAgentCurrent             MsgKey = "agent_current"
+	MsgAgentListTitle           MsgKey = "agent_list_title"
+	MsgAgentListEmpty           MsgKey = "agent_list_empty"
+	MsgAgentSwitchHint          MsgKey = "agent_switch_hint"
+	MsgAgentNotFound            MsgKey = "agent_not_found"
+	MsgAgentSwitched            MsgKey = "agent_switched"
+
 	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
 	MsgVoiceNoFFmpeg                 MsgKey = "voice_no_ffmpeg"
@@ -489,6 +498,7 @@ const (
 	MsgBuiltinCmdCurrent   MsgKey = "current"
 	MsgBuiltinCmdHistory   MsgKey = "history"
 	MsgBuiltinCmdProvider  MsgKey = "provider"
+	MsgBuiltinCmdAgent     MsgKey = "agent"
 	MsgBuiltinCmdMemory    MsgKey = "memory"
 	MsgBuiltinCmdAllow     MsgKey = "allow"
 	MsgBuiltinCmdModel     MsgKey = "model"
@@ -1529,6 +1539,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 已關聯服務商 **%s** 到目前專案。",
 		LangJapanese:           "✅ プロバイダー **%s** をこのプロジェクトにリンクしました。",
 		LangSpanish:            "✅ Proveedor **%s** vinculado a este proyecto.",
+	},
+	MsgAgentNotSupported: {
+		LangEnglish:            "Agent type switching is not available for this project.",
+		LangChinese:            "当前项目不支持切换 Agent 类型。",
+		LangTraditionalChinese: "目前專案不支援切換 Agent 類型。",
+		LangJapanese:           "このプロジェクトではAgentタイプの切り替えは利用できません。",
+		LangSpanish:            "Este proyecto no soporta el cambio de tipo de agente.",
+	},
+	MsgAgentNone: {
+		LangEnglish:            "No alternate agent types configured.",
+		LangChinese:            "未配置备用 Agent 类型。",
+		LangTraditionalChinese: "未設定備用 Agent 類型。",
+		LangJapanese:           "代替Agentタイプが設定されていません。",
+		LangSpanish:            "No hay tipos de agente alternativos configurados.",
+	},
+	MsgAgentCurrent: {
+		LangEnglish:            "Current agent: **%s**",
+		LangChinese:            "当前 Agent：%s",
+		LangTraditionalChinese: "目前 Agent：%s",
+		LangJapanese:           "現在のAgent：%s",
+		LangSpanish:            "Agente actual：%s",
+	},
+	MsgAgentListTitle: {
+		LangEnglish:            "Available agent types:",
+		LangChinese:            "可用的 Agent 类型：",
+		LangTraditionalChinese: "可用的 Agent 類型：",
+		LangJapanese:           "利用可能なAgentタイプ：",
+		LangSpanish:            "Tipos de agente disponibles：",
+	},
+	MsgAgentListEmpty: {
+		LangEnglish:            "No alternate agent types configured.",
+		LangChinese:            "未配置备用 Agent 类型。",
+		LangTraditionalChinese: "未設定備用 Agent 類型。",
+		LangJapanese:           "代替Agentタイプが設定されていません。",
+		LangSpanish:            "No hay tipos de agente alternativos configurados.",
+	},
+	MsgAgentSwitchHint: {
+		LangEnglish:            "Use /agent switch <name> to change agent type",
+		LangChinese:            "使用 /agent switch <名称> 切换 Agent 类型",
+		LangTraditionalChinese: "使用 /agent switch <名稱> 切換 Agent 類型",
+		LangJapanese:           "agentタイプを変更するには /agent switch <名前> を使用",
+		LangSpanish:            "Use /agent switch <nombre> para cambiar el tipo de agente",
+	},
+	MsgAgentNotFound: {
+		LangEnglish:            "Agent type **%s** not found.",
+		LangChinese:            "未找到 Agent 类型：**%s**。",
+		LangTraditionalChinese: "未找到 Agent 類型：**%s**。",
+		LangJapanese:           "Agentタイプ **%s** が見つかりません。",
+		LangSpanish:            "Tipo de agente **%s** no encontrado.",
+	},
+	MsgAgentSwitched: {
+		LangEnglish:            "✅ Switched to agent type **%s**. Session has been reset.",
+		LangChinese:            "✅ 已切换到 Agent **%s**。会话已重置。",
+		LangTraditionalChinese: "✅ 已切換到 Agent **%s**。對話已重置。",
+		LangJapanese:           "✅ Agentタイプ **%s** に切り替えました。セッションがリセットされました。",
+		LangSpanish:            "✅ Cambiado al tipo de agente **%s**. La sesión ha sido reiniciada.",
 	},
 	MsgVoiceNotEnabled: {
 		LangEnglish:            "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
