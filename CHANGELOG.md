@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.3.3-beta.3 (2026-05-24)
+
+Beta release with blackbox testing infrastructure, cursor/opencode agent support, and bug fixes.
+
+### New Features
+- **Blackbox testing framework**: Phase 1-2 blackbox testing with P0/P1/P2 coverage, config-switch, and NewEnvWithSetup infrastructure
+- **Cursor/OpenCode agents**: add cursor and opencode agent support in blackbox tests
+
+### Fixed
+- **Core italic wrapping**: restore italic wrapping on reply footer
+- **Feishu footer asterisks**: strip asterisks from footer to prevent Feishu markdown italic rendering
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout
+- **Codex stdio sentinel**: add stdio sentinel for Codex app_server backend
+- **Windows cross-compile**: add missing `CheckLinger` stub to `daemon/windows.go` and `daemon/unsupported.go` so `make release-all` succeeds for all target platforms
+
 ## v1.3.3-beta.2 (2026-05-09)
 
 Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.

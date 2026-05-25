@@ -473,7 +473,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 
 // ListSessions runs `opencode session list` and parses the JSON output.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listOpencodeSessions(a.cmd, a.workDir)
+	a.mu.RLock()
+	cmd := a.cmd
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listOpencodeSessions(cmd, workDir)
 }
 
 func (a *Agent) Stop() error { return nil }
@@ -522,9 +526,12 @@ func (a *Agent) CompressCommand() string { return "/compact" }
 // -- MemoryFileProvider --
 
 func (a *Agent) ProjectMemoryFile() string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return filepath.Join(absDir, "OPENCODE.md")
 }
@@ -681,4 +688,30 @@ func opencodeDBPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+}
+
+func (a *Agent) GetSessionTitle(sessionID string) string {
+	return querySessionTitle(sessionID)
+}
+
+func querySessionTitle(sessionID string) string {
+	dbPath := opencodeDBPath()
+	if dbPath == "" {
+		return ""
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return ""
+	}
+	escaped := strings.ReplaceAll(sessionID, "'", "''")
+	query := fmt.Sprintf("SELECT title FROM session WHERE id = '%s' LIMIT 1", escaped)
+	out, err := exec.Command(sqlite3, dbPath, query).Output()
+	if err != nil {
+		return ""
+	}
+	title := strings.TrimSpace(string(out))
+	return title
 }

@@ -723,6 +723,26 @@ cc-connect daemon install --work-dir ~/.cc-connect
 
 Optional flags: `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit). `--config` points to a config file, while `--work-dir` points to the directory containing `config.toml`.
 
+### Linux systemd: Keep service running after SSH disconnect
+
+When installed as a user-level systemd service (non-root), cc-connect runs under `user@UID.service`. By default, systemd stops this service when your last login session ends (e.g., SSH disconnect). This is controlled by the "linger" setting.
+
+To keep cc-connect running persistently, enable linger for your user:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+After enabling linger, `user@UID.service` remains active even when you log out. The daemon install command will warn you if linger is not enabled.
+
+Alternatively, you can install as a system-level service (requires root):
+
+```bash
+sudo cc-connect daemon install --config ~/.cc-connect/config.toml
+```
+
+System-level services are independent of login sessions.
+
 ### Control the service
 
 ```bash

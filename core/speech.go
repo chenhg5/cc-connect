@@ -298,7 +298,9 @@ func (g *GeminiSTT) Transcribe(ctx context.Context, audio []byte, format string,
 
 // ConvertAudioToMP3 uses ffmpeg to convert audio from unsupported formats to mp3.
 // Returns the mp3 bytes. If ffmpeg is not installed, returns an error.
-func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
+// The ctx is honored: cancellation kills the ffmpeg subprocess, matching the
+// behavior of the other Convert* helpers in this file.
+func ConvertAudioToMP3(ctx context.Context, audio []byte, srcFormat string) ([]byte, error) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable voice message support")
@@ -306,7 +308,7 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 
 	var cmd *exec.Cmd
 	if srcFormat == "amr" || srcFormat == "silk" {
-		cmd = exec.Command(ffmpegPath,
+		cmd = exec.CommandContext(ctx, ffmpegPath,
 			"-f", srcFormat,
 			"-i", "pipe:0",
 			"-f", "mp3",
@@ -316,7 +318,7 @@ func ConvertAudioToMP3(audio []byte, srcFormat string) ([]byte, error) {
 			"pipe:1",
 		)
 	} else {
-		cmd = exec.Command(ffmpegPath,
+		cmd = exec.CommandContext(ctx, ffmpegPath,
 			"-i", "pipe:0",
 			"-f", "mp3",
 			"-ac", "1",
@@ -518,7 +520,7 @@ func TranscribeAudio(ctx context.Context, stt SpeechToText, audio *AudioAttachme
 
 	if NeedsConversion(format) {
 		slog.Debug("speech: converting audio", "from", format, "to", "mp3")
-		converted, err := ConvertAudioToMP3(data, format)
+		converted, err := ConvertAudioToMP3(ctx, data, format)
 		if err != nil {
 			return "", err
 		}

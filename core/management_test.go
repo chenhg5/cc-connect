@@ -346,6 +346,45 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 }
 
+// TestMgmt_SessionsConcurrentNameWriteAndList pins the bug where the
+// POST /sessions handler wrote s.Name = body.Name directly without
+// holding s.mu, while the GET handler reads s.Name through s.mu.Lock().
+// Run with -race to detect the data race; with the production fix
+// the test stays clean.
+func TestMgmt_SessionsConcurrentNameWriteAndList(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	// Pre-create the session so both handlers operate on the same instance.
+	e.sessions.GetOrCreateActive("user1")
+
+	listURL := ts.URL + "/api/v1/projects/test-project/sessions"
+	postURL := listURL
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := "a"
+			if i%2 == 0 {
+				name = "b"
+			}
+			_ = mgmtPost(t, postURL, "tok", map[string]string{
+				"session_key": "user1",
+				"name":        name,
+			})
+		}(i)
+	}
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = mgmtGet(t, listURL, "tok")
+		}()
+	}
+	wg.Wait()
+}
+
 func TestMgmt_SessionDelete(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 
@@ -1520,9 +1559,10 @@ func TestMgmt_CronPatch(t *testing.T) {
 
 	// Add a job
 	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
-		"project":   "test-project",
-		"cron_expr": "0 9 * * *",
-		"prompt":    "hello",
+		"project":     "test-project",
+		"session_key": "test:chan:user",
+		"cron_expr":   "0 9 * * *",
+		"prompt":      "hello",
 	})
 	if !r.OK {
 		t.Fatalf("cron add failed: %s", r.Error)
@@ -2613,5 +2653,47 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 	r := mgmtDelete(t, ts.URL+"/api/v1/providers/cc-switch", "tok")
 	if r.OK {
 		t.Fatal("expected DELETE on cc-switch to fail")
+	}
+}
+
+// TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL is a regression test for a
+// nil-pointer panic in handleSetupWeixinPoll. The handler did
+// `u, _ := url.Parse(apiBase + "/")` and then immediately called
+// `u.JoinPath(...)`. For inputs like "://" or "%zz", url.Parse returns a nil
+// URL plus an error; the discarded error meant the next line crashed the
+// management server with `runtime error: invalid memory address or nil
+// pointer dereference`. handleSetupWeixinBegin already validated this same
+// field; this test pins the symmetric handling here.
+func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
+	mgmt := NewManagementServer(0, "", nil)
+
+	for _, bad := range []string{"://", "://malformed", "%zz"} {
+		body := map[string]any{
+			"qr_key":  "abc",
+			"api_url": bad,
+		}
+		buf := new(bytes.Buffer)
+		if err := json.NewEncoder(buf).Encode(body); err != nil {
+			t.Fatalf("encode body: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/weixin/poll", buf)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		// Recover any panic so the test reports a meaningful failure rather
+		// than crashing the test binary, then assert the handler returned a
+		// 4xx (not 5xx and not a panic) for the bad input.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("handleSetupWeixinPoll panicked on api_url=%q: %v", bad, r)
+				}
+			}()
+			mgmt.handleSetupWeixinPoll(w, req)
+		}()
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("api_url=%q: status=%d, want %d (body=%s)", bad, w.Code, http.StatusBadRequest, w.Body.String())
+		}
 	}
 }

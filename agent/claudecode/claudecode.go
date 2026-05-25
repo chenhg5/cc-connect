@@ -92,6 +92,13 @@ var claudeProviderManagedEnvVars = map[string]struct{}{
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+
+	// Provider-specific base URL env vars for thinking rewrite proxy routing.
+	// These are set by cc-connect when thinking override is needed for
+	// Bedrock/Vertex/Foundry providers that don't use base_url config.
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
@@ -409,6 +416,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	maxTok := a.maxContextTokens
 	model := a.model
 	effort := a.reasoningEffort
+	workDir := a.workDir
+	mode := a.mode
 	extraEnv := a.runtimeEnvLocked()
 
 	activeIdx := a.activeIdx
@@ -432,7 +441,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, a.mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -441,7 +450,10 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
 	}
 
-	absWorkDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
@@ -494,7 +506,10 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
 	}
-	absWorkDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
@@ -507,6 +522,19 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
 	return os.Remove(path)
+}
+
+// extractStringContent attempts to extract a plain string from a json.RawMessage.
+// Returns empty string if the raw message is not a JSON string.
+func extractStringContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 func scanSessionMeta(path string) (string, int) {
@@ -526,7 +554,7 @@ func scanSessionMeta(path string) (string, int) {
 		var entry struct {
 			Type    string `json:"type"`
 			Message struct {
-				Content string `json:"content"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
@@ -534,8 +562,10 @@ func scanSessionMeta(path string) (string, int) {
 		}
 		if entry.Type == "user" || entry.Type == "assistant" {
 			count++
-			if entry.Type == "user" && entry.Message.Content != "" {
-				summary = entry.Message.Content
+			if entry.Type == "user" {
+				if s := extractStringContent(entry.Message.Content); s != "" {
+					summary = s
+				}
 			}
 		}
 	}
@@ -559,7 +589,10 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 	if err != nil {
 		return nil, err
 	}
-	absWorkDir, _ := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
 	projectDir := findProjectDir(homeDir, absWorkDir)
 	if projectDir == "" {
 		return nil, fmt.Errorf("claudecode: project dir not found")
@@ -833,9 +866,12 @@ func (a *Agent) GetDisallowedTools() []string {
 // ── CommandProvider implementation ────────────────────────────
 
 func (a *Agent) CommandDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	dirs := []string{filepath.Join(absDir, ".claude", "commands")}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -847,9 +883,12 @@ func (a *Agent) CommandDirs() []string {
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return appendProjectClaudeSkillDirs(absDir, claudeConfigHomeDir())
 }
@@ -943,9 +982,12 @@ func uniqueSkillDirs(paths []string) []string {
 // ── MemoryFileProvider implementation ─────────────────────────
 
 func (a *Agent) ProjectMemoryFile() string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return filepath.Join(absDir, "CLAUDE.md")
 }
@@ -1014,6 +1056,10 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 //  2. If the provider sets thinking (e.g. "disabled"), a local reverse proxy
 //     rewrites the thinking parameter for compatibility with providers that
 //     don't support adaptive thinking.
+//
+// For env-only providers (Bedrock, Vertex, Foundry) that don't set base_url
+// but use CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY env vars, the thinking
+// rewrite proxy routes via ANTHROPIC_*_BASE_URL override env vars.
 func (a *Agent) providerEnvLocked() []string {
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
 		a.stopProviderProxyLocked()
@@ -1043,7 +1089,32 @@ func (a *Agent) providerEnvLocked() []string {
 			env = append(env, "ANTHROPIC_MODEL="+p.Model)
 		}
 	} else {
-		a.stopProviderProxyLocked()
+		// Check for env-only providers (Bedrock, Vertex, Foundry) that need thinking rewrite.
+		if p.Thinking != "" {
+			providerType := detectEnvOnlyProviderType(p.Env)
+			if providerType != "" {
+				targetURL := getDefaultEndpointForProviderType(providerType)
+				if targetURL != "" {
+					if err := a.ensureProviderProxyLocked(targetURL, p.Thinking); err != nil {
+						slog.Error("providerproxy: failed to start for "+providerType, "error", err)
+						a.stopProviderProxyLocked()
+					} else {
+						// Route the provider-specific requests through our proxy.
+						baseURLEnvVar := getBaseURLEnvVarForProviderType(providerType)
+						env = append(env, baseURLEnvVar+"="+a.proxyLocalURL)
+						env = append(env, "NO_PROXY=127.0.0.1")
+						slog.Info("claudecode: thinking rewrite proxy enabled for "+providerType,
+							"target", targetURL, "local", a.proxyLocalURL, "thinking", p.Thinking)
+					}
+				} else {
+					a.stopProviderProxyLocked()
+				}
+			} else {
+				a.stopProviderProxyLocked()
+			}
+		} else {
+			a.stopProviderProxyLocked()
+		}
 		if p.APIKey != "" {
 			env = append(env, "ANTHROPIC_API_KEY="+p.APIKey)
 		}
@@ -1121,6 +1192,59 @@ func (a *Agent) stopProviderProxyLocked() {
 		a.providerProxy.Close()
 		a.providerProxy = nil
 		a.proxyLocalURL = ""
+	}
+}
+
+// detectEnvOnlyProviderType checks if the provider uses Bedrock, Vertex, or Foundry
+// via environment variables (without base_url). Returns "bedrock", "vertex", "foundry",
+// or empty string if not detected.
+func detectEnvOnlyProviderType(env map[string]string) string {
+	if env == nil {
+		return ""
+	}
+	if env["CLAUDE_CODE_USE_BEDROCK"] == "1" {
+		return "bedrock"
+	}
+	if env["CLAUDE_CODE_USE_VERTEX"] == "1" {
+		return "vertex"
+	}
+	if env["CLAUDE_CODE_USE_FOUNDRY"] == "1" {
+		return "foundry"
+	}
+	return ""
+}
+
+// getDefaultEndpointForProviderType returns the default API endpoint for Bedrock/Vertex/Foundry.
+// Used as the proxy target when thinking rewrite is needed for env-only providers.
+func getDefaultEndpointForProviderType(providerType string) string {
+	switch providerType {
+	case "bedrock":
+		// Bedrock cross-region inference endpoint; works with AWS SDK auth.
+		// User can override region via AWS_REGION or CLOUD_ML_REGION env var.
+		return "https://bedrock-runtime.us-east-1.amazonaws.com"
+	case "vertex":
+		// Vertex AI endpoint; requires CLOUD_ML_REGION env var for region.
+		return "https://us-east1-aiplatform.googleapis.com"
+	case "foundry":
+		// Anthropic Foundry internal endpoint (rarely used externally).
+		return "https://api.anthropic.com"
+	default:
+		return ""
+	}
+}
+
+// getBaseURLEnvVarForProviderType returns the environment variable name that
+// Claude Code uses to override the base URL for Bedrock/Vertex/Foundry providers.
+func getBaseURLEnvVarForProviderType(providerType string) string {
+	switch providerType {
+	case "bedrock":
+		return "ANTHROPIC_BEDROCK_BASE_URL"
+	case "vertex":
+		return "ANTHROPIC_VERTEX_BASE_URL"
+	case "foundry":
+		return "ANTHROPIC_FOUNDRY_BASE_URL"
+	default:
+		return ""
 	}
 }
 

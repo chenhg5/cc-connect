@@ -111,6 +111,15 @@ func (s *Session) GetAgentSessionID() string {
 	return s.AgentSessionID
 }
 
+// SetName atomically updates the session's display name. The management
+// API used to write s.Name directly, which raced with GetName / listing
+// handlers that read it under s.mu.
+func (s *Session) SetName(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Name = name
+}
+
 // GetName atomically reads the session name.
 func (s *Session) GetName() string {
 	s.mu.Lock()
@@ -171,6 +180,13 @@ func (s *Session) ClearHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.History = nil
+}
+
+// HistoryLen returns the current number of history entries.
+func (s *Session) HistoryLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.History)
 }
 
 // GetHistory returns the last n entries. If n <= 0, returns all.

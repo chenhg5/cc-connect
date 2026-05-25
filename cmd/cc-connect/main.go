@@ -274,20 +274,16 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
-		showCtx := true
-		if proj.ShowContextIndicator != nil {
-			showCtx = *proj.ShowContextIndicator
-		}
+		// Wire display settings including show_context_indicator and reply_footer
+		// Global [display] config can be overridden by project-level settings
+		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
-		showFooter := true
-		if proj.ReplyFooter != nil {
-			showFooter = *proj.ReplyFooter
-		}
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
+		engine.SetDataDir(cfg.DataDir)
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -302,6 +298,9 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.WorkspaceInitAllowLocalPaths != nil {
+				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
+			}
 			idleMins := cfg.WorkspaceIdleTimeoutMins
 			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
 				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
@@ -315,6 +314,9 @@ func main() {
 				} else {
 					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
 				}
+			}
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
 			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
@@ -399,7 +401,7 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			mode, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, &proj)
+			mode, tm, tool, tmlen, toollen, _, _ := config.EffectiveDisplay(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
 				Mode:             mode,
 				CardMode:         config.EffectiveCardMode(cfg, &proj),
@@ -640,6 +642,16 @@ func main() {
 					ttsCfg.Provider = "minimax"
 				} else {
 					slog.Warn("tts: minimax provider enabled but api_key is empty")
+				}
+			case "mimo":
+				apiKey := cfg.TTS.Mimo.APIKey
+				baseURL := cfg.TTS.Mimo.BaseURL
+				model := cfg.TTS.Mimo.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewMimoTTS(apiKey, baseURL, model, nil)
+					ttsCfg.Provider = "mimo"
+				} else {
+					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
 				voice := cfg.TTS.Voice
@@ -1433,7 +1445,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	mode, tm, tool, tmlen, toollen := config.EffectiveDisplay(cfg, proj)
+	mode, tm, tool, tmlen, toollen, showCtx, showFooter := config.EffectiveDisplay(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
 		Mode:             mode,
 		CardMode:         config.EffectiveCardMode(cfg, proj),
@@ -1443,6 +1455,10 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ToolMessages:     tool,
 	})
 	result.DisplayUpdated = true
+
+	// Wire show_context_indicator and reply_footer from display config
+	engine.SetShowContextIndicator(showCtx)
+	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1464,17 +1480,6 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
-
-	showCtx := true
-	if proj.ShowContextIndicator != nil {
-		showCtx = *proj.ShowContextIndicator
-	}
-	engine.SetShowContextIndicator(showCtx)
-	showFooter := true
-	if proj.ReplyFooter != nil {
-		showFooter = *proj.ReplyFooter
-	}
-	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload instant reply
 	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {

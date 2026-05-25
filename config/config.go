@@ -175,12 +175,14 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode             *string `toml:"mode"`              // "full" (default), "compact", or "quiet"
-	CardMode         *string `toml:"card_mode"`         // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages *bool   `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
+	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
+	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
+	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -266,8 +268,8 @@ type SpeechConfig struct {
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
 	Enabled    bool   `toml:"enabled"`
-	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak" | "pico" | "edge"
-	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh")
+	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
 	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
 	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
 	OpenAI     struct {
@@ -285,6 +287,11 @@ type TTSConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"minimax"`
+	Mimo struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"mimo"`
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.
@@ -322,13 +329,19 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name         string             `toml:"name"`
-	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
-	Agent        AgentConfig        `toml:"agent"`
-	Platforms    []PlatformConfig   `toml:"platforms"`
-	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
-	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	Name    string `toml:"name"`
+	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
+	SkipGit *bool  `toml:"skip_git,omitempty"`
+	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
+	// init flow to bind existing local directories. Default false keeps init
+	// limited to git URLs; use /workspace bind or /workspace route for explicit
+	// local bindings.
+	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
+	Agent                        AgentConfig        `toml:"agent"`
+	Platforms                    []PlatformConfig   `toml:"platforms"`
+	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
+	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
@@ -636,7 +649,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
 		projDisp = proj.Display
@@ -711,6 +724,29 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		cfg.Display.ToolMaxLen,
 		500,
 	)
+
+	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
+	if proj != nil && proj.ShowContextIndicator != nil {
+		showContextIndicator = *proj.ShowContextIndicator
+	} else if projDisp != nil && projDisp.ShowContextIndicator != nil {
+		showContextIndicator = *projDisp.ShowContextIndicator
+	} else if cfg.Display.ShowContextIndicator != nil {
+		showContextIndicator = *cfg.Display.ShowContextIndicator
+	} else {
+		showContextIndicator = true
+	}
+
+	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default true
+	if proj != nil && proj.ReplyFooter != nil {
+		replyFooter = *proj.ReplyFooter
+	} else if projDisp != nil && projDisp.ReplyFooter != nil {
+		replyFooter = *projDisp.ReplyFooter
+	} else if cfg.Display.ReplyFooter != nil {
+		replyFooter = *cfg.Display.ReplyFooter
+	} else {
+		replyFooter = true
+	}
+
 	return
 }
 

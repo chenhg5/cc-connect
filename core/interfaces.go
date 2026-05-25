@@ -464,12 +464,27 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+type SessionTitleProvider interface {
+	GetSessionTitle(sessionID string) string
+}
+
 // WorkDirSwitcher is an optional interface for agents that support runtime
 // work directory switching. The change takes effect on the next session start;
 // the current running session is terminated automatically by the engine.
 type WorkDirSwitcher interface {
 	SetWorkDir(dir string)
 	GetWorkDir() string
+}
+
+// AgentOptsProvider is an optional interface for agents that need to carry
+// their full configuration options when the engine clones a per-workspace
+// agent instance in multi-workspace mode. The engine merges the returned map
+// into the workspace opts before calling the agent factory, giving workspace
+// agents access to agent-specific options (e.g. "session" for the tmux agent)
+// that are not covered by the standard GetModel / GetMode accessors.
+// work_dir is always overridden by the engine and must not be returned here.
+type AgentOptsProvider interface {
+	BaseOpts() map[string]any
 }
 
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.

@@ -85,6 +85,127 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 	}
 }
 
+func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
+	const appID = "cli_quote_image"
+	const appSecret = "secret-quote-image"
+	const parentMessageID = "om_parent_image"
+	const imageKey = "img_parent"
+
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+
+	tests := []struct {
+		name    string
+		msgType string
+		content string
+	}{
+		{
+			name:    "text reply",
+			msgType: "text",
+			content: `{"text":"这是什么图"}`,
+		},
+		{
+			name:    "post reply",
+			msgType: "post",
+			content: `{"content":[[{"tag":"text","text":"这是什么图"}]]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan *core.Message, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+				case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID:
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{
+						"code": 0,
+						"msg":  "success",
+						"data": map[string]any{
+							"items": []map[string]any{
+								{
+									"msg_type":  "image",
+									"parent_id": "",
+									"sender": map[string]any{
+										"id":          "",
+										"sender_type": "user",
+									},
+									"body": map[string]any{
+										"content": `{"image_key":"` + imageKey + `"}`,
+									},
+								},
+							},
+						},
+					})
+				case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID+"/resources/"+imageKey:
+					if r.URL.Query().Get("type") != "image" {
+						t.Fatalf("resource type = %q, want image", r.URL.Query().Get("type"))
+					}
+					w.Header().Set("Content-Type", "image/png")
+					if _, err := w.Write(imageData); err != nil {
+						t.Fatalf("write image: %v", err)
+					}
+				default:
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(_ core.Platform, msg *core.Message) {
+					got <- msg
+				},
+			}
+
+			p.dispatchMessage(
+				context.Background(),
+				tc.msgType,
+				tc.content,
+				nil,
+				"om_child",
+				"feishu:oc_chat:ou_user",
+				"",
+				"",
+				replyContext{messageID: "om_child", sessionKey: "feishu:oc_chat:ou_user"},
+				parentMessageID,
+			)
+
+			select {
+			case msg := <-got:
+				if msg.Content != "这是什么图" {
+					t.Fatalf("Content = %q, want question text", msg.Content)
+				}
+				if !strings.Contains(msg.ExtraContent, "[image]") {
+					t.Fatalf("ExtraContent = %q, want quoted image marker", msg.ExtraContent)
+				}
+				if len(msg.Images) != 1 {
+					t.Fatalf("len(Images) = %d, want 1", len(msg.Images))
+				}
+				if string(msg.Images[0].Data) != string(imageData) {
+					t.Fatal("quoted image data did not match downloaded resource")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for dispatched message")
+			}
+		})
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"

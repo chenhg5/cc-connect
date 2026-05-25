@@ -30,6 +30,7 @@ type piSession struct {
 	mode      string
 	thinking  string // reasoning effort level for --thinking flag
 	extraEnv  []string
+	attachDir string
 	events    chan core.Event
 	sessionID atomic.Value // stores string
 	ctx       context.Context
@@ -50,9 +51,11 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 		mode:     mode,
 		thinking: thinking,
 		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		attachDir: filepath.Join(workDir, ".cc-connect", "attachments",
+			fmt.Sprintf("pi_%d", time.Now().UnixNano())),
+		events: make(chan core.Event, 64),
+		ctx:    sessionCtx,
+		cancel: cancel,
 	}
 	s.alive.Store(true)
 
@@ -64,16 +67,17 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 }
 
 func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	// Clean up attachments from previous turns.
-	cleanAttachments(s.workDir)
+	// Keep attachments isolated per session so concurrent sessions in the same
+	// workDir cannot delete files that another Pi process still references.
+	cleanAttachments(s.attachDir)
 
 	// Save all attachments to disk — pi reads them via @file syntax.
 	var atFiles []string
 	if len(images) > 0 {
-		atFiles = append(atFiles, saveImagesToDisk(s.workDir, images)...)
+		atFiles = append(atFiles, saveImagesToDisk(s.attachDir, images)...)
 	}
 	if len(files) > 0 {
-		atFiles = append(atFiles, core.SaveFilesToDisk(s.workDir, files)...)
+		atFiles = append(atFiles, saveFilesToDisk(s.attachDir, files)...)
 	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
@@ -397,32 +401,33 @@ func (s *piSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(s.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("piSession: close timed out, abandoning wg.Wait")
 	}
-	close(s.events)
 	return nil
 }
 
-// cleanAttachments removes files from the attachments directory to avoid
+// cleanAttachments removes this session's attachment directory to avoid
 // accumulating files across turns.
-func cleanAttachments(workDir string) {
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
-	entries, err := os.ReadDir(attachDir)
-	if err != nil {
-		return // directory may not exist yet
+func cleanAttachments(attachDir string) {
+	if attachDir == "" {
+		return
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			os.Remove(filepath.Join(attachDir, e.Name()))
-		}
+	if err := os.RemoveAll(attachDir); err != nil {
+		slog.Warn("piSession: failed to clean attachments dir", "dir", attachDir, "error", err)
 	}
 }
 
-// saveImagesToDisk saves image attachments to workDir/.cc-connect/attachments/
+// saveImagesToDisk saves image attachments to attachDir
 // and returns the list of absolute file paths.
-func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+//
+// img.FileName originates from IM upload metadata and is treated as
+// untrusted: directory components are stripped (both `/` and `\`, the
+// latter so Linux strips Windows-style paths too) before joining into
+// attachDir. Without this, FileName="../../escape.png" wrote to
+// workDir/escape.png — outside the intended attachments directory.
+func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string {
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Error("piSession: failed to create attachments dir", "error", err)
 		return nil
@@ -439,7 +444,7 @@ func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
 		case "image/webp":
 			ext = ".webp"
 		}
-		fname := img.FileName
+		fname := sanitizePiAttachmentName(img.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("image_%d_%d%s", time.Now().UnixMilli(), i, ext)
 		}
@@ -451,6 +456,43 @@ func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
 		paths = append(paths, fpath)
 	}
 	return paths
+}
+
+func saveFilesToDisk(attachDir string, files []core.FileAttachment) []string {
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Error("piSession: failed to create attachments dir", "error", err)
+		return nil
+	}
+
+	paths := make([]string, 0, len(files))
+	for i, f := range files {
+		fname := sanitizePiAttachmentName(f.FileName)
+		if fname == "" {
+			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
+		}
+		fpath := filepath.Join(attachDir, fname)
+		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
+			slog.Error("piSession: save file failed", "error", err)
+			continue
+		}
+		paths = append(paths, fpath)
+	}
+	return paths
+}
+
+// sanitizePiAttachmentName reduces a user-supplied attachment filename to a
+// safe basename for joining into an attachment directory. Strips directory
+// components (handling both `/` and `\` so an attacker can't bypass via
+// Windows-style separators on Linux), and rejects parent / current-directory
+// references so the caller's empty-name fallback can substitute a generated
+// name. Mirrors core.SaveFilesToDisk's sanitization.
+func sanitizePiAttachmentName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
 }
 
 func truncStr(s string, maxRunes int) string {

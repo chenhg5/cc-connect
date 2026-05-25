@@ -299,7 +299,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -412,7 +412,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
