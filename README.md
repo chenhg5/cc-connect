@@ -389,6 +389,49 @@ reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 
 The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
 
+#### Idle session ask mode
+
+When a session has been idle for `reset_on_idle_mins`, cc-connect now **asks** you
+before rotating to a new session — rather than silently closing the old one.
+
+**Why this change?** Long-running sessions accumulate "context drift": failed
+commands, debug noise, and off-topic tangents get re-ingested via `--continue`
+every turn, slowly pulling the model's attention away from your actual goal.
+Starting fresh keeps the context sharp. But the model can also lose track if
+you are mid-debugging — so instead of guessing, we ask you. **If the next
+question has no continuity with the previous one, we strongly recommend
+starting a fresh session.**
+
+**Three modes** (set per project via `reset_on_idle_mode`):
+
+| Mode  | Behaviour |
+|-------|-----------|
+| `ask` (default) | Send a confirmation card: 🆕 Start fresh session, or 📂 Keep this session |
+| `auto` | Legacy behaviour: silently rotate (use this if you don't want prompts) |
+| `off`  | Disable idle reset entirely |
+
+**Configuration example** (in `config.toml`):
+
+```toml
+[[projects]]
+name = "my-project"
+# ... existing fields ...
+
+reset_on_idle_mins = 60                      # threshold (existing field)
+reset_on_idle_mode = "ask"                   # new: "ask" / "auto" / "off"
+reset_on_idle_confirm_timeout_sec = 30       # new: wait this long for user response, then default to keep
+```
+
+**Platform support**: rich card prompts are supported on **Feishu (Lark)** today.
+Other platforms (Telegram / Discord / Slack / DingTalk / WeCom / etc.) automatically
+fall back to `auto` mode with an `idle_confirm_degraded_to_auto` slog entry — no
+extra configuration required.
+
+**Rollback**: if the new prompts feel intrusive, set `reset_on_idle_mode = "auto"`
+to restore byte-equivalent pre-change behaviour. No code rollback needed. See
+[`docs/usage.md`](./docs/usage.md#session-management) for the full reference,
+including timeout / `/switch` interaction and slog event glossary.
+
 ### 🛡️ OS-User Isolation (`run_as_user`)
 
 On Linux/macOS, a project can spawn its agent under a different Unix

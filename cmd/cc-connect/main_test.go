@@ -98,6 +98,81 @@ func TestResolveResetOnIdle(t *testing.T) {
 	}
 }
 
+func TestResolveResetOnIdleMode_Default(t *testing.T) {
+	got, defaulted := resolveResetOnIdleMode(nil)
+	if got != "ask" {
+		t.Errorf("mode = %q, want %q (defaultResetOnIdleMode)", got, "ask")
+	}
+	if !defaulted {
+		t.Errorf("defaulted = false, want true when configured is nil")
+	}
+}
+
+func TestResolveResetOnIdleMode_Configured(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"auto", "auto"},
+		{"off", "off"},
+		{"ask", "ask"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, defaulted := resolveResetOnIdleMode(strPtr(tc.input))
+			if got != tc.input {
+				t.Errorf("mode = %q, want %q", got, tc.input)
+			}
+			if defaulted {
+				t.Errorf("defaulted = true, want false when configured is %q", tc.input)
+			}
+		})
+	}
+}
+
+func TestResolveResetOnIdleConfirmTimeout_Default(t *testing.T) {
+	got, defaulted := resolveResetOnIdleConfirmTimeout(nil)
+	want := time.Duration(defaultResetOnIdleConfirmTimeoutSec) * time.Second
+	if got != want {
+		t.Errorf("timeout = %v, want %v (default)", got, want)
+	}
+	if !defaulted {
+		t.Errorf("defaulted = false, want true when configured is nil")
+	}
+	if want != 30*time.Second {
+		t.Errorf("defaultResetOnIdleConfirmTimeoutSec = %v, want 30 seconds", want)
+	}
+}
+
+func TestResolveResetOnIdleConfirmTimeout_Configured(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	cases := []struct {
+		name  string
+		input int
+		want  time.Duration
+	}{
+		{"sixty_sec", 60, 60 * time.Second},
+		{"min_allowed", 5, 5 * time.Second},
+		{"max_allowed", 600, 600 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, defaulted := resolveResetOnIdleConfirmTimeout(intPtr(tc.input))
+			if got != tc.want {
+				t.Errorf("timeout = %v, want %v", got, tc.want)
+			}
+			if defaulted {
+				t.Errorf("defaulted = true, want false when configured is %d", tc.input)
+			}
+		})
+	}
+}
+
 func TestApplyProjectStateOverride(t *testing.T) {
 	baseDir := t.TempDir()
 	overrideDir := filepath.Join(t.TempDir(), "override")

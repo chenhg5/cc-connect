@@ -1413,3 +1413,78 @@ func mustNewPlatform(t *testing.T) *Platform {
 	}
 	return p
 }
+
+// TestInteractivePlatform_CardAction_IdlePrefixForwardsToHandler verifies the
+// T-006 feishu wiring: card.action.trigger payloads with action value
+// starting with "idle:" are forwarded verbatim to the registered handler as
+// a *core.Message whose Content equals the action value. Mirrors the askq:
+// dispatch pattern. AC16 coverage.
+func TestInteractivePlatform_CardAction_IdlePrefixForwardsToHandler(t *testing.T) {
+	cases := []struct {
+		name   string
+		action string
+	}{
+		{"keep", "idle:keep"},
+		{"rotate", "idle:rotate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			ip, ok := platformAny.(*interactivePlatform)
+			if !ok {
+				t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+			}
+
+			msgCh := make(chan *core.Message, 1)
+			platCh := make(chan core.Platform, 1)
+			ip.handler = func(p core.Platform, msg *core.Message) {
+				platCh <- p
+				msgCh <- msg
+			}
+
+			resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+				Event: &callback.CardActionTriggerRequest{
+					Operator: &callback.Operator{OpenID: "ou_test_user"},
+					Action:   &callback.CallBackAction{Value: map[string]any{"action": tc.action}},
+					Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("onCardAction() error = %v", err)
+			}
+			// We deliberately do NOT update the card in place; expect an
+			// empty (non-nil) response so the SDK acks the click without
+			// mutating the rendered card.
+			if resp == nil {
+				t.Fatal("onCardAction returned nil response, want empty CardActionTriggerResponse")
+			}
+			if resp.Card != nil {
+				t.Fatalf("idle: response should not replace the card, got %#v", resp.Card)
+			}
+
+			select {
+			case got := <-msgCh:
+				if got.Content != tc.action {
+					t.Fatalf("dispatched Content = %q, want %q", got.Content, tc.action)
+				}
+				if got.Platform != ip.platformName {
+					t.Fatalf("dispatched Platform = %q, want %q", got.Platform, ip.platformName)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("idle:%s did not reach handler", tc.name)
+			}
+
+			select {
+			case dispatchedPlat := <-platCh:
+				if _, ok := dispatchedPlat.(core.CardSender); !ok {
+					t.Fatalf("dispatched platform type = %T, want core.CardSender", dispatchedPlat)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("expected dispatched platform on platCh")
+			}
+		})
+	}
+}

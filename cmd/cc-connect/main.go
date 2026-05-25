@@ -53,6 +53,45 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
 }
 
+// defaultResetOnIdleMode is applied when a project does not set
+// reset_on_idle_mode. Default "ask" reflects the post-amend user decision: the
+// new behaviour is the default; existing deployments upgrade silently.
+// Operators may set "auto" to restore pre-change behaviour as a rollback
+// safeguard (see requirement.md §2.3 / AC8). Valid values:
+//
+//	"off"  – disable idle reset entirely (equivalent to reset_on_idle_mins=0)
+//	"auto" – legacy behaviour: silently rotate to a new session
+//	"ask"  – send a confirm card and wait for the user's explicit choice
+const defaultResetOnIdleMode = "ask"
+
+// defaultResetOnIdleConfirmTimeoutSec is the default ask-mode timeout in
+// seconds. Applied when a project does not set
+// reset_on_idle_confirm_timeout_sec. After this many seconds without a user
+// click, ask mode resolves to "keep this session" (the safe default).
+const defaultResetOnIdleConfirmTimeoutSec = 30
+
+// resolveResetOnIdleMode returns the configured mode for a project, applying
+// defaultResetOnIdleMode when the field is unset. The second return value
+// indicates whether the default was applied, so the caller can emit a one-time
+// nudge log directing users to the docs.
+func resolveResetOnIdleMode(configured *string) (string, bool) {
+	if configured != nil {
+		return *configured, false
+	}
+	return defaultResetOnIdleMode, true
+}
+
+// resolveResetOnIdleConfirmTimeout returns the configured ask-mode timeout for
+// a project (converted from seconds to time.Duration), applying the default
+// when unset. The second return value indicates whether the default was
+// applied.
+func resolveResetOnIdleConfirmTimeout(configured *int) (time.Duration, bool) {
+	if configured != nil {
+		return time.Duration(*configured) * time.Second, false
+	}
+	return time.Duration(defaultResetOnIdleConfirmTimeoutSec) * time.Second, true
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -546,6 +585,18 @@ func main() {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
+		mode, modeDefaulted := resolveResetOnIdleMode(proj.ResetOnIdleMode)
+		engine.SetResetOnIdleMode(mode)
+		if modeDefaulted {
+			slog.Info("project: reset_on_idle_mode not set, applying default — set reset_on_idle_mode = \"auto\" to restore legacy behaviour, see docs/usage.md",
+				"project", proj.Name, "default_mode", defaultResetOnIdleMode)
+		}
+		confirmTimeout, ctDefaulted := resolveResetOnIdleConfirmTimeout(proj.ResetOnIdleConfirmTimeoutSec)
+		engine.SetResetOnIdleConfirmTimeout(confirmTimeout)
+		if ctDefaulted {
+			slog.Info("project: reset_on_idle_confirm_timeout_sec not set, applying default",
+				"project", proj.Name, "default_seconds", defaultResetOnIdleConfirmTimeoutSec)
+		}
 
 		// Wire sender injection
 		if proj.InjectSender != nil {
@@ -934,16 +985,19 @@ func main() {
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
 		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
 			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
-				Language:             u.Language,
-				AdminFrom:            u.AdminFrom,
-				DisabledCommands:     u.DisabledCommands,
-				WorkDir:              u.WorkDir,
-				Mode:                 u.Mode,
-				AgentType:            u.AgentType,
-				ShowContextIndicator: u.ShowContextIndicator,
-				ReplyFooter:          u.ReplyFooter,
-				InjectSender:         u.InjectSender,
-				PlatformAllowFrom:    u.PlatformAllowFrom,
+				Language:                     u.Language,
+				AdminFrom:                    u.AdminFrom,
+				DisabledCommands:             u.DisabledCommands,
+				WorkDir:                      u.WorkDir,
+				Mode:                         u.Mode,
+				AgentType:                    u.AgentType,
+				ShowContextIndicator:         u.ShowContextIndicator,
+				ReplyFooter:                  u.ReplyFooter,
+				InjectSender:                 u.InjectSender,
+				PlatformAllowFrom:            u.PlatformAllowFrom,
+				ResetOnIdleMins:              u.ResetOnIdleMins,
+				ResetOnIdleMode:              u.ResetOnIdleMode,
+				ResetOnIdleConfirmTimeoutSec: u.ResetOnIdleConfirmTimeoutSec,
 			})
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
@@ -1463,6 +1517,18 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	if defaulted {
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
+	}
+	mode, modeDefaulted := resolveResetOnIdleMode(proj.ResetOnIdleMode)
+	engine.SetResetOnIdleMode(mode)
+	if modeDefaulted {
+		slog.Info("project: reset_on_idle_mode not set, applying default — set reset_on_idle_mode = \"auto\" to restore legacy behaviour, see docs/usage.md",
+			"project", proj.Name, "default_mode", defaultResetOnIdleMode)
+	}
+	confirmTimeout, ctDefaulted := resolveResetOnIdleConfirmTimeout(proj.ResetOnIdleConfirmTimeoutSec)
+	engine.SetResetOnIdleConfirmTimeout(confirmTimeout)
+	if ctDefaulted {
+		slog.Info("project: reset_on_idle_confirm_timeout_sec not set, applying default",
+			"project", proj.Name, "default_seconds", defaultResetOnIdleConfirmTimeoutSec)
 	}
 
 	showCtx := true

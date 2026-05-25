@@ -62,6 +62,107 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+### Idle session ask mode (`reset_on_idle_mode`)
+
+When a session has been idle longer than `reset_on_idle_mins`, cc-connect can either silently rotate to a fresh session (legacy behaviour) or **ask** you first via a confirmation card. The default is `ask`. **If the next question has no continuity with the previous one, we strongly recommend starting a fresh session — it keeps the model's attention sharp.**
+
+**Three modes** are exposed via `reset_on_idle_mode`:
+
+| Mode  | Behaviour |
+|-------|-----------|
+| `ask` (default) | Send a confirmation card on the next inbound message; the user picks 🆕 Start fresh session (recommended) or 📂 Keep this session. The triggering message is queued and replayed once the choice is made. |
+| `auto` | Legacy behaviour: silently close the old agent session and start a fresh one. A status line `MsgSessionAutoResetIdle` is rendered after the rotation. |
+| `off`  | Disable idle reset entirely. `reset_on_idle_mins` is ignored; `--continue` always resumes the previous transcript. |
+
+**Configuration reference**:
+
+| Field | Type | Default | Range / values | Description |
+|-------|------|---------|----------------|-------------|
+| `reset_on_idle_mins` | int | 30 | 0 disables; positive = minutes | Idle threshold; how long a session must be quiet before the reset rule fires. |
+| `reset_on_idle_mode` | string | `"ask"` | `"ask"` / `"auto"` / `"off"` | Decision mode when the threshold is crossed. |
+| `reset_on_idle_confirm_timeout_sec` | int | 30 | 5–600 seconds | How long to wait for the user's button click before defaulting to keep. Ignored unless mode is `ask`. |
+
+Example:
+
+```toml
+[[projects]]
+name = "demo"
+
+reset_on_idle_mins = 60
+reset_on_idle_mode = "ask"
+reset_on_idle_confirm_timeout_sec = 30
+```
+
+#### Confirmation card layout
+
+When `mode = "ask"` triggers, the bot replies in the same chat with a rich card that has roughly this shape:
+
+- **Title** — `🔄 Continue or start fresh?`
+- **Body** — an encouraging paragraph reminding you that if the next question has no continuity with the previous one, starting a fresh session keeps the model focused.
+- **Buttons** — two side-by-side buttons:
+  - `🆕 Start fresh session` (recommended)
+  - `📂 Keep this session`
+- **Footer** — short note explaining what happens on timeout (e.g. "no choice within 30s → keep").
+
+Localised in 5 languages (English / 简体中文 / 繁體中文 / 日本語 / Español) via the `idle_confirm_*` `MsgKey` set.
+
+#### Timeout behaviour
+
+If no button is clicked within `reset_on_idle_confirm_timeout_sec` (default 30 sec), cc-connect treats the silence as **keep** and replays the queued message(s) to the existing session. A late callback that arrives after the timer fires is logged as `idle_confirm_late_callback` and otherwise ignored — the outcome is deterministic and `sync.Once`-protected, so a "double click" never produces both keep and rotate.
+
+#### `/switch` during a pending confirmation
+
+If you send `/switch <id>` while an idle-confirm card is still pending:
+
+- the pending state is immediately resolved as **keep** with `reason="switch"` (slog event `idle_confirm_user_keep` with that reason);
+- any queued messages are replayed into the **previously-active** session (not the `/switch` target), preserving original intent;
+- then the `/switch` itself executes normally and your next message goes to the new target.
+
+This matches the requirement's A-006 / AC15 contract.
+
+#### Platform support matrix
+
+| Platform | Confirmation card | Notes |
+|----------|-------------------|-------|
+| Feishu (Lark) | ✅ Supported | Implements `CardSender`; rich interactive card with two buttons. |
+| Telegram | ⚠️ Silent fallback | Auto-degrades to `auto` mode; the session rotates as before. |
+| Discord | ⚠️ Silent fallback | Same — no `CardSender` capability today. |
+| Slack | ⚠️ Silent fallback | Same. |
+| DingTalk / WeCom / WeChat / QQ / MAX / etc. | ⚠️ Silent fallback | Same. |
+
+On a non-`CardSender` platform the engine emits a one-time `idle_confirm_degraded_to_auto` slog entry (per project, per process) and then performs the same rotation `auto` mode would, so observed behaviour is byte-equivalent to pre-change. No `mode` change required in `config.toml`.
+
+#### Web management panel
+
+Both `reset_on_idle_mode` and `reset_on_idle_confirm_timeout_sec` are exposed in the project detail page of the Web admin dashboard (see [Web Admin Dashboard](#web-admin-dashboard-beta)), with inline tooltips. Saving the form patches the same `ProjectSettingsUpdate` payload as the management REST API.
+
+#### slog events glossary
+
+For observability and debugging, the following structured log events are emitted (each carries `interactive_key`, `session_id`, and other contextual fields):
+
+| Event | When it fires |
+|-------|---------------|
+| `idle_confirm_started` | Confirmation card was sent successfully; pending state recorded; timer armed. |
+| `idle_confirm_user_keep` | User pressed the "Keep" button (or `/switch` triggered an implicit keep). Includes `reason` field. |
+| `idle_confirm_user_rotate` | User pressed the "Start fresh" button; engine rotated to a new agent session. |
+| `idle_confirm_timeout_keep` | Timer fired before any button click; treated as keep. |
+| `idle_confirm_late_callback` | A button click arrived after the state was already resolved (by timeout or peer click); ignored. Useful for diagnosing UI double-clicks. |
+| `idle_confirm_queue_appended` | A new inbound message arrived while the confirmation was pending; queued for replay. |
+| `idle_confirm_degraded_to_auto` | Triggered on a non-`CardSender` platform; engine fell through to legacy auto-rotate. |
+| `idle_confirm_card_send_failed` | The Feishu card send returned an error; engine fell back to legacy auto-rotate to avoid stalling the user. |
+
+#### Rollback
+
+If the ask-mode prompts feel intrusive — for example on a low-traffic project where idle is the norm — set:
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mode = "auto"
+```
+
+…and restart cc-connect. The pre-change byte-equivalent behaviour returns immediately. No code rollback or downgrade is required.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.

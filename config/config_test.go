@@ -1511,6 +1511,152 @@ func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	}
 }
 
+// resetOnIdleProject builds a minimal-valid project with reset_on_idle_mode and
+// reset_on_idle_confirm_timeout_sec set from pointers (any may be nil).
+func resetOnIdleProject(mode *string, timeoutSec *int) ProjectConfig {
+	p := validProject("demo")
+	p.ResetOnIdleMode = mode
+	p.ResetOnIdleConfirmTimeoutSec = timeoutSec
+	return p
+}
+
+func TestValidateProjects_ResetOnIdleMode_Valid(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	cases := []struct {
+		input         string
+		wantCanonical string
+	}{
+		{"off", "off"},
+		{"auto", "auto"},
+		{"ask", "ask"},
+		{"OFF", "off"},
+		{"Auto", "auto"},
+		{"ASK", "ask"},
+		{" ask ", "ask"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			cfg := Config{Projects: []ProjectConfig{resetOnIdleProject(strPtr(tc.input), nil)}}
+			if err := cfg.validate(); err != nil {
+				t.Fatalf("validate() unexpected error for %q: %v", tc.input, err)
+			}
+			got := cfg.Projects[0].ResetOnIdleMode
+			if got == nil {
+				t.Fatalf("ResetOnIdleMode is nil after validate(); want %q", tc.wantCanonical)
+			}
+			if *got != tc.wantCanonical {
+				t.Fatalf("ResetOnIdleMode = %q, want %q (canonical form must be lowercase, trimmed)", *got, tc.wantCanonical)
+			}
+		})
+	}
+}
+
+func TestValidateProjects_ResetOnIdleMode_Invalid(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"unknown_word", "invalid"},
+		{"close_match_long", "AUTOMATIC"},
+		{"empty_string", ""},
+		{"whitespace_only", "   "},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Projects: []ProjectConfig{resetOnIdleProject(strPtr(tc.input), nil)}}
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("validate() expected error for %q, got nil", tc.input)
+			}
+			if !strings.Contains(err.Error(), "must be one of: auto, ask, off") {
+				t.Fatalf("error = %q, want substring %q", err.Error(), "must be one of: auto, ask, off")
+			}
+		})
+	}
+}
+
+func TestValidateProjects_ResetOnIdleConfirmTimeoutSec_Range(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	cases := []struct {
+		name     string
+		value    int
+		wantPass bool
+	}{
+		{"below_min", 4, false},
+		{"at_min", 5, true},
+		{"typical", 30, true},
+		{"at_max", 600, true},
+		{"above_max", 601, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Projects: []ProjectConfig{resetOnIdleProject(nil, intPtr(tc.value))}}
+			err := cfg.validate()
+			if tc.wantPass {
+				if err != nil {
+					t.Fatalf("validate(%d) unexpected error: %v", tc.value, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validate(%d) expected error, got nil", tc.value)
+			}
+			if !strings.Contains(err.Error(), "must be between 5 and 600") {
+				t.Fatalf("error = %q, want substring %q", err.Error(), "must be between 5 and 600")
+			}
+		})
+	}
+}
+
+func TestValidateProjects_ResetOnIdleConfirmTimeoutSec_Unset(t *testing.T) {
+	cfg := Config{Projects: []ProjectConfig{resetOnIdleProject(nil, nil)}}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate() unexpected error when reset_on_idle_confirm_timeout_sec is unset: %v", err)
+	}
+}
+
+func TestValidateProjects_ResetOnIdleMins_BackwardCompat(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	cases := []struct {
+		name     string
+		value    int
+		wantPass bool
+	}{
+		{"negative_rejected", -1, false},
+		{"zero_accepted", 0, true},
+		{"positive_accepted", 60, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validProject("demo")
+			p.ResetOnIdleMins = intPtr(tc.value)
+			cfg := Config{Projects: []ProjectConfig{p}}
+			err := cfg.validate()
+			if tc.wantPass {
+				if err != nil {
+					t.Fatalf("validate(reset_on_idle_mins=%d) unexpected error: %v", tc.value, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validate(reset_on_idle_mins=%d) expected error, got nil", tc.value)
+			}
+			if !strings.Contains(err.Error(), "reset_on_idle_mins") {
+				t.Fatalf("error = %q, want substring %q", err.Error(), "reset_on_idle_mins")
+			}
+		})
+	}
+}
+
 func TestLoad_ParsesRunAsUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("run_as_user is only supported on Linux/macOS")

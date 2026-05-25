@@ -414,6 +414,27 @@ const (
 	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
 	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
 
+	// Idle-confirm (ask-before-idle-reset) — see REQ-20260521-cc-connect-ask-before-idle-reset §7.
+	// Placeholder contracts (MUST be honoured across all 5 languages):
+	//   MsgIdleConfirmCardTitle:   1 arg, %s = humanized idle duration (e.g. "1h 27min")
+	//   MsgIdleConfirmBody:        0 args, markdown body (bullets + encouragement)
+	//   MsgIdleConfirmBtnRotate:   0 args, primary button label
+	//   MsgIdleConfirmBtnKeep:     0 args, default button label
+	//   MsgIdleConfirmFooter:      2 args, %s = old session short id, %d = timeout seconds
+	//   MsgIdleConfirmKept:        0 args, ack after user picked "keep"
+	//   MsgIdleConfirmRotated:     1 arg, %s = "/switch <oldShortID>" hint command
+	//   MsgIdleConfirmTimeoutKept: 1 arg, %s = old session short id
+	//   MsgIdleConfirmQueuedHint:  0 args, one-time hint when user types text while pending
+	MsgIdleConfirmCardTitle   MsgKey = "idle_confirm_card_title"
+	MsgIdleConfirmBody        MsgKey = "idle_confirm_body"
+	MsgIdleConfirmBtnRotate   MsgKey = "idle_confirm_btn_rotate"
+	MsgIdleConfirmBtnKeep     MsgKey = "idle_confirm_btn_keep"
+	MsgIdleConfirmFooter      MsgKey = "idle_confirm_footer"
+	MsgIdleConfirmKept        MsgKey = "idle_confirm_kept"
+	MsgIdleConfirmRotated     MsgKey = "idle_confirm_rotated"
+	MsgIdleConfirmTimeoutKept MsgKey = "idle_confirm_timeout_kept"
+	MsgIdleConfirmQueuedHint  MsgKey = "idle_confirm_queued_hint"
+
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
 	MsgDeleteActiveDenied       MsgKey = "delete_active_denied"
@@ -2879,6 +2900,69 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 正在結束上一個會話（通常幾秒鐘，最多2分鐘）。新會話將自動啟動。",
 		LangJapanese:           "⏳ 前のセッションを終了中です（通常は数秒、最大2分）。新しいセッションは自動的に開始されます。",
 		LangSpanish:            "⏳ Cerrando la sesión anterior (normalmente unos segundos, hasta 2 minutos). La nueva sesión se iniciará automáticamente.",
+	},
+	MsgIdleConfirmCardTitle: {
+		LangEnglish:            "⏰ Idle for %s",
+		LangChinese:            "⏰ 上次活跃已过去 %s",
+		LangTraditionalChinese: "⏰ 上次活躍已過去 %s",
+		LangJapanese:           "⏰ %s 操作なし",
+		LangSpanish:            "⏰ Inactivo durante %s",
+	},
+	MsgIdleConfirmBody: {
+		LangEnglish:            "It's been a while since your last message. Would you like to **start a fresh session**?\n\n**Why start fresh?**\n- Old conversation history (failed commands, debug noise, tangents) gets re-ingested every time via `--continue`, slowly drifting the model's attention away from your goal.\n- A fresh session starts with clean context — sharper, more focused answers.\n- Your old session is **not deleted**; you can return anytime with `/switch <id>`.\n\n👉 If your current question is **unrelated** to the previous one, we strongly recommend starting fresh.\n👉 If you're just continuing the same thread, keep this session.",
+		LangChinese:            "我们注意到你已经一段时间没有发消息了。要不要**开启一个新会话**？\n\n**为什么建议新会话？**\n- 旧会话历史（失败命令、debug 噪音、跑偏尝试）会通过 `--continue` 反复回灌给模型，让它的注意力慢慢从原目标飘走\n- 新会话从干净的上下文出发，模型回答更聚焦、更准确\n- 旧会话**不会被删除**，随时可用 `/switch` 切回\n\n👉 **如果当前问题和上次没有延续性，强烈建议开启新会话。**\n👉 如果只是接着上次继续聊，请选「保留此会话」。",
+		LangTraditionalChinese: "我們注意到你已經一段時間沒有發訊息了。要不要**開啟一個新會話**？\n\n**為什麼建議新會話？**\n- 舊會話歷史（失敗指令、debug 雜訊、跑偏嘗試）會透過 `--continue` 反覆回灌給模型，讓它的注意力慢慢從原目標飄走\n- 新會話從乾淨的上下文出發，模型回答更聚焦、更準確\n- 舊會話**不會被刪除**，隨時可用 `/switch` 切回\n\n👉 **如果當前問題和上次沒有延續性，強烈建議開啟新會話。**\n👉 如果只是接著上次繼續聊，請選「保留此會話」。",
+		LangJapanese:           "しばらくメッセージがありませんでした。**新しいセッションを開始**しますか？\n\n**新セッションを推奨する理由**\n- 過去の会話履歴（失敗コマンド、デバッグノイズ、脱線）は `--continue` で繰り返し読み込まれ、モデルの注意が元の目的から逸れていきます\n- 新セッションはクリーンなコンテキストから始まるため、回答がより的確になります\n- 古いセッションは**削除されません**。`/switch <id>` でいつでも戻れます\n\n👉 現在の質問が前のと**無関係**なら、新しいセッションを開始することを強くおすすめします。\n👉 同じ話題の続きなら、このセッションを保持してください。",
+		LangSpanish:            "Ha pasado un rato desde tu último mensaje. ¿Quieres **iniciar una sesión nueva**?\n\n**¿Por qué empezar de cero?**\n- El historial antiguo (comandos fallidos, ruido de depuración, divagaciones) se re-ingiere cada vez con `--continue` y desvía la atención del modelo de tu objetivo.\n- Una sesión nueva comienza con contexto limpio — respuestas más precisas y enfocadas.\n- Tu sesión anterior **no se elimina**; puedes volver con `/switch <id>` cuando quieras.\n\n👉 Si tu pregunta actual **no tiene relación** con la anterior, te recomendamos encarecidamente empezar de cero.\n👉 Si solo continúas el mismo hilo, mantén esta sesión.",
+	},
+	MsgIdleConfirmBtnRotate: {
+		LangEnglish:            "🆕 Start fresh session",
+		LangChinese:            "🆕 开启新会话",
+		LangTraditionalChinese: "🆕 開啟新會話",
+		LangJapanese:           "🆕 新しいセッションを開始",
+		LangSpanish:            "🆕 Iniciar sesión nueva",
+	},
+	MsgIdleConfirmBtnKeep: {
+		LangEnglish:            "📂 Keep this session",
+		LangChinese:            "📂 保留此会话",
+		LangTraditionalChinese: "📂 保留此會話",
+		LangJapanese:           "📂 このセッションを保持",
+		LangSpanish:            "📂 Mantener esta sesión",
+	},
+	MsgIdleConfirmFooter: {
+		LangEnglish:            "Old session: %s · Auto-keep after %ds if no answer",
+		LangChinese:            "旧会话：%s · %d 秒未答默认保留",
+		LangTraditionalChinese: "舊會話：%s · %d 秒未回應預設保留",
+		LangJapanese:           "前のセッション：%s · %d 秒応答なしで自動的に保持",
+		LangSpanish:            "Sesión anterior: %s · Mantener automáticamente tras %d s sin respuesta",
+	},
+	MsgIdleConfirmKept: {
+		LangEnglish:            "📂 Session kept. Continuing where you left off…",
+		LangChinese:            "📂 已保留此会话，继续上次的话题…",
+		LangTraditionalChinese: "📂 已保留此會話，繼續上次的話題…",
+		LangJapanese:           "📂 セッションを保持しました。続きから再開します…",
+		LangSpanish:            "📂 Sesión mantenida. Continuando donde lo dejaste…",
+	},
+	MsgIdleConfirmRotated: {
+		LangEnglish:            "🆕 Fresh session started. To return to the previous one, send: %s",
+		LangChinese:            "🆕 新会话已开启。如需切回旧会话，请发送：%s",
+		LangTraditionalChinese: "🆕 新會話已開啟。如需切回舊會話，請傳送：%s",
+		LangJapanese:           "🆕 新しいセッションを開始しました。前のセッションに戻すには、送信してください：%s",
+		LangSpanish:            "🆕 Sesión nueva iniciada. Para volver a la anterior, envía: %s",
+	},
+	MsgIdleConfirmTimeoutKept: {
+		LangEnglish:            "⏰ No response in time — kept your previous session (%s). Tip: next time, choose explicitly to skip this prompt.",
+		LangChinese:            "⏰ 等待超时——已为你保留旧会话（%s）。提示：下次直接点选可跳过等待。",
+		LangTraditionalChinese: "⏰ 等待逾時——已為你保留舊會話（%s）。提示：下次直接點選可跳過等待。",
+		LangJapanese:           "⏰ 応答がなかったため、前のセッションを保持しました（%s）。次回はボタンを直接選ぶとこの確認をスキップできます。",
+		LangSpanish:            "⏰ Sin respuesta a tiempo — mantuvimos tu sesión anterior (%s). Consejo: la próxima vez, elige una opción directamente para saltar este aviso.",
+	},
+	MsgIdleConfirmQueuedHint: {
+		LangEnglish:            "📥 Got your message. Please choose \"keep\" or \"start fresh\" first.",
+		LangChinese:            "📥 消息已收到，请先选择是否保留旧会话。",
+		LangTraditionalChinese: "📥 訊息已收到，請先選擇是否保留舊會話。",
+		LangJapanese:           "📥 メッセージを受け取りました。まず「保持」か「新規開始」を選んでください。",
+		LangSpanish:            "📥 Mensaje recibido. Primero elige «mantener» o «iniciar de cero».",
 	},
 	MsgDeleteUsage: {
 		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",

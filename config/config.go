@@ -333,6 +333,20 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// ResetOnIdleMode controls how cc-connect reacts when a session has been
+	// idle for more than reset_on_idle_mins minutes. Valid values:
+	//   "off"  — disable idle reset entirely (equivalent to reset_on_idle_mins=0)
+	//   "auto" — legacy behaviour: silently rotate to a new session
+	//   "ask"  — (default) prompt the user with a confirm card; require explicit
+	//            "keep" or "start fresh" choice. Only platforms implementing
+	//            CardSender (currently feishu) take the ask path; others
+	//            silently fall back to auto behaviour.
+	// Validated case-insensitively; unset defaults to defaultResetOnIdleMode.
+	ResetOnIdleMode *string `toml:"reset_on_idle_mode,omitempty"`
+	// ResetOnIdleConfirmTimeoutSec is the number of seconds ask mode waits for
+	// a user response before defaulting to "keep". Must be between 5 and 600
+	// (inclusive). Unset defaults to 30.
+	ResetOnIdleConfirmTimeoutSec *int `toml:"reset_on_idle_confirm_timeout_sec,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
@@ -775,6 +789,24 @@ func (c *Config) validate() error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if proj.ResetOnIdleMode != nil {
+			m := strings.ToLower(strings.TrimSpace(*proj.ResetOnIdleMode))
+			switch m {
+			case "off", "auto", "ask":
+				// Normalize back into the struct so downstream consumers
+				// (engine setters, web management API) see the canonical form.
+				normalized := m
+				c.Projects[i].ResetOnIdleMode = &normalized
+			default:
+				return fmt.Errorf("config: %s.reset_on_idle_mode must be one of: auto, ask, off (got %q)", prefix, *proj.ResetOnIdleMode)
+			}
+		}
+		if proj.ResetOnIdleConfirmTimeoutSec != nil {
+			v := *proj.ResetOnIdleConfirmTimeoutSec
+			if v < 5 || v > 600 {
+				return fmt.Errorf("config: %s.reset_on_idle_confirm_timeout_sec must be between 5 and 600 (got %d)", prefix, v)
+			}
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err
@@ -2797,6 +2829,10 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	// Idle-reset confirmation controls; nil = leave existing TOML value untouched.
+	ResetOnIdleMins              *int
+	ResetOnIdleMode              *string
+	ResetOnIdleConfirmTimeoutSec *int
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -2880,6 +2916,18 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.InjectSender != nil {
 			v := *update.InjectSender
 			proj.InjectSender = &v
+		}
+		if update.ResetOnIdleMins != nil {
+			v := *update.ResetOnIdleMins
+			proj.ResetOnIdleMins = &v
+		}
+		if update.ResetOnIdleMode != nil {
+			v := *update.ResetOnIdleMode
+			proj.ResetOnIdleMode = &v
+		}
+		if update.ResetOnIdleConfirmTimeoutSec != nil {
+			v := *update.ResetOnIdleConfirmTimeoutSec
+			proj.ResetOnIdleConfirmTimeoutSec = &v
 		}
 		if update.WorkDir != nil || update.Mode != nil {
 			if proj.Agent.Options == nil {

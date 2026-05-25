@@ -190,6 +190,52 @@ app_secret = "secret"
 	}
 }
 
+// TestReleaseConfig_ResetOnIdleMode_AllValidValuesParse exercises the
+// three-mode matrix introduced by REQ-20260521-cc-connect-ask-before-idle-reset
+// at the release-local Load() boundary. Each accepted mode (ask, auto, off)
+// MUST round-trip through TOML parse + validateProjects without error and
+// preserve the canonical lowercased value the engine consumes via
+// SetResetOnIdleMode. AC1 / AC22 are the upstream unit-level guards; this
+// test pins the release-local end-to-end parse path so a regression there
+// surfaces independently of the per-package config_test.go.
+func TestReleaseConfig_ResetOnIdleMode_AllValidValuesParse(t *testing.T) {
+	for _, mode := range []string{"ask", "auto", "off"} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			path := writeConfig(t, `
+[[projects]]
+name = "release"
+reset_on_idle_mins = 60
+reset_on_idle_mode = "`+mode+`"
+reset_on_idle_confirm_timeout_sec = 45
+
+[projects.agent]
+type = "claudecode"
+work_dir = "/tmp/cc-connect-release-work"
+
+[[projects.platforms]]
+type = "feishu"
+app_id = "cli_release"
+app_secret = "secret"
+`)
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if len(cfg.Projects) != 1 {
+				t.Fatalf("projects = %d, want 1", len(cfg.Projects))
+			}
+			proj := &cfg.Projects[0]
+			if proj.ResetOnIdleMode == nil || *proj.ResetOnIdleMode != mode {
+				t.Fatalf("ResetOnIdleMode = %#v, want %q", proj.ResetOnIdleMode, mode)
+			}
+			if proj.ResetOnIdleConfirmTimeoutSec == nil || *proj.ResetOnIdleConfirmTimeoutSec != 45 {
+				t.Fatalf("ResetOnIdleConfirmTimeoutSec = %#v, want 45", proj.ResetOnIdleConfirmTimeoutSec)
+			}
+		})
+	}
+}
+
 func TestReleaseConfig_InvalidCriticalOptionsFailFast(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -240,6 +286,42 @@ app_id = "cli_release"
 app_secret = "secret"
 `,
 			wantErr: "reset_on_idle_mins must be >= 0",
+		},
+		{
+			name: "invalid reset_on_idle_mode value",
+			toml: `
+[[projects]]
+name = "release"
+reset_on_idle_mode = "maybe"
+
+[projects.agent]
+type = "claudecode"
+work_dir = "/tmp/cc-connect-release-work"
+
+[[projects.platforms]]
+type = "feishu"
+app_id = "cli_release"
+app_secret = "secret"
+`,
+			wantErr: "reset_on_idle_mode must be one of: auto, ask, off",
+		},
+		{
+			name: "reset_on_idle_confirm_timeout_sec out of range",
+			toml: `
+[[projects]]
+name = "release"
+reset_on_idle_confirm_timeout_sec = 1
+
+[projects.agent]
+type = "claudecode"
+work_dir = "/tmp/cc-connect-release-work"
+
+[[projects.platforms]]
+type = "feishu"
+app_id = "cli_release"
+app_secret = "secret"
+`,
+			wantErr: "reset_on_idle_confirm_timeout_sec must be between 5 and 600",
 		},
 	}
 

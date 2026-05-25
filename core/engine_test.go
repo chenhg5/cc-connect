@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -343,6 +345,20 @@ func (p *stubCardPlatform) getRefreshedCards() []*Card {
 	dst := make([]*Card, len(p.refreshedCards))
 	copy(dst, p.refreshedCards)
 	return dst
+}
+
+func (p *stubCardPlatform) getRepliedCards() []*Card {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	dst := make([]*Card, len(p.repliedCards))
+	copy(dst, p.repliedCards)
+	return dst
+}
+
+func (p *stubCardPlatform) clearRepliedCards() {
+	p.mu.Lock()
+	p.repliedCards = nil
+	p.mu.Unlock()
 }
 
 type stubCompactProgressPlatform struct {
@@ -12958,4 +12974,2166 @@ func TestReaction_ResolveIsIdempotent_MultiplePathsOnlyOneSwap(t *testing.T) {
 	if len(ops) != 2 {
 		t.Errorf("ops = %+v, want exactly 2 (add + swap, no duplicates)", ops)
 	}
+}
+
+// --- T-003: Engine state-machine skeleton tests (REQ-20260521 ask-before-idle-reset) ---
+//
+// These tests cover only the skeleton wired up in T-003: setters/getters with
+// defaults, the takePendingIdleConfirm helper, and Session.TouchUpdatedAt.
+// The full ask-path behaviour (maybeStartIdleConfirm / resolveKeep /
+// resolveRotate etc.) lands in T-004 / T-005 / T-006.
+
+func TestEngine_SetResetOnIdleMode(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"off", "off", "off"},
+		{"auto_uppercase", "AUTO", "auto"},
+		{"ask", "ask", "ask"},
+		{"invalid_defaults_to_ask", "invalid", "ask"},
+		{"empty_string_defaults_to_ask", "", "ask"},
+		{"trimmed_mixed_case", "   Auto  ", "auto"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine()
+			e.SetResetOnIdleMode(tc.in)
+			if got := e.getResetOnIdleMode(); got != tc.want {
+				t.Fatalf("SetResetOnIdleMode(%q): getResetOnIdleMode() = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEngine_GetResetOnIdleMode_ZeroValue(t *testing.T) {
+	e := newTestEngine()
+	// Do NOT call SetResetOnIdleMode — engine should still return the bottom
+	// default "ask" via the getter, never an empty string.
+	if got := e.getResetOnIdleMode(); got != "ask" {
+		t.Fatalf("zero-value getResetOnIdleMode() = %q, want %q (defaultResetOnIdleMode)", got, "ask")
+	}
+}
+
+func TestEngine_SetResetOnIdleConfirmTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"zero_defaults", 0, defaultResetOnIdleConfirmTimeout},
+		{"negative_defaults", -1 * time.Second, defaultResetOnIdleConfirmTimeout},
+		{"positive_45s", 45 * time.Second, 45 * time.Second},
+		{"positive_10min", 10 * time.Minute, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine()
+			e.SetResetOnIdleConfirmTimeout(tc.in)
+			if got := e.getResetOnIdleConfirmTimeout(); got != tc.want {
+				t.Fatalf("SetResetOnIdleConfirmTimeout(%v): getResetOnIdleConfirmTimeout() = %v, want %v",
+					tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEngine_GetResetOnIdleConfirmTimeout_ZeroValue(t *testing.T) {
+	e := newTestEngine()
+	if got := e.getResetOnIdleConfirmTimeout(); got != defaultResetOnIdleConfirmTimeout {
+		t.Fatalf("zero-value getResetOnIdleConfirmTimeout() = %v, want %v",
+			got, defaultResetOnIdleConfirmTimeout)
+	}
+}
+
+func TestEngine_TakePendingIdleConfirm_EmptyMap(t *testing.T) {
+	e := newTestEngine()
+	if got := e.takePendingIdleConfirm("nonexistent"); got != nil {
+		t.Fatalf("takePendingIdleConfirm on empty map = %v, want nil", got)
+	}
+}
+
+func TestEngine_TakePendingIdleConfirm_Removes(t *testing.T) {
+	e := newTestEngine()
+	state := &pendingIdleConfirmState{interactiveKey: "test:1"}
+
+	e.pendingIdleConfirmMu.Lock()
+	e.pendingIdleConfirm["test:1"] = state
+	e.pendingIdleConfirmMu.Unlock()
+
+	got := e.takePendingIdleConfirm("test:1")
+	if got != state {
+		t.Fatalf("first take = %v, want the registered state %v", got, state)
+	}
+
+	// Sanity: map entry actually gone.
+	e.pendingIdleConfirmMu.Lock()
+	_, stillPresent := e.pendingIdleConfirm["test:1"]
+	e.pendingIdleConfirmMu.Unlock()
+	if stillPresent {
+		t.Fatalf("map entry for %q still present after take", "test:1")
+	}
+
+	// Second call returns nil (already removed).
+	if got2 := e.takePendingIdleConfirm("test:1"); got2 != nil {
+		t.Fatalf("second take = %v, want nil", got2)
+	}
+}
+
+func TestSession_TouchUpdatedAt(t *testing.T) {
+	s := &Session{
+		ID:        "s1",
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+	}
+	old := s.GetUpdatedAt()
+	// Sleep just enough that monotonic time advances reliably across platforms.
+	time.Sleep(2 * time.Millisecond)
+	s.TouchUpdatedAt()
+	now := s.GetUpdatedAt()
+	if !now.After(old) {
+		t.Fatalf("UpdatedAt did not advance: before=%v after=%v", old, now)
+	}
+}
+
+// TestCore_NoHardcodedPlatformOrAgentNames is a static self-check enforcing
+// CLAUDE.md rule #1: core/ must not hardcode platform or agent names. Diffs
+// from new requirements (e.g. REQ-20260521 ask-mode) must continue to honour
+// capability-based dispatch — no `p.Name() == "feishu"` or
+// `AgentTypeName() == "cursor"` strings, no `CreateAgent("claudecode", ...)`.
+//
+// The test scans all *.go files in core/ (excluding *_test.go) for the
+// forbidden patterns. Any new violation MUST be either:
+//  1. refactored to use capability interfaces, OR
+//  2. explicitly whitelisted with a justified inline comment marker. The
+//     marker `// platform-name-whitelist: <reason>` must appear on the same
+//     line as the match or on the immediately preceding line, and should
+//     include an issue/PR link in <reason>.
+//
+// Platform / agent names are discovered dynamically by listing the
+// `platform/` and `agent/` sibling directories, so adding a new platform or
+// agent does NOT require updating this test.
+//
+// AC: AC17 (REQ-20260521).
+func TestCore_NoHardcodedPlatformOrAgentNames(t *testing.T) {
+	repoRoot := findCCConnectRepoRoot(t)
+
+	platforms := listImmediateSubdirs(t, filepath.Join(repoRoot, "platform"))
+	agents := listImmediateSubdirs(t, filepath.Join(repoRoot, "agent"))
+	if len(platforms) == 0 || len(agents) == 0 {
+		t.Skipf("could not enumerate platform/agent subdirs (platforms=%d, agents=%d) from repo root %s",
+			len(platforms), len(agents), repoRoot)
+	}
+
+	// Build forbidden regex patterns per discovered name. Patterns are
+	// intentionally narrow to avoid false positives on legitimate uses
+	// (i18n message keys, error strings, doc comments).
+	patternTemplates := []string{
+		`p\.Name\s*\(\s*\)\s*==\s*"%s"`,
+		`AgentTypeName\s*\(\s*\)\s*==\s*"%s"`,
+		`CreateAgent\s*\(\s*"%s"`,
+		`CreatePlatform\s*\(\s*"%s"`,
+	}
+	names := append([]string{}, platforms...)
+	names = append(names, agents...)
+
+	patterns := make([]*regexp.Regexp, 0, len(patternTemplates)*len(names))
+	for _, name := range names {
+		quoted := regexp.QuoteMeta(name)
+		for _, tpl := range patternTemplates {
+			patterns = append(patterns, regexp.MustCompile(fmt.Sprintf(tpl, quoted)))
+		}
+	}
+
+	coreDir := filepath.Join(repoRoot, "core")
+	matches, err := filepath.Glob(filepath.Join(coreDir, "*.go"))
+	if err != nil {
+		t.Fatalf("glob core/*.go: %v", err)
+	}
+
+	type violation struct {
+		File string
+		Line int
+		Text string
+	}
+	var (
+		violations []violation
+		scanned    int
+	)
+	const whitelistMarker = "platform-name-whitelist:"
+
+	for _, f := range matches {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		scanned++
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			// Skip lines whitelisted on the same line.
+			if strings.Contains(line, whitelistMarker) {
+				continue
+			}
+			for _, re := range patterns {
+				if re.FindStringIndex(line) == nil {
+					continue
+				}
+				// Allow whitelist marker on the immediately preceding line.
+				if i > 0 && strings.Contains(lines[i-1], whitelistMarker) {
+					break
+				}
+				violations = append(violations, violation{
+					File: f,
+					Line: i + 1,
+					Text: strings.TrimSpace(line),
+				})
+				break
+			}
+		}
+	}
+
+	if scanned == 0 {
+		t.Fatalf("no *.go files scanned in %s (expected core/ to contain source files)", coreDir)
+	}
+
+	if len(violations) > 0 {
+		for _, v := range violations {
+			t.Errorf("hardcoded platform/agent name in core/: %s:%d: %s",
+				filepath.Base(v.File), v.Line, v.Text)
+		}
+		t.Errorf("\n%d violation(s) found across %d core/*.go files (scanned %d names × %d patterns) — "+
+			"see CLAUDE.md rule #1: use capability interfaces instead, or annotate with "+
+			"`// %s <reason+link>` if intentional",
+			len(violations), scanned, len(names), len(patternTemplates), whitelistMarker)
+	}
+}
+
+// findCCConnectRepoRoot walks up from the test working directory until it
+// finds a directory containing go.mod. Used by the hardcoded-name self-check
+// to locate sibling platform/ and agent/ directories.
+func findCCConnectRepoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	dir := wd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not locate go.mod walking up from %s", wd)
+		}
+		dir = parent
+	}
+}
+
+// listImmediateSubdirs returns the names of immediate subdirectories of root,
+// skipping hidden entries. Returns nil if root cannot be read.
+func listImmediateSubdirs(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// ──────────────────────────────────────────────────────────────
+// T-004: ask-path core unit tests (REQ-20260521-cc-connect-ask-before-idle-reset)
+//
+// All TestAskMode_* tests below exercise maybeStartIdleConfirm /
+// startPendingIdleConfirm / resolveKeep / resolveRotate /
+// handlePendingIdleConfirm and the cmdSwitch hook. They do NOT cover:
+//   - real card rendering (T-006 / T-006a)
+//   - idle_confirm_degraded_to_auto slog event (T-007)
+//   - detailed timer-vs-button race (T-005)
+//
+// Convention: each test uses an "ask"-configured engine and a stub platform
+// (CardSender or plain) with a stale session (history + agent ID + 2h-old
+// UpdatedAt) so maybeStartIdleConfirm exercises the chosen branch.
+// ──────────────────────────────────────────────────────────────
+
+// newAskTestEngine builds an engine configured for ask mode with a
+// CardSender platform and a session that is already stale enough to
+// trigger idle confirm. Returns the engine, platform, agent (for sentPrompts
+// assertions), the session key, and the stale session.
+//
+// The caller may set CardSender=false to exercise the AC9b degrade path
+// by replacing the returned platform.
+func newAskTestEngine(t *testing.T, opts ...func(*askTestConfig)) (*Engine, Platform, *resultAgent, string, *Session) {
+	t.Helper()
+	cfg := askTestConfig{
+		cardSender:    true,
+		mode:          "ask",
+		confirmWait:   500 * time.Millisecond,
+		idleThreshold: 60 * time.Minute,
+		idleAgo:       2 * time.Hour,
+		oldAgentID:    "old-agent-session",
+		oldHistory:    "stale context",
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	var p Platform
+	if cfg.cardSender {
+		p = &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	} else {
+		p = &stubPlatformEngine{n: "test"}
+	}
+
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(cfg.idleThreshold)
+	e.SetResetOnIdleMode(cfg.mode)
+	e.SetResetOnIdleConfirmTimeout(cfg.confirmWait)
+
+	key := "test:user1"
+	old := e.sessions.GetOrCreateActive(key)
+	if cfg.oldHistory != "" {
+		old.AddHistory("user", cfg.oldHistory)
+	}
+	if cfg.oldAgentID != "" {
+		old.SetAgentSessionID(cfg.oldAgentID, "stub")
+	}
+	stale := time.Now().Add(-cfg.idleAgo)
+	old.mu.Lock()
+	old.UpdatedAt = stale
+	old.mu.Unlock()
+
+	return e, p, agent, key, old
+}
+
+type askTestConfig struct {
+	cardSender    bool
+	mode          string
+	confirmWait   time.Duration
+	idleThreshold time.Duration
+	idleAgo       time.Duration
+	oldAgentID    string
+	oldHistory    string
+}
+
+func withAskMode(m string) func(*askTestConfig) { return func(c *askTestConfig) { c.mode = m } }
+func withAskNoCardSender() func(*askTestConfig) {
+	return func(c *askTestConfig) { c.cardSender = false }
+}
+func withAskConfirmTimeout(d time.Duration) func(*askTestConfig) {
+	return func(c *askTestConfig) { c.confirmWait = d }
+}
+
+// waitFor polls cond until it returns true or deadline is hit. Used to
+// reduce flakiness in goroutine-heavy tests without forcing a fixed sleep.
+func waitFor(t *testing.T, deadline time.Duration, what string, cond func() bool) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s after %v", what, deadline)
+}
+
+func (e *Engine) pendingIdleConfirmLen() int {
+	e.pendingIdleConfirmMu.Lock()
+	defer e.pendingIdleConfirmMu.Unlock()
+	return len(e.pendingIdleConfirm)
+}
+
+func (e *Engine) lookupPendingIdleConfirm(key string) *pendingIdleConfirmState {
+	e.pendingIdleConfirmMu.Lock()
+	defer e.pendingIdleConfirmMu.Unlock()
+	return e.pendingIdleConfirm[key]
+}
+
+// platformSentContains returns true if any string sent to the stub platform
+// contains substr. Works for both stubCardPlatform (embedded) and
+// stubPlatformEngine.
+func platformSentContains(p Platform, substr string) bool {
+	type sender interface{ getSent() []string }
+	s, ok := p.(sender)
+	if !ok {
+		return false
+	}
+	for _, line := range s.getSent() {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAskMode_ModeOff_NoAction verifies that mode="off" is a no-op even
+// when the session is stale. No reply, no rotation, no pending state.
+func TestAskMode_ModeOff_NoAction(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t, withAskMode("off"))
+	stub := p.(*stubCardPlatform)
+	stub.clearSent()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "/list", // slash so processInteractiveMessageWith doesn't run
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	if got := e.pendingIdleConfirmLen(); got != 0 {
+		t.Fatalf("pendingIdleConfirm map size = %d, want 0 (mode=off)", got)
+	}
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != old.ID {
+		t.Fatalf("active session changed: got %s, want unchanged %s (mode=off)", active.ID, old.ID)
+	}
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Session auto-reset") {
+			t.Fatalf("unexpected auto-reset reply with mode=off: %v", stub.getSent())
+		}
+		if strings.Contains(line, "Idle for") {
+			t.Fatalf("unexpected ask card text with mode=off: %v", stub.getSent())
+		}
+	}
+	for _, card := range stub.getRepliedCards() {
+		if card.Header != nil && strings.Contains(card.Header.Title, "Idle for") {
+			t.Fatalf("unexpected ask card emitted with mode=off: %q", card.Header.Title)
+		}
+		for _, el := range card.Elements {
+			if a, ok := el.(CardActions); ok {
+				for _, b := range a.Buttons {
+					if strings.HasPrefix(b.Value, "idle:") {
+						t.Fatalf("unexpected ask card button with mode=off: %q", b.Value)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestAskMode_ModeAuto_GoesLegacyPath verifies that mode="auto" routes
+// through legacyAutoResetSessionOnIdle (AC8: byte-equivalent to pre-REQ
+// behaviour). Same agent / same platform / stale session → rotate.
+func TestAskMode_ModeAuto_GoesLegacyPath(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t, withAskMode("auto"))
+	stub := p.(*stubCardPlatform)
+	stub.clearSent()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	waitFor(t, 2*time.Second, "session rotation under mode=auto", func() bool {
+		active := e.sessions.GetOrCreateActive(key)
+		return active.ID != old.ID
+	})
+
+	if got := e.pendingIdleConfirmLen(); got != 0 {
+		t.Fatalf("pendingIdleConfirm map size = %d, want 0 (mode=auto bypasses ask)", got)
+	}
+
+	// AC8 byte-equivalence anchor: the auto-reset notice MUST be emitted
+	// just like the pre-REQ implementation.
+	found := false
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Session auto-reset") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("mode=auto: expected 'Session auto-reset' reply, got %v", stub.getSent())
+	}
+}
+
+// TestAskMode_NonCardSenderFallsBackToAuto verifies AC9b: when mode="ask"
+// but the platform lacks CardSender, the engine silently degrades to
+// legacy auto behaviour (same end result as mode=auto). The
+// idle_confirm_degraded_to_auto slog event will be added by T-007; here we
+// only validate the behavioural outcome.
+func TestAskMode_NonCardSenderFallsBackToAuto(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t, withAskNoCardSender())
+	stub := p.(*stubPlatformEngine)
+	stub.clearSent()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	waitFor(t, 2*time.Second, "session rotation via AC9b degrade", func() bool {
+		active := e.sessions.GetOrCreateActive(key)
+		return active.ID != old.ID
+	})
+
+	if got := e.pendingIdleConfirmLen(); got != 0 {
+		t.Fatalf("pendingIdleConfirm map size = %d, want 0 (AC9b: no pending state on degrade)", got)
+	}
+	found := false
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Session auto-reset") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("AC9b degrade: expected 'Session auto-reset' reply, got %v", stub.getSent())
+	}
+}
+
+// TestAskMode_StartsPending verifies the happy ask-path: mode="ask" +
+// CardSender + stale session → pending state created, original message
+// queued, card text emitted, timer armed, old session NOT rotated.
+func TestAskMode_StartsPending(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t,
+		withAskConfirmTimeout(10*time.Second), // long enough that timer doesn't fire
+	)
+	stub := p.(*stubCardPlatform)
+	stub.clearSent()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	waitFor(t, 1*time.Second, "pending state registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pendingIdleConfirm[key] not registered")
+	}
+	if state.oldAgentSessionID != "old-agent-session" {
+		t.Fatalf("state.oldAgentSessionID = %q, want %q", state.oldAgentSessionID, "old-agent-session")
+	}
+	if state.timer.Load() == nil {
+		t.Fatal("state.timer not armed")
+	}
+	if got := state.queuedLen(); got != 1 {
+		t.Fatalf("state.queued len = %d, want 1 (original triggering message)", got)
+	}
+
+	// Active session unchanged (ask does NOT rotate up-front).
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != old.ID {
+		t.Fatalf("active session changed during ask: got %s, want unchanged %s", active.ID, old.ID)
+	}
+
+	// Card was emitted via ReplyCard (T-006 upgraded the T-004 text
+	// placeholder to a real core.Card with two buttons). We assert one
+	// card was rendered, with the expected title, body, and button
+	// callback values.
+	cards := stub.getRepliedCards()
+	if len(cards) != 1 {
+		t.Fatalf("ask card not emitted exactly once: got %d cards, sent=%v", len(cards), stub.getSent())
+	}
+	card := cards[0]
+	if card.Header == nil || !strings.Contains(card.Header.Title, "Idle for") {
+		t.Fatalf("ask card title = %+v, want one containing %q", card.Header, "Idle for")
+	}
+	if card.Header.Color != "orange" {
+		t.Fatalf("ask card header color = %q, want %q", card.Header.Color, "orange")
+	}
+	var actions *CardActions
+	for _, el := range card.Elements {
+		if a, ok := el.(CardActions); ok {
+			actions = &a
+			break
+		}
+	}
+	if actions == nil {
+		t.Fatalf("ask card has no CardActions element: %+v", card.Elements)
+	}
+	if got := len(actions.Buttons); got != 2 {
+		t.Fatalf("ask card buttons = %d, want 2", got)
+	}
+	// Button order: rotate(primary) on the left, keep(default) on the right
+	// (matches design.md §3.7 / requirement.md §6.1).
+	if actions.Buttons[0].Value != "idle:rotate" || actions.Buttons[0].Type != "primary" {
+		t.Fatalf("button[0] = {value=%q, type=%q}, want {idle:rotate, primary}",
+			actions.Buttons[0].Value, actions.Buttons[0].Type)
+	}
+	if actions.Buttons[1].Value != "idle:keep" || actions.Buttons[1].Type != "default" {
+		t.Fatalf("button[1] = {value=%q, type=%q}, want {idle:keep, default}",
+			actions.Buttons[1].Value, actions.Buttons[1].Type)
+	}
+	if actions.Layout != CardActionLayoutEqualColumns {
+		t.Fatalf("ask card actions layout = %q, want equal_columns", actions.Layout)
+	}
+
+	// Cleanup the long timer so the goroutine doesn't leak into other tests.
+	if st := e.takePendingIdleConfirm(key); st != nil {
+		if t := st.timer.Load(); t != nil {
+			t.Stop()
+		}
+	}
+}
+
+// TestSendIdleConfirmCard_UsesNewCardBuilder is the T-006 focused unit test
+// for sendIdleConfirmCard. It bypasses the full ask pipeline and invokes
+// sendIdleConfirmCard directly with a hand-rolled pendingIdleConfirmState,
+// asserting that the rendered card has the expected:
+//   - orange header containing the localized "Idle for {duration}" title
+//   - non-empty markdown body element
+//   - two equal-width buttons in the correct order with callback values
+//     "idle:rotate" (primary, left) and "idle:keep" (default, right)
+//   - footer note containing the short old-session id and the timeout in
+//     seconds (matches MsgIdleConfirmFooter signature)
+//
+// AC16 coverage: feishu card rendering + button callback wiring.
+func TestSendIdleConfirmCard_UsesNewCardBuilder(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdleConfirmTimeout(45 * time.Second)
+
+	old := e.sessions.GetOrCreateActive("test:u1")
+	old.mu.Lock()
+	old.UpdatedAt = time.Now().Add(-2 * time.Hour)
+	old.mu.Unlock()
+
+	state := &pendingIdleConfirmState{
+		interactiveKey:       "test:u1",
+		sessionKey:           "test:u1",
+		oldSession:           old,
+		oldAgentSessionID:    "abcd1234efgh5678",
+		oldAgentSessionShort: "abcd1234",
+		platform:             p,
+		replyCtx:             "ctx",
+		createdAt:            time.Now(),
+	}
+
+	e.sendIdleConfirmCard(p, "ctx", state)
+
+	if got := len(p.getSent()); got != 0 {
+		t.Fatalf("sendIdleConfirmCard wrote %d plain replies, want 0 (card path)", got)
+	}
+	cards := p.getRepliedCards()
+	if len(cards) != 1 {
+		t.Fatalf("sendIdleConfirmCard wrote %d cards, want 1", len(cards))
+	}
+	card := cards[0]
+
+	if card.Header == nil {
+		t.Fatal("card has no header; want orange title")
+	}
+	if card.Header.Color != "orange" {
+		t.Fatalf("card header color = %q, want %q", card.Header.Color, "orange")
+	}
+	if !strings.Contains(card.Header.Title, "Idle for") {
+		t.Fatalf("card title = %q, want one containing %q", card.Header.Title, "Idle for")
+	}
+
+	var (
+		body    *CardMarkdown
+		actions *CardActions
+		note    *CardNote
+	)
+	for _, el := range card.Elements {
+		switch v := el.(type) {
+		case CardMarkdown:
+			if body == nil {
+				md := v
+				body = &md
+			}
+		case CardActions:
+			a := v
+			actions = &a
+		case CardNote:
+			n := v
+			note = &n
+		}
+	}
+	if body == nil || body.Content == "" {
+		t.Fatal("card has no non-empty markdown body element")
+	}
+	if actions == nil {
+		t.Fatalf("card has no CardActions element: %+v", card.Elements)
+	}
+	if got := len(actions.Buttons); got != 2 {
+		t.Fatalf("card buttons = %d, want 2", got)
+	}
+	if actions.Buttons[0].Value != "idle:rotate" || actions.Buttons[0].Type != "primary" {
+		t.Fatalf("button[0] = {value=%q, type=%q}, want {idle:rotate, primary}",
+			actions.Buttons[0].Value, actions.Buttons[0].Type)
+	}
+	if actions.Buttons[1].Value != "idle:keep" || actions.Buttons[1].Type != "default" {
+		t.Fatalf("button[1] = {value=%q, type=%q}, want {idle:keep, default}",
+			actions.Buttons[1].Value, actions.Buttons[1].Type)
+	}
+	if actions.Layout != CardActionLayoutEqualColumns {
+		t.Fatalf("actions layout = %q, want equal_columns", actions.Layout)
+	}
+	if note == nil || note.Text == "" {
+		t.Fatal("card has no non-empty footer note")
+	}
+	if !strings.Contains(note.Text, "abcd1234") {
+		t.Fatalf("footer note = %q, want one containing short session id %q", note.Text, "abcd1234")
+	}
+	if !strings.Contains(note.Text, "45") {
+		t.Fatalf("footer note = %q, want one containing timeout seconds %q", note.Text, "45")
+	}
+}
+
+// TestAskMode_ClickKeep_ResolvesAndDrainsToOldSession verifies the click=keep
+// happy path: user click → resolveKeep → ack reply + queue drained to old
+// session (no rotation) + UpdatedAt touched.
+func TestAskMode_ClickKeep_ResolvesAndDrainsToOldSession(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	// 1. Trigger ask.
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending state registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	// 2. User clicks "idle:keep" via simulated dispatch.
+	stub.clearSent()
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "idle:keep", ReplyCtx: "ctx",
+	})
+
+	// 3. Wait until pending state is gone AND the ack reply has landed
+	// (resolveKeep's reply runs after the map cleanup, so checking
+	// pendingLen alone races the user-visible ack).
+	waitFor(t, 2*time.Second, "resolveKeep clears pending + ack sent", func() bool {
+		return e.pendingIdleConfirmLen() == 0 &&
+			platformSentContains(p, "Session kept")
+	})
+
+	// 4. Active session unchanged (== old session).
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != old.ID {
+		t.Fatalf("active session changed after keep: got %s, want %s", active.ID, old.ID)
+	}
+
+	// 5. UpdatedAt was touched (post-keep should be recent).
+	if got := time.Since(old.GetUpdatedAt()); got > 5*time.Second {
+		t.Fatalf("old session UpdatedAt not touched: idle_for=%v", got)
+	}
+}
+
+// TestAskMode_ClickRotate_ResolvesAndDrainsToNewSession verifies the
+// click=rotate path: old agent closed via cleanupInteractiveState, new
+// session created (active != old.ID), ack reply with /switch hint to old
+// short id.
+func TestAskMode_ClickRotate_ResolvesAndDrainsToNewSession(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	stub.clearSent()
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "idle:rotate", ReplyCtx: "ctx",
+	})
+
+	waitFor(t, 2*time.Second, "resolveRotate clears pending + rotates + ack sent", func() bool {
+		if e.pendingIdleConfirmLen() != 0 {
+			return false
+		}
+		active := e.sessions.GetOrCreateActive(key)
+		if active.ID == old.ID {
+			return false
+		}
+		return platformSentContains(p, "Fresh session started")
+	})
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID == old.ID {
+		t.Fatalf("expected new active session after rotate, still %s", old.ID)
+	}
+
+	// Old session is preserved (not deleted; user can /switch back).
+	if got := old.GetAgentSessionID(); got != "old-agent-session" {
+		t.Fatalf("old agent session id = %q, want preserved old-agent-session", got)
+	}
+
+	// Ack contains /switch <short id> hint.
+	foundAck := false
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Fresh session started") &&
+			strings.Contains(line, "/switch old-agent-se") {
+			foundAck = true
+			break
+		}
+	}
+	if !foundAck {
+		t.Fatalf("MsgIdleConfirmRotated ack with /switch hint missing: %v", stub.getSent())
+	}
+}
+
+// TestAskMode_TimeoutDefaultsToKeep verifies AC7: when the user does not
+// respond within resetOnIdleConfirmTimeout, the timer fires and we treat
+// it as keep with reason="timeout" (distinct ack text).
+func TestAskMode_TimeoutDefaultsToKeep(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t,
+		withAskConfirmTimeout(50*time.Millisecond),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	// Wait for timer fire + resolveKeep completion AND ack reply to land
+	// on the platform (resolveKeep's reply happens after takePendingIdle,
+	// so checking pendingLen alone races the reply).
+	waitFor(t, 2*time.Second, "timer fires → resolveKeep clears pending + ack sent", func() bool {
+		return e.pendingIdleConfirmLen() == 0 &&
+			platformSentContains(p, "No response in time")
+	})
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != old.ID {
+		t.Fatalf("active session changed on timeout: got %s, want unchanged %s", active.ID, old.ID)
+	}
+	if !platformSentContains(p, "old-agent-se") {
+		t.Fatalf("MsgIdleConfirmTimeoutKept ack missing oldShortID: %v", stub.getSent())
+	}
+}
+
+// TestAskMode_SwitchDuringPending_TreatedAsKeep verifies AC15 / A-006:
+// /switch issued while a confirm card is outstanding clears the pending
+// state and proceeds with /switch normally. resolveKeep is called with
+// reason="switch".
+func TestAskMode_SwitchDuringPending_TreatedAsKeep(t *testing.T) {
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	stub.clearSent()
+	// /switch with a query that won't match — we don't care about the
+	// /switch ack content; we only need to verify the pending state
+	// gets cleared by the hook at the top of cmdSwitch.
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "/switch nonexistent-id", ReplyCtx: "ctx",
+	})
+
+	// resolveKeep with reason="switch" runs on its own goroutine; wait
+	// for both the map cleanup AND the ack reply to land before asserting.
+	waitFor(t, 2*time.Second, "pending cleared via /switch hook + ack sent", func() bool {
+		return e.pendingIdleConfirmLen() == 0 &&
+			platformSentContains(p, "Session kept")
+	})
+}
+
+// TestAskMode_QueueAppendsFreeText verifies that free-text messages while
+// pending are appended to state.queued, and only the first one elicits the
+// MsgIdleConfirmQueuedHint reply.
+func TestAskMode_QueueAppendsFreeText(t *testing.T) {
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	// Trigger ask (this queues 1 message: "first msg").
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	stub.clearSent()
+
+	for i, c := range []string{"text-a", "text-b", "text-c"} {
+		e.handleMessage(p, &Message{
+			SessionKey: key, Platform: "test",
+			UserID: "u1", UserName: "user",
+			Content: c, ReplyCtx: "ctx",
+		})
+
+		// Each handleMessage call resolves synchronously inside the
+		// pending hook (no goroutine spawn for free-text path).
+		state := e.lookupPendingIdleConfirm(key)
+		if state == nil {
+			t.Fatalf("[i=%d] pending state vanished", i)
+		}
+		want := 1 /*original*/ + i + 1
+		if got := state.queuedLen(); got != want {
+			t.Fatalf("[i=%d] queue len = %d, want %d", i, got, want)
+		}
+	}
+
+	// Only ONE hint reply expected (first append).
+	hintCount := 0
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Got your message") {
+			hintCount++
+		}
+	}
+	if hintCount != 1 {
+		t.Fatalf("hint reply count = %d, want exactly 1; replies: %v", hintCount, stub.getSent())
+	}
+
+	// Cleanup.
+	if st := e.takePendingIdleConfirm(key); st != nil {
+		if t := st.timer.Load(); t != nil {
+			t.Stop()
+		}
+	}
+}
+
+// TestAskMode_QueueFull verifies that beyond queueCapIdleConfirm, the
+// engine replies with MsgQueueFull and does NOT grow the queue further.
+func TestAskMode_QueueFull(t *testing.T) {
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+
+	// queue already has 1 (the trigger msg). Fill to capacity (10).
+	for i := 0; i < queueCapIdleConfirm-1; i++ {
+		e.handleMessage(p, &Message{
+			SessionKey: key, Platform: "test",
+			UserID: "u1", UserName: "user",
+			Content: fmt.Sprintf("fill-%d", i), ReplyCtx: "ctx",
+		})
+	}
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished")
+	}
+	if got := state.queuedLen(); got != queueCapIdleConfirm {
+		t.Fatalf("queue len after fill = %d, want %d", got, queueCapIdleConfirm)
+	}
+
+	stub.clearSent()
+	// Next message exceeds cap → expect MsgQueueFull reply, queue unchanged.
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "overflow", ReplyCtx: "ctx",
+	})
+	if got := state.queuedLen(); got != queueCapIdleConfirm {
+		t.Fatalf("queue len after overflow = %d, want unchanged %d", got, queueCapIdleConfirm)
+	}
+	foundFull := false
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Message queue is full") {
+			foundFull = true
+			break
+		}
+	}
+	if !foundFull {
+		t.Fatalf("MsgQueueFull reply missing: %v", stub.getSent())
+	}
+
+	if st := e.takePendingIdleConfirm(key); st != nil {
+		if t := st.timer.Load(); t != nil {
+			t.Stop()
+		}
+	}
+}
+
+// TestAskMode_DoubleClick_IsIdempotent verifies the A-002 race contract:
+// two concurrent resolveKeep calls on the same state produce exactly one
+// outcome, one ack reply, and no panics. We construct the state directly
+// (bypassing the full ask flow) to keep the race tightly controlled.
+func TestAskMode_DoubleClick_IsIdempotent(t *testing.T) {
+	e, p, _, key, old := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished")
+	}
+	stub.clearSent()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.resolveKeep(state, "user_click")
+		}()
+	}
+	wg.Wait()
+
+	// Wait until pending state is cleared (proxy for sync.Once completion).
+	// The sync.Once body runs in the FIRST goroutine; the second's Do()
+	// call blocks until the first's body finishes, so by the time wg.Wait
+	// returns, the body's IO has also completed.
+	waitFor(t, 2*time.Second, "pending cleared + ack sent", func() bool {
+		return e.pendingIdleConfirmLen() == 0 &&
+			platformSentContains(p, "Session kept")
+	})
+
+	if v := state.outcome.Load(); v == nil || v.(string) != "keep" {
+		t.Fatalf("outcome = %v, want \"keep\"", v)
+	}
+
+	// Exactly ONE ack reply.
+	ackCount := 0
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Session kept") {
+			ackCount++
+		}
+	}
+	if ackCount != 1 {
+		t.Fatalf("ack reply count = %d, want exactly 1 (idempotent); replies: %v", ackCount, stub.getSent())
+	}
+
+	// Old session unchanged.
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID != old.ID {
+		t.Fatalf("active session changed after double-keep: got %s, want %s", active.ID, old.ID)
+	}
+}
+
+// TestAskMode_LateCallbackAfterTimeout_NoOp verifies that a button click
+// arriving after the timer has already fired (and resolveKeep with
+// "timeout" reason has completed) is a no-op with a single
+// idle_confirm_late_callback slog entry. We don't capture slog here; we
+// assert no duplicate ack and no panic.
+func TestAskMode_LateCallbackAfterTimeout_NoOp(t *testing.T) {
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(40*time.Millisecond),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished before timer fire")
+	}
+
+	// Wait for timer fire.
+	waitFor(t, 2*time.Second, "timer fires", func() bool {
+		return e.pendingIdleConfirmLen() == 0 && state.resolvedFlag.Load()
+	})
+
+	stub.clearSent()
+	// Simulate a late button click via the public hook surface.
+	e.resolveKeep(state, "user_click")
+	e.resolveRotate(state, "user_click")
+
+	// No new ack replies — state was already resolved.
+	for _, line := range stub.getSent() {
+		if strings.Contains(line, "Session kept") || strings.Contains(line, "Fresh session started") {
+			t.Fatalf("unexpected ack reply after late callback: %v", stub.getSent())
+		}
+	}
+	if v := state.outcome.Load(); v == nil || v.(string) != "keep" {
+		t.Fatalf("outcome = %v, want unchanged \"keep\"", v)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// T-007: idle_confirm_degraded_to_auto slog event (AC9b / AC20)
+// ──────────────────────────────────────────────────────────────
+
+// slogCaptureHandler is a minimal slog.Handler that records every Record it
+// receives. Used by T-007 (and other ask-mode tests) to assert that the
+// engine emits the expected structured slog events under specific code
+// paths. It is intentionally simple — no attribute groups, no level filtering
+// — so tests can grep records by Message and walk Attrs directly.
+type slogCaptureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *slogCaptureHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *slogCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *slogCaptureHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *slogCaptureHandler) WithGroup(_ string) slog.Handler      { return h }
+
+// findByMsg returns all captured records whose Message equals msg.
+func (h *slogCaptureHandler) findByMsg(msg string) []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Record
+	for _, r := range h.records {
+		if r.Message == msg {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// captureSlog redirects the default slog logger to a slogCaptureHandler for
+// the duration of a single test. The returned restore func must be called
+// (typically via defer) to put the previous default logger back.
+func captureSlog(t *testing.T) (*slogCaptureHandler, func()) {
+	t.Helper()
+	h := &slogCaptureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	return h, func() { slog.SetDefault(prev) }
+}
+
+// recordAttr looks up a single attribute by key on a slog.Record. Returns
+// the attribute and true if found; zero-value Attr and false otherwise.
+func recordAttr(r slog.Record, key string) (slog.Attr, bool) {
+	var found slog.Attr
+	var ok bool
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			found = a
+			ok = true
+			return false
+		}
+		return true
+	})
+	return found, ok
+}
+
+// TestAskMode_NonCardSenderEmitsDegradeSlog verifies AC9b's observability
+// contract: when the engine is configured for mode="ask" but the platform
+// does not implement CardSender, the degrade path emits a structured slog
+// event "idle_confirm_degraded_to_auto" with interactive_key / platform /
+// reason="no_card_sender" attributes (design.md §3.6 / AC20).
+//
+// Behavioural equivalence to mode=auto (old session closed, new session
+// rotated) is already covered by TestAskMode_NonCardSenderFallsBackToAuto;
+// this test focuses on the slog instrumentation only — but still asserts
+// the rotation outcome to guard against silent regressions where the slog
+// is emitted but the legacy forward is dropped.
+func TestAskMode_NonCardSenderEmitsDegradeSlog(t *testing.T) {
+	cap, restore := captureSlog(t)
+	defer restore()
+
+	e, p, _, key, old := newAskTestEngine(t, withAskNoCardSender())
+	stub := p.(*stubPlatformEngine)
+	stub.clearSent()
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Behavioural assertion: rotation happened (degrade is equivalent to
+	// mode=auto). Without this, a regression that drops the legacy forward
+	// but keeps the slog would still pass the instrumentation check below.
+	waitFor(t, 2*time.Second, "session rotation via AC9b degrade", func() bool {
+		active := e.sessions.GetOrCreateActive(key)
+		return active.ID != old.ID
+	})
+
+	// Instrumentation assertion: exactly the expected event was emitted.
+	records := cap.findByMsg("idle_confirm_degraded_to_auto")
+	if len(records) != 1 {
+		t.Fatalf("expected exactly 1 idle_confirm_degraded_to_auto slog event, got %d", len(records))
+	}
+	r := records[0]
+
+	// AC20: structured attrs interactive_key / platform / reason.
+	if a, ok := recordAttr(r, "interactive_key"); !ok {
+		t.Errorf("slog event missing attr interactive_key")
+	} else if got := a.Value.String(); got != key {
+		t.Errorf("slog attr interactive_key = %q, want %q", got, key)
+	}
+
+	if a, ok := recordAttr(r, "platform"); !ok {
+		t.Errorf("slog event missing attr platform")
+	} else if got := a.Value.String(); got != "test" {
+		t.Errorf("slog attr platform = %q, want %q", got, "test")
+	}
+
+	if a, ok := recordAttr(r, "reason"); !ok {
+		t.Errorf("slog event missing attr reason")
+	} else if got := a.Value.String(); got != "no_card_sender" {
+		t.Errorf("slog attr reason = %q, want %q", got, "no_card_sender")
+	}
+
+	// No pending state should have been registered on the degrade path.
+	if got := e.pendingIdleConfirmLen(); got != 0 {
+		t.Fatalf("pendingIdleConfirm map size = %d, want 0 (degrade must not create pending state)", got)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// T-005: timer + race safety (design.md §4 / AC14 / AC23)
+//
+// Three race scenarios from design.md §4:
+//
+//	Race A — timer fires first, then a late user click hits the
+//	         late-callback fast-path (post-resolve no-op + slog).
+//	Race B — user click resolves first, then a late timer fire
+//	         (simulating Stop() returning false) hits the same
+//	         late-callback fast-path.
+//	Race C — many concurrent clicks (keep + rotate mixed) race for
+//	         the sync.Once winner; exactly one outcome stored, exactly
+//	         one ack reply sent, and 0..N-1 late_callback slog events
+//	         (deterministic ceiling only — sync.Once may absorb losers
+//	         silently if they enter Do() before resolvedFlag is set).
+//
+// All four tests pass under `go test -race` (AC23). They share the
+// existing newAskTestEngine + captureSlog + slogCaptureHandler helpers
+// landed in T-004 / T-007.
+// ──────────────────────────────────────────────────────────────
+
+// idleConfirmAckCount counts user-facing acknowledgement replies (keep /
+// rotate / timeout-keep) seen by the stub platform. Used by Race A/B/C
+// tests to assert "ack sent exactly once" across all winning + losing
+// resolveKeep/Rotate calls.
+func idleConfirmAckCount(p Platform) int {
+	type sender interface{ getSent() []string }
+	s, ok := p.(sender)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, line := range s.getSent() {
+		if strings.Contains(line, "Session kept") ||
+			strings.Contains(line, "Fresh session started") ||
+			strings.Contains(line, "No response in time") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestAskMode_TimerFiresBeforeClick verifies Race A (design.md §4.1):
+// timer fires first → resolveKeep("timeout") wins; subsequent late user
+// clicks (idle:keep + idle:rotate, simulating a click that arrived AFTER
+// the map was cleared but on the same captured state pointer) hit the
+// late-callback fast-path and emit idle_confirm_late_callback slog with
+// the winning outcome attached.
+func TestAskMode_TimerFiresBeforeClick(t *testing.T) {
+	cap, restore := captureSlog(t)
+	defer restore()
+
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(40*time.Millisecond),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished before timer fire")
+	}
+
+	// Wait for timer fire → resolveKeep("timeout") wins. State flag
+	// flips, pending map empties, ack lands.
+	waitFor(t, 2*time.Second, "timer fires + timeout ack sent", func() bool {
+		return e.pendingIdleConfirmLen() == 0 &&
+			state.resolvedFlag.Load() &&
+			platformSentContains(p, "No response in time")
+	})
+
+	// Sanity: winning slog sequence.
+	if got := len(cap.findByMsg("idle_confirm_started")); got != 1 {
+		t.Fatalf("idle_confirm_started count = %d, want 1", got)
+	}
+	if got := len(cap.findByMsg("idle_confirm_timeout_keep")); got != 1 {
+		t.Fatalf("idle_confirm_timeout_keep count = %d, want 1", got)
+	}
+	if got := len(cap.findByMsg("idle_confirm_user_keep")); got != 0 {
+		t.Fatalf("idle_confirm_user_keep count = %d, want 0 (timer path)", got)
+	}
+	if got := len(cap.findByMsg("idle_confirm_user_rotate")); got != 0 {
+		t.Fatalf("idle_confirm_user_rotate count = %d, want 0 (timer path)", got)
+	}
+
+	// Reset stub so post-resolution ack assertions are decisive.
+	stub.clearSent()
+
+	// Late user click (post-resolve). Two distinct buttons exercise
+	// both fast-path branches (resolveKeep + resolveRotate).
+	e.resolveKeep(state, "user_click")
+	e.resolveRotate(state, "user_click")
+
+	// Both should emit idle_confirm_late_callback with outcome=keep.
+	lateCallbacks := cap.findByMsg("idle_confirm_late_callback")
+	if got := len(lateCallbacks); got != 2 {
+		t.Fatalf("idle_confirm_late_callback count = %d, want 2 (one keep + one rotate)", got)
+	}
+
+	incoming := map[string]int{}
+	for i, r := range lateCallbacks {
+		if a, ok := recordAttr(r, "outcome"); !ok {
+			t.Errorf("late_callback[%d] missing outcome attr", i)
+		} else if got := a.Value.String(); got != "keep" {
+			t.Errorf("late_callback[%d] outcome = %q, want %q", i, got, "keep")
+		}
+		if a, ok := recordAttr(r, "interactive_key"); !ok {
+			t.Errorf("late_callback[%d] missing interactive_key attr", i)
+		} else if got := a.Value.String(); got != key {
+			t.Errorf("late_callback[%d] interactive_key = %q, want %q", i, got, key)
+		}
+		if a, ok := recordAttr(r, "incoming_reason"); !ok {
+			t.Errorf("late_callback[%d] missing incoming_reason attr", i)
+		} else if got := a.Value.String(); got != "user_click" {
+			t.Errorf("late_callback[%d] incoming_reason = %q, want %q", i, got, "user_click")
+		}
+		if a, ok := recordAttr(r, "incoming_outcome"); ok {
+			incoming[a.Value.String()]++
+		} else {
+			t.Errorf("late_callback[%d] missing incoming_outcome attr", i)
+		}
+	}
+	if incoming["keep"] != 1 || incoming["rotate"] != 1 {
+		t.Errorf("incoming_outcome distribution = %v, want {keep:1, rotate:1}", incoming)
+	}
+
+	// No new ack replies after the late callbacks — fast-path is noop.
+	if got := idleConfirmAckCount(p); got != 0 {
+		t.Fatalf("post-late ack count = %d, want 0 (late callbacks must be silent); replies: %v",
+			got, stub.getSent())
+	}
+
+	// Outcome immutable post-resolve.
+	if v := state.outcome.Load(); v == nil || v.(string) != "keep" {
+		t.Fatalf("outcome = %v, want unchanged \"keep\"", v)
+	}
+
+	// Pending map remains empty (defensive — late callbacks must not
+	// re-register state).
+	if got := e.pendingIdleConfirmLen(); got != 0 {
+		t.Fatalf("pendingIdleConfirm len = %d, want 0 (late callbacks must not resurrect state)", got)
+	}
+}
+
+// TestAskMode_ClickFiresBeforeTimer verifies Race B (design.md §4.2):
+// user click resolves first; a late timer fire (the path taken when
+// state.timer.Stop() returns false because the timer goroutine had
+// already started) hits the late-callback fast-path with no side
+// effects.
+//
+// We simulate the late timer fire by invoking
+// resolveKeep(state, "timeout") directly — this is the exact code path
+// executed by time.AfterFunc's closure when Stop() lost the race. The
+// real timer was Stop()ed by the winning click; calling resolveKeep
+// here exercises the fast-path no-op semantics that protect against
+// the lost-Stop race.
+func TestAskMode_ClickFiresBeforeTimer(t *testing.T) {
+	cap, restore := captureSlog(t)
+	defer restore()
+
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second), // timer won't fire on its own
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished")
+	}
+
+	// User click wins the race.
+	e.resolveKeep(state, "user_click")
+
+	waitFor(t, 2*time.Second, "click ack sent + pending cleared", func() bool {
+		return e.pendingIdleConfirmLen() == 0 &&
+			platformSentContains(p, "Session kept")
+	})
+
+	if got := len(cap.findByMsg("idle_confirm_user_keep")); got != 1 {
+		t.Fatalf("idle_confirm_user_keep count = %d, want 1", got)
+	}
+	if got := len(cap.findByMsg("idle_confirm_timeout_keep")); got != 0 {
+		t.Fatalf("idle_confirm_timeout_keep count = %d, want 0 (click won)", got)
+	}
+
+	stub.clearSent()
+
+	// Simulate the late timer fire that lost Stop()'s race.
+	e.resolveKeep(state, "timeout")
+
+	lateCallbacks := cap.findByMsg("idle_confirm_late_callback")
+	if got := len(lateCallbacks); got != 1 {
+		t.Fatalf("idle_confirm_late_callback count = %d, want 1 (late timer fire)", got)
+	}
+	r := lateCallbacks[0]
+	if a, ok := recordAttr(r, "outcome"); !ok {
+		t.Errorf("late_callback missing outcome attr")
+	} else if got := a.Value.String(); got != "keep" {
+		t.Errorf("late_callback outcome = %q, want %q", got, "keep")
+	}
+	if a, ok := recordAttr(r, "incoming_reason"); !ok {
+		t.Errorf("late_callback missing incoming_reason attr")
+	} else if got := a.Value.String(); got != "timeout" {
+		t.Errorf("late_callback incoming_reason = %q, want %q (simulated late timer fire)", got, "timeout")
+	}
+	if a, ok := recordAttr(r, "incoming_outcome"); !ok {
+		t.Errorf("late_callback missing incoming_outcome attr")
+	} else if got := a.Value.String(); got != "keep" {
+		t.Errorf("late_callback incoming_outcome = %q, want %q (resolveKeep called)", got, "keep")
+	}
+
+	// No second ack reply — the late timer fire must not produce a
+	// duplicate timeout-keep ack.
+	if got := idleConfirmAckCount(p); got != 0 {
+		t.Fatalf("post-late ack count = %d, want 0; replies: %v", got, stub.getSent())
+	}
+
+	// Outcome unchanged.
+	if v := state.outcome.Load(); v == nil || v.(string) != "keep" {
+		t.Fatalf("outcome = %v, want unchanged \"keep\"", v)
+	}
+
+	// Pending map remains empty.
+	if got := e.pendingIdleConfirmLen(); got != 0 {
+		t.Fatalf("pendingIdleConfirm len = %d, want 0", got)
+	}
+
+	// Single winning user_keep slog, no extra winners after the late
+	// timer fire.
+	if got := len(cap.findByMsg("idle_confirm_user_keep")); got != 1 {
+		t.Fatalf("idle_confirm_user_keep count after late fire = %d, want 1 (no duplicate winner)", got)
+	}
+}
+
+// TestAskMode_ConcurrentClicksAreIdempotent verifies Race C
+// (design.md §4.3): N goroutines invoking resolveKeep + resolveRotate
+// concurrently produce exactly one winning outcome, exactly one ack
+// reply, and a bounded number (0..N-1) of late_callback slog entries.
+//
+// Stronger than TestAskMode_DoubleClick_IsIdempotent (T-004): N=10
+// goroutines + mixed keep/rotate + slog capture + winner uniqueness
+// assertion.
+func TestAskMode_ConcurrentClicksAreIdempotent(t *testing.T) {
+	cap, restore := captureSlog(t)
+	defer restore()
+
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished")
+	}
+	stub.clearSent()
+
+	const N = 10
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		idx := i
+		go func() {
+			defer wg.Done()
+			<-start
+			// Mixed keep + rotate; idx even → keep, odd → rotate.
+			// Both same-button (idx 0/2/4/...) and different-button
+			// (idx alternating) double-click scenarios are exercised.
+			if idx%2 == 0 {
+				e.resolveKeep(state, "user_click")
+			} else {
+				e.resolveRotate(state, "user_click")
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Outcome stored exactly once (atomic.Value semantics).
+	v := state.outcome.Load()
+	if v == nil {
+		t.Fatal("outcome not stored")
+	}
+	outcome, _ := v.(string)
+	if outcome != "keep" && outcome != "rotate" {
+		t.Fatalf("outcome = %q, want \"keep\" or \"rotate\"", outcome)
+	}
+
+	// Pending map cleared.
+	waitFor(t, 2*time.Second, "pending cleared", func() bool {
+		return e.pendingIdleConfirmLen() == 0
+	})
+
+	// Exactly ONE winner slog (either keep or rotate); the winner
+	// matches the stored outcome.
+	winnerKeep := len(cap.findByMsg("idle_confirm_user_keep"))
+	winnerRotate := len(cap.findByMsg("idle_confirm_user_rotate"))
+	if winnerKeep+winnerRotate != 1 {
+		t.Fatalf("winner slog count = %d (keep=%d, rotate=%d), want exactly 1",
+			winnerKeep+winnerRotate, winnerKeep, winnerRotate)
+	}
+	if outcome == "keep" && winnerKeep != 1 {
+		t.Fatalf("outcome=keep but idle_confirm_user_keep count = %d, want 1", winnerKeep)
+	}
+	if outcome == "rotate" && winnerRotate != 1 {
+		t.Fatalf("outcome=rotate but idle_confirm_user_rotate count = %d, want 1", winnerRotate)
+	}
+
+	// Late callbacks: 0..N-1 (sync.Once may absorb losers silently if
+	// they enter Do() before resolvedFlag is set — see design.md §4.3).
+	lateCount := len(cap.findByMsg("idle_confirm_late_callback"))
+	if lateCount > N-1 {
+		t.Fatalf("idle_confirm_late_callback count = %d, want ≤ %d (N-1)", lateCount, N-1)
+	}
+
+	// Winner ack reply (sent synchronously inside the sync.Once body,
+	// so already landed by wg.Wait(); waitFor is defensive).
+	waitFor(t, 2*time.Second, "winner ack sent", func() bool {
+		return platformSentContains(p, "Session kept") ||
+			platformSentContains(p, "Fresh session started")
+	})
+
+	// Exactly ONE ack reply across all N goroutines.
+	if got := idleConfirmAckCount(p); got != 1 {
+		t.Fatalf("ack reply count = %d, want exactly 1 (idempotent); replies: %v",
+			got, stub.getSent())
+	}
+}
+
+// TestAskMode_RaceDetectorClean is an aggressive race-detector torture
+// test that combines (a) a very short timer (so the real
+// time.AfterFunc closure races with user clicks) and (b) N concurrent
+// goroutines doing keep + rotate + simulated late-timer-fire. Run with
+// `go test -race` to verify the atomic.Pointer[time.Timer] + sync.Once
+// + atomic.Bool combo is race-free at the language level.
+//
+// Multiple parallel sub-trials maximize scheduler interleaving (and
+// therefore the chance of any latent data race surfacing under -race).
+// We do NOT assert exact slog counts here — the deterministic
+// correctness assertions (outcome stored once, ack count == 1) live in
+// the Race A/B/C tests above. This test focuses on race detector
+// cleanliness only.
+func TestAskMode_RaceDetectorClean(t *testing.T) {
+	t.Parallel()
+
+	const trials = 5
+	for trial := 0; trial < trials; trial++ {
+		trial := trial
+		t.Run(fmt.Sprintf("trial-%d", trial), func(t *testing.T) {
+			t.Parallel()
+
+			e, p, _, key, _ := newAskTestEngine(t,
+				withAskConfirmTimeout(5*time.Millisecond), // very short
+			)
+
+			e.handleMessage(p, &Message{
+				SessionKey: key, Platform: "test",
+				UserID: "u1", UserName: "user",
+				Content: "first msg", ReplyCtx: "ctx",
+			})
+
+			// Best-effort: grab the state pointer before the timer
+			// fires. If the tight 5ms timer wins outright, lookup
+			// returns nil — in that case the race surface is gone
+			// for this trial and we skip the goroutine fan-out.
+			state := e.lookupPendingIdleConfirm(key)
+			if state == nil {
+				return
+			}
+
+			const N = 20
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			for i := 0; i < N; i++ {
+				wg.Add(1)
+				idx := i
+				go func() {
+					defer wg.Done()
+					<-start
+					switch idx % 3 {
+					case 0:
+						e.resolveKeep(state, "user_click")
+					case 1:
+						e.resolveRotate(state, "user_click")
+					case 2:
+						// Simulated late timer fire — runs the
+						// exact path time.AfterFunc's closure
+						// would have executed if Stop() returned
+						// false.
+						e.resolveKeep(state, "timeout")
+					}
+				}()
+			}
+			close(start)
+			wg.Wait()
+
+			// State must be resolved exactly once, with a valid
+			// outcome. We don't care which one — the race torture
+			// test's contract is "no race detector report + state
+			// consistent".
+			waitFor(t, 2*time.Second, "pending cleared", func() bool {
+				return e.pendingIdleConfirmLen() == 0
+			})
+			v := state.outcome.Load()
+			if v == nil {
+				t.Fatal("outcome not stored")
+			}
+			s, _ := v.(string)
+			if s != "keep" && s != "rotate" {
+				t.Fatalf("outcome = %q, want \"keep\" or \"rotate\"", s)
+			}
+			if !state.resolvedFlag.Load() {
+				t.Fatal("resolvedFlag not set after wg.Wait")
+			}
+		})
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// T-009: AC matrix gap fills (AC10 / AC13 / AC26 / AC27)
+//
+// These tests close discoverability gaps in the AC1~AC27 coverage matrix
+// identified during the T-009 audit. The behaviours they cover are
+// already implemented by T-003 / T-004 / T-007 — these tests provide
+// AC-anchored regression guards plus the table-driven cursor / cursorsdk
+// scope narrowing landed in the 2026-05-22 amend.
+// ──────────────────────────────────────────────────────────────
+
+// TestAskMode_SlashListDoesNotConsumePending verifies AC10 (requirement.md
+// §8.4): while a confirm card is outstanding, slash commands other than
+// /switch (e.g. /list, /help, /new) execute normally and MUST NOT consume
+// or clear the pending state. The pending state's queue length is also
+// unchanged because slash commands are caught by handleCommand BEFORE
+// handlePendingIdleConfirm — they never reach the queue-append path.
+//
+// AC15 (/switch ↔ resolveKeep("switch")) is covered separately by
+// TestAskMode_SwitchDuringPending_TreatedAsKeep; this test focuses on
+// non-/switch slashes and explicitly asserts the bypass property.
+func TestAskMode_SlashListDoesNotConsumePending(t *testing.T) {
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	// 1. Trigger ask (state created, queue holds the original message).
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "first msg", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("pending vanished before slash send")
+	}
+	initQueue := state.queuedLen()
+	stub.clearSent()
+
+	// 2. Send /list (not /switch). It must execute via handleCommand
+	// and bypass handlePendingIdleConfirm entirely.
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "/list", ReplyCtx: "ctx",
+	})
+
+	// /list dispatches synchronously inside handleCommand; give a small
+	// margin for any async ack to land but no goroutine fan-out is needed.
+	time.Sleep(50 * time.Millisecond)
+
+	// AC10 core invariants:
+	if got := e.pendingIdleConfirmLen(); got != 1 {
+		t.Fatalf("AC10: pendingIdleConfirm len = %d after /list, want 1 (slash must bypass)", got)
+	}
+	again := e.lookupPendingIdleConfirm(key)
+	if again == nil {
+		t.Fatal("AC10: pending state cleared by /list (should not be)")
+	}
+	if again != state {
+		t.Fatal("AC10: pending state replaced after /list (should reuse same instance)")
+	}
+	if got := state.queuedLen(); got != initQueue {
+		t.Fatalf("AC10: queue len = %d after /list, want unchanged %d (slash bypasses queue)", got, initQueue)
+	}
+
+	// /list executed: some reply was produced (we don't assert exact
+	// content; the audit log "command_executed user_id=... command=list"
+	// in cmdList path is the primary evidence — but here we only need
+	// to confirm the slash was processed, not the idle-confirm queue path).
+	if len(stub.getSent()) == 0 && len(stub.getRepliedCards()) == 0 {
+		t.Fatalf("AC10: /list produced neither text nor card reply (slash may not have executed); state %+v", state)
+	}
+
+	if st := e.takePendingIdleConfirm(key); st != nil {
+		if tmr := st.timer.Load(); tmr != nil {
+			tmr.Stop()
+		}
+	}
+}
+
+// TestAskMode_RepeatedTriggerReusesPendingState verifies AC13
+// (requirement.md §8.4): if a second message arrives while a confirm card
+// is outstanding for the same interactiveKey, the engine MUST reuse the
+// existing pendingIdleConfirmState (append to its queue, no new card,
+// no duplicate idle_confirm_started slog) rather than create a parallel
+// state.
+//
+// Behaviourally this is already partially exercised by
+// TestAskMode_QueueAppendsFreeText (multiple queued messages) but the
+// AC13 invariants — exactly one card render and exactly one
+// idle_confirm_started slog event across the whole flow — are not made
+// explicit there. This test asserts them directly so the reuse contract
+// has an AC-anchored guard.
+func TestAskMode_RepeatedTriggerReusesPendingState(t *testing.T) {
+	cap, restore := captureSlog(t)
+	defer restore()
+
+	e, p, _, key, _ := newAskTestEngine(t,
+		withAskConfirmTimeout(30*time.Second),
+	)
+	stub := p.(*stubCardPlatform)
+
+	// 1. First trigger: registers state, sends ONE card, logs ONE start.
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "trigger 1", ReplyCtx: "ctx",
+	})
+	waitFor(t, 1*time.Second, "pending registered", func() bool {
+		return e.pendingIdleConfirmLen() == 1
+	})
+	state := e.lookupPendingIdleConfirm(key)
+	if state == nil {
+		t.Fatal("AC13: pending vanished after first trigger")
+	}
+
+	// 2. Second message: intercepted by handlePendingIdleConfirm, added
+	// to queue. Crucially, maybeStartIdleConfirm must NOT run again
+	// (we never reach sessionLocked once handlePendingIdleConfirm
+	// returns true) — so no new idle_confirm_started, no new card.
+	e.handleMessage(p, &Message{
+		SessionKey: key, Platform: "test",
+		UserID: "u1", UserName: "user",
+		Content: "trigger 2", ReplyCtx: "ctx",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	// AC13 invariants:
+	if got := e.pendingIdleConfirmLen(); got != 1 {
+		t.Fatalf("AC13: pendingIdleConfirm len = %d after second msg, want 1 (state reuse)", got)
+	}
+	again := e.lookupPendingIdleConfirm(key)
+	if again != state {
+		t.Fatal("AC13: pending state replaced (should reuse same instance)")
+	}
+	if got := state.queuedLen(); got != 2 {
+		t.Fatalf("AC13: queue len = %d after second msg, want 2 (1 original + 1 appended)", got)
+	}
+
+	starts := len(cap.findByMsg("idle_confirm_started"))
+	if starts != 1 {
+		t.Fatalf("AC13: idle_confirm_started count = %d, want exactly 1 (no duplicate trigger)", starts)
+	}
+	if got := len(stub.getRepliedCards()); got != 1 {
+		t.Fatalf("AC13: card count = %d, want exactly 1 (no duplicate card render)", got)
+	}
+
+	if st := e.takePendingIdleConfirm(key); st != nil {
+		if tmr := st.timer.Load(); tmr != nil {
+			tmr.Stop()
+		}
+	}
+}
+
+// namedAgent is a test-only Agent that takes a configurable Name() to
+// exercise table-driven scenarios across agent types (AC26: cursor +
+// cursorsdk). It delegates StartSession to a pre-built AgentSession so
+// the engine's processing harness has a usable session for any rotate
+// path that materializes.
+type namedAgent struct {
+	name    string
+	session AgentSession
+}
+
+func (a *namedAgent) Name() string { return a.name }
+func (a *namedAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	return a.session, nil
+}
+func (a *namedAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *namedAgent) Stop() error { return nil }
+
+// newNamedAgentAskEngine builds an engine identical in shape to
+// newAskTestEngine but with a caller-provided agent.Name() — used by the
+// AC26 table-driven test below. Wires a fresh resultAgentSession so any
+// rotate path has a working downstream session.
+func newNamedAgentAskEngine(t *testing.T, agentName string) (*Engine, Platform, string, *Session) {
+	t.Helper()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &namedAgent{name: agentName, session: newResultAgentSession("agent reply")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+	e.SetResetOnIdleMode("ask")
+	e.SetResetOnIdleConfirmTimeout(30 * time.Second)
+
+	key := "feishu:user1"
+	old := e.sessions.GetOrCreateActive(key)
+	old.AddHistory("user", "stale context")
+	old.SetAgentSessionID("old-agent-session", agentName)
+	stale := time.Now().Add(-2 * time.Hour)
+	old.mu.Lock()
+	old.UpdatedAt = stale
+	old.mu.Unlock()
+
+	return e, p, key, old
+}
+
+// TestAskMode_AgentTypes_TableDriven verifies AC26 (requirement.md §8.8 +
+// design.md §14.4.1): the ask path is agent-agnostic by construction
+// (core/engine.go::maybeStartIdleConfirm dispatches purely on CardSender
+// capability and session.UpdatedAt; it never branches on agent.Name()).
+// Two stub agents differing ONLY in Name() must produce byte-identical
+// observable behaviour — same slog event names, same MsgKey-derived
+// reply text, same queue semantics — for both keep and rotate outcomes.
+//
+// Scope (2026-05-22 22:14 user decision): cursor + cursorsdk only. The
+// 11 other agent types are out of AC scope; their capability-based
+// compatibility is documented in design.md §14.1 but not validated here.
+func TestAskMode_AgentTypes_TableDriven(t *testing.T) {
+	tests := []struct {
+		agentName    string
+		outcome      string // "keep" | "rotate"
+		callback     string // "idle:keep" | "idle:rotate"
+		wantAckMatch string
+		wantSlog     string
+	}{
+		{"cursor", "keep", "idle:keep", "Session kept", "idle_confirm_user_keep"},
+		{"cursorsdk", "keep", "idle:keep", "Session kept", "idle_confirm_user_keep"},
+		{"cursor", "rotate", "idle:rotate", "Fresh session started", "idle_confirm_user_rotate"},
+		{"cursorsdk", "rotate", "idle:rotate", "Fresh session started", "idle_confirm_user_rotate"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(fmt.Sprintf("%s_%s", tc.agentName, tc.outcome), func(t *testing.T) {
+			cap, restore := captureSlog(t)
+			defer restore()
+
+			e, p, key, old := newNamedAgentAskEngine(t, tc.agentName)
+
+			// 1. Trigger ask.
+			e.handleMessage(p, &Message{
+				SessionKey: key, Platform: "feishu",
+				UserID: "u1", UserName: "user",
+				Content: "first msg", ReplyCtx: "ctx",
+			})
+			waitFor(t, 1*time.Second, "pending registered", func() bool {
+				return e.pendingIdleConfirmLen() == 1
+			})
+
+			// 2. Dispatch the callback.
+			e.handleMessage(p, &Message{
+				SessionKey: key, Platform: "feishu",
+				UserID: "u1", UserName: "user",
+				Content: tc.callback, ReplyCtx: "ctx",
+			})
+
+			// 3. Wait for resolve (pending cleared + ack reply landed).
+			waitFor(t, 2*time.Second, "resolve completes + ack sent", func() bool {
+				return e.pendingIdleConfirmLen() == 0 && platformSentContains(p, tc.wantAckMatch)
+			})
+
+			// AC26 invariants: outcome stored, ack reply matches MsgKey,
+			// winner slog event matches expected name. All three are
+			// identical across the two agent types.
+			if v := e.sessions.GetOrCreateActive(key); tc.outcome == "keep" && v.ID != old.ID {
+				t.Fatalf("AC26 [%s/keep]: active session changed (got %s, want unchanged %s)", tc.agentName, v.ID, old.ID)
+			} else if tc.outcome == "rotate" && v.ID == old.ID {
+				t.Fatalf("AC26 [%s/rotate]: active session unchanged (still %s) — rotate path did not engage", tc.agentName, old.ID)
+			}
+
+			if !platformSentContains(p, tc.wantAckMatch) {
+				t.Fatalf("AC26 [%s/%s]: ack reply containing %q not found", tc.agentName, tc.outcome, tc.wantAckMatch)
+			}
+			if got := len(cap.findByMsg(tc.wantSlog)); got != 1 {
+				t.Fatalf("AC26 [%s/%s]: slog %q count = %d, want exactly 1", tc.agentName, tc.outcome, tc.wantSlog, got)
+			}
+		})
+	}
+}
+
+// cursorSDKLikeAgent is a test fixture that mimics the *shape* of the
+// agent/cursorsdk Agent: it carries an internal "idle TTL" intended to
+// model the sidecar Node.js session resource cleanup window
+// (agent/cursorsdk/session.go::idleTTL). Critically, this TTL value is
+// stored as an unexported field on the agent itself and is NOT exposed
+// through any method on core.Agent or core.AgentSession — so the engine
+// has no access path to it. This mirrors the real cursorsdk integration
+// where idleTTL lives inside the sidecar and never leaks into core.
+//
+// The fixture lets the AC27 orthogonality test demonstrate the contract
+// in observable terms: the engine's idle decision is driven entirely by
+// engine-level configuration (e.resetOnIdle + session.UpdatedAt), and
+// any agent-internal TTL — regardless of value — is invisible and has
+// zero influence on engine timing.
+type cursorSDKLikeAgent struct {
+	namedAgent
+	// claimedIdleTTL models the sidecar's own session-resource TTL.
+	// It is stored here but never read by core — see test comments.
+	claimedIdleTTL time.Duration
+}
+
+// TestAskMode_CursorSDKIdleTTL_DoesNotInterfere verifies AC27
+// (requirement.md §8.8 + design.md §14.3 / §14.5):
+// `cursorsdk.session.idleTTL` (sidecar Node.js resource TTL) and
+// `core.Engine.resetOnIdle` (user-facing ask-or-keep threshold) are at
+// different layers and operate on independent timers. They MUST NOT
+// influence each other's behaviour.
+//
+// Verification approach (per task brief §3.5, Approach 1 — pure unit):
+// We construct a cursorsdk-flavoured stub agent that carries a
+// `claimedIdleTTL` field modelling the sidecar TTL. Because this field
+// is private to the agent type and the core.Agent / core.AgentSession
+// interfaces do not expose any TTL accessor, the engine literally has
+// no API surface through which it could read or react to that value.
+// We then exercise two scenarios that would diverge if the engine were
+// (incorrectly) sensitive to the agent's TTL:
+//
+//   - Scenario A: e.resetOnIdle = 60min, session 2h stale, agent
+//     claimedIdleTTL = 10s. If engine respected the agent's TTL, ask
+//     would have triggered long ago — and the inverse, if it ignored
+//     the engine threshold, no card would land. The test asserts a
+//     SINGLE pending state and SINGLE idle_confirm_started slog —
+//     proving the decision derives from e.resetOnIdle alone.
+//   - Scenario B: e.resetOnIdle = 60min, session 30min stale (NOT idle
+//     by core's threshold), agent claimedIdleTTL = 1ns. If engine
+//     read the agent TTL, ask would trigger immediately. The test
+//     asserts NO pending state and NO idle_confirm_started slog —
+//     proving the agent's TTL has zero influence on engine timing.
+//
+// Approach 2 (real cursorsdk sidecar + integration smoke) is deferred
+// to phase 11 integration tests; for T-009 the pure-unit scope is
+// sufficient given the engine's strict capability-based dispatch
+// (validated by TestCore_NoHardcodedPlatformOrAgentNames / AC25).
+func TestAskMode_CursorSDKIdleTTL_DoesNotInterfere(t *testing.T) {
+	// Scenario A: engine threshold exceeded → ask must trigger,
+	// independent of the agent's claimed (very short) idle TTL.
+	t.Run("engine_threshold_exceeded_triggers_regardless_of_agent_ttl", func(t *testing.T) {
+		cap, restore := captureSlog(t)
+		defer restore()
+
+		p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		agent := &cursorSDKLikeAgent{
+			namedAgent: namedAgent{
+				name:    "cursorsdk",
+				session: newResultAgentSession("agent reply"),
+			},
+			// Pretend the sidecar wants to GC the session after 10s.
+			// The engine must NOT read this field.
+			claimedIdleTTL: 10 * time.Second,
+		}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		e.SetResetOnIdle(60 * time.Minute)
+		e.SetResetOnIdleMode("ask")
+		e.SetResetOnIdleConfirmTimeout(30 * time.Second)
+
+		key := "feishu:user1"
+		old := e.sessions.GetOrCreateActive(key)
+		old.AddHistory("user", "stale context")
+		old.SetAgentSessionID("old-agent-session", "cursorsdk")
+		stale := time.Now().Add(-2 * time.Hour)
+		old.mu.Lock()
+		old.UpdatedAt = stale
+		old.mu.Unlock()
+
+		e.handleMessage(p, &Message{
+			SessionKey: key, Platform: "feishu",
+			UserID: "u1", UserName: "user",
+			Content: "hello after idle", ReplyCtx: "ctx",
+		})
+
+		// Engine threshold (60min) reached — ask must trigger exactly once.
+		waitFor(t, 1*time.Second, "pending registered (engine-driven)", func() bool {
+			return e.pendingIdleConfirmLen() == 1
+		})
+		if got := len(cap.findByMsg("idle_confirm_started")); got != 1 {
+			t.Fatalf("AC27 scen A: idle_confirm_started count = %d, want 1 (engine-driven trigger)", got)
+		}
+
+		// AC27 documentary: agent's claimed TTL is irrelevant — verify
+		// the engine did not somehow consult it (we cannot observe a
+		// negative directly, but we can prove the engine's behaviour
+		// is consistent with reading ONLY e.resetOnIdle).
+		if agent.claimedIdleTTL != 10*time.Second {
+			t.Fatalf("agent.claimedIdleTTL mutated by engine: got %v, want unchanged %v",
+				agent.claimedIdleTTL, 10*time.Second)
+		}
+
+		if st := e.takePendingIdleConfirm(key); st != nil {
+			if tmr := st.timer.Load(); tmr != nil {
+				tmr.Stop()
+			}
+		}
+	})
+
+	// Scenario B: engine threshold NOT exceeded → ask must NOT trigger,
+	// even when the agent's claimed idle TTL is extremely short and
+	// would (incorrectly) have fired the path long ago.
+	t.Run("engine_threshold_not_exceeded_skips_regardless_of_agent_ttl", func(t *testing.T) {
+		cap, restore := captureSlog(t)
+		defer restore()
+
+		p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		agent := &cursorSDKLikeAgent{
+			namedAgent: namedAgent{
+				name:    "cursorsdk",
+				session: newResultAgentSession("agent reply"),
+			},
+			// Sidecar TTL of 1ns: if the engine were sensitive to it,
+			// ask would fire immediately even for a fresh session.
+			claimedIdleTTL: 1 * time.Nanosecond,
+		}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		e.SetResetOnIdle(60 * time.Minute)
+		e.SetResetOnIdleMode("ask")
+		e.SetResetOnIdleConfirmTimeout(30 * time.Second)
+
+		key := "feishu:user1"
+		session := e.sessions.GetOrCreateActive(key)
+		session.AddHistory("user", "recent context")
+		session.SetAgentSessionID("existing-session", "cursorsdk")
+		// Only 30min stale — engine threshold (60min) NOT crossed.
+		recent := time.Now().Add(-30 * time.Minute)
+		session.mu.Lock()
+		session.UpdatedAt = recent
+		session.mu.Unlock()
+
+		e.handleMessage(p, &Message{
+			SessionKey: key, Platform: "feishu",
+			UserID: "u1", UserName: "user",
+			Content: "follow up", ReplyCtx: "ctx",
+		})
+
+		// Give the normal turn time to run; we just need to assert
+		// that no pending state was ever registered.
+		time.Sleep(100 * time.Millisecond)
+
+		if got := e.pendingIdleConfirmLen(); got != 0 {
+			t.Fatalf("AC27 scen B: pending count = %d, want 0 (engine threshold not crossed; agent TTL must not trigger)", got)
+		}
+		if got := len(cap.findByMsg("idle_confirm_started")); got != 0 {
+			t.Fatalf("AC27 scen B: idle_confirm_started count = %d, want 0 (no engine-side trigger; agent TTL is irrelevant)", got)
+		}
+	})
 }

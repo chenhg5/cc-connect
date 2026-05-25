@@ -959,6 +959,14 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 		return
 	}
 
+	// idle: — idle-confirm card response (T-006); forward verbatim so the
+	// engine's handlePendingIdleConfirm hook can route it to resolveKeep /
+	// resolveRotate.
+	if strings.HasPrefix(ca.Action, "idle:") {
+		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, ca.Action)
+		return
+	}
+
 	// cmd: — command shortcut from a card button; forward as a message
 	if strings.HasPrefix(ca.Action, "cmd:") {
 		cmdText := strings.TrimPrefix(ca.Action, "cmd:")

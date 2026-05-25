@@ -682,6 +682,25 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}, nil
 	}
 
+	// idle: — idle-confirm card response (T-006); forward verbatim so the
+	// engine's handlePendingIdleConfirm hook routes it to resolveKeep /
+	// resolveRotate. We deliberately do NOT replace the original card here:
+	// in-place card refresh on resolve is out of scope this iteration
+	// (design.md §3.7). The engine emits a follow-up text ack instead.
+	if strings.HasPrefix(actionVal, "idle:") {
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		go p.handler(p.dispatchPlatform(), &core.Message{
+			SessionKey: sessionKey,
+			Platform:   p.platformName,
+			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
+			Content:    actionVal,
+			ReplyCtx:   rctx,
+		})
+		return &callback.CardActionTriggerResponse{}, nil
+	}
+
 	// cmd: — async command dispatch
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
