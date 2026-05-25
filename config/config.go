@@ -990,10 +990,13 @@ func SaveActiveProvider(projectName, providerName string) error {
 	return patchProjectAgentOption(projectName, "provider", providerName)
 }
 
-// SaveActiveAgentType swaps the active agent configuration with an alternate one
-// from AgentTypes[]. The old active config is stored back into AgentTypes at the
-// position of the new config, preserving all entries. Uses full config rewrite
-// since this is a multi-field swap (type + options + providers + provider_refs).
+// SaveActiveAgentType swaps the active [projects.agent] configuration with an alternate
+// one from [projects.agent_types]. The old active config is stored back into AgentTypes
+// at the position of the new config, enabling switch-back later.
+//
+// Swap is done field-by-field with deep-copy of Options map to avoid map reference
+// aliasing. Logs warnings for duplicate agent types in AgentTypes config.
+// Uses full config rewrite (saveConfig) since this is a multi-field swap.
 func SaveActiveAgentType(projectName, agentType string) error {
 	configMu.Lock()
 	defer configMu.Unlock()

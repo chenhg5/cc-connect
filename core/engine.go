@@ -220,9 +220,11 @@ type Engine struct {
 	baseWorkDir       string
 	projectState      *ProjectStateStore
 
-	// Agent type switching - list of alternate agent types from config
+	// Agent type switching: list of alternate agent types from [projects.agent_types].
+	// Set via SetAlternateAgentTypes() during engine initialization.
 	alternateAgentTypes []string
-	// currentAgentType is the type name of the currently active agent config
+	// currentAgentType is the original agent type from config, used for display
+	// in /agent list when the current type is not in agent_types config.
 	currentAgentType string
 
 	// Auto-compress settings
@@ -8544,6 +8546,9 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	}
 }
 
+// cmdAgent handles the /agent command for switching between different agent types.
+// Requires admin privileges (admin_from check).
+// Usage: /agent [list|switch <type>|current]
 func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 	// Agent type switching requires admin privileges - check admin_from
 	if !e.isAdmin(msg.UserID) {
@@ -8574,6 +8579,9 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 	}
 }
 
+// cmdAgentList displays the current agent type and all available alternate types.
+// The current type is always shown first with a marker. If the current type is not
+// in the configured agent_types list, it is shown separately with an "(original)" marker.
 func (e *Engine) cmdAgentList(p Platform, msg *Message) {
 	// Show current agent type and available alternate types from config
 	var sb strings.Builder
@@ -8625,6 +8633,9 @@ func (e *Engine) cmdAgentList(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
+// switchAgentType validates the target agent type, saves the config swap,
+// clears the session, and triggers a restart to load the new agent.
+// The old agent config is swapped into AgentTypes so switch-back is possible.
 func (e *Engine) switchAgentType(p Platform, msg *Message, agentType string) {
 	// Validate the target type is in our alternate list
 	found := false
