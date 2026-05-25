@@ -135,6 +135,19 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
+# Controls how cc-connect reacts at the idle threshold. Values:
+#   "ask"  – (default) send a confirmation card; require user choice
+#   "auto" – legacy behaviour: silently rotate to a new session
+#   "off"  – never reset (equivalent to reset_on_idle_mins = 0)
+# Only platforms implementing rich-card buttons (currently feishu) take the
+# ask path; others silently fall back to "auto" behaviour with a
+# `idle_confirm_degraded_to_auto` log entry.
+# reset_on_idle_mode = "ask"
+
+# How long ask mode waits for the user's choice before defaulting to "keep
+# this session" (seconds; valid range 5–600). Default: 30.
+# reset_on_idle_confirm_timeout_sec = 30
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）

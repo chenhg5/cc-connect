@@ -387,6 +387,43 @@ cc-connect update --pre     # 含预发布版本
 reset_on_idle_mins = 60
 ```
 
+#### 空闲会话「问答式」确认（ask 模式）
+
+当一个会话空闲时间超过 `reset_on_idle_mins` 后，cc-connect 现在会**先询问你**——
+而不是直接静默切换。
+
+**为什么改这个？** 长会话会积累「上下文漂移」：失败命令、调试噪声、跑题的对话每轮通过
+`--continue` 不断回灌，慢慢把模型的注意力从你的真实目标上拽走，开启新会话能让上下文保持
+清爽。但你也有可能正在排查 bug 里，模型如果擅自切了反而打断了思路——所以与其猜，不如问
+你一下。**如果当前问题和上次没有延续性，强烈建议开启新会话。**
+
+**三种模式**（通过 `reset_on_idle_mode` 按项目配置）：
+
+| 模式  | 行为 |
+|-------|------|
+| `ask`（默认） | 发送一张确认卡片：🆕 开启新会话（推荐），或 📂 继续使用当前会话 |
+| `auto` | 原有行为：静默切换（不希望被打扰可选这个）|
+| `off`  | 完全关闭空闲重置 |
+
+**配置示例**（`config.toml`）：
+
+```toml
+[[projects]]
+name = "my-project"
+# ... 其他字段 ...
+
+reset_on_idle_mins = 60                      # 空闲阈值（既有字段）
+reset_on_idle_mode = "ask"                   # 新增："ask" / "auto" / "off"
+reset_on_idle_confirm_timeout_sec = 30       # 新增：等待用户响应的秒数，超时默认 keep
+```
+
+**平台支持**：目前 **飞书（Lark）** 支持富卡片确认，其他平台（Telegram / Discord /
+Slack / 钉钉 / 企业微信 等）会自动降级为 `auto` 行为，并写入 `idle_confirm_degraded_to_auto`
+slog 事件，无需额外配置。
+
+**回滚方式**：如果新提示打扰到你，把 `reset_on_idle_mode = "auto"` 配回项目即可——
+行为等价于改造前，无需代码回滚。完整说明（含超时、`/switch` 交互、slog 事件清单）见
+[`docs/usage.zh-CN.md`](./docs/usage.zh-CN.md#会话管理)。
 
 ### 🛡️ 系统用户隔离 (`run_as_user`)
 

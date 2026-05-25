@@ -918,3 +918,59 @@ func TestBridge_SessionMissingParams(t *testing.T) {
 		t.Fatal("expected error without target in switch")
 	}
 }
+
+// TestBridge_CardAction_IdlePrefixDispatchesAsMessage verifies the T-006
+// bridge wiring: card actions with an "idle:" prefix are forwarded to the
+// engine handler as a regular Message whose Content equals the action value.
+// The engine's handlePendingIdleConfirm hook keys off Content == "idle:keep" /
+// "idle:rotate" and routes accordingly. AC16 coverage.
+func TestBridge_CardAction_IdlePrefixDispatchesAsMessage(t *testing.T) {
+	cases := []struct {
+		name   string
+		action string
+	}{
+		{"keep", "idle:keep"},
+		{"rotate", "idle:rotate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bs, wsURL := startTestBridge(t, "")
+
+			gotCh := make(chan *Message, 1)
+			bp := bs.NewPlatform("test-proj")
+			e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+			bs.RegisterEngine("test-proj", e, bp)
+			bp.handler = func(_ Platform, msg *Message) {
+				select {
+				case gotCh <- msg:
+				default:
+				}
+			}
+
+			conn := dialWS(t, wsURL, nil)
+			register(t, conn, "mychat", []string{"text", "card"})
+
+			mustWriteJSON(t, conn, map[string]any{
+				"type":        "card_action",
+				"session_key": "mychat:user1:user1",
+				"action":      tc.action,
+				"reply_ctx":   "conv-1",
+			})
+
+			select {
+			case got := <-gotCh:
+				if got.Content != tc.action {
+					t.Fatalf("dispatched Content = %q, want %q", got.Content, tc.action)
+				}
+				if got.SessionKey != "mychat:user1:user1" {
+					t.Fatalf("dispatched SessionKey = %q, want %q", got.SessionKey, "mychat:user1:user1")
+				}
+				if got.Platform != "mychat" {
+					t.Fatalf("dispatched Platform = %q, want %q", got.Platform, "mychat")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("idle:%s card action did not produce a dispatched message", tc.name)
+			}
+		})
+	}
+}

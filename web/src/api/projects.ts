@@ -36,6 +36,9 @@ export interface ProjectDetail {
     admin_from: string;
     language: string;
     disabled_commands: string[];
+    reset_on_idle_mins: number;
+    reset_on_idle_mode: 'auto' | 'ask' | 'off';
+    reset_on_idle_confirm_timeout_sec: number;
   };
 }
 
@@ -50,6 +53,9 @@ export interface ProjectSettingsUpdate {
   reply_footer?: boolean;
   inject_sender?: boolean;
   platform_allow_from?: Record<string, string>;
+  reset_on_idle_mins?: number;
+  reset_on_idle_mode?: 'auto' | 'ask' | 'off';
+  reset_on_idle_confirm_timeout_sec?: number;
 }
 
 export const listAgentTypes = () => api.get<{ agents: string[]; platforms: string[] }>('/agents');

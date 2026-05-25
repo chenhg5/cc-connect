@@ -60,6 +60,107 @@ reset_on_idle_mins = 60
 
 开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
 
+### 空闲会话「问答式」确认（`reset_on_idle_mode`）
+
+当一个会话空闲时间超过 `reset_on_idle_mins` 后，cc-connect 可以选择静默切换到新会话（原有行为），也可以**先发卡片询问你**。默认是 `ask` 模式。**如果当前问题和上次没有延续性，强烈建议开启新会话——这样能让模型的注意力保持集中。**
+
+通过 `reset_on_idle_mode` 在三种模式中切换：
+
+| 模式 | 行为 |
+|------|------|
+| `ask`（默认）| 下一条入站消息到达时发送一张确认卡片：用户选 🆕 开启新会话（推荐）或 📂 继续使用当前会话；触发卡片的消息会被入队，按用户的选择回放到对应会话。|
+| `auto` | 原有行为：静默关闭旧 agent 会话并启动新会话，切换完成后追加一条 `MsgSessionAutoResetIdle` 状态行。|
+| `off`  | 完全禁用空闲重置，`reset_on_idle_mins` 不再生效，每次都通过 `--continue` 续接旧上下文。|
+
+**配置项参考表**：
+
+| 字段 | 类型 | 默认值 | 取值范围 | 说明 |
+|------|------|--------|----------|------|
+| `reset_on_idle_mins` | int | 30 | 0=关闭；正数=分钟 | 空闲阈值；会话静默多久后触发重置规则。|
+| `reset_on_idle_mode` | string | `"ask"` | `"ask"` / `"auto"` / `"off"` | 触发阈值时的决策模式。|
+| `reset_on_idle_confirm_timeout_sec` | int | 30 | 5–600 秒 | 等待用户点击按钮的时长，超时后默认 keep；仅 `ask` 模式下生效。|
+
+示例：
+
+```toml
+[[projects]]
+name = "demo"
+
+reset_on_idle_mins = 60
+reset_on_idle_mode = "ask"
+reset_on_idle_confirm_timeout_sec = 30
+```
+
+#### 确认卡片样例
+
+当 `mode = "ask"` 被触发时，机器人会在同一聊天里回复一张富卡片，结构大致如下：
+
+- **标题** — `🔄 继续还是开启新会话？`
+- **正文** — 一段鼓励性的提示，提醒你：如果当前问题和上次没有延续性，开启新会话能让模型保持专注。
+- **按钮** — 并排两个按钮：
+  - `🆕 开启新会话`（推荐）
+  - `📂 继续使用当前会话`
+- **页脚** — 简短说明超时行为（如 "30 秒内未选择则默认保留"）。
+
+所有文案通过 `idle_confirm_*` MsgKey 提供 5 种语言（English / 简体中文 / 繁體中文 / 日本語 / Español）。
+
+#### 超时行为
+
+如果在 `reset_on_idle_confirm_timeout_sec`（默认 30 秒）内没有点击任意按钮，cc-connect 把这次沉默视为 **keep**，并把队列里的消息回放到现有会话。超时后才到达的迟到回调会被记为 `idle_confirm_late_callback` slog 并忽略——状态机由 `sync.Once` 保护，"连点两次" 不可能同时产生 keep 和 rotate。
+
+#### `/switch` 在 ask 期间的行为
+
+如果在确认卡片仍处于 pending 状态时发送 `/switch <id>`：
+
+- 立刻把 pending state resolve 为 **keep**，原因写为 `reason="switch"`（slog 事件 `idle_confirm_user_keep`）；
+- 队列里的消息会按到达顺序回放到 **之前活跃** 的会话（不是 `/switch` 的目标 X），保留原始意图；
+- 之后 `/switch` 正常生效，你的下一条新消息进入新目标会话。
+
+这是需求中 A-006 / AC15 的契约。
+
+#### 平台支持矩阵
+
+| 平台 | 确认卡片 | 备注 |
+|------|----------|------|
+| 飞书（Lark）| ✅ 支持 | 实现 `CardSender`；富交互卡片 + 两个按钮。|
+| Telegram | ⚠️ 静默降级 | 自动退回 `auto` 模式；会话按改造前方式切换。|
+| Discord | ⚠️ 静默降级 | 同上 — 目前没有 `CardSender` capability。|
+| Slack | ⚠️ 静默降级 | 同上。|
+| 钉钉 / 企业微信 / 微信 / QQ / MAX 等 | ⚠️ 静默降级 | 同上。|
+
+在非 `CardSender` 平台上，engine 会写一条 `idle_confirm_degraded_to_auto` slog（每项目每进程一次），随后执行与 `auto` 模式相同的切换流程——可观测行为与改造前字节级等价，无需修改 `config.toml`。
+
+#### Web 管理面板
+
+`reset_on_idle_mode` 与 `reset_on_idle_confirm_timeout_sec` 两个字段都已在 Web 管理后台的项目详情页面暴露（见 [Web 管理后台](#web-管理后台beta)），带 tooltip 提示；保存表单时 patch 的是与管理 REST API 同一份 `ProjectSettingsUpdate` 数据。
+
+#### slog 事件清单
+
+排错和可观测性可用以下结构化日志事件（每条都附带 `interactive_key`、`session_id` 等上下文字段）：
+
+| 事件 | 触发时机 |
+|------|----------|
+| `idle_confirm_started` | 确认卡片发送成功；pending state 已记录；计时器已启动。|
+| `idle_confirm_user_keep` | 用户点击「继续使用当前会话」按钮（或 `/switch` 触发的隐式 keep），带 `reason` 字段。|
+| `idle_confirm_user_rotate` | 用户点击「开启新会话」按钮；engine 切换到新的 agent session。|
+| `idle_confirm_timeout_keep` | 计时器到期且未发生任何点击；按 keep 处理。|
+| `idle_confirm_late_callback` | resolve 之后又到达的迟到点击（超时或对端先点击之后），忽略；适合排查双击 UI。|
+| `idle_confirm_queue_appended` | 卡片 pending 期间又有入站消息到达；进入回放队列。|
+| `idle_confirm_degraded_to_auto` | 平台不实现 `CardSender`；engine 自动降级走原 auto 切换路径。|
+| `idle_confirm_card_send_failed` | 飞书卡片发送失败；engine 回退到 legacy auto 切换以避免阻塞用户。|
+
+#### 回滚
+
+如果新提示让你觉得打扰（例如低流量项目本来就经常空闲），把对应项目改成：
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mode = "auto"
+```
+
+…然后重启 cc-connect 即可——改造前的行为字节级等价地恢复。无需代码回滚或版本降级。
+
 ### 切换模型时保留历史
 
 `/model` 切换模型时保留当前会话——agent 会在新模型下继续对话（不额外消耗 token）。注意模型切换作用于共享的 agent 实例——如果多个平台使用同一个 project，模型变更会影响所有平台。

@@ -3,7 +3,15 @@
 ## Unreleased (magicmatrix-aigen)
 
 ### New Features
+- **Ask mode for idle session reset**: When a session is idle past `reset_on_idle_mins`, cc-connect now sends a confirmation card with two buttons — "🆕 Start fresh session" (recommended) and "📂 Keep this session" — instead of silently rotating the session. Defaults to `ask` mode; the legacy silent-rotate behaviour is preserved via `reset_on_idle_mode = "auto"`. New config fields `reset_on_idle_mode` (values: `ask` / `auto` / `off`) and `reset_on_idle_confirm_timeout_sec` (5–600 sec, default 30). Web management panel exposes both fields for project-level configuration. Capability-based dispatch: rich card prompts are only sent on platforms implementing `CardSender` (currently Feishu); other platforms silently fall back to `auto` mode with an `idle_confirm_degraded_to_auto` slog event. New slog events for observability: `idle_confirm_started` / `idle_confirm_user_keep` / `idle_confirm_user_rotate` / `idle_confirm_timeout_keep` / `idle_confirm_late_callback` / `idle_confirm_queue_appended` / `idle_confirm_degraded_to_auto`. (REQ-20260521)
 - **Feishu streaming reply emoji reaction**: bot's streaming reply message gets a lifecycle emoji (default editing=`OnIt`, failed=`Cry`, completed=`""`); engine attaches on first preview flush and swaps on EventResult / EventError / channel-closed. New `ReactionSender` capability interface in `core` allows any platform to opt in — feishu is the first implementer. Config: `streaming_reply_editing_emoji` / `streaming_reply_failed_emoji` / `streaming_reply_completed_emoji` (see `docs/feishu.md`). Multi-round queued turns swap each turn's editing→completed mid-flight. (REQ-20260522)
+
+### Changed
+- **Idle reset default**: behaviour at `reset_on_idle_mins` threshold changed from "silently rotate" to "ask for confirmation". Set `reset_on_idle_mode = "auto"` in `config.toml` (or via the Web management panel) to restore byte-equivalent pre-change behaviour. (REQ-20260521)
+
+### Migration / rollback
+- **Auto-upgrade**: existing deployments transparently get the new ask mode with a startup `slog.Info` nudge noting the default applied.
+- **Rollback**: set `reset_on_idle_mode = "auto"` in `config.toml` per project, or via the management API / Web panel; restart cc-connect; behaviour is byte-equivalent to the pre-change version. No code rollback needed.
 
 ## v1.3.3-beta.2 (2026-05-09)
 

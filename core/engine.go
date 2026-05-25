@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -53,6 +54,17 @@ const (
 	messageRecallCheckTimeout = 2 * time.Second
 	messageRecallPollInterval = 2 * time.Second
 	recalledStopLockWait      = 2 * time.Second
+)
+
+// Defaults for the "ask before idle reset" feature (REQ-20260521).
+// See design.md §2.4. defaultResetOnIdleMode is the engine-level bottom
+// default applied by getResetOnIdleMode when the field was never set
+// (e.g. main.go skipped the wiring); defaultResetOnIdleConfirmTimeout is
+// the timeout returned by getResetOnIdleConfirmTimeout when no positive
+// value has been configured.
+const (
+	defaultResetOnIdleConfirmTimeout = 30 * time.Second
+	defaultResetOnIdleMode           = "ask"
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -232,6 +244,33 @@ type Engine struct {
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
 
+	// resetOnIdleMode controls the behaviour when a session has been idle
+	// longer than resetOnIdle. Values: "off" / "auto" / "ask". Default "ask".
+	// Validated by config layer; engine treats unknown values as "ask"
+	// (defensive, paired with a slog warn at SetResetOnIdleMode time).
+	resetOnIdleMode string
+
+	// resetOnIdleConfirmTimeout is how long ask mode waits for user response
+	// before defaulting to keep. Zero or negative = use defaultResetOnIdleConfirmTimeout.
+	resetOnIdleConfirmTimeout time.Duration
+
+	// pendingIdleConfirm tracks active idle-confirm prompts per interactiveKey.
+	//
+	// ⚠️ Lock order contract (A-001):
+	//     pendingIdleConfirmMu  <  interactiveMu  <  session.mu
+	//
+	// Rationale: this ordering matches the existing call sites where
+	// interactiveMu may be acquired while inspecting interactiveStates and
+	// then session.mu is taken for short field reads. The new outermost
+	// pendingIdleConfirmMu is held only for short critical sections that do
+	// NOT take interactiveMu or session.mu transitively. Any nested
+	// acquisition MUST follow this strict order to avoid deadlock.
+	//
+	// Holding pendingIdleConfirmMu while calling out to platform.Reply /
+	// CardSender is FORBIDDEN — release the lock first, then call out.
+	pendingIdleConfirmMu sync.Mutex
+	pendingIdleConfirm   map[string]*pendingIdleConfirmState
+
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
 	replyFooterEnabled   bool
@@ -341,6 +380,75 @@ type pendingProviderAddState struct {
 	codexHTTPHeaders map[string]string
 }
 
+// pendingIdleConfirmState tracks a user awaiting an "ask before idle reset"
+// confirmation. Created by maybeStartIdleConfirm when:
+//
+//	(1) reset_on_idle_mode == "ask"
+//	(2) idle threshold reached
+//	(3) the originating Platform implements CardSender (capability check)
+//
+// While the state lives:
+//   - the OLD agent session is NOT closed
+//   - the OLD session.busy lock is released so /list, /switch, /help still work
+//   - subsequent user messages are appended to .queued via handlePendingIdleConfirm
+//   - a timer (resetOnIdleConfirmTimeout, default 30s) will resolve to keep if
+//     the user does not click any button
+//
+// Resolved exactly once via sync.Once (covering timer-fire vs button-click vs
+// double-click race; see design.md §4 for the three timing diagrams).
+type pendingIdleConfirmState struct {
+	// Immutable after creation.
+	interactiveKey       string
+	sessionKey           string
+	oldSession           *Session
+	oldAgentSessionID    string // captured at create time for resolve_keep/rotate reply text
+	oldAgentSessionShort string // shortAgentSessionID(oldAgentSessionID) for footer / "/switch X" hint
+	platform             Platform
+	replyCtx             any
+	sessions             *SessionManager // bound at create time (workspace-aware)
+	agent                Agent           // active agent at create time (workspace-aware)
+	workspaceDir         string          // resolved workspace dir for resolveRotate
+	createdAt            time.Time
+
+	// Mutable (guarded by queuedMu).
+	queuedMu sync.Mutex
+	queued   []queuedMessage
+
+	// Set by sendIdleConfirmCard; used by RefreshCard in resolveKeep/Rotate
+	// to update the original card with a finalized state. Empty when the
+	// platform does not implement CardRefresher.
+	cardMessageID string
+
+	// Timer running watchIdleConfirmTimeout. May be Stop()ed by resolve*;
+	// sync.Once below ensures Stop()/fire race never produces double resolve.
+	//
+	// Stored as an atomic.Pointer so the resolve* goroutines (which may run
+	// in parallel with startPendingIdleConfirm when the configured timeout
+	// is very short) can safely Load() and Stop() the timer without
+	// synchronising against the assignment. Without atomics the Go race
+	// detector flags the write-by-creator vs read-by-timer-callback as a
+	// data race (and the Go memory model technically allows torn reads on
+	// architectures without word-aligned atomic pointer access).
+	timer atomic.Pointer[time.Timer]
+
+	// Set exactly once. Subsequent click / timer fires are no-ops with a
+	// late-callback slog.
+	//
+	// resolvedFlag is the fast-path sentinel for late callbacks: when set,
+	// any subsequent resolve* call skips the sync.Once body and emits an
+	// idle_confirm_late_callback slog instead. Writers MUST set resolvedFlag
+	// inside the resolved.Do(...) body BEFORE any other side-effects so that
+	// concurrent readers see a consistent "resolved" view (design.md §4.4 /
+	// A-002).
+	resolvedFlag atomic.Bool
+	resolved     sync.Once
+	outcome      atomic.Value // string: "keep" | "rotate" (post-resolve, for tests)
+
+	// hintSent guards the one-shot MsgIdleConfirmQueuedHint reply emitted by
+	// appendToIdleConfirmQueue when the first free-text message arrives.
+	hintSent atomic.Bool
+}
+
 type deleteModeState struct {
 	page        int
 	selectedIDs map[string]struct{}
@@ -420,6 +528,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		pendingIdleConfirm:    make(map[string]*pendingIdleConfirmState),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
@@ -591,6 +700,68 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetResetOnIdleMode configures the behaviour when a session has been idle
+// longer than resetOnIdle. Accepted values (case-insensitive, trimmed):
+// "off", "auto", "ask". Unknown values fall back to "ask" with a slog.Warn —
+// the config layer is expected to reject invalid input before this is called,
+// so reaching the Warn branch indicates a bug upstream.
+func (e *Engine) SetResetOnIdleMode(m string) {
+	m = strings.ToLower(strings.TrimSpace(m))
+	switch m {
+	case "off", "auto", "ask":
+		e.resetOnIdleMode = m
+	default:
+		slog.Warn("SetResetOnIdleMode: unknown mode, defaulting to ask", "given", m)
+		e.resetOnIdleMode = "ask"
+	}
+}
+
+// SetResetOnIdleConfirmTimeout configures the ask-mode wait window. Zero or
+// negative input applies defaultResetOnIdleConfirmTimeout.
+func (e *Engine) SetResetOnIdleConfirmTimeout(d time.Duration) {
+	if d <= 0 {
+		e.resetOnIdleConfirmTimeout = defaultResetOnIdleConfirmTimeout
+		return
+	}
+	e.resetOnIdleConfirmTimeout = d
+}
+
+// getResetOnIdleMode returns the engine's current idle-reset mode, applying
+// the bottom default "ask" when the field was never set. Never returns "".
+func (e *Engine) getResetOnIdleMode() string {
+	if e.resetOnIdleMode == "" {
+		return defaultResetOnIdleMode
+	}
+	return e.resetOnIdleMode
+}
+
+// getResetOnIdleConfirmTimeout returns the engine's configured ask-mode
+// timeout, applying defaultResetOnIdleConfirmTimeout when unset. Never
+// returns <= 0.
+func (e *Engine) getResetOnIdleConfirmTimeout() time.Duration {
+	if e.resetOnIdleConfirmTimeout <= 0 {
+		return defaultResetOnIdleConfirmTimeout
+	}
+	return e.resetOnIdleConfirmTimeout
+}
+
+// takePendingIdleConfirm atomically removes and returns the state. Returns
+// nil if no state is registered for key. Caller must invoke resolveKeep /
+// resolveRotate to drain queue and emit slog.
+//
+// Lock order: pendingIdleConfirmMu (outermost; do not call while holding
+// interactiveMu or session.mu). The critical section performs only a map
+// read + delete; no IO or callouts permitted while the lock is held.
+func (e *Engine) takePendingIdleConfirm(key string) *pendingIdleConfirmState {
+	e.pendingIdleConfirmMu.Lock()
+	defer e.pendingIdleConfirmMu.Unlock()
+	state := e.pendingIdleConfirm[key]
+	if state != nil {
+		delete(e.pendingIdleConfirm, key)
+	}
+	return state
 }
 
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
@@ -2034,6 +2205,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	// Pending idle-confirm (ask-before-idle-reset): intercept button
+	// callbacks (idle:keep / idle:rotate) and queue free-text messages
+	// arriving while the user is deciding. Slash commands have already
+	// been dispatched above (cmdSwitch carries its own keep-coupling
+	// hook); permission responses bypass too.
+	if e.handlePendingIdleConfirm(p, msg) {
+		return
+	}
+
 	// Pending provider add (card-driven multi-step flow)
 	if e.handlePendingProviderAdd(p, msg, content) {
 		return
@@ -2076,7 +2256,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 sessionLocked:
-	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
+	if rotated, started := e.maybeStartIdleConfirm(p, msg, sessions, interactiveKey, session, agent, resolvedWorkspace); started {
+		// Ask path took over: pending state owns the original message via
+		// state.queued; session lock was released inside maybeStartIdleConfirm
+		// (we MUST NOT proceed with processInteractiveMessageWith here).
+		return
+	} else if rotated != nil {
 		session = rotated
 	}
 
@@ -2094,7 +2279,16 @@ sessionLocked:
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
-func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
+// legacyAutoResetSessionOnIdle is the original (pre-REQ-20260521) auto-reset
+// logic, preserved byte-equivalently to back the mode="auto" code path and
+// the AC9b "no CardSender → silent degrade" fallback (see AC8 / AC24 for
+// the equivalence guarantees). New ask-mode behaviour lives in
+// maybeStartIdleConfirm and resolveKeep / resolveRotate.
+//
+// DO NOT inline behavioural changes here without updating both AC8 and AC24
+// — the rollback path (operator sets mode="auto") relies on this function
+// behaving identically to the pre-change implementation.
+func (e *Engine) legacyAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
 	if e.resetOnIdle <= 0 || session == nil {
 		return nil
 	}
@@ -2154,6 +2348,592 @@ func shortAgentSessionID(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// ──────────────────────────────────────────────────────────────
+// Ask-before-idle-reset (REQ-20260521): ask-path core
+// ──────────────────────────────────────────────────────────────
+
+// queueCapIdleConfirm bounds how many free-text messages may accumulate
+// in a single pendingIdleConfirmState.queued slice. Beyond the cap,
+// appendToIdleConfirmQueue returns (false, true) so the caller can reply
+// with MsgQueueFull. Kept small because the user is expected to either
+// click a button or send /switch within seconds.
+const queueCapIdleConfirm = 10
+
+// maybeStartIdleConfirm dispatches the idle-reset decision based on the
+// configured mode (off / auto / ask) and platform capability (CardSender).
+// It replaces the direct legacyAutoResetSessionOnIdle call previously made
+// at the sessionLocked label in handleMessage.
+//
+// Returns:
+//   - (nil, false)   → no idle action; caller proceeds with current session.
+//   - (rotated, false) → auto path or AC9b degrade path produced a fresh
+//     session; caller must swap session = rotated and proceed.
+//   - (nil, true)    → ask path took over; caller MUST return immediately
+//     without invoking the agent. The original message is now stored in
+//     state.queued and the OLD session lock has been released
+//     (UnlockWithoutUpdate) inside this function.
+//
+// Lock order contract (A-001): only pendingIdleConfirmMu is taken inside
+// startPendingIdleConfirm (downstream); we MUST NOT hold interactiveMu or
+// session.mu when calling that function. The caller (handleMessage at
+// sessionLocked:) already holds session.busy via TryLock — we release it
+// in the ask branch BEFORE creating the pending state so /switch / /list
+// can still grab the session while the user thinks.
+func (e *Engine) maybeStartIdleConfirm(
+	p Platform,
+	msg *Message,
+	sessions *SessionManager,
+	interactiveKey string,
+	session *Session,
+	agent Agent,
+	workspaceDir string,
+) (rotated *Session, started bool) {
+	// Early-exit conditions MUST match legacyAutoResetSessionOnIdle so that
+	// mode="auto" is behaviourally indistinguishable from the pre-REQ
+	// implementation (AC8 / AC24).
+	if e.resetOnIdle <= 0 || session == nil {
+		return nil, false
+	}
+	hasBackend := session.GetAgentSessionID() != ""
+	hasHistory := len(session.GetHistory(1)) > 0
+	if !hasBackend && !hasHistory {
+		return nil, false
+	}
+	lastActive := session.GetUpdatedAt()
+	if lastActive.IsZero() || time.Since(lastActive) < e.resetOnIdle {
+		return nil, false
+	}
+
+	switch e.getResetOnIdleMode() {
+	case "off":
+		return nil, false
+	case "auto":
+		return e.legacyAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session), false
+	default: // "ask"
+		if _, ok := p.(CardSender); !ok {
+			// AC9b: platform lacks card capability → silently fall back to
+			// legacy auto behaviour. T-007 will add an
+			// idle_confirm_degraded_to_auto slog event inside
+			// legacyAutoResetForNonCardPlatform.
+			return e.legacyAutoResetForNonCardPlatform(p, msg, sessions, interactiveKey, session), false
+		}
+
+		// CardSender path: take over with ask flow. Release session.busy
+		// first so /switch / /list still work while the user decides.
+		session.UnlockWithoutUpdate()
+		e.startPendingIdleConfirm(p, msg, sessions, interactiveKey, session, agent, workspaceDir)
+		return nil, true
+	}
+}
+
+// legacyAutoResetForNonCardPlatform is the mode=ask + non-CardSender fallback
+// (AC9b). Emits the idle_confirm_degraded_to_auto slog event for observability
+// (design.md §3.6 / AC20) and forwards to the legacy auto-reset path so the
+// behavioural outcome is byte-equivalent to mode=auto.
+//
+// Keeping this as a distinct entry point (rather than inlining the fallback)
+// gives a single place to emit the degrade event and gives tests a stable
+// function boundary to assert against.
+func (e *Engine) legacyAutoResetForNonCardPlatform(
+	p Platform,
+	msg *Message,
+	sessions *SessionManager,
+	interactiveKey string,
+	session *Session,
+) *Session {
+	slog.Info("idle_confirm_degraded_to_auto",
+		"interactive_key", interactiveKey,
+		"platform", p.Name(),
+		"reason", "no_card_sender",
+	)
+	return e.legacyAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session)
+}
+
+// startPendingIdleConfirm builds the pendingIdleConfirmState, registers it
+// in the engine map, dispatches the confirm prompt via sendIdleConfirmCard,
+// and starts the timeout timer.
+//
+// Callers MUST have already validated p.(CardSender) and released
+// session.busy. Caller must NOT hold interactiveMu or session.mu.
+//
+// Lock order: pendingIdleConfirmMu (outermost) only during the brief map
+// insertion; sendIdleConfirmCard is called *after* the lock is released to
+// honour the "no IO while holding pending lock" rule (A-001).
+func (e *Engine) startPendingIdleConfirm(
+	p Platform,
+	msg *Message,
+	sessions *SessionManager,
+	interactiveKey string,
+	session *Session,
+	agent Agent,
+	workspaceDir string,
+) *pendingIdleConfirmState {
+	oldAgentSessionID := session.GetAgentSessionID()
+
+	state := &pendingIdleConfirmState{
+		interactiveKey:       interactiveKey,
+		sessionKey:           msg.SessionKey,
+		oldSession:           session,
+		oldAgentSessionID:    oldAgentSessionID,
+		oldAgentSessionShort: shortAgentSessionID(oldAgentSessionID),
+		platform:             p,
+		replyCtx:             msg.ReplyCtx,
+		sessions:             sessions,
+		agent:                agent,
+		workspaceDir:         workspaceDir,
+		createdAt:            time.Now(),
+	}
+
+	// Capture the triggering message so it can be replayed once the user
+	// resolves keep / rotate. Mirror queueMessageForBusySession's field
+	// copy semantics (deep-copy by value; ImageAttachment / FileAttachment
+	// slices are shared, matching existing behaviour).
+	state.queued = append(state.queued, queuedMessage{
+		messageID:     msg.MessageID,
+		platform:      p,
+		replyCtx:      msg.ReplyCtx,
+		content:       msg.Content,
+		images:        msg.Images,
+		files:         msg.Files,
+		fromVoice:     msg.FromVoice,
+		userID:        msg.UserID,
+		userName:      msg.UserName,
+		msgPlatform:   msg.Platform,
+		msgSessionKey: msg.SessionKey,
+		channelKey:    msg.ChannelKey,
+	})
+
+	// Register first, then send card and arm timer (both can run after
+	// the lock is released). If a stale entry exists for the same
+	// interactiveKey (defensive — should not happen under normal flow),
+	// resolve it as keep so its timer/state is cleaned up.
+	var stale *pendingIdleConfirmState
+	e.pendingIdleConfirmMu.Lock()
+	if prev, exists := e.pendingIdleConfirm[interactiveKey]; exists && prev != nil {
+		stale = prev
+	}
+	e.pendingIdleConfirm[interactiveKey] = state
+	e.pendingIdleConfirmMu.Unlock()
+
+	if stale != nil {
+		// Drain off-thread to avoid blocking the caller; the stale entry
+		// almost certainly never had a real choice made and its queued
+		// messages should not be lost.
+		go e.resolveKeep(stale, "superseded")
+	}
+
+	// IO out of the pending lock — see A-001.
+	e.sendIdleConfirmCard(p, msg.ReplyCtx, state)
+
+	timeout := e.getResetOnIdleConfirmTimeout()
+	// Publish via atomic.Pointer so a timer callback that fires before this
+	// call returns can still race-safely Load() the timer from resolveKeep.
+	state.timer.Store(time.AfterFunc(timeout, func() {
+		e.resolveKeep(state, "timeout")
+	}))
+
+	slog.Info("idle_confirm_started",
+		"interactive_key", interactiveKey,
+		"session_id", session.ID,
+		"session_key", msg.SessionKey,
+		"old_agent_session", state.oldAgentSessionShort,
+		"timeout_sec", int(timeout/time.Second),
+		"idle_for", time.Since(session.GetUpdatedAt()).Truncate(time.Second).String(),
+	)
+	return state
+}
+
+// sendIdleConfirmCard builds and sends the confirm card via CardSender.
+//
+// Card layout (matches requirement.md §6.1 / design.md §3.7):
+//
+//	Title:   ⏰ Idle for {duration}                 (orange header)
+//	Body:    why-start-fresh markdown + 3 bullets + recommendation
+//	Buttons: [🆕 Start fresh session] [📂 Keep this session]   (equal width)
+//	Footer:  Old session: {short_id} · Auto-keep after {N}s if no answer
+//
+// Callback values:
+//   - "🆕 Start fresh session" → idle:rotate   (primary, on the left)
+//   - "📂 Keep this session"   → idle:keep     (default,  on the right)
+//
+// Callers MUST have validated p.(CardSender) before reaching this function
+// (maybeStartIdleConfirm enforces this). If the platform happens to lack
+// CardSender at this point (defensive), replyWithCard transparently degrades
+// to text via Card.RenderText so we never silently swallow the prompt.
+//
+// Card-refresh on resolve (cardMessageID capture) is out of scope this
+// iteration per design.md §3.7.
+func (e *Engine) sendIdleConfirmCard(p Platform, replyCtx any, state *pendingIdleConfirmState) {
+	idleDur := humanizeIdleDuration(time.Since(state.oldSession.GetUpdatedAt()))
+	timeoutSec := int(e.getResetOnIdleConfirmTimeout() / time.Second)
+
+	card := NewCard().
+		Title(fmt.Sprintf(e.i18n.T(MsgIdleConfirmCardTitle), idleDur), "orange").
+		Markdown(e.i18n.T(MsgIdleConfirmBody)).
+		ButtonsEqual(
+			CardButton{Text: e.i18n.T(MsgIdleConfirmBtnRotate), Type: "primary", Value: "idle:rotate"},
+			CardButton{Text: e.i18n.T(MsgIdleConfirmBtnKeep), Type: "default", Value: "idle:keep"},
+		).
+		Note(fmt.Sprintf(e.i18n.T(MsgIdleConfirmFooter), state.oldAgentSessionShort, timeoutSec)).
+		Build()
+
+	e.replyWithCard(p, replyCtx, card)
+}
+
+// humanizeIdleDuration formats an idle Duration for the confirm-card title.
+// Buckets: ≥1h → "Nh Mm"; ≥1m → "Nm"; otherwise "<1m". Kept locale-neutral
+// because the calling MsgKey already wraps it in the localized title text.
+// We deliberately don't reuse formatDurationI18n because that helper always
+// renders "0h 27m" instead of "27m" for sub-hour durations.
+func humanizeIdleDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if mins == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh %dm", hours, mins)
+}
+
+// handlePendingIdleConfirm intercepts user input while an idle-confirm card
+// is outstanding for this user's interactiveKey. Returns true when the
+// message was fully handled by this hook (caller should stop further
+// processing).
+//
+// Routing:
+//   - no pending state → return false (caller continues)
+//   - content == "idle:keep"   → spawn resolveKeep("user_click") and return true
+//   - content == "idle:rotate" → spawn resolveRotate("user_click") and return true
+//   - anything else (free text)→ append to state.queued; reply with a
+//     one-time MsgIdleConfirmQueuedHint on the first append; subsequent
+//     appends are silent. Returns true so the caller does NOT start an
+//     agent turn for this message — it will be drained when the user
+//     resolves the prompt.
+//
+// Note: slash commands are caught by handleCommand earlier in
+// handleMessage, so this hook only sees button callbacks and free text.
+// The /switch coupling (AC15 / A-006) lives in handleCommand directly.
+func (e *Engine) handlePendingIdleConfirm(p Platform, msg *Message) bool {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+
+	// Lock order: pendingIdleConfirmMu (outermost; release before any IO).
+	e.pendingIdleConfirmMu.Lock()
+	state := e.pendingIdleConfirm[iKey]
+	e.pendingIdleConfirmMu.Unlock()
+	if state == nil {
+		return false
+	}
+
+	trimmed := strings.TrimSpace(msg.Content)
+	switch trimmed {
+	case "idle:keep":
+		go e.resolveKeep(state, "user_click")
+		return true
+	case "idle:rotate":
+		go e.resolveRotate(state, "user_click")
+		return true
+	}
+
+	// Free text: append to queue. Reply with the one-time hint on the
+	// first successful append; silent for subsequent appends.
+	appended, queueFull := e.appendToIdleConfirmQueue(state, p, msg)
+	if queueFull {
+		depth := state.queuedLen()
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
+		return true
+	}
+	if appended {
+		if state.hintSent.CompareAndSwap(false, true) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgIdleConfirmQueuedHint))
+		}
+	}
+	return true
+}
+
+// queuedLen returns the current queue length under queuedMu. Safe to call
+// from any goroutine.
+func (s *pendingIdleConfirmState) queuedLen() int {
+	s.queuedMu.Lock()
+	defer s.queuedMu.Unlock()
+	return len(s.queued)
+}
+
+// takeQueued atomically returns the current queue contents and clears it.
+// Used by resolveKeep / resolveRotate after the sync.Once winner has been
+// chosen, so concurrent appendToIdleConfirmQueue calls land into a fresh
+// (but unused) slice — practically a no-op because the state is no longer
+// reachable via pendingIdleConfirm map at that point.
+func (s *pendingIdleConfirmState) takeQueued() []queuedMessage {
+	s.queuedMu.Lock()
+	defer s.queuedMu.Unlock()
+	out := s.queued
+	s.queued = nil
+	return out
+}
+
+// appendToIdleConfirmQueue appends msg's content to state.queued under
+// state.queuedMu, enforcing queueCapIdleConfirm. Returns (appended,
+// queueFull): exactly one of the two is true on success.
+//
+// Lock order: state.queuedMu is independent of pendingIdleConfirmMu /
+// interactiveMu / session.mu (it guards only this state's slice). Caller
+// MUST NOT hold any of the others when calling here.
+func (e *Engine) appendToIdleConfirmQueue(state *pendingIdleConfirmState, p Platform, msg *Message) (appended bool, queueFull bool) {
+	state.queuedMu.Lock()
+	if len(state.queued) >= queueCapIdleConfirm {
+		state.queuedMu.Unlock()
+		return false, true
+	}
+	state.queued = append(state.queued, queuedMessage{
+		messageID:     msg.MessageID,
+		platform:      p,
+		replyCtx:      msg.ReplyCtx,
+		content:       msg.Content,
+		images:        msg.Images,
+		files:         msg.Files,
+		fromVoice:     msg.FromVoice,
+		userID:        msg.UserID,
+		userName:      msg.UserName,
+		msgPlatform:   msg.Platform,
+		msgSessionKey: msg.SessionKey,
+		channelKey:    msg.ChannelKey,
+	})
+	depth := len(state.queued)
+	state.queuedMu.Unlock()
+
+	slog.Info("idle_confirm_queue_appended",
+		"interactive_key", state.interactiveKey,
+		"queue_depth", depth,
+	)
+	return true, false
+}
+
+// resolveKeep handles the "keep this session" outcome. Idempotent via
+// sync.Once + resolvedFlag fast-path: the first call performs the full
+// outcome (Stop timer, remove from map, touch UpdatedAt, drain queue to
+// old session, reply, slog); subsequent calls (e.g. button click after
+// timer already fired, or rapid double-click) noop with an
+// idle_confirm_late_callback slog entry.
+//
+// reason ∈ {"user_click", "timeout", "switch", "superseded"} — recorded
+// in slog for triage. "switch" is emitted by handleCommand's /switch hook
+// (AC15); "superseded" is emitted by startPendingIdleConfirm when a stale
+// state was found at the same interactiveKey.
+//
+// Lock order: takePendingIdleConfirm acquires pendingIdleConfirmMu briefly
+// (outermost); all IO (reply, replay) happens OUTSIDE that lock.
+func (e *Engine) resolveKeep(state *pendingIdleConfirmState, reason string) {
+	if state.resolvedFlag.Load() {
+		slog.Info("idle_confirm_late_callback",
+			"interactive_key", state.interactiveKey,
+			"outcome", outcomeString(state),
+			"incoming_reason", reason,
+			"incoming_outcome", "keep",
+		)
+		return
+	}
+
+	state.resolved.Do(func() {
+		// Order matters: flag → outcome → side effects. Concurrent
+		// late-callbacks will see resolvedFlag=true on their fast-path
+		// load and short-circuit before reaching Do().
+		state.resolvedFlag.Store(true)
+		state.outcome.Store("keep")
+		if t := state.timer.Load(); t != nil {
+			_ = t.Stop() // false if already fired — sync.Once handles the race
+		}
+
+		// Defensive map cleanup. handleCommand's /switch hook may have
+		// already removed us via takePendingIdleConfirm; that's fine —
+		// takePendingIdleConfirm is idempotent.
+		e.takePendingIdleConfirm(state.interactiveKey)
+
+		// Prevent the very next user message from re-triggering idle.
+		state.oldSession.TouchUpdatedAt()
+
+		queued := state.takeQueued()
+
+		// Drain best-effort and asynchronously: the original webhook
+		// callback (or timer goroutine) should not block on agent IO.
+		// C-001 decision: replay must not block ack.
+		go e.replayQueueToOldSession(state, queued)
+
+		// User-facing ack.
+		switch reason {
+		case "timeout":
+			slog.Info("idle_confirm_timeout_keep",
+				"interactive_key", state.interactiveKey,
+				"session_key", state.sessionKey,
+				"queued_count", len(queued),
+			)
+			e.reply(state.platform, state.replyCtx,
+				fmt.Sprintf(e.i18n.T(MsgIdleConfirmTimeoutKept), state.oldAgentSessionShort))
+		default:
+			slog.Info("idle_confirm_user_keep",
+				"interactive_key", state.interactiveKey,
+				"session_key", state.sessionKey,
+				"reason", reason,
+				"queued_count", len(queued),
+			)
+			e.reply(state.platform, state.replyCtx, e.i18n.T(MsgIdleConfirmKept))
+		}
+	})
+}
+
+// resolveRotate handles the "start fresh session" outcome. Idempotent via
+// sync.Once + resolvedFlag fast-path (mirrors resolveKeep).
+//
+// reason ∈ {"user_click"} — timeout is mapped to keep, not rotate (AC7).
+//
+// Behaviour (first call wins):
+//  1. Stop timer (best-effort).
+//  2. Remove from pendingIdleConfirm map.
+//  3. Close the old agent process (cleanupInteractiveState).
+//  4. Create a fresh session via sessions.NewSession.
+//  5. Drain the queued messages into the fresh session asynchronously
+//     (best-effort; webhook callback returns immediately).
+//  6. Reply with MsgIdleConfirmRotated containing the /switch hint to the
+//     old session.
+//  7. Emit idle_confirm_user_rotate slog.
+func (e *Engine) resolveRotate(state *pendingIdleConfirmState, reason string) {
+	if state.resolvedFlag.Load() {
+		slog.Info("idle_confirm_late_callback",
+			"interactive_key", state.interactiveKey,
+			"outcome", outcomeString(state),
+			"incoming_reason", reason,
+			"incoming_outcome", "rotate",
+		)
+		return
+	}
+
+	state.resolved.Do(func() {
+		state.resolvedFlag.Store(true)
+		state.outcome.Store("rotate")
+		if t := state.timer.Load(); t != nil {
+			_ = t.Stop()
+		}
+
+		e.takePendingIdleConfirm(state.interactiveKey)
+
+		// Close the old agent CLI; mirrors legacyAutoResetSessionOnIdle.
+		e.cleanupInteractiveState(state.interactiveKey)
+
+		// Old session lock was already released by maybeStartIdleConfirm
+		// before pending state creation. UnlockWithoutUpdate is idempotent
+		// at the application level (busy is a sync.Mutex; double-unlock
+		// would panic), so we deliberately do NOT call it here.
+
+		// Switch active session to a freshly created one BEFORE replay
+		// runs. Otherwise sessions.GetOrCreateActive(sessionKey) inside
+		// the replayed handleMessage call would still return the old
+		// (stale) session and re-trigger the ask flow, instead of giving
+		// the replayed message a clean context. We discard the returned
+		// *Session — the next handleMessage will pick it up via
+		// GetOrCreateActive on its own.
+		_ = state.sessions.NewSession(state.sessionKey, "")
+
+		queued := state.takeQueued()
+
+		// User-facing ack with /switch hint to old session.
+		switchCmd := "/list"
+		if state.oldAgentSessionID != "" {
+			switchCmd = "/switch " + state.oldAgentSessionShort
+		}
+		e.reply(state.platform, state.replyCtx,
+			fmt.Sprintf(e.i18n.T(MsgIdleConfirmRotated), switchCmd))
+
+		slog.Info("idle_confirm_user_rotate",
+			"interactive_key", state.interactiveKey,
+			"session_key", state.sessionKey,
+			"reason", reason,
+			"queued_count", len(queued),
+			"old_agent_session", state.oldAgentSessionShort,
+		)
+
+		// Drain into the brand-new (now active) session asynchronously.
+		go e.replayQueueToNewSession(state, queued)
+	})
+}
+
+// outcomeString returns state.outcome as a string, or "" if not set. Used
+// by late-callback slog events to disambiguate keep vs rotate.
+func outcomeString(state *pendingIdleConfirmState) string {
+	v := state.outcome.Load()
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// replayQueueToOldSession replays the queued messages into the OLD session
+// (the one that triggered the prompt). Run on its own goroutine.
+//
+// Strategy: re-dispatch through handleMessage so each message walks the
+// full processMessage pipeline (slash handling, permission, queueing, lock
+// acquisition). The pending state for this interactiveKey has already been
+// removed, so the first replayed message will not re-enter
+// handlePendingIdleConfirm and will instead acquire session.busy via the
+// normal TryLock / queue path.
+//
+// This is intentionally simple and resilient: if the old agent process is
+// dead, the normal session-spawn path will recreate it; if the user has
+// since sent a /switch, the new active session naturally takes over.
+func (e *Engine) replayQueueToOldSession(state *pendingIdleConfirmState, queued []queuedMessage) {
+	for i, qm := range queued {
+		replayed := queuedMessageToMessage(qm)
+		if i == 0 {
+			// First message: synchronously process so the user sees a
+			// reply ordering close to "I clicked keep → my message
+			// runs". Subsequent messages dispatch normally via the
+			// handleMessage queue path inside their handlers.
+			e.handleMessage(qm.platform, replayed)
+		} else {
+			go e.handleMessage(qm.platform, replayed)
+		}
+	}
+}
+
+// replayQueueToNewSession replays queued messages after a rotate. The new
+// session is implicit: sessions.GetOrCreateActive() inside handleMessage
+// will pick up whatever is active at that point — which, after
+// cleanupInteractiveState in resolveRotate, is the rotated session.
+// Symmetric to replayQueueToOldSession.
+func (e *Engine) replayQueueToNewSession(state *pendingIdleConfirmState, queued []queuedMessage) {
+	for i, qm := range queued {
+		replayed := queuedMessageToMessage(qm)
+		if i == 0 {
+			e.handleMessage(qm.platform, replayed)
+		} else {
+			go e.handleMessage(qm.platform, replayed)
+		}
+	}
+}
+
+// queuedMessageToMessage rehydrates a queuedMessage into a *Message
+// suitable for re-dispatch through handleMessage. Mirrors the field
+// selection from queueMessageForBusySession's append.
+func queuedMessageToMessage(qm queuedMessage) *Message {
+	return &Message{
+		SessionKey: qm.msgSessionKey,
+		Platform:   qm.msgPlatform,
+		MessageID:  qm.messageID,
+		UserID:     qm.userID,
+		UserName:   qm.userName,
+		Content:    qm.content,
+		Images:     qm.images,
+		Files:      qm.files,
+		ChannelKey: qm.channelKey,
+		ReplyCtx:   qm.replyCtx,
+		FromVoice:  qm.fromVoice,
+	}
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -5400,6 +6180,20 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
+	// AC15 / A-006: if an idle-confirm card is outstanding for this user,
+	// treat /switch as an explicit "keep this session" choice. Drain the
+	// queue back to the old session (drain runs asynchronously inside
+	// resolveKeep) BEFORE /switch reassigns active, so the queued
+	// messages land where the user originally meant them to. /switch
+	// then proceeds normally and may change the active session for
+	// future messages.
+	{
+		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+		if state := e.takePendingIdleConfirm(iKey); state != nil {
+			go e.resolveKeep(state, "switch")
+		}
+	}
+
 	if len(args) == 0 {
 		e.reply(p, msg.ReplyCtx, "Usage: /switch <number | id_prefix | name>")
 		return

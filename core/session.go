@@ -124,6 +124,17 @@ func (s *Session) GetUpdatedAt() time.Time {
 	return s.UpdatedAt
 }
 
+// TouchUpdatedAt sets UpdatedAt to time.Now() under session.mu. Used by
+// resolveKeep (REQ-20260521 ask-before-idle-reset) to prevent the next
+// user message from immediately re-triggering the idle threshold after a
+// "keep this session" decision. Does not touch busy. Mirrors the inline
+// pattern already used by SessionManager.SwitchToAgentSession.
+func (s *Session) TouchUpdatedAt() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.UpdatedAt = time.Now()
+}
+
 // SetAgentSessionID atomically sets the agent session ID and agent type.
 // The ContinueSession sentinel is never persisted — it is only used transiently
 // when starting an agent (see engine); storing it on disk breaks resume (#255).

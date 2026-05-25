@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -1860,6 +1861,245 @@ func TestMgmt_ProjectDetail_MethodNotAllowed(t *testing.T) {
 	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project", "tok", nil)
 	if r.OK {
 		t.Fatal("expected POST on project detail to fail")
+	}
+}
+
+// ── Idle reset confirmation settings (REQ-20260521 / T-010) ──
+
+// TestMgmt_ProjectDetail_GetIncludesResetOnIdleFields verifies that GET on the
+// project detail endpoint surfaces the three new idle-reset settings keys.
+// They MUST appear under data.settings even when the engine still uses defaults.
+func TestMgmt_ProjectDetail_GetIncludesResetOnIdleFields(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	// Configure non-default values so we can assert exact serialisation.
+	e.SetResetOnIdle(45 * time.Minute)
+	e.SetResetOnIdleMode("auto")
+	e.SetResetOnIdleConfirmTimeout(75 * time.Second)
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	if !r.OK {
+		t.Fatalf("project detail GET failed: %s", r.Error)
+	}
+
+	var data struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal project detail: %v", err)
+	}
+	if data.Settings == nil {
+		t.Fatalf("settings missing from project detail GET response")
+	}
+
+	mins, ok := data.Settings["reset_on_idle_mins"]
+	if !ok {
+		t.Fatalf("reset_on_idle_mins missing from settings: %#v", data.Settings)
+	}
+	if minsNum, _ := mins.(float64); int(minsNum) != 45 {
+		t.Fatalf("reset_on_idle_mins = %v, want 45", mins)
+	}
+
+	mode, ok := data.Settings["reset_on_idle_mode"]
+	if !ok {
+		t.Fatalf("reset_on_idle_mode missing from settings: %#v", data.Settings)
+	}
+	if mode != "auto" {
+		t.Fatalf("reset_on_idle_mode = %v, want \"auto\"", mode)
+	}
+
+	timeout, ok := data.Settings["reset_on_idle_confirm_timeout_sec"]
+	if !ok {
+		t.Fatalf("reset_on_idle_confirm_timeout_sec missing from settings: %#v", data.Settings)
+	}
+	if timeoutNum, _ := timeout.(float64); int(timeoutNum) != 75 {
+		t.Fatalf("reset_on_idle_confirm_timeout_sec = %v, want 75", timeout)
+	}
+}
+
+// TestMgmt_ProjectDetail_GetReportsDefaultsBeforeSetters verifies that GET
+// surfaces the engine defaults (mode="ask", timeout=30s) even when no setter
+// has been called. This is the new-deployment / unset-config experience.
+func TestMgmt_ProjectDetail_GetReportsDefaultsBeforeSetters(t *testing.T) {
+	_, ts, _ := testManagementServer(t, "tok")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	if !r.OK {
+		t.Fatalf("project detail GET failed: %s", r.Error)
+	}
+	var data struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal project detail: %v", err)
+	}
+
+	if mode := data.Settings["reset_on_idle_mode"]; mode != "ask" {
+		t.Fatalf("default reset_on_idle_mode = %v, want \"ask\"", mode)
+	}
+	if timeout, _ := data.Settings["reset_on_idle_confirm_timeout_sec"].(float64); int(timeout) != 30 {
+		t.Fatalf("default reset_on_idle_confirm_timeout_sec = %v, want 30", timeout)
+	}
+}
+
+// TestMgmt_ProjectPatch_ResetOnIdleMode is a table-driven test that covers all
+// three accepted modes plus the rejection paths for unknown / empty values.
+// Mode normalisation (case-insensitive + trim) MUST round-trip into the engine
+// state via the getter.
+func TestMgmt_ProjectPatch_ResetOnIdleMode(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantOK   bool
+		wantMode string // only checked when wantOK
+		wantErr  string // substring; only checked when !wantOK
+	}{
+		{"ask_lower", "ask", true, "ask", ""},
+		{"auto_lower", "auto", true, "auto", ""},
+		{"off_lower", "off", true, "off", ""},
+		{"ask_upper_normalised", "ASK", true, "ask", ""},
+		{"auto_padded_normalised", "  Auto  ", true, "auto", ""},
+		{"reject_invalid", "invalid", false, "", "reset_on_idle_mode must be one of: auto, ask, off"},
+		{"reject_empty", "", false, "", "reset_on_idle_mode must be one of: auto, ask, off"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts, e := testManagementServer(t, "tok")
+			r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+				"reset_on_idle_mode": tc.input,
+			})
+			if tc.wantOK {
+				if !r.OK {
+					t.Fatalf("PATCH mode=%q expected success, got error: %s", tc.input, r.Error)
+				}
+				if got := e.getResetOnIdleMode(); got != tc.wantMode {
+					t.Fatalf("engine mode = %q, want %q", got, tc.wantMode)
+				}
+			} else {
+				if r.OK {
+					t.Fatalf("PATCH mode=%q expected error, got success", tc.input)
+				}
+				if !strings.Contains(r.Error, tc.wantErr) {
+					t.Fatalf("error = %q, want substring %q", r.Error, tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+// TestMgmt_ProjectPatch_ResetOnIdleConfirmTimeoutSec covers the validated 5..600
+// range. Boundary inclusive bounds (5, 600) must succeed; just-out-of-range
+// values (4, 601) must yield 400 with the documented error string.
+func TestMgmt_ProjectPatch_ResetOnIdleConfirmTimeoutSec(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   int
+		wantOK  bool
+		wantSec int // engine seconds after PATCH; only checked when wantOK
+	}{
+		{"lower_bound", 5, true, 5},
+		{"midrange_60", 60, true, 60},
+		{"upper_bound", 600, true, 600},
+		{"reject_below", 4, false, 0},
+		{"reject_above", 601, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts, e := testManagementServer(t, "tok")
+			r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+				"reset_on_idle_confirm_timeout_sec": tc.input,
+			})
+			if tc.wantOK {
+				if !r.OK {
+					t.Fatalf("PATCH timeout=%d expected success, got error: %s", tc.input, r.Error)
+				}
+				gotSec := int(e.getResetOnIdleConfirmTimeout() / time.Second)
+				if gotSec != tc.wantSec {
+					t.Fatalf("engine timeout sec = %d, want %d", gotSec, tc.wantSec)
+				}
+			} else {
+				if r.OK {
+					t.Fatalf("PATCH timeout=%d expected error, got success", tc.input)
+				}
+				if !strings.Contains(r.Error, "reset_on_idle_confirm_timeout_sec must be between 5 and 600") {
+					t.Fatalf("error = %q, want substring about 5-600 range", r.Error)
+				}
+			}
+		})
+	}
+}
+
+// TestMgmt_ProjectPatch_ResetOnIdleMins guards the >=0 invariant on the
+// existing reset_on_idle_mins setting now that it is also exposed via the
+// management PATCH (T-010 regression set).
+func TestMgmt_ProjectPatch_ResetOnIdleMins(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    int
+		wantOK   bool
+		wantMins int // engine minutes after PATCH; only checked when wantOK
+	}{
+		{"zero_disables", 0, true, 0},
+		{"sixty_minutes", 60, true, 60},
+		{"reject_negative", -1, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts, e := testManagementServer(t, "tok")
+			r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+				"reset_on_idle_mins": tc.input,
+			})
+			if tc.wantOK {
+				if !r.OK {
+					t.Fatalf("PATCH mins=%d expected success, got error: %s", tc.input, r.Error)
+				}
+				gotMins := int(e.resetOnIdle / time.Minute)
+				if gotMins != tc.wantMins {
+					t.Fatalf("engine reset_on_idle minutes = %d, want %d", gotMins, tc.wantMins)
+				}
+			} else {
+				if r.OK {
+					t.Fatalf("PATCH mins=%d expected error, got success", tc.input)
+				}
+				if !strings.Contains(r.Error, "reset_on_idle_mins must be >= 0") {
+					t.Fatalf("error = %q, want substring about >= 0", r.Error)
+				}
+			}
+		})
+	}
+}
+
+// TestMgmt_ProjectPatch_SaveProjectSettingsCarriesResetOnIdleFields verifies
+// that successful PATCH payloads forward the new three fields through to the
+// persistence layer (config.SaveProjectSettings via the registered callback),
+// proving the mapping in cmd/cc-connect/main.go::SetSaveProjectSettings stays
+// in lock-step with the management DTO.
+func TestMgmt_ProjectPatch_SaveProjectSettingsCarriesResetOnIdleFields(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	var captured ProjectSettingsUpdate
+	mgmt.SetSaveProjectSettings(func(name string, u ProjectSettingsUpdate) error {
+		captured = u
+		return nil
+	})
+
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+		"reset_on_idle_mins":                15,
+		"reset_on_idle_mode":                "Ask", // mixed case to assert normalisation
+		"reset_on_idle_confirm_timeout_sec": 45,
+	})
+	if !r.OK {
+		t.Fatalf("PATCH failed: %s", r.Error)
+	}
+
+	if captured.ResetOnIdleMins == nil || *captured.ResetOnIdleMins != 15 {
+		t.Fatalf("captured.ResetOnIdleMins = %v, want *15", captured.ResetOnIdleMins)
+	}
+	if captured.ResetOnIdleMode == nil || *captured.ResetOnIdleMode != "ask" {
+		t.Fatalf("captured.ResetOnIdleMode = %v, want *\"ask\" (canonical form)", captured.ResetOnIdleMode)
+	}
+	if captured.ResetOnIdleConfirmTimeoutSec == nil || *captured.ResetOnIdleConfirmTimeoutSec != 45 {
+		t.Fatalf("captured.ResetOnIdleConfirmTimeoutSec = %v, want *45", captured.ResetOnIdleConfirmTimeoutSec)
 	}
 }
 

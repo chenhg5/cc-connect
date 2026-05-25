@@ -28,6 +28,11 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	// Idle-reset confirmation controls (see Engine.SetResetOnIdle* setters).
+	// nil pointers indicate "do not change"; non-nil triggers a persist + engine setter call.
+	ResetOnIdleMins              *int
+	ResetOnIdleMode              *string
+	ResetOnIdleConfirmTimeoutSec *int
 }
 
 // ManagementServer provides an HTTP REST API for external management tools
@@ -141,10 +146,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -676,9 +681,12 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		e.userRolesMu.RUnlock()
 
 		data["settings"] = map[string]any{
-			"language":          string(e.i18n.CurrentLang()),
-			"admin_from":        adminFrom,
-			"disabled_commands": e.GetDisabledCommands(),
+			"language":                          string(e.i18n.CurrentLang()),
+			"admin_from":                        adminFrom,
+			"disabled_commands":                 e.GetDisabledCommands(),
+			"reset_on_idle_mins":                int(e.resetOnIdle / time.Minute),
+			"reset_on_idle_mode":                e.getResetOnIdleMode(),
+			"reset_on_idle_confirm_timeout_sec": int(e.getResetOnIdleConfirmTimeout() / time.Second),
 		}
 
 		var workDir string
@@ -706,16 +714,19 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Language             *string           `json:"language"`
-			AdminFrom            *string           `json:"admin_from"`
-			DisabledCommands     []string          `json:"disabled_commands"`
-			WorkDir              *string           `json:"work_dir"`
-			Mode                 *string           `json:"mode"`
-			AgentType            *string           `json:"agent_type"`
-			ShowContextIndicator *bool             `json:"show_context_indicator"`
-			ReplyFooter          *bool             `json:"reply_footer"`
-			InjectSender         *bool             `json:"inject_sender"`
-			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
+			Language                     *string           `json:"language"`
+			AdminFrom                    *string           `json:"admin_from"`
+			DisabledCommands             []string          `json:"disabled_commands"`
+			WorkDir                      *string           `json:"work_dir"`
+			Mode                         *string           `json:"mode"`
+			AgentType                    *string           `json:"agent_type"`
+			ShowContextIndicator         *bool             `json:"show_context_indicator"`
+			ReplyFooter                  *bool             `json:"reply_footer"`
+			InjectSender                 *bool             `json:"inject_sender"`
+			PlatformAllowFrom            map[string]string `json:"platform_allow_from"`
+			ResetOnIdleMins              *int              `json:"reset_on_idle_mins"`
+			ResetOnIdleMode              *string           `json:"reset_on_idle_mode"`
+			ResetOnIdleConfirmTimeoutSec *int              `json:"reset_on_idle_confirm_timeout_sec"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -761,6 +772,33 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if body.InjectSender != nil {
 			e.SetInjectSender(*body.InjectSender)
 		}
+		if body.ResetOnIdleMode != nil {
+			m := strings.ToLower(strings.TrimSpace(*body.ResetOnIdleMode))
+			switch m {
+			case "off", "auto", "ask":
+				e.SetResetOnIdleMode(m)
+				// Persist the canonical (normalized) form to TOML downstream.
+				body.ResetOnIdleMode = &m
+			default:
+				mgmtError(w, http.StatusBadRequest, "reset_on_idle_mode must be one of: auto, ask, off")
+				return
+			}
+		}
+		if body.ResetOnIdleConfirmTimeoutSec != nil {
+			sec := *body.ResetOnIdleConfirmTimeoutSec
+			if sec < 5 || sec > 600 {
+				mgmtError(w, http.StatusBadRequest, "reset_on_idle_confirm_timeout_sec must be between 5 and 600")
+				return
+			}
+			e.SetResetOnIdleConfirmTimeout(time.Duration(sec) * time.Second)
+		}
+		if body.ResetOnIdleMins != nil {
+			if *body.ResetOnIdleMins < 0 {
+				mgmtError(w, http.StatusBadRequest, "reset_on_idle_mins must be >= 0")
+				return
+			}
+			e.SetResetOnIdle(time.Duration(*body.ResetOnIdleMins) * time.Minute)
+		}
 
 		restartRequired := false
 		if body.AgentType != nil && *body.AgentType != e.agent.Name() {
@@ -781,16 +819,19 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
-				Language:             body.Language,
-				AdminFrom:            body.AdminFrom,
-				DisabledCommands:     body.DisabledCommands,
-				WorkDir:              body.WorkDir,
-				Mode:                 body.Mode,
-				AgentType:            body.AgentType,
-				ShowContextIndicator: body.ShowContextIndicator,
-				ReplyFooter:          body.ReplyFooter,
-				InjectSender:         body.InjectSender,
-				PlatformAllowFrom:    body.PlatformAllowFrom,
+				Language:                     body.Language,
+				AdminFrom:                    body.AdminFrom,
+				DisabledCommands:             body.DisabledCommands,
+				WorkDir:                      body.WorkDir,
+				Mode:                         body.Mode,
+				AgentType:                    body.AgentType,
+				ShowContextIndicator:         body.ShowContextIndicator,
+				ReplyFooter:                  body.ReplyFooter,
+				InjectSender:                 body.InjectSender,
+				PlatformAllowFrom:            body.PlatformAllowFrom,
+				ResetOnIdleMins:              body.ResetOnIdleMins,
+				ResetOnIdleMode:              body.ResetOnIdleMode,
+				ResetOnIdleConfirmTimeoutSec: body.ResetOnIdleConfirmTimeoutSec,
 			}
 			if err := m.saveProjectSettings(name, patch); err != nil {
 				slog.Warn("management: failed to persist project settings", "project", name, "error", err)
@@ -1859,10 +1900,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

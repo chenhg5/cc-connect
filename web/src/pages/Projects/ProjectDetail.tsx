@@ -53,6 +53,9 @@ export default function ProjectDetail() {
   const [replyFooter, setReplyFooter] = useState(true);
   const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
+  const [resetOnIdleMins, setResetOnIdleMins] = useState('');
+  const [resetOnIdleMode, setResetOnIdleMode] = useState<'auto' | 'ask' | 'off'>('ask');
+  const [resetOnIdleConfirmTimeoutSec, setResetOnIdleConfirmTimeoutSec] = useState('30');
   const [saving, setSaving] = useState(false);
 
   // Agent type
@@ -138,6 +141,17 @@ export default function ProjectDetail() {
         setShowCtxIndicator(proj.value.show_context_indicator !== false);
         setReplyFooter(proj.value.reply_footer !== false);
         setInjectSender(proj.value.inject_sender === true);
+        setResetOnIdleMins(
+          proj.value.settings?.reset_on_idle_mins != null
+            ? String(proj.value.settings.reset_on_idle_mins)
+            : ''
+        );
+        setResetOnIdleMode(proj.value.settings?.reset_on_idle_mode || 'ask');
+        setResetOnIdleConfirmTimeoutSec(
+          proj.value.settings?.reset_on_idle_confirm_timeout_sec != null
+            ? String(proj.value.settings.reset_on_idle_confirm_timeout_sec)
+            : '30'
+        );
         setProviderRefs(proj.value.provider_refs || []);
         const afMap: Record<string, string> = {};
         proj.value.platform_configs?.forEach(pc => {
@@ -176,6 +190,14 @@ export default function ProjectDetail() {
     setSaving(true);
     try {
       const agentTypeChanged = project && selectedAgentType !== project.agent_type;
+      // Only include numeric fields when they parse cleanly; the empty-string
+      // case (initial state before mount or cleared input) must be omitted so
+      // the backend doesn't see a 0 value and disable idle reset accidentally.
+      const minsNum = resetOnIdleMins.trim() === '' ? undefined : Number(resetOnIdleMins);
+      const timeoutNum =
+        resetOnIdleConfirmTimeoutSec.trim() === ''
+          ? undefined
+          : Number(resetOnIdleConfirmTimeoutSec);
       const res = await updateProject(name, {
         language,
         admin_from: adminFrom,
@@ -187,6 +209,11 @@ export default function ProjectDetail() {
         reply_footer: replyFooter,
         inject_sender: injectSender,
         platform_allow_from: platformAllowFrom,
+        ...(minsNum !== undefined && Number.isFinite(minsNum) ? { reset_on_idle_mins: minsNum } : {}),
+        reset_on_idle_mode: resetOnIdleMode,
+        ...(timeoutNum !== undefined && Number.isFinite(timeoutNum)
+          ? { reset_on_idle_confirm_timeout_sec: timeoutNum }
+          : {}),
       });
       if (res && (res as any).restart_required) {
         setShowRestartModal(true);
@@ -569,6 +596,35 @@ export default function ProjectDetail() {
             <Input label={t('projects.language')} value={language} onChange={(e) => setLanguage(e.target.value)} placeholder="en, zh, ja..." />
             <Input label={t('projects.adminFrom')} value={adminFrom} onChange={(e) => setAdminFrom(e.target.value)} placeholder="user1,user2 or *" />
             <Input label={t('projects.disabledCommands')} value={disabledCmds} onChange={(e) => setDisabledCmds(e.target.value)} placeholder="restart, upgrade, cron" />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                {t('projects.resetOnIdleMode')}
+              </label>
+              <select
+                value={resetOnIdleMode}
+                onChange={(e) => setResetOnIdleMode(e.target.value as 'auto' | 'ask' | 'off')}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
+              >
+                <option value="ask">{t('projects.resetOnIdleModeAsk')}</option>
+                <option value="auto">{t('projects.resetOnIdleModeAuto')}</option>
+                <option value="off">{t('projects.resetOnIdleModeOff')}</option>
+              </select>
+              <p className="text-[11px] text-gray-400 mt-1">{t('projects.resetOnIdleModeHint')}</p>
+            </div>
+            <div>
+              <Input
+                label={t('projects.resetOnIdleConfirmTimeoutSec')}
+                type="number"
+                min={5}
+                max={600}
+                step={5}
+                value={resetOnIdleConfirmTimeoutSec}
+                onChange={(e) => setResetOnIdleConfirmTimeoutSec(e.target.value)}
+                placeholder="30"
+                disabled={resetOnIdleMode !== 'ask'}
+              />
+              <p className="text-[11px] text-gray-400 mt-1">{t('projects.resetOnIdleConfirmTimeoutSecHint')}</p>
+            </div>
           </div>
         </Card>
 
