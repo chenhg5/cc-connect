@@ -386,7 +386,8 @@ var ansiRe = regexp.MustCompile(
 //  2. TUI redraws (e.g. Claude Code) — terminal overwrites lines in place; find the
 //     longest common line prefix shared by both snapshots, then return the new lines
 //     that follow it in current, stripping the repeated trailing prompt lines.
-//  3. Terminal scrolled — baseline has partially scrolled off; use a shrinking anchor.
+//  3. Terminal scrolled and/or the volatile prompt was redrawn — anchor on a
+//     stable multi-line block of baseline's content (sliding up past the input box).
 func extractNew(baseline, current string) string {
 	if current == baseline {
 		return ""
@@ -426,21 +427,71 @@ func extractNew(baseline, current string) string {
 		}
 	}
 
-	// Scroll path: baseline has partially scrolled off the top; try progressively
-	// shorter anchors from the end of baseline to find where new content begins.
-	maxAnchor := 10
-	if len(baseLines) < maxAnchor {
-		maxAnchor = len(baseLines)
-	}
-	for n := maxAnchor; n >= 1; n-- {
-		anchor := strings.Join(baseLines[len(baseLines)-n:], "\n")
-		if idx := strings.LastIndex(current, anchor); idx >= 0 {
-			rest := strings.TrimLeft(current[idx+len(anchor):], "\n")
-			if rest != "" {
-				return rest
+	// Scroll path: the top of baseline scrolled off the buffer (so the prefix path
+	// found nothing) and/or the volatile bottom — a TUI input box / prompt that the
+	// agent redraws every turn — changed, so an exact tail match also misses. Slide
+	// a small multi-line window upward from the bottom of baseline and take its LAST
+	// occurrence in current: that is the lowest stable block the two snapshots still
+	// share, i.e. the boundary between old content and the agent's new output.
+	//
+	// A multi-line block (not a single line) avoids latching onto a lone repeated
+	// line such as a bare prompt, and LastIndex avoids latching onto an identical
+	// block from far back in history — the bug where stale scrollback was returned.
+	const win = 3
+	if len(baseLines) >= win {
+		for end := len(baseLines); end >= win; end-- {
+			block := baseLines[end-win : end]
+			start := lastIndexOfBlock(curLines, block)
+			if start < 0 {
+				continue
+			}
+			newLines := trimCommonTail(curLines[start+win:], baseLines)
+			if res := strings.TrimRight(strings.Join(newLines, "\n"), "\n"); res != "" {
+				return res
 			}
 		}
 	}
 
-	return current
+	// No shared block: baseline and current barely overlap, so current is
+	// effectively all-new (e.g. the buffer fully scrolled). Emit at most the last
+	// visibleFallbackLines lines so a stale multi-thousand-line scrollback can
+	// never be returned as "the response".
+	const visibleFallbackLines = 60
+	if len(curLines) > visibleFallbackLines {
+		curLines = curLines[len(curLines)-visibleFallbackLines:]
+	}
+	return strings.TrimRight(strings.Join(curLines, "\n"), "\n")
+}
+
+// lastIndexOfBlock returns the start index of the last contiguous occurrence of
+// block within lines, or -1 if block does not occur.
+func lastIndexOfBlock(lines, block []string) int {
+	if len(block) == 0 || len(block) > len(lines) {
+		return -1
+	}
+	for i := len(lines) - len(block); i >= 0; i-- {
+		match := true
+		for j := range block {
+			if lines[i+j] != block[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
+// trimCommonTail drops trailing lines of newLines that duplicate the tail of
+// baseLines — the unchanged remnants of a redrawn input box / prompt, which are
+// not part of the agent's response.
+func trimCommonTail(newLines, baseLines []string) []string {
+	b := len(baseLines)
+	for len(newLines) > 0 && b > 0 && newLines[len(newLines)-1] == baseLines[b-1] {
+		newLines = newLines[:len(newLines)-1]
+		b--
+	}
+	return newLines
 }

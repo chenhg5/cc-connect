@@ -64,6 +64,17 @@ func TestExtractNew(t *testing.T) {
 			current:  "header\n\nLine one.\nLine two.\n\n>",
 			want:     "Line one.\nLine two.",
 		},
+		{
+			// Real bug: a long session fills the tmux scrollback so the oldest
+			// lines (h1, h2) scroll off the top — defeating the prefix path — and
+			// the response lands above the unchanged input box (UIa, UIb). The old
+			// tail-anchor scroll path returned the whole capture (stale history);
+			// the block-anchor path must return only RESP.
+			name:     "scrolled off top, response above stable input box",
+			baseline: "h1\nh2\nh3\nh4\nh5\nUIa\nUIb",
+			current:  "h3\nh4\nh5\nRESP\nUIa\nUIb",
+			want:     "RESP",
+		},
 	}
 
 	for _, tt := range tests {
