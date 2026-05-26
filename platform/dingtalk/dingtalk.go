@@ -3,12 +3,14 @@ package dingtalk
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -277,7 +279,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	}
 
 	// Handle image messages
-	if data.Msgtype == "image" {
+	if data.Msgtype == "picture" {
 		p.handleImageMessage(data, sessionKey)
 		return
 	}
@@ -461,21 +463,33 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 
 	slog.Info("dingtalk: image downloaded successfully", "size", len(imgBytes), "mime", mimeType)
 
+	// Pre-process image via DeepSeek Vision API to get a text description.
+	// DeepSeek's Anthropic-compatible endpoint does not support image blocks,
+	// so we replace the image with a text description for the agent.
+	// When DeepSeek opens their Vision API, this will transparently start
+	// producing real image descriptions — no code change needed.
+	content := ""
+	desc, err := describeImageViaVisionAPI(imgBytes, mimeType)
+	if err != nil {
+		slog.Warn("dingtalk: vision API failed, falling back to text-only", "error", err)
+		content = "User sent an image, but automatic description failed. Please ask the user to describe the image."
+	} else {
+		slog.Info("dingtalk: image described via vision API", "desc_len", len(desc))
+		content = fmt.Sprintf("User sent an image. Image description:\n\n%s\n\nPlease respond based on this description.", desc)
+	}
+
 	msg := &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "dingtalk",
 		UserID:     data.SenderStaffId,
 		UserName:   data.SenderNick,
+		Content:    content,
 		MessageID:  data.MsgId,
 		ReplyCtx: replyContext{
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
 		},
-		Images: []core.ImageAttachment{{
-			MimeType: mimeType,
-			Data:     imgBytes,
-		}},
 	}
 
 	p.handler(p, msg)
@@ -1261,4 +1275,90 @@ func preprocessDingTalkMarkdown(s string) string {
 		}
 	}
 	return sb.String()
+}
+
+// describeImageViaVisionAPI calls the DeepSeek Vision API (OpenAI-compatible format)
+// to get a text description of the image. Returns the description text or an error.
+func describeImageViaVisionAPI(imgBytes []byte, mimeType string) (string, error) {
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_AUTH_TOKEN")
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	if apiKey == "" {
+		return "", fmt.Errorf("dingtalk: no API key found (set DEEPSEEK_API_KEY, ANTHROPIC_AUTH_TOKEN, or ANTHROPIC_API_KEY)")
+	}
+
+	baseURL := os.Getenv("DEEPSEEK_BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com"
+	}
+
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(imgBytes))
+
+	reqBody := map[string]any{
+		"model":       "deepseek-v4-pro",
+		"max_tokens":  1024,
+		"temperature": 0.3,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": "请详细描述这张图片的内容。如果是文档截图，请提取其中的文字信息。如果是图表，请描述图表的内容和数据。如果是照片，请描述照片中的场景、人物、物体等。"},
+					{"type": "image_url", "image_url": map[string]string{"url": dataURL}},
+				},
+			},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("vision API call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("dingtalk: vision API returned non-OK status", "status", resp.StatusCode, "body", string(respBytes))
+		return "", fmt.Errorf("vision API status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBytes, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no choices in vision API response")
+	}
+
+	return result.Choices[0].Message.Content, nil
 }

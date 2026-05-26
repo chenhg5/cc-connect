@@ -3,6 +3,7 @@ package acp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -596,7 +597,11 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 	filePaths := core.SaveFilesToDisk(s.workDir, files)
 	prompt = core.AppendFileRefs(prompt, filePaths)
 	if len(images) > 0 {
-		prompt = s.appendImageRefs(prompt, images)
+		// Still save images to disk for reference, but don't put paths in prompt
+		_ = s.saveImagesToDisk(images)
+		if prompt == "" {
+			prompt = "User sent image(s)."
+		}
 	}
 
 	sid := s.currentACPSessionID()
@@ -604,8 +609,16 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 		return fmt.Errorf("acp: no agent session id")
 	}
 
-	promptBlocks := []any{
-		map[string]any{"type": "text", "text": prompt},
+	promptBlocks := []any{}
+	if prompt != "" {
+		promptBlocks = append(promptBlocks, map[string]any{"type": "text", "text": prompt})
+	}
+	for _, img := range images {
+		promptBlocks = append(promptBlocks, map[string]any{
+			"type":     "image",
+			"data":     base64.StdEncoding.EncodeToString(img.Data),
+			"mimeType": img.MimeType,
+		})
 	}
 	params := map[string]any{
 		"sessionId": sid,
@@ -627,11 +640,11 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 	return nil
 }
 
-func (s *acpSession) appendImageRefs(prompt string, images []core.ImageAttachment) string {
+func (s *acpSession) saveImagesToDisk(images []core.ImageAttachment) []string {
 	attachDir := filepath.Join(s.workDir, ".cc-connect", "attachments")
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Warn("acp: mkdir attachments failed", "error", err)
-		return prompt
+		return nil
 	}
 	var paths []string
 	for i, img := range images {
@@ -654,13 +667,7 @@ func (s *acpSession) appendImageRefs(prompt string, images []core.ImageAttachmen
 		}
 		paths = append(paths, fpath)
 	}
-	if len(paths) == 0 {
-		return prompt
-	}
-	if prompt == "" {
-		prompt = "User sent image(s)."
-	}
-	return prompt + "\n\n(Image files saved locally: " + strings.Join(paths, ", ") + ")"
+	return paths
 }
 
 func (s *acpSession) RespondPermission(requestID string, result core.PermissionResult) error {
