@@ -2,6 +2,9 @@ package antigravity
 
 import (
 	"context"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -63,4 +66,65 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 	if got := s.CurrentSessionID(); got != "" {
 		t.Errorf("ContinueSession should be treated as fresh: chatID = %q, want empty", got)
 	}
+}
+
+func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
+	args := buildAntigravityArgs("sid-1", true, "gemini-2.5-pro", "plan", "What is 1+1?")
+	if len(args) < 2 {
+		t.Fatalf("args too short: %v", args)
+	}
+	if args[len(args)-2] != "-p" || args[len(args)-1] != "What is 1+1?" {
+		t.Fatalf("expected prompt to be final '-p <prompt>', got: %v", args)
+	}
+	if !contains(args, "--sandbox") {
+		t.Fatalf("expected --sandbox in args, got: %v", args)
+	}
+}
+
+func TestRespondPermission_WritesTerminalAnswer(t *testing.T) {
+	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "default", "", nil, 0)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer s.Close()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	s.stdin = w
+
+	if err := s.RespondPermission("req", core.PermissionResult{Behavior: "allow"}); err != nil {
+		t.Fatalf("RespondPermission allow: %v", err)
+	}
+	buf := make([]byte, 8)
+	n, err := r.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("read allow response: %v", err)
+	}
+	if got := string(buf[:n]); got != "y\n" {
+		t.Fatalf("allow response = %q, want %q", got, "y\n")
+	}
+
+	if err := s.RespondPermission("req", core.PermissionResult{Behavior: "deny"}); err != nil {
+		t.Fatalf("RespondPermission deny: %v", err)
+	}
+	n, err = r.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("read deny response: %v", err)
+	}
+	if got := string(buf[:n]); got != "n\n" {
+		t.Fatalf("deny response = %q, want %q", got, "n\n")
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if strings.TrimSpace(x) == want {
+			return true
+		}
+	}
+	return false
 }

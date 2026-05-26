@@ -22,18 +22,21 @@ import (
 
 // antigravitySession manages multi-turn conversations with the Antigravity CLI (agy).
 type antigravitySession struct {
-	cmd      string
-	workDir  string
-	model    string
-	mode     string
-	timeout  time.Duration
-	extraEnv []string
-	events   chan core.Event
-	chatID   atomic.Value // stores string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	alive    atomic.Bool
+	cmd       string
+	workDir   string
+	model     string
+	mode      string
+	timeout   time.Duration
+	extraEnv  []string
+	events    chan core.Event
+	stdin     io.WriteCloser
+	stdinMu   sync.Mutex
+	closeOnce sync.Once
+	chatID    atomic.Value // stores string
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	alive     atomic.Bool
 }
 
 func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
@@ -118,25 +121,6 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	chatID := as.CurrentSessionID()
 	isResume := chatID != ""
 
-	// Build CLI arguments
-	args := []string{
-		"-p",
-	}
-
-	if isResume {
-		args = append(args, "--conversation", chatID)
-	}
-	if as.model != "" {
-		args = append(args, "-m", as.model)
-	}
-
-	switch as.mode {
-	case "yolo":
-		args = append(args, "--dangerously-skip-permissions")
-	case "plan":
-		args = append(args, "--sandbox")
-	}
-
 	// Attach image and file references to prompt
 	fullPrompt := prompt
 	if len(imageRefs) > 0 {
@@ -151,7 +135,7 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 		}
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
-	args = append(args, fullPrompt)
+	args := buildAntigravityArgs(chatID, isResume, as.model, as.mode, fullPrompt)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -182,6 +166,10 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	if err != nil {
 		return fmt.Errorf("antigravitySession: stdout pipe: %w", err)
 	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("antigravitySession: stdin pipe: %w", err)
+	}
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -189,6 +177,9 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("antigravitySession: start: %w", err)
 	}
+	as.stdinMu.Lock()
+	as.stdin = stdin
+	as.stdinMu.Unlock()
 
 	started = true
 	as.wg.Add(1)
@@ -198,6 +189,25 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	}()
 
 	return nil
+}
+
+func buildAntigravityArgs(chatID string, isResume bool, model, mode, fullPrompt string) []string {
+	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
+	args := make([]string, 0, 10)
+	if isResume {
+		args = append(args, "--conversation", chatID)
+	}
+	if model != "" {
+		args = append(args, "-m", model)
+	}
+	switch mode {
+	case "yolo":
+		args = append(args, "--dangerously-skip-permissions")
+	case "plan":
+		args = append(args, "--sandbox")
+	}
+	args = append(args, "-p", fullPrompt)
+	return args
 }
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
@@ -355,7 +365,25 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 	return candidates[0].sessionID
 }
 
-func (as *antigravitySession) RespondPermission(_ string, _ core.PermissionResult) error {
+func (as *antigravitySession) RespondPermission(_ string, result core.PermissionResult) error {
+	if !as.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	as.stdinMu.Lock()
+	defer as.stdinMu.Unlock()
+	if as.stdin == nil {
+		return fmt.Errorf("stdin is not available")
+	}
+	// agy permission prompts accept terminal-style responses.
+	// Keep this conservative until agy exposes a structured permission protocol.
+	reply := "y\n"
+	if strings.EqualFold(result.Behavior, "deny") {
+		reply = "n\n"
+	}
+	_, err := io.WriteString(as.stdin, reply)
+	if err != nil {
+		return fmt.Errorf("write permission response: %w", err)
+	}
 	return nil
 }
 
@@ -375,9 +403,18 @@ func (as *antigravitySession) Alive() bool {
 func (as *antigravitySession) Close() error {
 	as.alive.Store(false)
 	as.cancel()
+	as.stdinMu.Lock()
+	if as.stdin != nil {
+		_ = as.stdin.Close()
+		as.stdin = nil
+	}
+	as.stdinMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		as.wg.Wait()
+		as.closeOnce.Do(func() {
+			close(as.events)
+		})
 		close(done)
 	}()
 	select {
@@ -385,6 +422,5 @@ func (as *antigravitySession) Close() error {
 	case <-time.After(8 * time.Second):
 		slog.Warn("antigravitySession: close timed out")
 	}
-	close(as.events)
 	return nil
 }
