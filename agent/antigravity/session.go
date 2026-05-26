@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,7 +98,7 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 		}
 		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
 		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err == nil {
+		if err := os.WriteFile(fpath, img.Data, 0o600); err == nil {
 			imageRefs = append(imageRefs, fpath)
 		}
 	}
@@ -109,7 +110,7 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
 		}
 		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err == nil {
+		if err := os.WriteFile(fpath, f.Data, 0o600); err == nil {
 			fileRefs = append(fileRefs, fpath)
 		}
 	}
@@ -193,13 +194,13 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	as.wg.Add(1)
 	go func() {
 		defer cancel()
-		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...), preEntries)
+		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...), preEntries, time.Now())
 	}()
 
 	return nil
 }
 
-func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool) {
+func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
 	defer func() {
 		for _, f := range tempFiles {
@@ -210,7 +211,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		if as.CurrentSessionID() == "" {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
-				sid = as.detectNewSessionID(preEntries)
+				sid = as.detectNewSessionID(preEntries, sendStartedAt)
 				if sid != "" {
 					break
 				}
@@ -278,7 +279,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 	}
 }
 
-func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool) string {
+func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -291,11 +292,25 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool) str
 		return ""
 	}
 
+	type candidate struct {
+		sessionID string
+		modTime   time.Time
+		diff      time.Duration
+	}
+	var candidates []candidate
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
 		if preEntries[entry.Name()] {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		mod := info.ModTime()
+		if !sendStartedAt.IsZero() && mod.Before(sendStartedAt.Add(-2*time.Second)) {
 			continue
 		}
 
@@ -305,18 +320,39 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool) str
 			continue
 		}
 		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		if scanner.Scan() {
 			var sf struct {
 				SessionID string `json:"sessionId"`
 			}
 			if json.Unmarshal([]byte(scanner.Text()), &sf) == nil && sf.SessionID != "" {
-				file.Close()
-				return sf.SessionID
+				diff := time.Duration(0)
+				if !sendStartedAt.IsZero() {
+					if mod.After(sendStartedAt) {
+						diff = mod.Sub(sendStartedAt)
+					} else {
+						diff = sendStartedAt.Sub(mod)
+					}
+				}
+				candidates = append(candidates, candidate{
+					sessionID: sf.SessionID,
+					modTime:   mod,
+					diff:      diff,
+				})
 			}
 		}
 		file.Close()
 	}
-	return ""
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].diff == candidates[j].diff {
+			return candidates[i].modTime.After(candidates[j].modTime)
+		}
+		return candidates[i].diff < candidates[j].diff
+	})
+	return candidates[0].sessionID
 }
 
 func (as *antigravitySession) RespondPermission(_ string, _ core.PermissionResult) error {
