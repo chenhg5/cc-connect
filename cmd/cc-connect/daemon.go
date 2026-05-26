@@ -29,7 +29,7 @@ func runDaemon(args []string) {
 	case "stop":
 		daemonStop()
 	case "restart":
-		daemonRestart()
+		daemonRestart(args[1:])
 	case "status":
 		daemonStatus()
 	case "logs":
@@ -103,6 +103,18 @@ func daemonInstall(args []string) {
 	fmt.Println("  cc-connect daemon restart   - Restart")
 	fmt.Println("  cc-connect daemon stop      - Stop")
 	fmt.Println("  cc-connect daemon uninstall - Remove")
+
+	// Check linger for user-mode systemd
+	if strings.Contains(mgr.Platform(), "user") {
+		enabled, user := daemon.CheckLinger()
+		if !enabled {
+			fmt.Println()
+			fmt.Println("⚠️  Warning: Linger is not enabled for this user.")
+			fmt.Println("   cc-connect will stop when your last login session ends (e.g., SSH disconnect).")
+			fmt.Println("   To keep it running persistently, run:")
+			fmt.Printf("     sudo loginctl enable-linger %s\n", user)
+		}
+	}
 }
 
 func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
@@ -223,9 +235,24 @@ func daemonStop() {
 	fmt.Println("cc-connect daemon stopped.")
 }
 
-func daemonRestart() {
+func daemonRestart(args []string) {
+	force := false
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+		}
+	}
+
 	mgr := mustManager()
 	requireInstalled(mgr)
+
+	if force {
+		if meta, err := daemon.LoadMeta(); err == nil {
+			configPath := meta.WorkDir + "/config.toml"
+			KillExistingInstance(configPath)
+		}
+	}
+
 	if err := mgr.Restart(); err != nil {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
@@ -405,6 +432,9 @@ Install flags:
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation
 
+Restart flags:
+  --force               Kill existing process before restarting
+
 Logs flags:
   -f, --follow          Follow log output (like tail -f)
   -n N                  Number of lines to show (default: 100)
@@ -413,5 +443,6 @@ Logs flags:
 Supported platforms:
   Linux (root)     - systemd system service (/etc/systemd/system/)
   Linux (non-root) - systemd user service (~/.config/systemd/user/)
-  macOS            - launchd LaunchAgent`)
+  macOS            - launchd LaunchAgent
+  Windows          - Task Scheduler task (schtasks)`)
 }

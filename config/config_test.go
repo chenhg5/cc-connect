@@ -209,10 +209,13 @@ func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
 
 func TestEffectiveDisplayQuiet(t *testing.T) {
 	tru, fal := true, false
+	compact := DisplayModeCompact
+	quiet := DisplayModeQuiet
 	tests := []struct {
 		name     string
 		cfg      Config
 		proj     ProjectConfig
+		wantMode string
 		wantTM   bool
 		wantTool bool
 	}{
@@ -220,20 +223,23 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			name:     "defaults no quiet",
 			cfg:      Config{},
 			proj:     ProjectConfig{},
+			wantMode: "full",
 			wantTM:   true,
 			wantTool: true,
 		},
 		{
-			name:     "global quiet maps when display unset",
+			name:     "global quiet maps to quiet mode",
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{},
+			wantMode: "quiet",
 			wantTM:   false,
 			wantTool: false,
 		},
 		{
-			name:     "project quiet maps when display unset",
+			name:     "project quiet maps to quiet mode",
 			cfg:      Config{},
 			proj:     ProjectConfig{Quiet: &tru},
+			wantMode: "quiet",
 			wantTM:   false,
 			wantTool: false,
 		},
@@ -244,6 +250,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 				Display: DisplayConfig{ThinkingMessages: &tru},
 			},
 			proj:     ProjectConfig{},
+			wantMode: "quiet",
 			wantTM:   true,
 			wantTool: false,
 		},
@@ -251,18 +258,208 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			name:     "project quiet false overrides global quiet",
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{Quiet: &fal},
+			wantMode: "full",
 			wantTM:   true,
 			wantTool: true,
+		},
+		{
+			name:     "explicit mode compact",
+			cfg:      Config{Display: DisplayConfig{Mode: &compact}},
+			proj:     ProjectConfig{},
+			wantMode: "compact",
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name:     "project mode overrides global mode",
+			cfg:      Config{Display: DisplayConfig{Mode: &quiet}},
+			proj:     ProjectConfig{Display: &DisplayConfig{Mode: &compact}},
+			wantMode: "compact",
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name:     "explicit mode wins over legacy quiet",
+			cfg:      Config{Quiet: &tru, Display: DisplayConfig{Mode: &compact}},
+			proj:     ProjectConfig{},
+			wantMode: "compact",
+			wantTM:   false,
+			wantTool: false,
+		},
+		{
+			name: "explicit mode quiet with thinking override",
+			cfg: Config{
+				Display: DisplayConfig{Mode: &quiet, ThinkingMessages: &tru},
+			},
+			proj:     ProjectConfig{},
+			wantMode: "quiet",
+			wantTM:   true,
+			wantTool: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tm, tool, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if mode != tt.wantMode {
+				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
+			}
 			if tm != tt.wantTM {
 				t.Fatalf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
 			if tool != tt.wantTool {
 				t.Fatalf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
+	tru, fal := true, false
+	maxA, maxB := 100, 200
+
+	tests := []struct {
+		name           string
+		cfg            Config
+		proj           ProjectConfig
+		wantTM         bool
+		wantTool       bool
+		wantThinkLen   int
+		wantToolMaxLen int
+	}{
+		{
+			name: "project overrides global thinking_messages",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &tru, ToolMessages: &tru},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMessages: &fal},
+			},
+			wantTM:         false,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project unset falls back to global",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &fal, ToolMessages: &fal},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         false,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "both unset falls back to default",
+			cfg:  Config{},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         true,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project overrides max-len fields",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMaxLen: &maxA, ToolMaxLen: &maxA},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMaxLen: &maxB, ToolMaxLen: &maxB},
+			},
+			wantTM:         true,
+			wantTool:       true,
+			wantThinkLen:   200,
+			wantToolMaxLen: 200,
+		},
+		{
+			name: "project quiet still respected when project display unset",
+			cfg:  Config{Quiet: &tru},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{},
+			},
+			wantTM:         false,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "project display.thinking_messages true overrides project quiet",
+			cfg:  Config{Quiet: &tru},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{ThinkingMessages: &tru},
+			},
+			wantTM:         true,
+			wantTool:       false,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+		{
+			name: "nil project display behaves like before",
+			cfg: Config{
+				Display: DisplayConfig{ThinkingMessages: &fal},
+			},
+			proj:           ProjectConfig{},
+			wantTM:         false,
+			wantTool:       true,
+			wantThinkLen:   300,
+			wantToolMaxLen: 500,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if tm != tt.wantTM {
+				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
+			}
+			if tool != tt.wantTool {
+				t.Errorf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+			if thinkLen != tt.wantThinkLen {
+				t.Errorf("ThinkingMaxLen = %d, want %d", thinkLen, tt.wantThinkLen)
+			}
+			if toolMaxLen != tt.wantToolMaxLen {
+				t.Errorf("ToolMaxLen = %d, want %d", toolMaxLen, tt.wantToolMaxLen)
+			}
+		})
+	}
+}
+
+func TestValidateProjectDisplayConfig(t *testing.T) {
+	mode := "verbose"
+	cardMode := "modern"
+
+	tests := []struct {
+		name    string
+		display *DisplayConfig
+		wantErr string
+	}{
+		{
+			name:    "invalid project display mode",
+			display: &DisplayConfig{Mode: &mode},
+			wantErr: `projects[0].display.mode must be "full", "compact", or "quiet"`,
+		},
+		{
+			name:    "invalid project card mode",
+			display: &DisplayConfig{CardMode: &cardMode},
+			wantErr: `projects[0].display.card_mode must be "legacy" or "rich"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Projects: []ProjectConfig{validProject("demo")}}
+			cfg.Projects[0].Display = tt.display
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("validate() = nil, want %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() = %q, want contains %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
@@ -513,6 +710,341 @@ func TestSaveAgentModel(t *testing.T) {
 	}
 }
 
+const providerConfigWithCommentsTOML = `# This is my config file
+# Very important - do not lose this!
+custom_top = "keep_me"
+
+[[projects]]
+name = "demo"
+work_dir = "/tmp/demo" # inline comment
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+mode = "default"
+provider = "primary"
+custom_option = "still_here" # keep inline comment
+
+[[projects.agent.providers]]
+name = "primary"
+api_key = "sk-primary"
+
+[[projects.agent.providers]]
+name = "backup"
+api_key = "sk-backup"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test-token"
+`
+
+func TestSaveActiveProvider_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveActiveProvider("demo", "backup"); err != nil {
+		t.Fatalf("SaveActiveProvider() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# Very important - do not lose this!") {
+		t.Fatalf("expected second comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_top = "keep_me"`) {
+		t.Fatalf("expected unknown top-level field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "keep inline comment") {
+		t.Fatalf("expected inline comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `mode = "default"`) {
+		t.Fatalf("expected mode to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `provider = "backup"`) {
+		t.Fatalf("expected provider to be updated to backup, got:\n%s", text)
+	}
+	if !strings.Contains(text, `work_dir = "/tmp/demo"`) {
+		t.Fatalf("expected work_dir to be preserved, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	active, _ := cfg.Projects[0].Agent.Options["provider"].(string)
+	if active != "backup" {
+		t.Fatalf("active provider = %q, want backup", active)
+	}
+}
+
+func TestSaveAgentModel_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveAgentModel("demo", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveAgentModel() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `provider = "primary"`) {
+		t.Fatalf("expected provider to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `model = "gpt-5.4"`) {
+		t.Fatalf("expected model to be set, got:\n%s", text)
+	}
+}
+
+func TestSaveProviderModel_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveProviderModel("demo", "primary", "gpt-5.4"); err != nil {
+		t.Fatalf("SaveProviderModel() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `model = "gpt-5.4"`) {
+		t.Fatalf("expected model to be set in provider, got:\n%s", text)
+	}
+}
+
+func TestSaveLanguage_PreservesComments(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveLanguage("zh"); err != nil {
+		t.Fatalf("SaveLanguage() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `language = "zh"`) {
+		t.Fatalf("expected language to be set, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	if cfg.Language != "zh" {
+		t.Fatalf("Language = %q, want zh", cfg.Language)
+	}
+}
+
+func TestSaveDisplayConfig_PreservesComments(t *testing.T) {
+	configWithDisplay := providerConfigWithCommentsTOML + `
+[display]
+# display settings below
+thinking_messages = true
+custom_display = "keep" # also keep
+`
+	writeTestConfig(t, configWithDisplay)
+
+	thinking := 200
+	toolShow := false
+	if err := SaveDisplayConfig(nil, nil, &thinking, nil, &toolShow); err != nil {
+		t.Fatalf("SaveDisplayConfig() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# display settings below") {
+		t.Fatalf("expected display comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_display = "keep"`) {
+		t.Fatalf("expected unknown display field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `thinking_max_len = 200`) {
+		t.Fatalf("expected thinking_max_len to be set, got:\n%s", text)
+	}
+	if !strings.Contains(text, `tool_messages = false`) {
+		t.Fatalf("expected tool_messages to be set, got:\n%s", text)
+	}
+}
+
+func TestSaveTTSMode_PreservesComments(t *testing.T) {
+	configWithTTS := providerConfigWithCommentsTOML + `
+[tts]
+# tts config
+tts_mode = "auto"
+`
+	writeTestConfig(t, configWithTTS)
+
+	if err := SaveTTSMode("always"); err != nil {
+		t.Fatalf("SaveTTSMode() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# tts config") {
+		t.Fatalf("expected tts comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `tts_mode = "always"`) {
+		t.Fatalf("expected tts_mode to be updated, got:\n%s", text)
+	}
+}
+
+const multiProjectConfigTOML = `# multi-project config
+[[projects]]
+name = "alpha"
+work_dir = "/tmp/alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+provider = "openai"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "alpha-token"
+
+[[projects]]
+name = "beta"
+work_dir = "/tmp/beta"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+provider = "anthropic"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "beta-app"
+`
+
+func TestSaveActiveProvider_MultiProject(t *testing.T) {
+	writeTestConfig(t, multiProjectConfigTOML)
+
+	if err := SaveActiveProvider("beta", "openai"); err != nil {
+		t.Fatalf("SaveActiveProvider() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# multi-project config") {
+		t.Fatalf("expected top comment preserved, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	alphaProvider, _ := cfg.Projects[0].Agent.Options["provider"].(string)
+	betaProvider, _ := cfg.Projects[1].Agent.Options["provider"].(string)
+	if alphaProvider != "openai" {
+		t.Fatalf("alpha provider = %q, want openai (untouched)", alphaProvider)
+	}
+	if betaProvider != "openai" {
+		t.Fatalf("beta provider = %q, want openai (updated)", betaProvider)
+	}
+}
+
+const globalProviderRefConfigTOML = `# global provider refs
+[[providers]]
+name = "shared-openai"
+api_key = "sk-shared"
+model = "gpt-4o"
+
+[[projects]]
+name = "demo"
+work_dir = "/tmp/demo"
+
+[projects.agent]
+type = "codex"
+provider_refs = ["shared-openai"]
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "demo-token"
+`
+
+func TestSaveProviderModel_GlobalProviderRef(t *testing.T) {
+	writeTestConfig(t, globalProviderRefConfigTOML)
+
+	if err := SaveProviderModel("demo", "shared-openai", "gpt-5"); err != nil {
+		t.Fatalf("SaveProviderModel() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# global provider refs") {
+		t.Fatalf("expected comment preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `model = "gpt-5"`) {
+		t.Fatalf("expected model updated in global provider, got:\n%s", text)
+	}
+	if !strings.Contains(text, `api_key = "sk-shared"`) {
+		t.Fatalf("expected api_key preserved, got:\n%s", text)
+	}
+
+	cfg := readTestConfig(t)
+	if cfg.Providers[0].Model != "gpt-5" {
+		t.Fatalf("global provider model = %q, want gpt-5", cfg.Providers[0].Model)
+	}
+}
+
 func TestCommandConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 
@@ -566,7 +1098,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	thinking := 120
 	tool := 240
 	showTools := false
-	if err := SaveDisplayConfig(nil, &thinking, &tool, &showTools); err != nil {
+	if err := SaveDisplayConfig(nil, nil, &thinking, &tool, &showTools); err != nil {
 		t.Fatalf("SaveDisplayConfig() error: %v", err)
 	}
 
@@ -582,7 +1114,7 @@ func TestDisplayConfig_Save(t *testing.T) {
 	}
 
 	thinking = 360
-	if err := SaveDisplayConfig(nil, &thinking, nil, nil); err != nil {
+	if err := SaveDisplayConfig(nil, nil, &thinking, nil, nil); err != nil {
 		t.Fatalf("SaveDisplayConfig() second update error: %v", err)
 	}
 
@@ -1069,6 +1601,76 @@ func TestLoad_ParsesAttachmentSendOff(t *testing.T) {
 	}
 	if cfg.AttachmentSend != "off" {
 		t.Fatalf("cfg.AttachmentSend = %q, want %q", cfg.AttachmentSend, "off")
+	}
+}
+
+func TestLoad_FilterExternalSessionsDefault(t *testing.T) {
+	configPath := writeConfigFixture(t, attachmentSendConfigFixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.FilterExternalSessions != nil {
+		t.Fatalf("FilterExternalSessions should be nil by default, got %v", *proj.FilterExternalSessions)
+	}
+}
+
+func TestLoad_FilterExternalSessionsTrue(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "beta"
+filter_external_sessions = true
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test"
+`
+	configPath := writeConfigFixture(t, fixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.FilterExternalSessions == nil || !*proj.FilterExternalSessions {
+		t.Fatalf("FilterExternalSessions should be true, got %v", proj.FilterExternalSessions)
+	}
+}
+
+func TestLoad_FilterExternalSessionsFalse(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "gamma"
+filter_external_sessions = false
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/gamma"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test"
+`
+	configPath := writeConfigFixture(t, fixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.FilterExternalSessions == nil || *proj.FilterExternalSessions {
+		t.Fatalf("FilterExternalSessions should be false, got %v", proj.FilterExternalSessions)
 	}
 }
 

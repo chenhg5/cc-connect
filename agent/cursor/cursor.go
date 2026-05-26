@@ -25,10 +25,10 @@ func init() {
 // Agent drives the Cursor Agent CLI (`agent`) using --print --output-format stream-json.
 //
 // Modes (maps to Cursor agent CLI flags):
-//   - "default":  --trust only (ask permission for tools)
-//   - "force":    --trust --force (auto-approve tools unless explicitly denied)
-//   - "plan":     --trust --mode plan (read-only analysis)
-//   - "ask":      --trust --mode ask (Q&A style, read-only)
+//   - "default":  default permissions (ask permission for tools)
+//   - "force":    --force (auto-approve tools unless explicitly denied)
+//   - "plan":     --mode plan (read-only analysis)
+//   - "ask":      --mode ask (Q&A style, read-only)
 type Agent struct {
 	workDir    string
 	model      string
@@ -78,7 +78,6 @@ func normalizeMode(raw string) string {
 	}
 }
 
-
 func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
@@ -91,8 +90,8 @@ func (a *Agent) SetWorkDir(dir string) {
 }
 
 func (a *Agent) GetWorkDir() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.workDir
 }
 
@@ -104,8 +103,8 @@ func (a *Agent) SetModel(model string) {
 }
 
 func (a *Agent) GetModel() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
@@ -119,11 +118,11 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
-	a.mu.Lock()
+	a.mu.RLock()
 	cmd := a.cmd
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
 		return models
@@ -189,10 +188,11 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
-	a.mu.Lock()
+	a.mu.RLock()
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	workDir := a.workDir
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -200,14 +200,15 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
-	return newCursorSession(ctx, cmd, a.workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
 }
 
 // ListSessions reads sessions from ~/.cursor/chats/<workspace_hash>/.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listCursorSessions(a.workDir)
+	workDir := a.GetWorkDir()
+	return listCursorSessions(workDir)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
@@ -215,7 +216,8 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("cursor: cannot determine home dir: %w", err)
 	}
-	hash := workspaceHash(a.workDir)
+	workDir := a.GetWorkDir()
+	hash := workspaceHash(workDir)
 	dir := filepath.Join(homeDir, ".cursor", "chats", hash, sessionID)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("session not found: %s", sessionID)
@@ -228,9 +230,10 @@ func (a *Agent) Stop() error { return nil }
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -253,8 +256,8 @@ func (a *Agent) SetMode(mode string) {
 }
 
 func (a *Agent) GetMode() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.mode
 }
 
@@ -294,8 +297,8 @@ func (a *Agent) SetActiveProvider(name string) bool {
 }
 
 func (a *Agent) GetActiveProvider() *core.ProviderConfig {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
 		return nil
 	}
@@ -304,8 +307,8 @@ func (a *Agent) GetActiveProvider() *core.ProviderConfig {
 }
 
 func (a *Agent) ListProviders() []core.ProviderConfig {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	result := make([]core.ProviderConfig, len(a.providers))
 	copy(result, a.providers)
 	return result

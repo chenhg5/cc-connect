@@ -113,6 +113,7 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 	}
 }
 
+
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
 	if job.Mute {
@@ -443,6 +444,42 @@ func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {
 	}
 }
 
+// TestCronScheduler_AddJob_EmptySessionKey verifies that AddJob refuses to
+// persist a job without a session_key. Without this guard, ExecuteCronJob
+// later fails at fire-time with `platform "" not found for session ""`,
+// leaving an unrunnable job lingering in the store.
+func TestCronScheduler_AddJob_EmptySessionKey(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		sessionKey string
+	}{
+		{"empty", ""},
+		{"whitespace", "   "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs := NewCronScheduler(store)
+			err = cs.AddJob(&CronJob{
+				ID: "j1", Project: "p", SessionKey: tt.sessionKey,
+				CronExpr: "0 6 * * *", Prompt: "hi",
+			})
+			if err == nil {
+				t.Fatalf("expected error for empty session_key, got nil")
+			}
+			if !strings.Contains(err.Error(), "session_key") {
+				t.Errorf("error %q should mention session_key", err.Error())
+			}
+			if jobs := store.List(); len(jobs) != 0 {
+				t.Errorf("store should be empty after rejected AddJob, got %d job(s)", len(jobs))
+			}
+		})
+	}
+}
+
 func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
@@ -563,5 +600,53 @@ func TestCronStore_ListByProject(t *testing.T) {
 	list3 := store.ListByProject("nonexistent")
 	if len(list3) != 0 {
 		t.Errorf("ListByProject(nonexistent) = %d jobs, want 0", len(list3))
+	}
+}
+
+// TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule verifies that
+// passing a non-bool value for the "enabled" field is rejected up-front and
+// does NOT silently leave the scheduled cron entry removed. Before this fix,
+// UpdateJob removed the entry before delegating to store.Update, so a type
+// mismatch left the job marked Enabled but with no scheduled tick — the only
+// recovery was a daemon restart.
+func TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID: "e1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", Enabled: true,
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.mu.RLock()
+	_, scheduledBefore := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if !scheduledBefore {
+		t.Fatal("precondition: enabled job should be scheduled after AddJob")
+	}
+
+	// String "true" instead of bool true — what a misbehaving HTTP/management
+	// API client could send.
+	if err := cs.UpdateJob(job.ID, "enabled", "true"); err == nil {
+		t.Fatal("UpdateJob with non-bool enabled value should return an error")
+	}
+
+	cs.mu.RLock()
+	_, scheduledAfter := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if !scheduledAfter {
+		t.Fatal("schedule was removed even though update failed; job will never fire again")
+	}
+
+	stored := store.Get(job.ID)
+	if stored == nil || !stored.Enabled {
+		t.Fatalf("stored job state should be unchanged on validation error, got %+v", stored)
 	}
 }

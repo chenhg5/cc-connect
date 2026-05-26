@@ -369,20 +369,27 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			slog.Warn("weixin: getUpdates ret", "ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
 		}
 
-		p.syncBufMu.Lock()
-		if resp.GetUpdatesBuf != "" {
-			p.persistSyncBuf(resp.GetUpdatesBuf)
-		}
-		p.syncBufMu.Unlock()
-
 		p.mu.RLock()
 		h := p.handler
 		p.mu.RUnlock()
 		if h == nil {
 			continue
 		}
+		var wg sync.WaitGroup
 		for i := range resp.Msgs {
-			p.dispatchInbound(ctx, &resp.Msgs[i], h)
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				p.dispatchInbound(ctx, &resp.Msgs[i], h)
+			}()
+		}
+		wg.Wait()
+
+		if ctx.Err() == nil && resp.GetUpdatesBuf != "" {
+			p.syncBufMu.Lock()
+			p.persistSyncBuf(resp.GetUpdatesBuf)
+			p.syncBufMu.Unlock()
 		}
 	}
 }
@@ -607,12 +614,17 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 		rc.contextToken = p.getContextToken(rc.peerUserID)
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
-		return fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
+		slog.Error("weixin: cannot send message - missing context_token",
+			"peer", rc.peerUserID,
+			"content_preview", truncatePreview(content, 100),
+			"hint", "user needs to send a new message to refresh context_token")
+		return fmt.Errorf("weixin: missing context_token for peer %q - user must send a new message first", rc.peerUserID)
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
 	chunks := splitUTF8(content, maxWeixinChunk)
+	total := len(chunks)
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
 		if i > 0 {
@@ -623,9 +635,20 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 			}
 		}
 		// Retry sendText with context_token refresh on failure
-		err := p.sendChunkWithRetry(ctx, rc, chunk)
+		err := p.sendChunkWithRetry(ctx, rc, chunk, i+1, total)
 		if err != nil {
-			return fmt.Errorf("weixin: send: %w", err)
+			slog.Error("weixin: chunk send failed, message incomplete",
+				"peer", rc.peerUserID,
+				"failed_chunk", fmt.Sprintf("%d/%d", i+1, total),
+				"error", err)
+			// Notify user that message delivery was incomplete.
+			// Use a short message that is unlikely to fail itself.
+			notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
+			noticeID := "cc-" + randomHex(6)
+			if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, noticeID); nerr != nil {
+				slog.Warn("weixin: failed to send incomplete-delivery notice", "peer", rc.peerUserID, "error", nerr)
+			}
+			return fmt.Errorf("weixin: send chunk %d/%d: %w", i+1, total, err)
 		}
 	}
 	return nil
@@ -633,7 +656,8 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
 // When sendMessage returns ret=-2, it retries with a fresh context_token.
-func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string) error {
+// chunkIdx and totalChunks are 1-based indices used for logging context.
+func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string, chunkIdx, totalChunks int) error {
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
 		clientID := "cc-" + randomHex(6)
@@ -644,8 +668,15 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 		lastErr = err
 		// Check if error is ret=-2 (API declined) - retry with fresh token
 		if strings.Contains(err.Error(), "ret=-2") {
+			preview := []rune(chunk)
+			if len(preview) > 50 {
+				preview = preview[:50]
+			}
 			slog.Warn("weixin: sendMessage ret=-2, retrying with fresh context_token",
-				"attempt", attempt+1, "peer", rc.peerUserID, "chunk_len", len(chunk))
+				"attempt", attempt+1, "peer", rc.peerUserID,
+				"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
+				"chunk_runes", utf8.RuneCountInString(chunk),
+				"preview", string(preview))
 			// Add delay before retry
 			select {
 			case <-ctx.Done():
@@ -664,6 +695,13 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 		return err
 	}
 	return lastErr
+}
+
+func truncatePreview(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func splitUTF8(s string, maxRunes int) []string {

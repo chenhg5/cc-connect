@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestFormatAesKeyForAPI(t *testing.T) {
@@ -101,8 +103,12 @@ func TestGetUploadURLResponse_Validation(t *testing.T) {
 			// Replicate the validation logic from client.go:
 			// both fields empty/whitespace-only → error
 			trim := func(s string) string {
-				for len(s) > 0 && s[0] == ' ' { s = s[1:] }
-				for len(s) > 0 && s[len(s)-1] == ' ' { s = s[:len(s)-1] }
+				for len(s) > 0 && s[0] == ' ' {
+					s = s[1:]
+				}
+				for len(s) > 0 && s[len(s)-1] == ' ' {
+					s = s[:len(s)-1]
+				}
 				return s
 			}
 			hasError := trim(tt.resp.UploadParam) == "" && trim(tt.resp.UploadFullURL) == ""
@@ -110,5 +116,79 @@ func TestGetUploadURLResponse_Validation(t *testing.T) {
 				t.Errorf("validation error = %v, wantError %v", hasError, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestIsVideoFile(t *testing.T) {
+	tests := []struct {
+		name string
+		file core.FileAttachment
+		want bool
+	}{
+		{
+			name: "video mime",
+			file: core.FileAttachment{MimeType: "video/mp4", FileName: "reply.bin"},
+			want: true,
+		},
+		{
+			name: "mp4 extension",
+			file: core.FileAttachment{MimeType: "application/octet-stream", FileName: "reply.mp4"},
+			want: true,
+		},
+		{
+			name: "uppercase mov extension",
+			file: core.FileAttachment{FileName: "reply.MOV"},
+			want: true,
+		},
+		{
+			name: "plain file",
+			file: core.FileAttachment{MimeType: "application/pdf", FileName: "reply.pdf"},
+			want: false,
+		},
+		{
+			name: "audio is not video",
+			file: core.FileAttachment{MimeType: "audio/mpeg", FileName: "reply.mp3"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isVideoFile(tt.file); got != tt.want {
+				t.Fatalf("isVideoFile() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildVideoMessageItemUsesVideoShape(t *testing.T) {
+	ref := &cdnUploadedRef{
+		downloadParam: "encrypted-query",
+		aesKey:        []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+		cipherSize:    4096,
+		rawSize:       4000,
+	}
+
+	item := buildVideoMessageItem(ref)
+	if item.Type != messageItemVideo {
+		t.Fatalf("item.Type = %d, want %d", item.Type, messageItemVideo)
+	}
+	if item.VideoItem == nil {
+		t.Fatal("VideoItem is nil")
+	}
+	if item.VideoItem.VideoSize != ref.cipherSize {
+		t.Fatalf("VideoSize = %d, want %d", item.VideoItem.VideoSize, ref.cipherSize)
+	}
+	if item.VideoItem.Media == nil {
+		t.Fatal("VideoItem.Media is nil")
+	}
+	if item.VideoItem.Media.EncryptQueryParam != ref.downloadParam {
+		t.Fatalf("EncryptQueryParam = %q, want %q", item.VideoItem.Media.EncryptQueryParam, ref.downloadParam)
+	}
+	if item.VideoItem.Media.AESKey != formatAesKeyForAPI(ref.aesKey) {
+		t.Fatal("VideoItem.Media.AESKey does not match API format")
+	}
+	if item.VideoItem.Media.EncryptType != 1 {
+		t.Fatalf("EncryptType = %d, want 1", item.VideoItem.Media.EncryptType)
 	}
 }

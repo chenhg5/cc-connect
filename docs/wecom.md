@@ -8,8 +8,8 @@
 
 | 模式 | 优势 | 要求 |
 |------|------|------|
-| **WebSocket 长连接**（推荐） | 无需公网 URL、无需消息加解密、无需 IP 白名单 | 创建「智能机器人」 |
-| **Webhook 回调** | 支持图片/语音消息、Markdown 格式 | 公网 URL + 可信 IP |
+| **WebSocket 长连接**（推荐） | 无需公网 URL、无需消息加解密、无需 IP 白名单，支持图片接收与图片回传 | 创建「智能机器人」 |
+| **Webhook 回调** | 兼容企业微信自建应用回调模式 | 公网 URL + 可信 IP |
 
 ---
 
@@ -92,13 +92,14 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 - **认证方式**：连接后发送 `aibot_subscribe`（bot_id + secret）
 - **心跳**：每 30 秒发送 `ping`
 - **自动重连**：连接断开后指数退避重连（1s → 2s → 4s → ... → 30s max）
+- **图片回传**：通过 `aibot_upload_media_*` 上传临时素材，再用 `aibot_send_msg` 发送图片
 - **限制**：同一机器人仅支持 1 个长连接；30 条/分钟、1000 条/小时
 
 ---
 
 ## 模式二：Webhook 回调
 
-> 💡 如果你不需要图片/语音消息或 Markdown 格式，推荐使用上方的 WebSocket 长连接模式，配置更简单。
+> 💡 推荐优先使用上方的 WebSocket 长连接模式。只有在你已有企业微信自建应用回调部署、或需要兼容旧配置时，再使用 Webhook 回调模式。
 
 ### 前置要求
 

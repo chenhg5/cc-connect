@@ -1,5 +1,120 @@
 # Changelog
 
+## v1.3.3-beta.3 (2026-05-24)
+
+Beta release with blackbox testing infrastructure, cursor/opencode agent support, and bug fixes.
+
+### New Features
+- **Blackbox testing framework**: Phase 1-2 blackbox testing with P0/P1/P2 coverage, config-switch, and NewEnvWithSetup infrastructure
+- **Cursor/OpenCode agents**: add cursor and opencode agent support in blackbox tests
+
+### Fixed
+- **Core italic wrapping**: restore italic wrapping on reply footer
+- **Feishu footer asterisks**: strip asterisks from footer to prevent Feishu markdown italic rendering
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout
+- **Codex stdio sentinel**: add stdio sentinel for Codex app_server backend
+- **Windows cross-compile**: add missing `CheckLinger` stub to `daemon/windows.go` and `daemon/unsupported.go` so `make release-all` succeeds for all target platforms
+
+## v1.3.3-beta.2 (2026-05-09)
+
+Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.
+
+### New Features
+- **Slack Assistant API**: support Slack Assistant API (Agent toggle) with natural on/off switching (#844)
+- **DingTalk richText**: support richText message type for DingTalk platform (#828)
+- **DingTalk image handling**: add DingTalk image message support (#828)
+- **MAX webhook delivery mode**: add webhook delivery mode for MAX messenger platform with deployment docs (#818)
+- **Claude Code env vars**: support project-level environment variables via `env` config section (#812)
+- **display_mode enum**: add `display_mode` enum to replace boolean `quiet` config, with quiet/compact/normal/full options (#655)
+- **Core reset_on_idle_mins default**: default to 30 minutes to prevent context drift (#494)
+- **Claude Code custom system prompt**: add support for custom system prompt configuration via `system_prompt` option (#534)
+
+### Fixed
+- **Bridge security**: require token when Bridge is enabled to prevent unauthorized access (#408)
+- **Feishu recalled messages**: handle recalled messages gracefully (#841)
+- **Feishu media download failure**: notify user when media download fails instead of silent drop (#815)
+- **WeChat video messages**: send video files as proper video messages in WeChat (#813)
+- **WeChat incomplete delivery**: notify user on incomplete message delivery and enhance retry logging (#771)
+- **Telegram private topics**: preserve private topic session keys (#804)
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout (#766)
+- **Codex app_server config**: app_server backend should honor model/effort/provider config + add stdio sentinel (#837)
+- **Codex progress rendering**: render progress in rich Card 2.0 format (#838)
+- **Core ellipsis events**: suppress ellipsis-only events and handle context indicator in footer
+- **Core Markdown table**: render inline formatting inside GFM table cells (#675)
+- **Feishu user id resolution**: guard user id resolution against edge cases
+- **Feishu thread topics**: skip quote injection in thread-isolated topics (#767)
+- **Config display mode**: honor project display mode setting
+- **Daemon restart**: add --force flag to daemon restart command (#736)
+- **AskUserQuestion**: use question text as answers key for proper answer routing (#822)
+
+## v1.3.3-beta.1 (2026-04-25)
+
+Beta release with new agents, new features, and broad platform fixes. No breaking changes.
+
+### New Features
+- **Devin agent**: add Devin CLI as a first-class agent with full `/list`, `/mode`, and session management (#672)
+- **`/ps` command** (replaces `/btw`): send a message to a busy session mid-turn; `/btw` kept as alias for backward compatibility (#620)
+- **`!` shell shortcut**: use `!ls -la` as shorthand for `/shell ls -la`, with optional `--timeout` parameter (#658)
+- **NO_REPLY suppression**: agents can return `NO_REPLY` to silently skip platform delivery, useful for cron/analysis tasks (#682)
+- **Feishu shared WebSocket**: multiple projects sharing the same `app_id` now share one WebSocket connection with per-project `allow_chat` / `group_only` filtering (#613)
+- **Message queue depth configurable**: new `[queue] max_depth` config option (default 5) (#690)
+- **Claude Code opus[1m]**: add 1M-context Opus model option with shorthand descriptions (#660)
+- **QQ Bot file send/receive**: full file attachment support with robustness checks (#685)
+- **Bridge ImageSender/FileSender**: `cc-connect send --image/--file` now works through bridge protocol (#712)
+- **Provider presets**: add NekoCode, VisionCoder, and AIHubMix to provider presets; add Trae CLI ACP and COCO ACP config examples (#739)
+
+### Fixed
+- **OpenCode image handling**: inbound images from WeChat/WeCom are now correctly passed to OpenCode CLI via `--file` flags (#717)
+- **Slack Markdown**: convert standard Markdown to Slack mrkdwn format (bold, italic, strike, links, headings) (#680)
+- **QQ Bot reconnect**: cancel stale goroutines on WebSocket reconnect to prevent race conditions (#678)
+- **Gemini multiline prompt**: pass prompt via stdin to preserve newlines (#695)
+- **Telegram HTML fallback**: upgrade silent HTML parse failures to Warn-level logs (#674)
+- **Telegram /skills**: show Telegram-safe skill command format (#571)
+- **Feishu webhook mode**: skip bot open_id fetch in webhook mode for private deployments (#696)
+- **Reply footer**: suppress footer when only workdir is known (#701)
+- **Web UI add-platform**: fix "project not found" error when adding a new platform to an uncreated project
+
+### Contributors
+Thanks to all contributors who made this release possible:
+- @YoungShook — Devin agent integration, Telegram HTML fallback
+- @Cigarrr — /ps command, NO_REPLY feature
+- @vinnyxiong — Feishu shared WebSocket and allow_chat
+- @happyTonakai — Shell `!` prefix and `--timeout`
+- @AaronZ345 — Claude Code opus[1m] model
+- @ferocknew — QQ Bot file support
+- @soaringk — OpenCode image fix
+- @Zx55 — Telegram /skills fix
+- @zhaomoran — Feishu webhook mode fix
+- @LyInfi — Reply footer suppression
+- @meloalright — Trae/COCO ACP config examples
+
+## v1.3.2 (2026-04-21)
+
+Hotfix release: session filtering is now configurable and defaults to showing all sessions.
+
+### Fixed
+- **`/list` shows all sessions by default**: the session filter introduced in v1.3.0 (which hid sessions not created by cc-connect) was accidentally merged and caused confusion. The filter is now **off by default** — `/list`, `/switch`, and `/delete` show all agent sessions regardless of origin.
+
+### Added
+- **`filter_external_sessions` config option**: users who *do* want to hide externally-created sessions can set `filter_external_sessions = true` in `[[projects]]` to restore the old filtering behavior.
+- **Comprehensive integration tests**: real-agent E2E tests for both Codex and Claude Code covering the full `/list` → `/new` → conversation → `/list` lifecycle with provider-based authentication (no env-var API keys required). Plus 9 adapter-level filter tests using real Codex/Claude Code session file fixtures.
+
+## v1.3.1 (2026-04-20)
+
+Patch release with critical bug fixes for session management, config preservation, and Weibo media support.
+
+### Fixed
+- **Session visibility (`/list`)**: historical Codex sessions disappeared after upgrade due to `AgentSessionID` being cleared on `/new` or provider switch without preservation. Added `PastAgentSessionIDs` tracking with legacy data migration so existing sessions remain visible.
+- **Session naming (`/new xxx`)**: custom session names from `/new` were not mapped to the agent session ID for agents where the ID is established asynchronously (Codex, Qoder, Kimi, etc.). Added name mapping to all `EventResult` and `EventText` handlers across interactive, relay, and drain paths.
+- **Config comment preservation**: `/provider switch`, `/model`, `/lang`, display settings, and TTS changes now use surgical text-level editing instead of full TOML re-serialization, preserving all comments, unknown fields, and formatting.
+- **Codex `codex_home` path**: session listing, history, and deletion now consistently use the configured `codex_home` instead of hardcoded `~/.codex`.
+- **Feishu card callback hint**: log a reminder when interactive card mode is enabled but `card.action.trigger` may not be subscribed.
+
+### Added
+- **Weibo image & file support**: send and receive images and files in Weibo DMs via base64 encoding within the WebSocket `send_message` payload. Implements `ImageSender` and `FileSender` interfaces.
+- **Comprehensive session tests**: 12 new `SessionManager` unit tests covering `PastAgentSessionIDs`, legacy data migration, and version-based schema detection. 9 new `Engine` integration tests covering `/list` visibility across `/new`, provider switch, and real-world legacy data scenarios, plus end-to-end session name mapping tests for all three agent ID patterns (immediate, EventText, EventResult).
+- **Config preservation tests**: 8 new tests verifying comment and field preservation for `SaveActiveProvider`, `SaveAgentModel`, `SaveProviderModel`, `SaveLanguage`, `SaveDisplayConfig`, `SaveTTSMode`, multi-project config, and global provider refs.
+
 ## v1.3.0 (2026-04-19)
 
 First stable release of the 1.3 series. 555 commits since v1.2.1 with major new features, platform improvements, and broad community contributions.

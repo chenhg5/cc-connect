@@ -583,13 +583,6 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 	}
 
 	projName := parts[0]
-	m.mu.RLock()
-	engine, ok := m.engines[projName]
-	m.mu.RUnlock()
-	if !ok {
-		mgmtError(w, http.StatusNotFound, fmt.Sprintf("project not found: %s", projName))
-		return
-	}
 
 	sub := ""
 	if len(parts) > 1 {
@@ -598,6 +591,21 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 	rest := ""
 	if len(parts) > 2 {
 		rest = parts[2]
+	}
+
+	// add-platform writes config only; it does not need a running engine
+	// and must work for brand-new projects that have no engine yet.
+	if sub == "add-platform" {
+		m.handleProjectAddPlatform(w, r, projName)
+		return
+	}
+
+	m.mu.RLock()
+	engine, ok := m.engines[projName]
+	m.mu.RUnlock()
+	if !ok {
+		mgmtError(w, http.StatusNotFound, fmt.Sprintf("project not found: %s", projName))
+		return
 	}
 
 	switch sub {
@@ -619,8 +627,6 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectHeartbeat(w, r, projName, rest)
 	case "users":
 		m.handleProjectUsers(w, r, engine)
-	case "add-platform":
-		m.handleProjectAddPlatform(w, r, projName)
 	default:
 		mgmtError(w, http.StatusNotFound, "not found")
 	}
@@ -986,13 +992,13 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 
 		s := e.sessions.GetOrCreateActive(body.SessionKey)
 		if body.Name != "" {
-			s.Name = body.Name
+			s.SetName(body.Name)
 		}
 		e.sessions.Save()
 
 		mgmtJSON(w, http.StatusOK, map[string]any{
 			"session_key": body.SessionKey,
-			"name":        s.Name,
+			"name":        s.GetName(),
 		})
 
 	default:
@@ -1143,6 +1149,7 @@ func (m *ManagementServer) handleProjectProviders(w http.ResponseWriter, r *http
 				mgmtError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %s", provName))
 				return
 			}
+			e.resetAllSessions()
 			if e.providerSaveFunc != nil {
 				_ = e.providerSaveFunc(provName)
 			}

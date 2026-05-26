@@ -17,6 +17,9 @@ func TestStripWeComAtMentions(t *testing.T) {
 		{"fullwidth at", "允许 ＠mybot", []string{"mybot"}, "允许"},
 		{"two ids second", "ok @a @b", []string{"a", "b"}, "ok"},
 		{"unrelated at", "email x@y.com", []string{"mybot"}, "email x@y.com"},
+		{"display mention before slash command", "@小口不休息 /whoami", []string{"robot01"}, "/whoami"},
+		{"display mention before bang command", "＠小口不休息 !pwd", []string{"robot01"}, "!pwd"},
+		{"display mention before normal text preserved", "@小口不休息 你好", []string{"robot01"}, "@小口不休息 你好"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

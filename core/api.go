@@ -147,22 +147,27 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	engine, ok := s.engines[req.Project]
+	var engine *Engine
+	var ok bool
+	if req.Project != "" {
+		engine, ok = s.engines[req.Project]
+	} else if len(s.engines) == 1 {
+		// No project specified and only one engine: use it by default.
+		// Do NOT silently fall back when a non-empty project name is unknown —
+		// that misroutes the message to the wrong engine. Mirrors the resolve
+		// pattern in webhook.go and handleCronAdd.
+		for _, e := range s.engines {
+			engine = e
+			ok = true
+		}
+	}
 	s.mu.RUnlock()
 
 	if !ok {
-		// If only one engine, use it by default
-		s.mu.RLock()
-		if len(s.engines) == 1 {
-			for _, e := range s.engines {
-				engine = e
-				ok = true
-			}
+		if req.Project == "" {
+			http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+			return
 		}
-		s.mu.RUnlock()
-	}
-
-	if !ok {
 		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
 		return
 	}

@@ -3,6 +3,8 @@ package claudecode
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -386,6 +388,21 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username-my-project",
 		},
 		{
+			name:     "path with spaces",
+			input:    "/Users/username/Mobile Documents/my project",
+			expected: "-Users-username-Mobile-Documents-my-project",
+		},
+		{
+			name:     "path with tildes",
+			input:    "/Users/username/com~apple~CloudDocs/project",
+			expected: "-Users-username-com-apple-CloudDocs-project",
+		},
+		{
+			name:     "iCloud path with spaces and tildes",
+			input:    "/Users/username/Library/Mobile Documents/com~apple~CloudDocs/my project",
+			expected: "-Users-username-Library-Mobile-Documents-com-apple-CloudDocs-my-project",
+		},
+		{
 			name:     "mixed ASCII and non-ASCII",
 			input:    "/Users/username/中文folder/english文件夹",
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
@@ -457,5 +474,279 @@ func TestFindProjectDir_NotFound(t *testing.T) {
 	found := findProjectDir(homeDir, workDir)
 	if found != "" {
 		t.Errorf("findProjectDir for nonexistent project = %q, want empty string", found)
+	}
+}
+
+func TestFindProjectDir_ICloudPath(t *testing.T) {
+	// Regression for issue #500: paths containing spaces and "~" (common in macOS
+	// iCloud Drive paths like "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+	// must match the on-disk project key that Claude Code CLI generates, which
+	// collapses both spaces and "~" to "-".
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	iCloudWorkDir := "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/my project"
+	// The on-disk key Claude Code CLI actually writes (spaces and "~" → "-").
+	expectedKey := "-Users-test-Library-Mobile-Documents-com-apple-CloudDocs-my-project"
+
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	found := findProjectDir(homeDir, iCloudWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, iCloudWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestSnapshotCLIPath(t *testing.T) {
+	cases := []struct {
+		name      string
+		cliBin    string
+		extraArgs []string
+		want      string
+	}{
+		{"default-claude-skipped", "claude", nil, ""},
+		{"empty-binary-skipped", "", nil, ""},
+		{"custom-binary-only", "/usr/local/bin/claude", nil, "/usr/local/bin/claude"},
+		{"wrapper-with-args", "my-cli", []string{"code", "-t", "foo"}, "my-cli code -t foo"},
+		{"claude-with-add-dir", "claude", []string{"--add-dir", "/parent"}, "claude --add-dir /parent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := snapshotCLIPath(tc.cliBin, tc.extraArgs)
+			if got != tc.want {
+				t.Errorf("snapshotCLIPath(%q, %v) = %q, want %q", tc.cliBin, tc.extraArgs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
+	// Construct an Agent directly so we don't depend on `claude` being on
+	// PATH. WorkspaceAgentOptions only reads fields that the production
+	// New() also writes; this just verifies the snapshot shape.
+	a := &Agent{
+		cliBin:           "my-cli",
+		cliExtraArgs:     []string{"--add-dir", "/parent"},
+		cliArgsFlag:      "-a",
+		model:            "claude-opus-4-7",
+		reasoningEffort:  "high",
+		mode:             "acceptEdits",
+		allowedTools:     []string{"Edit", "Read"},
+		disallowedTools:  []string{"Bash"},
+		maxContextTokens: 200000,
+		routerURL:        "http://127.0.0.1:3456",
+		routerAPIKey:     "secret",
+	}
+	got := a.WorkspaceAgentOptions()
+
+	want := map[string]any{
+		"mode":               "acceptEdits",
+		"cli_path":           "my-cli --add-dir /parent",
+		"cli_args_flag":      "-a",
+		"model":              "claude-opus-4-7",
+		"reasoning_effort":   "high",
+		"allowed_tools":      []any{"Edit", "Read"},
+		"disallowed_tools":   []any{"Bash"},
+		"max_context_tokens": 200000,
+		"router_url":         "http://127.0.0.1:3456",
+		"router_api_key":     "secret",
+	}
+	if len(got) != len(want) {
+		t.Errorf("snapshot len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok {
+			t.Errorf("snapshot missing key %q", k)
+			continue
+		}
+		if !reflect.DeepEqual(gv, wv) {
+			t.Errorf("snapshot[%q] = %v (%T), want %v (%T)", k, gv, gv, wv, wv)
+		}
+	}
+}
+
+func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
+	// Default agent (only mode is always emitted, plus default cliBin
+	// "claude" should be skipped by snapshotCLIPath).
+	a := &Agent{cliBin: "claude", mode: "default"}
+	got := a.WorkspaceAgentOptions()
+
+	if len(got) != 1 {
+		t.Errorf("snapshot len = %d, want 1 (got=%v)", len(got), got)
+	}
+	if got["mode"] != "default" {
+		t.Errorf("snapshot[mode] = %v, want %q", got["mode"], "default")
+	}
+	for _, k := range []string{
+		"cli_path", "cli_args_flag", "model", "reasoning_effort",
+		"allowed_tools", "disallowed_tools", "max_context_tokens",
+		"router_url", "router_api_key",
+	} {
+		if _, ok := got[k]; ok {
+			t.Errorf("snapshot unexpectedly includes %q = %v", k, got[k])
+		}
+	}
+}
+
+func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
+	// End-to-end: snapshot → New() should reproduce every field. Use
+	// run_as_user to skip the supervisor-side LookPath check, since the
+	// fake "my-cli" binary doesn't exist on the test host's PATH.
+	//
+	// run_as_user only short-circuits LookPath on platforms where
+	// SpawnOptions.IsolationMode() can be true — i.e. Unix. On Windows
+	// it always returns false (see core/runas_windows.go), so the fake
+	// CLI would fail LookPath and New() would error out before the
+	// round-trip assertions run.
+	if runtime.GOOS == "windows" {
+		t.Skip("run_as_user-based LookPath bypass is Unix-only")
+	}
+	parent := &Agent{
+		cliBin:           "my-cli",
+		cliExtraArgs:     []string{"code", "--add-dir", "/parent"},
+		cliArgsFlag:      "-a",
+		model:            "claude-opus-4-7",
+		reasoningEffort:  "high",
+		mode:             "acceptEdits",
+		allowedTools:     []string{"Edit", "Read"},
+		disallowedTools:  []string{"Bash"},
+		maxContextTokens: 200000,
+		routerURL:        "http://127.0.0.1:3456",
+		routerAPIKey:     "secret",
+	}
+	opts := parent.WorkspaceAgentOptions()
+	opts["work_dir"] = "/tmp/claudecode-test"
+	opts["run_as_user"] = "skip-lookpath"
+
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New(snapshot) returned error: %v", err)
+	}
+	child := a.(*Agent)
+
+	if child.cliBin != "my-cli" {
+		t.Errorf("cliBin = %q, want %q", child.cliBin, "my-cli")
+	}
+	if !reflect.DeepEqual(child.cliExtraArgs, []string{"code", "--add-dir", "/parent"}) {
+		t.Errorf("cliExtraArgs = %v, want [code --add-dir /parent]", child.cliExtraArgs)
+	}
+	if child.cliArgsFlag != "-a" {
+		t.Errorf("cliArgsFlag = %q, want -a", child.cliArgsFlag)
+	}
+	if child.model != "claude-opus-4-7" {
+		t.Errorf("model = %q, want claude-opus-4-7", child.model)
+	}
+	if child.reasoningEffort != "high" {
+		t.Errorf("reasoningEffort = %q, want high", child.reasoningEffort)
+	}
+	if child.mode != "acceptEdits" {
+		t.Errorf("mode = %q, want acceptEdits", child.mode)
+	}
+	if !reflect.DeepEqual(child.allowedTools, []string{"Edit", "Read"}) {
+		t.Errorf("allowedTools = %v, want [Edit Read]", child.allowedTools)
+	}
+	if !reflect.DeepEqual(child.disallowedTools, []string{"Bash"}) {
+		t.Errorf("disallowedTools = %v, want [Bash]", child.disallowedTools)
+	}
+	if child.maxContextTokens != 200000 {
+		t.Errorf("maxContextTokens = %d, want 200000", child.maxContextTokens)
+	}
+	if child.routerURL != "http://127.0.0.1:3456" {
+		t.Errorf("routerURL = %q, want http://127.0.0.1:3456", child.routerURL)
+	}
+	if child.routerAPIKey != "secret" {
+		t.Errorf("routerAPIKey = %q, want secret", child.routerAPIKey)
+	}
+}
+
+func TestScanSessionMeta_ArrayContent(t *testing.T) {
+	// Regression test for: scanSessionMeta skips entries where content is a JSON array
+	// (e.g., assistant messages with thinking blocks, or user messages with tool results).
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "queue-operation", "operation": "start"}`,
+		`{"type": "user", "message": {"content": "Hello world"}}`,
+		`{"type": "assistant", "message": {"content": [{"type": "thinking", "text": ""}, {"type": "text", "text": "Hi there"}]}}`,
+		`{"type": "user", "message": {"content": [{"tool_use_id": "call_abc", "type": "tool_result", "content": "result data"}]}}`,
+		`{"type": "assistant", "message": {"content": "Plain text reply"}}`,
+		`{"type": "last-prompt", "lastPrompt": "test"}`,
+	}
+
+	data := ""
+	for _, line := range lines {
+		data += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+
+	// Expected: 2 user + 2 assistant = 4 messages
+	if count != 4 {
+		t.Errorf("scanSessionMeta count = %d, want 4 (2 user + 2 assistant, array content should not be skipped)", count)
+	}
+
+	// Summary should come from the last user message with string content (line 2)
+	if summary != "Hello world" {
+		t.Errorf("scanSessionMeta summary = %q, want %q", summary, "Hello world")
+	}
+}
+
+func TestScanSessionMeta_AllArrayContent(t *testing.T) {
+	// When all user messages have array content, summary should remain empty
+	// and count should still be correct.
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": [{"type": "tool_result", "content": "data"}]}}`,
+		`{"type": "assistant", "message": {"content": [{"type": "text", "text": "reply"}]}}`,
+	}
+
+	data := ""
+	for _, line := range lines {
+		data += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "" {
+		t.Errorf("scanSessionMeta summary = %q, want empty string when no string user content exists", summary)
+	}
+}
+
+func TestExtractStringContent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"string", `"hello"`, "hello"},
+		{"empty", `""`, ""},
+		{"array", `[{"type": "text"}]`, ""},
+		{"object", `{"key": "val"}`, ""},
+		{"null", `null`, ""},
+		{"number", `42`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractStringContent([]byte(tt.raw))
+			if got != tt.want {
+				t.Errorf("extractStringContent(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
 	}
 }

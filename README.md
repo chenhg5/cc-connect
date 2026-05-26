@@ -33,6 +33,12 @@
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23266" target="_blank">
+    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
+  </a>
+</p>
+
 
 ## ❤️ Sponsor
 
@@ -56,8 +62,23 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </tr>
 
 <tr>
+<td width="150"><a href="https://aihubmix.com/?aff=mGTx"><img src="assets/sponsors/aihubmix.png" alt="AIHubMix" width="120"></a> <b>AIHubMix</b></td>
+<td>Thanks to AIHubMix for sponsoring this project! AIHubMix offers deep integration with 500+ global models including OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi. Unlimited concurrency, production-grade stability on Google Cloud. One API Key drives all your Agents with native OpenAI/Anthropic/Gemini format support — zero code changes. Pay-as-you-go pricing aligned with official providers, plus free models like coding-glm-5.1-free. <a href="https://aihubmix.com/?aff=mGTx">Click here to sign up!</a></td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
 <td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://apikey.fun/register?aff=cc_connect"><img src="assets/sponsors/apikeyfun.png" alt="APIKEY.FUN" width="120"></a></td>
+<td>Thanks to APIKEY.FUN for sponsoring this project! APIKEY.FUN is a professional enterprise-grade AI relay service, dedicated to providing stable, efficient, and cost-effective AI model API access for enterprises and individual developers. The platform supports Claude, OpenAI, Gemini and other mainstream models, with prices as low as 7% of official rates. Register via <a href="https://apikey.fun/register?aff=cc_connect">this link</a> to enjoy an exclusive permanent 5% discount on all top-ups!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://nekocode.ai/?aff=CC-CONNECT"><img src="assets/sponsors/nekocode.jpg" alt="NekoCode" width="120"></a></td>
+<td>Thanks to NekoCode for sponsoring this project! NekoCode provides reliable, stable, and efficient API relay services for Claude and CodeX with transparent pricing. Exclusive 10% discount for cc-connect users with promo code: CC-CONNECT. High-value, stable AI model access for developers. Register via <a href="https://nekocode.ai/?aff=CC-CONNECT">this link</a>.</td>
 </tr>
 
 <tr>
@@ -68,6 +89,58 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 <tr>
 <td width="150"><a href="https://www.aicodemirror.com/register?invitecode=KDHMUP"><img src="assets/sponsors/aicodemirror.jpg" alt="AICodeMirror" width="120"></a></td>
 <td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CC users: register via <a href="https://www.aicodemirror.com/register?invitecode=KDHMUP">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://camel.kr777.top/register?aff=V2z8"><img src="assets/sponsors/camel_logo.png" alt="CaMeL" width="120"></a></td>
+<td>Thanks to CaMeL for sponsoring this project! In-depth cooperation with major research institutes and supercomputing centers, self-developed high-stability high-efficiency cache scheduling solution. Exclusive for cc-connect users: New registration authentication immediately receive $10 credit upon registration. Register via <a href="https://camel.kr777.top/register?aff=V2z8">this link</a>.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
+<td>Thanks to AnyRoute.io for sponsoring this project! AnyRoute.io is a reliable, stable, and efficient API relay platform integrating the latest Claude Code and Codex models. Transparent pricing with rates as low as 93% off official prices (just 0.7x), supports invoicing and enterprise-grade high-concurrency usage. Register via <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://aicanapi.com/register?aff=rIEy"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
+<td>Thanks to aicanapi.com for sponsoring this project! Aican API provides high-performance, low-latency, high-concurrency API services for enterprises and developers. Claude Code models at up to 84% off, other models at 80% off official price. Doubao Seedance 2 real-person generation service with queue-free access for faster responses. Choose Aican API for simpler, more efficient, and more cost-effective enterprise-grade AI services. Register via <a href="https://aicanapi.com/register?aff=rIEy">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
+<td>Thanks to Pateway for sponsoring this project! PatewayAI is a premium API relay service for serious AI developers, offering 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. Transparent billing with token-level verification. Enterprise-grade concurrency, formal contracts and invoicing available. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get $3 free trial credit, up to 40% off on top-ups, and referral rewards up to $150!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
+<td>Thanks to 10点AI for sponsoring this project! 10dian-AI Enterprise Platform is an AI API gateway for developers and enterprises, aggregating GPT, Claude, Gemini, DeepSeek and more. Optimized for production environments with stable high-concurrency operation, avoiding interface jitter and timeout issues. Affordable pricing, stable uptime, official guarantee. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://cloud.siliconflow.cn/i/650Yh2Z7"><img src="assets/sponsors/siliconflow.png" alt="SiliconFlow" width="120"></a></td>
+<td>Thanks to SiliconFlow for supporting this project! SiliconFlow is a high-performance AI infrastructure and model API platform, providing fast and reliable access to language, speech, image, and video models in one place. With pay-as-you-go billing, broad multimodal model support, high-speed inference, and enterprise-grade stability, SiliconFlow helps developers and teams build and scale AI applications more efficiently. Register via <a href="https://cloud.siliconflow.cn/i/650Yh2Z7">this link</a> and complete real-name verification to receive ¥20 in bonus credit!</td>
+</tr>
+
+
+<tr>
+<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
+<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://dragoncode.codes/register?ref=23ZELCPX"><img src="assets/sponsors/dragoncode.png" alt="DragonCode" width="120"></a></td>
+<td>Thanks to DragonCode for supporting this project. DragonCode has prepared a special benefit for cc-connect users: register via <a href="https://dragoncode.codes/register?ref=23ZELCPX">this link</a> to get started.</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://coder.visioncoder.cn"><img src="assets/sponsors/visioncoder.png" alt="VisionCoder" width="120"></a></td>
+<td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity. VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
+</tr>
+
+
+<tr>
+<td width="150"><a href="https://ddshub.short.gy/ccconnect"><img src="assets/sponsors/ddshub.png" alt="DDS Hub" width="120"></a></td>
+<td>Thanks to DDS for sponsoring this project! DDS Hub is a reliable and high-performance Claude and CodeX API proxy service. We provides cost-effective domestic Claude direct acceleration services for both individual and enterprise users. We offer stable and low-latency Claude Max number pools, with full support for Claude Haiku, Opus, Sonnet, GPT 5.4 and other flagship models. Invoices are available for recharges of 1000 RMB or more. Enterprise customers can also enjoy customized grouping and dedicated technical support services. Exclusive benefit for CC connect users: Register via <a href="https://ddshub.short.gy/ccconnect">this link</a> and enjoy an extra 10% credit on your first recharge (please contact the group admin to claim after recharging)!</td>
 </tr>
 
 <tr>
@@ -104,11 +177,12 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 
 ## 🆕 What’s New in v1.3.0
 
-- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to open it instantly.
+- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
 - **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
 - **Skill Management** — New `/skills` page with local skill browser and recommended presets.
 - **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
 - **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
+- **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
 - **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
 - **New Agents** — Kimi CLI and Pi agent support added.
 
@@ -122,21 +196,20 @@ High-level view of what each **built-in platform** can do in cc-connect.
 | Symbol | Meaning |
 |--------|---------|
 | ✅ | Works in **stable** cc-connect with typical configuration |
-
 | ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
 | ❌ | Not supported or not applicable in practice |
 
 † **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
 
-| Capability | Feishu | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
-|------------|:------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
-| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
-| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Images & files | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Voice / STT / TTS | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
-| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Capability | Feishu | WPS Xiezuo | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
+|------------|:------:|:----------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
+| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
+| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Images & files | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Voice / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
+| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
 
 > **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
@@ -146,10 +219,10 @@ High-level view of what each **built-in platform** can do in cc-connect.
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**9+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
+**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
+**12 Chat Platforms** — Feishu, WPS Xiezuo, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -201,9 +274,13 @@ Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INST
 **Via npm:**
 
 ```bash
-# Stable version
 npm install -g cc-connect
+```
 
+**Via Homebrew (macOS / Linux):**
+
+```bash
+brew install cc-connect
 ```
 
 **Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
@@ -227,7 +304,7 @@ make build
 
 ### ⚙️ Configure
 
-> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to open the built-in management dashboard. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files.
+> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
 
 If you prefer manual configuration:
 
@@ -254,6 +331,9 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 # npm
 npm install -g cc-connect
 
+# Homebrew
+brew upgrade cc-connect
+
 # Binary self-update
 cc-connect update           # Stable
 cc-connect update --pre     # Include pre-releases
@@ -274,10 +354,12 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Kimi CLI (Moonshot) | ✅ Supported |
 | Agent | Pi (Cursor Background Agent) | ✅ Supported |
 | Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
+| Agent | Devin (Cognition) | ✅ Supported (via ACP) |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
 | Platform | DingTalk | ✅ Stream — no public IP needed |
+| Platform | WPS Xiezuo | ✅ WebSocket — no public IP needed |
 | Platform | Telegram | ✅ Long Polling — no public IP needed |
 | Platform | Slack | ✅ Socket Mode — no public IP needed |
 | Platform | Discord | ✅ Gateway — no public IP needed |
@@ -295,6 +377,7 @@ cc-connect update --pre     # Include pre-releases
 |----------|-------|------------|------------|
 | Feishu (Lark) | [docs/feishu.md](docs/feishu.md) | WebSocket | No |
 | DingTalk | [docs/dingtalk.md](docs/dingtalk.md) | Stream | No |
+| WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
@@ -316,13 +399,14 @@ cc-connect update --pre     # Include pre-releases
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
-Project configs can also rotate to a fresh session automatically after long inactivity:
+Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 
 ```toml
 [[projects]]
-reset_on_idle_mins = 60
+reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 ```
 
+The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
 
 ### 🛡️ OS-User Isolation (`run_as_user`)
 
@@ -486,11 +570,9 @@ If cc-connect has been helpful to you, consider buying us a coffee! Your support
 We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
 
 <!-- Donors will be listed below -->
-<!--
-| GitHub Username | Date |
-|-----------------|------|
-| @username | YYYY-MM-DD |
--->
+| Avatar | GitHub Username | Date |
+|--------|-----------------|------|
+| <img src="https://avatars.githubusercontent.com/u/1762560?v=4" width="40" height="40" style="border-radius: 50%;"> | [@thx0701](https://github.com/thx0701) | 2026-04-29 |
 
 
 ## 🤝 Commercial Cooperation
