@@ -401,6 +401,23 @@ type ProjectConfig struct {
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+
+	// AutoSessionName controls automatic naming of newly-created agent
+	// sessions from the first user message. With cc-connect, agents are
+	// spawned via CLI (e.g. cursor-agent) without the IDE renderer that
+	// normally writes meta.name, so /list otherwise falls back to a
+	// session-id hash prefix.
+	//
+	// Values:
+	//   "off"           — disabled (preserves pre-feature behavior)
+	//   "first_message" — (default) take cleaned prefix of first user message
+	//   "llm"           — reserved for future LLM-summary mode (currently
+	//                     equivalent to first_message)
+	AutoSessionName string `toml:"auto_session_name,omitempty"`
+
+	// AutoSessionNameMaxLen caps the auto-generated title rune length.
+	// Default 28 covers Chinese / English short titles comfortably.
+	AutoSessionNameMaxLen int `toml:"auto_session_name_max_len,omitempty"`
 }
 
 type AgentConfig struct {

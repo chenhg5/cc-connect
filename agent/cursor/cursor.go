@@ -379,7 +379,16 @@ func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 			if firstUserMsg != "" {
 				summary = firstUserMsg
 			} else {
-				summary = sessionID[:12] + "..."
+				// No usable title from cursor's persisted state. Surface a
+				// human-readable timestamp instead of an opaque session-id
+				// hash prefix. This branch is reachable only when (1) cursor
+				// IDE never wrote meta.name (which is the cc-connect CLI
+				// scenario), AND (2) blob parsing failed to extract a first
+				// user message, AND (3) the engine's auto-naming hook (see
+				// core/auto_session_name.go) hasn't run yet (e.g. the
+				// session is listed before its first turn completes). The
+				// chosen format is locale-neutral and sortable in /list.
+				summary = "New chat " + info.ModTime().Format("01-02 15:04")
 			}
 		}
 		if utf8.RuneCountInString(summary) > 60 {

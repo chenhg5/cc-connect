@@ -280,6 +280,13 @@ type Engine struct {
 	// Default false = show all sessions.
 	filterExternalSessions bool
 
+	// autoSessionName controls auto-naming of new agent sessions.
+	// Values: "off" / "first_message" / "llm". See ProjectConfig.AutoSessionName.
+	// Set once at startup via SetAutoSessionName; only read on the turn-complete
+	// path, so no lock is required.
+	autoSessionName       string
+	autoSessionNameMaxLen int
+
 	// Multi-workspace mode
 	multiWorkspace    bool
 	baseDir           string
@@ -780,6 +787,23 @@ func (e *Engine) SetReplyFooterEnabled(show bool) {
 // Default false = show all sessions from the agent.
 func (e *Engine) SetFilterExternalSessions(v bool) {
 	e.filterExternalSessions = v
+}
+
+// SetAutoSessionName configures the auto-naming policy for new agent
+// sessions. See ProjectConfig.AutoSessionName for value semantics.
+// Empty mode falls back to "first_message"; non-positive maxLen falls
+// back to 28 runes. Called once during engine wiring (main.go); the
+// fields are then read-only on the turn-complete path, so no lock is
+// required.
+func (e *Engine) SetAutoSessionName(mode string, maxLen int) {
+	if mode == "" {
+		mode = "first_message"
+	}
+	if maxLen <= 0 {
+		maxLen = 28
+	}
+	e.autoSessionName = mode
+	e.autoSessionNameMaxLen = maxLen
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -4965,6 +4989,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
 			)
+
+			// Auto-name the session from its first user message if no name has
+			// been set yet. Idempotent — re-runs every turn but bails early
+			// when a name already exists or the policy is disabled.
+			// See core/auto_session_name.go for the full guard chain.
+			e.maybeAutoNameSession(session)
 
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()

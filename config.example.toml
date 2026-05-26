@@ -652,6 +652,20 @@ name = "my-backend"
 # filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
+# auto_session_name: auto-name newly-created agent sessions from the first user
+# message so /list shows readable titles instead of session-id hash prefixes.
+# (Cursor IDE's renderer auto-titles via meta.name in store.db, but cc-connect
+# spawns the agent CLI without a renderer, so the engine fills the gap here.)
+# Values: "off" | "first_message" (default) | "llm" (reserved for future)
+# auto_session_name = "first_message"
+# auto_session_name_max_len = 28
+# auto_session_name：根据首条用户消息自动给会话命名，让 /list 显示可读标题而非 session-id
+# 哈希前缀。（Cursor IDE 的 renderer 会通过 store.db 的 meta.name 自动生成标题，
+# 但 cc-connect 启动 agent CLI 时没有 renderer，所以由 engine 在此处兜底。）
+# 取值："off" | "first_message"（默认）| "llm"（暂未实现，预留）
+# auto_session_name = "first_message"
+# auto_session_name_max_len = 28
+#
 # admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
 # admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
 #

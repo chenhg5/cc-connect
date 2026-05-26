@@ -325,6 +325,7 @@ func main() {
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+		engine.SetAutoSessionName(proj.AutoSessionName, proj.AutoSessionNameMaxLen)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 
@@ -1560,6 +1561,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload filter_external_sessions
 	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+
+	// Reload auto_session_name
+	engine.SetAutoSessionName(proj.AutoSessionName, proj.AutoSessionNameMaxLen)
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
