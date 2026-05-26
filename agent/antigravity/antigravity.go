@@ -241,8 +241,9 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		if err != nil {
 			continue
 		}
-		
+
 		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		if scanner.Scan() {
 			var sf struct {
 				SessionID string `json:"sessionId"`
@@ -251,6 +252,10 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 				file.Close()
 				return os.Remove(fpath)
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			file.Close()
+			continue
 		}
 		file.Close()
 	}
@@ -440,9 +445,9 @@ type sessionMessagePart struct {
 }
 
 type sessionLine struct {
-	Type      string               `json:"type"` // "user", "assistant"
-	Content   []sessionMessagePart `json:"content"`
-	Set       *struct {
+	Type    string               `json:"type"` // "user", "assistant"
+	Content []sessionMessagePart `json:"content"`
+	Set     *struct {
 		LastUpdated time.Time `json:"lastUpdated"`
 	} `json:"$set"`
 }
@@ -482,6 +487,7 @@ func listAntigravitySessions(workDir string) ([]core.AgentSessionInfo, error) {
 		hasUserMsg := false
 
 		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		lineNum := 0
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -519,6 +525,10 @@ func listAntigravitySessions(workDir string) ([]core.AgentSessionInfo, error) {
 				}
 			}
 			lineNum++
+		}
+		if err := scanner.Err(); err != nil {
+			file.Close()
+			continue
 		}
 		file.Close()
 
