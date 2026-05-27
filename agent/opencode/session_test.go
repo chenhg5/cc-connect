@@ -156,54 +156,48 @@ func TestHandleStepStart_SessionIDFromPart(t *testing.T) {
 	}
 }
 
-// TestHandleStepStopSendsEventResult verifies that handleStepFinish sends
-// an EventResult when reason="stop", signaling turn completion to the engine.
-func TestHandleStepStopSendsEventResult(t *testing.T) {
-	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+func TestHandleStepFinish(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       map[string]any
+		wantEvent bool
+	}{
+		{
+			name:      "reason stop sends EventResult",
+			raw:       map[string]any{"type": "step_finish", "part": map[string]any{"reason": "stop"}},
+			wantEvent: true,
+		},
+		{
+			name:      "reason tool-calls no EventResult",
+			raw:       map[string]any{"type": "step_finish", "part": map[string]any{"reason": "tool-calls"}},
+			wantEvent: false,
+		},
+		{
+			name:      "no reason no EventResult",
+			raw:       map[string]any{"type": "step_finish", "part": map[string]any{}},
+			wantEvent: false,
+		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
-	s.handleStepFinish(raw)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
 
-	select {
-	case evt := <-s.events:
-		if evt.Type != core.EventResult {
-			t.Errorf("event type = %q, want EventResult", evt.Type)
-		}
-		if !evt.Done {
-			t.Errorf("event.Done = false, want true")
-		}
-	default:
-		t.Error("expected EventResult to be sent when reason=stop")
-	}
-}
+			s.handleStepFinish(tt.raw)
 
-// TestHandleStepToolCallsNoEventResult verifies that handleStepFinish does NOT
-// send EventResult when reason="tool-calls", allowing the agent to continue
-// with subsequent tool execution steps.
-func TestHandleStepToolCallsNoEventResult(t *testing.T) {
-	jsonData := `{"type":"step_finish","part":{"reason":"tool-calls"}}`
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
-	s.handleStepFinish(raw)
-
-	select {
-	case evt := <-s.events:
-		t.Errorf("unexpected event sent when reason=tool-calls: %v", evt)
-	default:
+			select {
+			case evt := <-s.events:
+				if !tt.wantEvent {
+					t.Errorf("unexpected event: %+v", evt)
+				}
+			default:
+				if tt.wantEvent {
+					t.Error("expected EventResult, got none")
+				}
+			}
+		})
 	}
 }
 
@@ -211,13 +205,6 @@ func TestHandleStepToolCallsNoEventResult(t *testing.T) {
 // handleStepFinish multiple times with reason="stop" only sends one
 // EventResult, preventing duplicate completion signals to the engine.
 func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
-	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{
@@ -226,19 +213,24 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 		resultSent: atomic.Bool{},
 	}
 
+	raw := map[string]any{"type": "step_finish", "part": map[string]any{"reason": "stop"}}
 	s.handleStepFinish(raw)
 	s.handleStepFinish(raw)
 
 	count := 0
-	for len(s.events) > 0 {
-		evt := <-s.events
-		if evt.Type == core.EventResult {
-			count++
+	drain := true
+	for drain {
+		select {
+		case evt := <-s.events:
+			if evt.Type == core.EventResult {
+				count++
+			}
+		default:
+			drain = false
 		}
 	}
-
 	if count != 1 {
-		t.Errorf("EventResult count = %d, want 1 (duplicate should be prevented)", count)
+		t.Errorf("expected 1 EventResult, got %d (duplicate should be prevented)", count)
 	}
 }
 

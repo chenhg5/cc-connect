@@ -73,7 +73,6 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
-
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
 
@@ -241,14 +240,24 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
+// Emit EventResult after all steps are done and the process has finished writing.
+	sid := s.CurrentSessionID()
+	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", sid)
 	s.sendEventResult()
 }
 
-// OpenCode NDJSON event structure:
+// OpenCode NDJSON stdout event structure:
 //
-//	{ "type": "text|tool_use|reasoning|step_start|step_finish",
-//	  "part": { "type": "text|tool|reasoning|step-start|step-finish", ... } }
+//	{ "type": "text", "part": { "text": "..." } }
+//	{ "type": "reasoning", "part": { "text": "..." } }
+//	{ "type": "tool_use", "part": { "tool": "bash", "state": {...} } }
+//	{ "type": "step_start", "sessionID": "ses_xxx", "part": {...} }
+//	{ "type": "step_finish", "part": { "reason": "stop|tool-calls" } }
+//	{ "type": "error", "error": { "data": { "message": "..." } } }
+//
+// Note: stdout format uses underscores (step_start, step_finish, tool_use),
+// while database storage uses hyphens (step-start, step-finish, tool).
+// The sessionID is at the top level for step_start, not in part.
 func (s *opencodeSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
@@ -441,6 +450,7 @@ func extractErrorMessage(raw map[string]any) string {
 }
 
 func (s *opencodeSession) handleStepStart(raw map[string]any) {
+// OpenCode stdout format: sessionID is at the top level, not in part
 	sessionID, _ := raw["sessionID"].(string)
 	if sessionID == "" {
 		part, _ := raw["part"].(map[string]any)
@@ -460,11 +470,14 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	if part != nil {
 		reason, _ = part["reason"].(string)
 	}
-	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
-		s.sendEventResult()
+	if reason != "stop" {
+		slog.Debug("opencodeSession: step-finish with non-stop reason, continuing", "reason", reason, "session_id", s.CurrentSessionID())
+		return
 	}
+
+	slog.Debug("opencodeSession: sending EventResult from step_finish", "session_id", s.CurrentSessionID())
+	s.sendEventResult()
 }
 
 func (s *opencodeSession) sendEventResult() {
