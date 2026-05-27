@@ -120,8 +120,9 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 // Returns "" when the input cannot produce a safe basename, so callers can
 // fall back to a generated name.
 func sanitizeAttachmentFileName(name string) string {
-	// Normalize backslashes to forward slashes so filepath.Base on Linux
+	// Normalize backslashes to forward slashes so filepath.Base on any OS
 	// strips Windows-style separators in attacker-supplied paths too.
+	name = filepath.ToSlash(name)
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = filepath.Base(name)
 	if name == "" || name == "." || name == ".." {

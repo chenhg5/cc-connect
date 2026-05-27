@@ -36,6 +36,7 @@ type opencodeSession struct {
 	wg                sync.WaitGroup
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
+	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 }
 
 func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -72,6 +73,9 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
+
+	s.resultSent.Store(false)
+	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -164,6 +168,12 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	// Enable thinking blocks.
 	args = append(args, "--thinking")
 
+	// In yolo/auto mode, skip permission prompts entirely so headless
+	// runs don't get stuck with auto-rejected external-directory ops.
+	if s.mode == "yolo" {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+
 	for _, imagePath := range imagePaths {
 		if imagePath == "" {
 			continue
@@ -231,14 +241,8 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	// Emit EventResult after all steps are done and the process has finished writing.
-	sid := s.CurrentSessionID()
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", sid)
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
-	}
+	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
+	s.sendEventResult()
 }
 
 // OpenCode NDJSON event structure:
@@ -437,11 +441,13 @@ func extractErrorMessage(raw map[string]any) string {
 }
 
 func (s *opencodeSession) handleStepStart(raw map[string]any) {
-	part, _ := raw["part"].(map[string]any)
-	if part == nil {
-		return
+	sessionID, _ := raw["sessionID"].(string)
+	if sessionID == "" {
+		part, _ := raw["part"].(map[string]any)
+		if part != nil {
+			sessionID, _ = part["sessionID"].(string)
+		}
 	}
-	sessionID, _ := part["sessionID"].(string)
 	if sessionID != "" {
 		s.chatID.Store(sessionID)
 		slog.Debug("opencodeSession: session started", "session_id", sessionID)
@@ -450,8 +456,29 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 
 func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	part, _ := raw["part"].(map[string]any)
-	reason, _ := part["reason"].(string)
+	reason := ""
+	if part != nil {
+		reason, _ = part["reason"].(string)
+	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
+
+	if reason == "stop" {
+		s.sendEventResult()
+	}
+}
+
+func (s *opencodeSession) sendEventResult() {
+	if s.resultSent.Load() {
+		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
+		return
+	}
+	s.resultSent.Store(true)
+	sid := s.CurrentSessionID()
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
 }
 
 // RespondPermission is a no-op — OpenCode handles permissions internally.
