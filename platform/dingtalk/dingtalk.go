@@ -270,6 +270,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 				sessionWebhook: data.SessionWebhook,
 				conversationId: data.ConversationId,
 				senderStaffId:  data.SenderStaffId,
+				isGroup:        data.ConversationType == "2",
 			},
 		}
 		p.handler(p, msg)
@@ -471,6 +472,7 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionWebhook:  data.SessionWebhook,
 			conversationId:  data.ConversationId,
 			senderStaffId:   data.SenderStaffId,
+			isGroup:         data.ConversationType == "2",
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
