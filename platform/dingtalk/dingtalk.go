@@ -277,8 +277,15 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	}
 
 	// Handle image messages
-	if data.Msgtype == "image" {
+	// NOTE: DingTalk enterprise bots send `picture` (not `image`) as msgtype.
+	if data.Msgtype == "image" || data.Msgtype == "picture" {
 		p.handleImageMessage(data, sessionKey)
+		return
+	}
+
+	// Handle file messages (docx/pdf/xlsx/pptx/etc.)
+	if data.Msgtype == "file" {
+		p.handleFileMessage(data, sessionKey)
 		return
 	}
 
@@ -475,6 +482,86 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
 			Data:     imgBytes,
+		}},
+	}
+
+	p.handler(p, msg)
+}
+
+// handleFileMessage handles user-uploaded files (docx/pdf/xlsx/pptx/etc.)
+// from DingTalk enterprise bots, mirroring the image handler.
+func (p *Platform) handleFileMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
+	slog.Debug("dingtalk: file message received", "user", data.SenderNick)
+
+	// Parse file content from the raw content
+	fileData, ok := data.Content.(map[string]interface{})
+	if !ok {
+		slog.Error("dingtalk: invalid file content type", "type", fmt.Sprintf("%T", data.Content))
+		return
+	}
+
+	downloadCode, _ := fileData["downloadCode"].(string)
+	if downloadCode == "" {
+		slog.Error("dingtalk: file message missing downloadCode")
+		return
+	}
+	fileName, _ := fileData["fileName"].(string)
+	if fileName == "" {
+		fileName = "unnamed"
+	}
+
+	// Download file using the same messageFiles/download API as image/audio
+	downloadURL, err := p.getDownloadURL(downloadCode)
+	if err != nil {
+		slog.Error("dingtalk: failed to get file download URL", "error", err, "fileName", fileName)
+		return
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		slog.Error("dingtalk: failed to download file", "error", err, "fileName", fileName)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("dingtalk: file download returned status", "status", resp.StatusCode, "fileName", fileName)
+		return
+	}
+
+	const maxFileBytes = 50 * 1024 * 1024 // 50 MiB, larger than images for docs
+	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
+	if err != nil {
+		slog.Error("dingtalk: failed to read file data", "error", err, "fileName", fileName)
+		return
+	}
+	if len(fileBytes) > maxFileBytes {
+		slog.Error("dingtalk: file too large, dropping", "size", len(fileBytes), "limit", maxFileBytes, "fileName", fileName)
+		return
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	slog.Info("dingtalk: file downloaded successfully", "size", len(fileBytes), "mime", mimeType, "fileName", fileName)
+
+	msg := &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "dingtalk",
+		UserID:     data.SenderStaffId,
+		UserName:   data.SenderNick,
+		MessageID:  data.MsgId,
+		ReplyCtx: replyContext{
+			sessionWebhook:  data.SessionWebhook,
+			conversationId:  data.ConversationId,
+			senderStaffId:   data.SenderStaffId,
+		},
+		Files: []core.FileAttachment{{
+			MimeType: mimeType,
+			Data:     fileBytes,
+			FileName: fileName,
 		}},
 	}
 

@@ -1,0 +1,24 @@
+name: Build cc-connect (fork)
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  build-darwin-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Build (no_web — skip embedding frontend)
+        run: |
+          go build -tags no_web -o cc-connect ./cmd/cc-connect
+          ls -lh cc-connect
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cc-connect-darwin-arm64
+          path: cc-connect
+          retention-days: 30
