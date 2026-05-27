@@ -537,6 +537,17 @@ type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
 }
 
+// ThreadAnchorPoster is an optional interface for platforms that support posting
+// a message and returning a reply context that threads to that message. This is
+// used by InjectPromptToNewThread to post an anchor message first, then inject
+// a prompt whose responses will be threaded to that anchor.
+type ThreadAnchorPoster interface {
+	// PostThreadAnchor posts a message and returns a reply context that threads
+	// replies to the posted message. The returned context should be used for
+	// subsequent Send/Reply calls to keep them in the same thread.
+	PostThreadAnchor(ctx context.Context, replyCtx any, content string) (threadedReplyCtx any, err error)
+}
+
 // StreamingCard represents an active streaming card that aggregates
 // an entire agent turn (tool calls, thinking, text) into a single
 // updatable message.
