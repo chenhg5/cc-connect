@@ -404,6 +404,20 @@ func (sm *SessionManager) SetSessionName(agentSessionID, name string) {
 	sm.saveLocked()
 }
 
+// SetSessionNameOnSession finds the session with the given agentSessionID
+// and updates its Name field to match, keeping sessions[sN].Name consistent
+// with session_names[agentSessionID].
+func (sm *SessionManager) SetSessionNameOnSession(agentSessionID, name string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for _, s := range sm.sessions {
+		if s.GetAgentSessionID() == agentSessionID {
+			s.SetName(name)
+			break
+		}
+	}
+}
+
 // GetSessionName returns the custom name for an agent session, or "".
 func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 	sm.mu.RLock()

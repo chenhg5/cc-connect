@@ -113,6 +113,29 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	return paths
 }
 
+// SaveVideoToDisk saves a video attachment to workDir/.cc-connect/attachments/
+// and returns the absolute file path.
+func SaveVideoToDisk(workDir string, video *VideoAttachment) string {
+	if video == nil || len(video.Data) == 0 {
+		return ""
+	}
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Warn("SaveVideoToDisk: mkdir failed", "dir", attachDir, "error", err)
+	}
+	fname := sanitizeAttachmentFileName(video.FileName)
+	if fname == "" {
+		fname = fmt.Sprintf("video_%d.mp4", time.Now().UnixMilli())
+	}
+	fpath := filepath.Join(attachDir, fname)
+	if err := os.WriteFile(fpath, video.Data, 0o644); err != nil {
+		slog.Error("SaveVideoToDisk: write failed", "error", err)
+		return ""
+	}
+	slog.Debug("SaveVideoToDisk: video saved", "path", fpath, "name", video.FileName, "size", len(video.Data))
+	return fpath
+}
+
 // sanitizeAttachmentFileName reduces a user-supplied attachment filename to a
 // safe basename suitable for joining into an attachment directory. It strips
 // any directory components (both `/` and `\`, the latter so Linux strips
@@ -149,6 +172,14 @@ type AudioAttachment struct {
 	Duration int    // duration in seconds (if known)
 }
 
+// VideoAttachment represents a video sent by the user.
+type VideoAttachment struct {
+	MimeType string // e.g. "video/mp4", "video/quicktime"
+	Data     []byte // raw video bytes
+	FileName string // original filename
+	Duration int    // duration in seconds (if known)
+}
+
 // LocationAttachment represents a geographical location sent by the user.
 type LocationAttachment struct {
 	Latitude             float64 // latitude coordinate
@@ -173,6 +204,7 @@ type Message struct {
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)
 	Audio        *AudioAttachment    // voice message (if any)
+	Video        *VideoAttachment    // video message (if any)
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)

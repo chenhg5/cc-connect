@@ -222,6 +222,7 @@ const (
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
+	MsgNameSyncFailed            MsgKey = "name_sync_failed"
 	MsgProviderNotSupported      MsgKey = "provider_not_supported"
 	MsgProviderNone              MsgKey = "provider_none"
 	MsgProviderCurrent           MsgKey = "provider_current"
@@ -465,6 +466,37 @@ const (
 	MsgDeleteModeSelectedCount  MsgKey = "delete_mode_selected_count"
 	MsgDeleteModeDeleteSelected MsgKey = "delete_mode_delete_selected"
 	MsgDeleteModeCancel         MsgKey = "delete_mode_cancel"
+	MsgForkNotSupported         MsgKey = "fork_not_supported"
+	MsgForkNoSession            MsgKey = "fork_no_session"
+	MsgForkError               MsgKey = "fork_error"
+	MsgForkCreated              MsgKey = "fork_created"
+	MsgForkCreatedAt            MsgKey = "fork_created_at"
+	MsgForkLoading              MsgKey = "fork_loading"
+	MsgForkNoTurns              MsgKey = "fork_no_turns"
+	MsgForkTurnListHeader       MsgKey = "fork_turn_list_header"
+	MsgForkTurnHint             MsgKey = "fork_turn_hint"
+	MsgTurnListItem             MsgKey = "turn_list_item"
+	MsgForkPending              MsgKey = "fork_pending"
+	MsgForkPendingSuffix        MsgKey = "fork_pending_suffix"
+	MsgCardTitleForkTurns       MsgKey = "card_title_fork_turns"
+	MsgForkEntireSession        MsgKey = "fork_entire_session"
+	MsgForkSelectPlaceholder    MsgKey = "fork_select_placeholder"
+	MsgCardTitleRollbackTurns   MsgKey = "card_title_rollback_turns"
+	MsgRollbackSelectPlaceholder MsgKey = "rollback_select_placeholder"
+	MsgTurnOptionLabel          MsgKey = "turn_option_label"
+	MsgForkNamePrompt          MsgKey = "fork_name_prompt"
+	MsgForkNamePromptEntire    MsgKey = "fork_name_prompt_entire"
+	MsgForkCustomName          MsgKey = "fork_custom_name"
+	MsgForkCustomNamePrompt    MsgKey = "fork_custom_name_prompt"
+	MsgForkCustomNamePromptEntire MsgKey = "fork_custom_name_prompt_entire"
+	MsgForkCustomNamePromptChat  MsgKey = "fork_custom_name_prompt_chat"
+	MsgRollbackNotSupported     MsgKey = "rollback_not_supported"
+	MsgRollbackNoSession        MsgKey = "rollback_no_session"
+	MsgRollbackNoTurns          MsgKey = "rollback_no_turns"
+	MsgRollbackTurnListHeader   MsgKey = "rollback_turn_list_header"
+	MsgRollbackTurnHint         MsgKey = "rollback_turn_hint"
+	MsgRollbackDone             MsgKey = "rollback_done"
+	MsgRollbackError            MsgKey = "rollback_error"
 	MsgDeleteModeConfirmTitle   MsgKey = "delete_mode_confirm_title"
 	MsgDeleteModeConfirmButton  MsgKey = "delete_mode_confirm_button"
 	MsgDeleteModeBackButton     MsgKey = "delete_mode_back_button"
@@ -554,6 +586,8 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 	MsgBuiltinCmdPs        MsgKey = "ps"
+	MsgBuiltinCmdFork      MsgKey = "fork"
+	MsgBuiltinCmdRollback  MsgKey = "rollback"
 
 	MsgDiffEmpty       MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
@@ -991,6 +1025,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
+				"/fork [名称] [N]\n  从指定轮次分叉会话\n\n" +
+				"/rollback [N]\n  回滚会话到指定轮次\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
@@ -1034,6 +1070,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
+				"/fork [名稱] [N]\n  從指定輪次分叉會話\n\n" +
+				"/rollback [N]\n  回滾會話到指定輪次\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
@@ -1164,6 +1202,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — List agent sessions\n" +
 			"/search <keyword> — Search sessions\n" +
 			"/switch <number> — Resume a session\n" +
+			"/fork [name] — Fork current session\n" +
+			"/rollback [N] — Undo last N turns\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
@@ -1173,6 +1213,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出会话列表\n" +
 			"/search <关键词> — 搜索会话\n" +
 			"/switch <序号> — 切换会话\n" +
+			"/fork [名称] — 从当前会话分叉\n" +
+			"/rollback [N] — 回撤最近 N 轮对话\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
@@ -1182,6 +1224,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — 列出會話列表\n" +
 			"/search <關鍵詞> — 搜尋會話\n" +
 			"/switch <序號> — 切換會話\n" +
+			"/fork [名稱] — 從當前會話分叉\n" +
+			"/rollback [N] — 回撤最近 N 輪對話\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
@@ -1191,6 +1235,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — セッション一覧\n" +
 			"/search <キーワード> — セッション検索\n" +
 			"/switch <番号> — セッション切り替え\n" +
+			"/fork [名前] — 現在のセッションから分岐\n" +
+			"/rollback [N] — 直近Nターンの会話を撤回\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
@@ -1200,6 +1246,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list — Listar sesiones\n" +
 			"/search <keyword> — Buscar sesiones\n" +
 			"/switch <número> — Reanudar sesión\n" +
+			"/fork [nombre] — Bifurcar sesión actual\n" +
+			"/rollback [N] — Revertir últimos N turnos\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
@@ -1424,6 +1472,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有活躍會話，請先傳送訊息或切換到一個會話。",
 		LangJapanese:           "❌ アクティブなセッションがありません。メッセージを送信するかセッションに切り替えてください。",
 		LangSpanish:            "❌ No hay sesión activa. Envía un mensaje primero o cambia a una sesión.",
+	},
+	MsgNameSyncFailed: {
+		LangEnglish:            "Name saved locally but failed to sync to agent: %s",
+		LangChinese:            "名称已本地保存但同步到 agent 失败：%s",
+		LangTraditionalChinese: "名稱已本地儲存但同步到 agent 失敗：%s",
+		LangJapanese:           "名前はローカルに保存されましたが、agentへの同期に失敗しました：%s",
+		LangSpanish:            "Nombre guardado localmente pero falló la sincronización con el agente: %s",
 	},
 	MsgProviderNotSupported: {
 		LangEnglish:            "This agent does not support provider switching.",
@@ -3028,6 +3083,216 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "キャンセル",
 		LangSpanish:            "Cancelar",
 	},
+	MsgForkNotSupported: {
+		LangEnglish:            "Fork not supported by this agent.",
+		LangChinese:            "当前 agent 不支持 fork。",
+		LangTraditionalChinese: "當前 agent 不支援 fork。",
+		LangJapanese:           "このagentはforkをサポートしていません。",
+		LangSpanish:            "Fork no soportado por este agente.",
+	},
+	MsgForkNoSession: {
+		LangEnglish:            "No active session to fork. Send a message first.",
+		LangChinese:            "没有活跃会话可以分叉，请先发送消息。",
+		LangTraditionalChinese: "沒有活躍會話可以分叉，請先傳送訊息。",
+		LangJapanese:           "forkできるアクティブなセッションがありません。先にメッセージを送信してください。",
+		LangSpanish:            "No hay sesión activa para fork. Envía un mensaje primero.",
+	},
+	MsgForkError: {
+		LangEnglish:            "Fork failed: %s",
+		LangChinese:            "分叉失败：%s",
+		LangTraditionalChinese: "分叉失敗：%s",
+		LangJapanese:           "fork失敗：%s",
+		LangSpanish:            "Fork falló: %s",
+	},
+	MsgForkCreated: {
+			LangEnglish:            "🌿 Fork created: **%s** (%s). Use /switch to start working on it.",
+			LangChinese:            "🌿 分叉已创建：**%s** (%s)。使用 /switch 切换到分叉会话。",
+			LangTraditionalChinese: "🌿 分叉已建立：**%s** (%s)。使用 /switch 切換到分叉會話。",
+			LangJapanese:           "🌿 fork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
+			LangSpanish:            "🌿 Fork creado: **%s** (%s). Usa /switch para empezar a trabajar en él.",
+		},
+		MsgForkLoading: {
+			LangEnglish:            "Forking...",
+			LangChinese:            "正在分叉...",
+			LangTraditionalChinese: "正在分叉...",
+			LangJapanese:           "フォーク中...",
+			LangSpanish:            "Bifurcando...",
+		},
+		MsgForkCreatedAt: {
+			LangEnglish:            "🌿 Fork created from turn %d: **%s** (%s). Use /switch to start working on it.",
+			LangChinese:            "🌿 从第 %d 轮分叉：**%s** (%s)。使用 /switch 切换到分叉会话。",
+			LangTraditionalChinese: "🌿 從第 %d 輪分叉：**%s** (%s)。使用 /switch 切換到分叉會話。",
+			LangJapanese:           "🌿 第%dターンからfork作成：**%s** (%s)。/switchでforkセッションに切り替えてください。",
+			LangSpanish:            "🌿 Fork desde turno %d: **%s** (%s). Usa /switch para empezar.",
+		},
+		MsgForkNoTurns: {
+			LangEnglish:            "No conversation turns found to fork from.",
+			LangChinese:            "没有可分叉的对话轮次。",
+			LangTraditionalChinese: "沒有可分叉的對話輪次。",
+			LangJapanese:           "forkできるターンがありません。",
+			LangSpanish:            "No hay turnos de conversación para fork.",
+		},
+		MsgForkTurnListHeader: {
+			LangEnglish:            "Recent turns (1 = most recent):\n",
+			LangChinese:            "最近几轮对话（1 = 最新一轮）：\n",
+			LangTraditionalChinese: "最近幾輪對話（1 = 最新一輪）：\n",
+			LangJapanese:           "最近のターン（1 = 最新）：\n",
+			LangSpanish:            "Turnos recientes (1 = más reciente):\n",
+		},
+		MsgForkTurnHint: {
+			LangEnglish:            "\nUse /fork [name] [N] to fork from turn N (removing last N turns)",
+			LangChinese:            "\n使用 /fork [名称] [N] 从第 N 轮分叉（去掉最后 N 轮）",
+			LangTraditionalChinese: "\n使用 /fork [名稱] [N] 從第 N 輪分叉（去掉最後 N 輪）",
+			LangJapanese:           "\n/fork [名前] [N] で第Nターンからfork（最後Nターンを削除）",
+			LangSpanish:            "\nUsa /fork [nombre] [N] para fork desde turno N (eliminando últimos N turnos)",
+		},
+		MsgTurnListItem: {
+			LangEnglish:            "%d. %s\n",
+			LangChinese:            "%d. %s\n",
+			LangTraditionalChinese: "%d. %s\n",
+			LangJapanese:           "%d. %s\n",
+			LangSpanish:            "%d. %s\n",
+		},
+	MsgForkPending: {
+		LangEnglish:            "fork pending",
+		LangChinese:            "分叉待激活",
+		LangTraditionalChinese: "分叉待啟動",
+		LangJapanese:           "fork待機中",
+		LangSpanish:            "fork pendiente",
+	},
+	MsgForkPendingSuffix: {
+		LangEnglish:            " ◇ %s",
+		LangChinese:            " ◇ %s",
+		LangTraditionalChinese: " ◇ %s",
+		LangJapanese:           " ◇ %s",
+		LangSpanish:            " ◇ %s",
+	},
+	MsgRollbackNotSupported: {
+		LangEnglish:            "Rollback not supported by this agent.",
+		LangChinese:            "当前 agent 不支持回撤。",
+		LangTraditionalChinese: "當前 agent 不支援回撤。",
+		LangJapanese:           "このagentはrollbackをサポートしていません。",
+		LangSpanish:            "Rollback no soportado por este agente.",
+	},
+	MsgRollbackNoSession: {
+		LangEnglish:            "No active session to rollback. Send a message first.",
+		LangChinese:            "没有活跃会话可以回撤，请先发送消息。",
+		LangTraditionalChinese: "沒有活躍會話可以回撤，請先傳送訊息。",
+		LangJapanese:           "rollbackできるアクティブなセッションがありません。先にメッセージを送信してください。",
+		LangSpanish:            "No hay sesión activa para rollback. Envía un mensaje primero.",
+	},
+	MsgRollbackDone: {
+		LangEnglish:            "↩️ Rolled back %d turns. %d remaining. Send a message to continue.",
+		LangChinese:            "↩️ 已回撤 %d 轮，剩余 %d 轮。发送消息继续对话。",
+		LangTraditionalChinese: "↩️ 已回撤 %d 輪，剩餘 %d 輪。傳送訊息繼續對話。",
+		LangJapanese:           "↩️ %dターンrollback完了。残り%dターン。メッセージを送信して続行してください。",
+		LangSpanish:            "↩️ Se han revertido %d turnos. %d restantes. Envía un mensaje para continuar.",
+	},
+		MsgRollbackNoTurns: {
+			LangEnglish:            "No conversation turns found to rollback.",
+			LangChinese:            "没有可回撤的对话轮次。",
+			LangTraditionalChinese: "沒有可回撤的對話輪次。",
+			LangJapanese:           "rollbackできるターンがありません。",
+			LangSpanish:            "No hay turnos para rollback.",
+		},
+		MsgCardTitleForkTurns: {
+			LangEnglish:            "Fork — select turn",
+			LangChinese:            "分叉 — 选择轮次",
+			LangTraditionalChinese: "分叉 — 選擇輪次",
+			LangJapanese:           "fork — ターン選択",
+			LangSpanish:            "Fork — seleccionar turno",
+		},
+		MsgForkEntireSession: {
+			LangEnglish:            "Entire session (no truncation)",
+			LangChinese:            "整个会话（不截断）",
+			LangTraditionalChinese: "整個會話（不截斷）",
+			LangJapanese:           "セッション全体（truncatedなし）",
+			LangSpanish:            "Sesión completa (sin truncar)",
+		},
+		MsgForkSelectPlaceholder: {
+			LangEnglish:            "Select turn to fork from...",
+			LangChinese:            "选择从哪轮分叉...",
+			LangTraditionalChinese: "選擇從哪輪分叉...",
+			LangJapanese:           "forkするターンを選択...",
+			LangSpanish:            "Seleccionar turno para fork...",
+		},
+		MsgCardTitleRollbackTurns: {
+			LangEnglish:            "Rollback — select turn",
+			LangChinese:            "回撤 — 选择轮次",
+			LangTraditionalChinese: "回撤 — 選擇輪次",
+			LangJapanese:           "rollback — ターン選択",
+			LangSpanish:            "Rollback — seleccionar turno",
+		},
+		MsgRollbackSelectPlaceholder: {
+			LangEnglish:            "Select turn to rollback to...",
+			LangChinese:            "选择回撤到哪轮...",
+			LangTraditionalChinese: "選擇回撤到哪輪...",
+			LangJapanese:           "rollbackするターンを選択...",
+			LangSpanish:            "Seleccionar turno para rollback...",
+		},
+		MsgTurnOptionLabel: {
+			LangEnglish:            "#%d: %s",
+			LangChinese:            "倒数第%d轮: %s",
+			LangTraditionalChinese: "倒數第%d輩: %s",
+			LangJapanese:           "下から%d番目: %s",
+			LangSpanish:            "#%d desde el final: %s",
+		},
+		MsgForkNamePrompt: {
+			LangEnglish:            "You selected turn #%d. Please type a name for this fork:",
+			LangChinese:            "你选择了倒数第%d轮。请输入分叉名称：",
+			LangTraditionalChinese: "你選擇了倒數第%d輩。請輸入分叉名稱：",
+			LangJapanese:           "下から%d番目を選択しました。fork名を入力してください：",
+			LangSpanish:            "Seleccionaste turno #%d. Ingresa un nombre para este fork:",
+		},
+		MsgForkNamePromptEntire: {
+			LangEnglish:            "You selected entire session. Please type a name for this fork:",
+			LangChinese:            "你选择了整个会话。请输入分叉名称：",
+			LangTraditionalChinese: "你選擇了整個會話。請輸入分叉名稱：",
+			LangJapanese:           "セッション全体を選択しました。fork名を入力してください：",
+			LangSpanish:            "Seleccionaste sesión completa. Ingresa un nombre para este fork:",
+		},
+		MsgForkCustomName: {
+			LangEnglish:            "Enter fork name",
+			LangChinese:            "输入分叉名称",
+			LangTraditionalChinese: "輸入分叉名稱",
+			LangJapanese:           "fork名を入力",
+			LangSpanish:            "Ingresa nombre del fork",
+		},
+		MsgForkCustomNamePrompt: {
+			LangEnglish:            "You selected turn #%d with custom name. Please type the fork name in chat:",
+			LangChinese:            "你选择了倒数第%d轮，自定义名称。请在聊天中输入分叉名称：",
+			LangTraditionalChinese: "你選擇了倒數第%d輩，自定義名稱。請在聊天中輸入分叉名稱：",
+			LangJapanese:           "下から%d番目を選択しました。チャットでfork名を入力してください：",
+			LangSpanish:            "Seleccionaste turno #%d con nombre personalizado. Ingresa el nombre en chat:",
+		},
+		MsgForkCustomNamePromptEntire: {
+			LangEnglish:            "You selected entire session with custom name. Please type the fork name in chat:",
+			LangChinese:            "你选择了整个会话，自定义名称。请在聊天中输入分叉名称：",
+			LangTraditionalChinese: "你選擇了整個會話，自定義名稱。請在聊天中輸入分叉名稱：",
+			LangJapanese:           "セッション全体を選択しました。チャットでfork名を入力してください：",
+			LangSpanish:            "Seleccionaste sesión completa con nombre personalizado. Ingresa el nombre en chat:",
+		},
+		MsgRollbackTurnListHeader: {
+			LangEnglish:            "Recent turns (1 = most recent):\n",
+			LangChinese:            "最近几轮对话（1 = 最新一轮）：\n",
+			LangTraditionalChinese: "最近幾輪對話（1 = 最新一輪）：\n",
+			LangJapanese:           "最近のターン（1 = 最新）：\n",
+			LangSpanish:            "Turnos recientes (1 = más reciente):\n",
+		},
+		MsgRollbackTurnHint: {
+			LangEnglish:            "\nUse /rollback [N] to remove the last N turns",
+			LangChinese:            "\n使用 /rollback [N] 回撤最近 N 轮对话",
+			LangTraditionalChinese: "\n使用 /rollback [N] 回撤最近 N 輪對話",
+			LangJapanese:           "\n/rollback [N] で最後Nターンを撤回",
+			LangSpanish:            "\nUsa /rollback [N] para revertir últimos N turnos",
+		},
+	MsgRollbackError: {
+		LangEnglish:            "Rollback failed: %s",
+		LangChinese:            "回撤失败：%s",
+		LangTraditionalChinese: "回撤失敗：%s",
+		LangJapanese:           "rollback失敗：%s",
+		LangSpanish:            "Rollback falló: %s",
+	},
 	MsgDeleteModeConfirmTitle: {
 		LangEnglish:            "Confirm Delete",
 		LangChinese:            "确认删除",
@@ -3550,6 +3815,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "向正在執行的任務追加補充資訊",
 		LangJapanese:           "実行中のタスクに補足情報を送信",
 		LangSpanish:            "Enviar un P.S. a la tarea en curso",
+	},
+	MsgBuiltinCmdFork: {
+		LangEnglish:            "Fork session from a specific turn, args: [name] [N]",
+		LangChinese:            "从指定轮次分叉会话，参数: [名称] [N]",
+		LangTraditionalChinese: "從指定輪次分叉會話，參數: [名稱] [N]",
+		LangJapanese:           "指定ターンからセッションをフォーク、引数: [名前] [N]",
+		LangSpanish:            "Bifurcar sesión desde un turno específico, args: [nombre] [N]",
+	},
+	MsgBuiltinCmdRollback: {
+		LangEnglish:            "Rollback session to a previous turn, arg: [N]",
+		LangChinese:            "回滚会话到之前的轮次，参数: [N]",
+		LangTraditionalChinese: "回滾會話到之前的輪次，參數: [N]",
+		LangJapanese:           "セッションを前のターンにロールバック、引数: [N]",
+		LangSpanish:            "Revertir sesión a un turno anterior, arg: [N]",
 	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
