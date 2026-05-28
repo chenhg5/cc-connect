@@ -528,6 +528,11 @@ func main() {
 			}
 		}
 
+		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
+		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
+			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
+		}
+
 		// Wire queue depth
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
 			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)

@@ -122,6 +122,15 @@ level = "info" # debug, info, warn, error
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
 
+# Absolute wall-clock cap per agent turn in minutes. Unlike idle_timeout_mins
+# (which resets on every event), this timer is never reset — it guarantees the
+# session is released even when a long bash command generates periodic tool events.
+# Recommended: 30–60 minutes for most use cases. Default: 0 (disabled).
+# 每次 agent 对话的绝对时间上限（分钟）。与 idle_timeout_mins 不同，此计时器不会因
+# 工具调用事件而重置，可防止长时间运行的 bash 命令永久占用会话（#1091）。
+# 推荐值：30–60。默认 0（禁用）。
+# max_turn_time_mins = 0  # default: disabled / 默认禁用
+
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.

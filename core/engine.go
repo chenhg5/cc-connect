@@ -228,6 +228,7 @@ type Engine struct {
 	references        ReferenceRenderCfg
 	relayManager      *RelayManager
 	eventIdleTimeout  time.Duration
+	maxTurnTime       time.Duration // absolute wall-clock cap per turn (0 = disabled)
 	maxQueuedMessages int
 	queueMode         string
 	dirHistory        *DirHistory
@@ -653,7 +654,6 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
 
-
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
@@ -964,6 +964,17 @@ func (e *Engine) checkRateLimit(msg *Message) bool {
 // SetStreamPreviewCfg configures the streaming preview behavior.
 func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 	e.streamPreview = cfg
+}
+
+// SetMaxTurnTime sets an absolute wall-clock limit on how long a single agent turn
+// may run. Unlike SetEventIdleTimeout (which resets on every event), this timer is
+// not reset by tool-call activity. When it fires, the session is terminated and the
+// user is notified. A value of 0 disables the limit (default).
+//
+// This is the primary mitigation for #1091: long-running bash commands that generate
+// periodic tool events keep the idle timer alive indefinitely; the turn timer caps them.
+func (e *Engine) SetMaxTurnTime(d time.Duration) {
+	e.maxTurnTime = d
 }
 
 // SetEventIdleTimeout sets the maximum time to wait between consecutive agent events.
@@ -1994,7 +2005,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
-	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
+	if content == "" && msg.ExtraContent == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
 		return
 	}
 
@@ -2164,6 +2175,11 @@ sessionLocked:
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
+	// Record that a real user message is being processed. This keeps
+	// LastUserActivity separate from UpdatedAt (bumped by every Unlock), so
+	// reset_on_idle_mins is not defeated by heartbeats or unsolicited agent
+	// output running between user messages (#1115).
+	session.TouchUserActivity()
 
 	// Ensure an interactiveState entry exists before launching the async
 	// processor so messages arriving during session startup can be queued
@@ -2190,7 +2206,14 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
-	lastActive := session.GetUpdatedAt()
+	// Prefer LastUserActivity for idle tracking: it is only updated on actual
+	// user messages, so heartbeats and unsolicited agent output don't prevent
+	// idle reset from firing (#1115). Fall back to UpdatedAt for sessions
+	// created before this field was introduced.
+	lastActive := session.GetLastUserActivity()
+	if lastActive.IsZero() {
+		lastActive = session.GetUpdatedAt()
+	}
 	if lastActive.IsZero() || time.Since(lastActive) < e.resetOnIdle {
 		return nil
 	}
@@ -2503,6 +2526,14 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 
 	// AskUserQuestion: interpret user response as an answer, not a permission decision
 	if len(pending.Questions) > 0 {
+		// Reject empty or whitespace-only content: some platforms echo delivery
+		// receipts or read-notifications as zero-length messages, and they must
+		// not be accepted as answers — otherwise the tool gets empty answers
+		// within ~500ms before the user has a chance to respond (#1086).
+		if strings.TrimSpace(content) == "" {
+			return false
+		}
+
 		curIdx := pending.CurrentQuestion
 		q := pending.Questions[curIdx]
 		answer := e.resolveAskQuestionAnswer(q, content)
@@ -3085,6 +3116,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			slog.Error("session resume failed, falling back to fresh session",
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
+			// Clear the stale session ID so CompareAndSetAgentSessionID can
+			// write the new ID, matching the relay fallback at line 12640.
+			session.SetAgentSessionID("", agent.Name())
+			sessions.Save()
 			startAt = time.Now()
 			agentSession, err = agent.StartSession(e.ctx, "")
 			startElapsed = time.Since(startAt)
@@ -3765,11 +3800,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// is only needed when the platform doesn't support cards or card creation failed.
 	e.sendInitialInstantReply(state.platform, state.replyCtx, streamCard, false)
 
-	// Idle timeout: 0 = disabled
+	// Idle timeout: resets on every received event (0 = disabled)
 	if e.eventIdleTimeout > 0 {
 		idleTimer = time.NewTimer(e.eventIdleTimeout)
 		defer idleTimer.Stop()
 		idleCh = idleTimer.C
+	}
+
+	// Max turn time: absolute wall-clock cap that does NOT reset on events.
+	// Prevents long-running tool calls from blocking the session forever (#1091).
+	var turnDeadlineCh <-chan time.Time
+	if e.maxTurnTime > 0 {
+		turnDeadlineTimer := time.NewTimer(e.maxTurnTime)
+		defer turnDeadlineTimer.Stop()
+		turnDeadlineCh = turnDeadlineTimer.C
 	}
 
 	events := state.agentSession.Events()
@@ -3816,6 +3860,54 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			p := state.platform
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.cleanupInteractiveState(sessionKey, state)
+			return
+		case <-turnDeadlineCh:
+			elapsed := time.Since(turnStart)
+			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
+				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
+			state.mu.Lock()
+			p := state.platform
+			state.mu.Unlock()
+			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+
+			// Two-phase shutdown: first try a graceful stop so the agent can
+			// write its final state before dying (preserves --resume ability).
+			// If it doesn't exit within a short grace window, force-kill.
+			state.markStopped()
+			gracePeriod := 10 * time.Second
+			graceTimer := time.NewTimer(gracePeriod)
+		graceLoop:
+			for {
+				select {
+				case evt, ok := <-state.agentSession.Events():
+					if !ok || (ok && evt.Done) {
+						// Agent exited cleanly; state is intact, resume will work.
+						slog.Info("agent exited gracefully after max_turn_time stop signal",
+							"session_key", sessionKey, "elapsed", time.Since(turnStart))
+						graceTimer.Stop()
+						state.mu.Lock()
+						state.eventsNeedResync = false
+						state.mu.Unlock()
+						break graceLoop
+					}
+				case <-graceTimer.C:
+					// Agent did not stop within grace period — force-kill.
+					slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
+						"session_key", sessionKey, "grace_period", gracePeriod)
+					graceTimer.Stop()
+					state.mu.Lock()
+					state.eventsNeedResync = true
+					state.mu.Unlock()
+					e.cleanupInteractiveState(sessionKey, state)
+					return
+				}
+			}
+			// Graceful exit path: cleanupInteractiveState closes the session,
+			// but eventsNeedResync=false so the next --resume works correctly.
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
@@ -5906,6 +5998,11 @@ func appendReplyFooter(content, footer string) string {
 		return content
 	}
 	content = strings.TrimRight(content, "\n")
+	last30 := content
+	if len(last30) > 30 {
+		last30 = last30[len(last30)-30:]
+	}
+	slog.Debug("appendReplyFooter", "content_len", len(content), "footer", footer, "content_last30", last30)
 	if content == "" {
 		return "*" + footer + "*"
 	}
@@ -6328,7 +6425,9 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 			htmlData, err := e.diff2html(ctx, diffOutput, workDir, title)
 			if err == nil {
 				fileName := fmt.Sprintf("%s-%s.html", currentBranch, commitID)
-				_ = e.waitOutgoing(p)
+				if err := e.waitOutgoing(p); err != nil {
+					slog.Warn("outgoing rate limit", "platform", p.Name(), "error", err)
+				}
 				if err := fileSender.SendFile(e.ctx, msg.ReplyCtx, FileAttachment{
 					MimeType: "text/html", Data: htmlData, FileName: fileName,
 				}); err == nil {
@@ -8208,6 +8307,17 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
+	// clearStaleSessionID removes the stale AgentSessionID so the next message
+	// starts a fresh agent instead of trying to resume the killed session
+	// (recycling loop — see issue #830).
+	clearStaleSessionID := func() {
+		if _, sessions, _, err := e.commandContext(p, msg); err == nil {
+			s := sessions.GetOrCreateActive(msg.SessionKey)
+			s.SetAgentSessionID("", "")
+			sessions.Save()
+		}
+	}
+
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
 		// Fallback: try suffix scan in case interactiveKeyForSessionKey
@@ -8215,6 +8325,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		// (e.g. workspace binding lookup inconsistency).
 		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
 			if e.stopInteractiveSession(found, p, msg.ReplyCtx) {
+				clearStaleSessionID()
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 				return
 			}
@@ -8222,6 +8333,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
+	clearStaleSessionID()
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 
@@ -9931,9 +10043,13 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		sub, id := subArgs[0], subArgs[1]
 		switch sub {
 		case "enable":
-			_ = e.cronScheduler.EnableJob(id)
+			if err := e.cronScheduler.EnableJob(id); err != nil {
+				slog.Error("cron: enable job failed", "id", id, "error", err)
+			}
 		case "disable":
-			_ = e.cronScheduler.DisableJob(id)
+			if err := e.cronScheduler.DisableJob(id); err != nil {
+				slog.Error("cron: disable job failed", "id", id, "error", err)
+			}
 		case "delete":
 			e.cronScheduler.RemoveJob(id)
 		case "mute":

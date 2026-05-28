@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated_at": "2026-04-21",
+  "updated_at": "2026-05-23",
   "providers": [
     {
       "name": "minimax",
@@ -182,6 +182,52 @@
           "base_url": "https://www.dmxapi.cn/v1",
           "model": "claude-sonnet-4-20250514",
           "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
+      "name": "camel",
+      "display_name": "CaMeL",
+      "invite_url": "https://camel.kr777.top/register?aff=V2z8",
+      "description": "In-depth cooperation with major research institutes and supercomputing centers, self-developed high-stability high-efficiency cache scheduling solution. Exclusive cc-connect benefit: New users get $10 credit upon registration!",
+      "description_zh": "携手各大科研院所、超算中心深度合作，自研高稳高效缓存调度方案。CC-Connect专享新人注册认证即送$10！",
+      "features": ["Research Institutes", "Cache Scheduling", "$10 New User Credit"],
+      "tier": 2,
+      "website": "https://camel.kr777.top",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.camel.kr777.top",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.camel.kr777.top/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "apikeyfun",
+      "display_name": "APIKEY.FUN",
+      "invite_url": "https://apikey.fun/register?aff=cc_connect",
+      "description": "Enterprise-grade AI relay service. Claude, OpenAI, Gemini models from 7% of official price. Exclusive 5% permanent discount for cc-connect users!",
+      "description_zh": "企业级 AI 中转站，Claude/OpenAI/Gemini 模型低至官方 7% 折，cc-connect 用户专属 95 折永久优惠！",
+      "features": ["Enterprise", "Claude/OpenAI/Gemini", "7% Price", "95折"],
+      "tier": 2,
+      "website": "https://apikey.fun",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.apikey.fun",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.apikey.fun/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
         }
       }
     },
@@ -382,6 +428,121 @@
           "base_url": "https://coder.visioncoder.cn/v1",
           "model": "claude-sonnet-4-20250514",
           "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
+      "name": "anyroute",
+      "display_name": "AnyRoute.io",
+      "invite_url": "https://cc.anyroute.io/register?aff=CR455DSQSKEV",
+      "description": "Reliable API relay platform integrating Claude Code and Codex models. Transparent pricing, rates as low as 0.7x official price, supports invoicing and enterprise-grade high-concurrency.",
+      "description_zh": "可靠稳定高效的 API 中转平台，集成 Claude Code、Codex 最新模型。价格透明，最低低至官方 0.7 折，支持开票和企业高并发。",
+      "features": ["Claude Code", "Codex", "0.7x Price", "Enterprise"],
+      "tier": 2,
+      "website": "https://cc.anyroute.io",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.anyroute.io",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.anyroute.io/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "aicanapi",
+      "display_name": "aicanapi.com",
+      "invite_url": "https://aicanapi.com/register?aff=rIEy",
+      "description": "High-performance API relay for enterprises and developers. Claude Code models up to 84% off, other models at 20% of official price. Doubao Seedance 2 with queue-free access.",
+      "description_zh": "高性能 API 接口服务，支持 Claude、GPT、Gemini 等主流模型。Claude Code 最低 1.6 折，其余模型 2 折。豆包 Seedance 2 免排队调用。",
+      "features": ["Claude Code", "GPT", "Gemini", "Doubao", "16% Price"],
+      "tier": 2,
+      "website": "https://aicanapi.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.aicanapi.com",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.aicanapi.com/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "pateway",
+      "display_name": "Pateway",
+      "invite_url": "https://pateway.ai/?ch=2qn568&aff=DRA4VUFS",
+      "description": "Premium API relay for serious AI developers. 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. $3 free trial, up to 40% off.",
+      "description_zh": "面向重度 AI 开发者的优质 API 中转。100% 官方源直供 Claude/Codex，不掺假不注水。注册送 $3 试用额度，充值低至 6 折。",
+      "features": ["Claude Code", "Codex", "Official Direct", "$3 Trial"],
+      "tier": 2,
+      "website": "https://pateway.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.pateway.ai",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.pateway.ai/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "10dianai",
+      "display_name": "10点AI",
+      "invite_url": "https://cy.10dianai.com/register?aff=3FQn",
+      "description": "AI API gateway for developers and enterprises. Aggregates GPT, Claude, Gemini, DeepSeek. Production-optimized with high concurrency, stable operation. Register for ¥5 free credit.",
+      "description_zh": "面向开发者和企业的 AI API 中转平台，聚合 GPT、Claude、Gemini、DeepSeek 等主流模型。生产环境优化，高并发稳定运行。注册即送 ¥5。",
+      "features": ["GPT", "Claude", "Gemini", "DeepSeek", "¥5 Free"],
+      "tier": 2,
+      "website": "https://cy.10dianai.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.10dianai.com",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.10dianai.com/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "siliconflow",
+      "display_name": "SiliconFlow",
+      "invite_url": "https://cloud.siliconflow.cn/i/650Yh2Z7",
+      "description": "High-performance AI infrastructure and model API platform. Fast access to language, speech, image, and video models. Pay-as-you-go, multimodal support, enterprise-grade stability. ¥20 bonus for new users!",
+      "description_zh": "高性能 AI 基础设施和模型 API 平台，提供语言、语音、图片、视频等多种模型快速访问。按量计费，多模态支持，企业级稳定性。新用户注册送 ¥20！",
+      "features": ["Multimodal", "Pay-as-you-go", "¥20 Bonus", "Fast Inference"],
+      "tier": 2,
+      "website": "https://siliconflow.cn",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.siliconflow.cn",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.siliconflow.cn/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
         }
       }
     }

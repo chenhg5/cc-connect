@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1091,6 +1092,7 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	workDir := filepath.Join(homeDir, "codes", "cc-connect")
 	agent := &stubReplyFooterAgent{
@@ -1140,6 +1142,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
 	agent := &stubReplyFooterAgent{
@@ -1177,6 +1180,7 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
 	agent := &stubReplyFooterAgent{
@@ -1292,6 +1296,7 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
@@ -1565,6 +1570,9 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 }
 
 func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	p := &stubPlatformEngine{n: "feishu"}
 	a := &namedStubModelModeAgent{name: "codex"}
 	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
@@ -5109,6 +5117,28 @@ func TestHandleMessage_ExtraContentPreservedThroughAlias(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_ExtraContentOnlyIsProcessed(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{
+		SessionKey:   "test:user1",
+		ReplyCtx:     "ctx",
+		Content:      "",
+		ExtraContent: "> quoted reply context",
+		Platform:     "test",
+		UserID:       "user1",
+		MessageID:    "m-extra-only",
+	}
+
+	e.handleMessage(p, msg)
+
+	if msg.Content != "> quoted reply context" {
+		t.Fatalf("Content = %q, want ExtraContent to become message content", msg.Content)
+	}
+}
+
 func TestCmdDiff_RejectsDashTarget(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -5990,12 +6020,16 @@ func (s *controllableAgentSession) Close() error {
 
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
-	nextSession AgentSession
-	listFn      func() ([]AgentSessionInfo, error)
+	nextSession     AgentSession
+	listFn          func() ([]AgentSessionInfo, error)
+	startSessionFn  func(ctx context.Context, sessionID string) (AgentSession, error)
 }
 
 func (a *controllableAgent) Name() string { return "controllable" }
-func (a *controllableAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+func (a *controllableAgent) StartSession(ctx context.Context, sessionID string) (AgentSession, error) {
+	if a.startSessionFn != nil {
+		return a.startSessionFn(ctx, sessionID)
+	}
 	if a.nextSession != nil {
 		return a.nextSession, nil
 	}
@@ -6289,6 +6323,78 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 
 	if got != "existing-uuid" {
 		t.Fatalf("AgentSessionID = %q, want %q — writeback should not overwrite", got, "existing-uuid")
+	}
+}
+
+// TestCmdStop_ClearsAgentSessionID verifies that /stop clears the stale
+// AgentSessionID so the next message starts a fresh agent instead of trying
+// to resume the killed session (issue #830).
+func TestCmdStop_ClearsAgentSessionID(t *testing.T) {
+	sess := newControllableSession("agent-1")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Seed a live interactive state.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// Set the Session's AgentSessionID to match (simulates a normal turn).
+	active := e.sessions.GetOrCreateActive(key)
+	active.SetAgentSessionID("agent-1", "controllable")
+	e.sessions.Save()
+
+	// Simulate /stop: it uses interactiveKeyForSessionKey internally.
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+	e.cmdStop(p, msg)
+
+	// After /stop, AgentSessionID must be cleared.
+	got := active.GetAgentSessionID()
+	if got != "" {
+		t.Fatalf("AgentSessionID = %q, want empty after /stop", got)
+	}
+}
+
+// TestResumeFallback_ClearsStaleSessionID verifies that when agent.StartSession
+// fails with a stale session ID and falls back to a fresh session, the stale
+// AgentSessionID is cleared so CompareAndSetAgentSessionID can write the new ID
+// (issue #830, matching the relay fallback at engine.go:12640).
+func TestResumeFallback_ClearsStaleSessionID(t *testing.T) {
+	freshSess := newControllableSession("fresh-id")
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
+			if sessionID != "" {
+				return nil, errors.New("session not found")
+			}
+			return freshSess, nil
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Session has a stale AgentSessionID from a previously killed agent.
+	session := &Session{AgentSessionID: "stale-id", AgentType: "controllable"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	// The new agent session should be the fresh one.
+	if state.agentSession != freshSess {
+		t.Fatal("expected fresh agent session from fallback")
+	}
+
+	// The stale ID should have been replaced with the new ID.
+	got := session.GetAgentSessionID()
+	if got != "fresh-id" {
+		t.Fatalf("AgentSessionID = %q, want %q — stale ID should be replaced", got, "fresh-id")
 	}
 }
 
@@ -9760,7 +9866,11 @@ func TestRunShellWithProgress_EmptyOutput(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "true", t.TempDir(), 5*time.Second, 4000)
+	cmd := "true"
+	if runtime.GOOS == "windows" {
+		cmd = `cmd /c "exit /b 0"`
+	}
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -9786,7 +9896,11 @@ func TestRunShellWithProgress_StderrOutput(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "echo err >&2", t.TempDir(), 5*time.Second, 4000)
+	cmd := "echo err >&2"
+	if runtime.GOOS == "windows" {
+		cmd = `cmd /c "echo err >&2"`
+	}
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -9816,7 +9930,13 @@ func TestRunShellWithProgress_LongOutputTruncated(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
 	// Generate output longer than maxOutput
-	err := e.runShellWithProgress(p, "ctx", "python3 -c 'print(\"x\" * 5000)'", t.TempDir(), 5*time.Second, 100)
+	cmd := "python3 -c 'print(\"x\" * 5000)'"
+	timeout := 5 * time.Second
+	if runtime.GOOS == "windows" {
+		cmd = `Write-Host ('x' * 5000)`
+		timeout = 15 * time.Second
+	}
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), timeout, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -9859,7 +9979,7 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 			if !strings.Contains(last, "❌") {
 				t.Errorf("expected failure emoji, got %q", last)
 			}
-			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") {
+			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") && !strings.Contains(last, "CommandNotFoundException") {
 				t.Errorf("expected start failure message, got %q", last)
 			}
 			return
@@ -13551,5 +13671,113 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 	id2 := matchPrefix("ps", builtinCommands)
 	if id2 != "ps" {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
+}
+
+func TestHandlePendingPermission_AskQuestion_EmptyContentRejected(t *testing.T) {
+	// Regression test for #1086: empty or whitespace-only messages must NOT
+	// be accepted as AskUserQuestion answers. Some platforms deliver read-receipts
+	// or delivery notifications as empty messages within ~500ms; before this fix,
+	// they resolved the question with empty answers immediately.
+	e := newTestEngine()
+
+	session := &recordingAgentSession{}
+	pending := &pendingPermission{
+		RequestID: "req-askq",
+		Questions: testQuestions(),
+		Answers:   map[int]string{},
+		Resolved:  make(chan struct{}),
+	}
+
+	iKey := "ws:sk"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{
+		agentSession: session,
+		pending:      pending,
+	}
+	e.interactiveMu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "sk", ReplyCtx: "ctx"}
+
+	for _, emptyContent := range []string{"", "   ", "\t", "\n"} {
+		if e.handlePendingPermission(p, msg, emptyContent, iKey) {
+			t.Errorf("handlePendingPermission(%q) = true, want false (empty answer must be rejected)", emptyContent)
+		}
+		select {
+		case <-pending.Resolved:
+			t.Errorf("AskUserQuestion resolved with empty content %q", emptyContent)
+		default:
+		}
+		if session.calls != 0 {
+			t.Errorf("RespondPermission called with empty content %q", emptyContent)
+		}
+	}
+
+	// A real answer should still work after the empty ones were rejected.
+	if !e.handlePendingPermission(p, msg, "1", iKey) {
+		t.Fatal("handlePendingPermission(\"1\") = false, want true")
+	}
+	if session.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", session.calls)
+	}
+}
+
+func TestMaybeAutoResetSessionOnIdle_UsesLastUserActivity(t *testing.T) {
+	// Regression test for #1115 Bug 2: maybeAutoResetSessionOnIdle must use
+	// LastUserActivity (only updated on real user messages) rather than
+	// UpdatedAt (bumped by every session.Unlock including heartbeats).
+	// Without the fix, automated activity (heartbeats, unsolicited agent output)
+	// would continuously bump UpdatedAt and prevent idle reset from ever firing.
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := sm.GetOrCreateActive("user:sk")
+	// Simulate history so the session is eligible for reset.
+	session.AddHistory("user", "hello")
+	session.SetAgentSessionID("agent-id-1", "claudecode")
+	session.TryLock()
+
+	// Simulate that UpdatedAt is recent (heartbeat just updated it)
+	// but LastUserActivity is old (last real user message was 35 minutes ago).
+	old := time.Now().Add(-35 * time.Minute)
+	session.mu.Lock()
+	session.UpdatedAt = time.Now() // heartbeat bumped this just now
+	session.LastUserActivity = old // last real user message was 35 min ago
+	session.mu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "sk", ReplyCtx: "ctx"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk", session)
+	if rotated == nil {
+		t.Fatal("expected idle reset to fire because LastUserActivity is 35min ago, but it did not")
+	}
+}
+
+func TestMaybeAutoResetSessionOnIdle_NotFiredWhenUserActivityRecent(t *testing.T) {
+	// Complementary test: when LastUserActivity is recent, the reset must NOT fire
+	// even if UpdatedAt is also recent (normal case).
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := sm.GetOrCreateActive("user:sk2")
+	session.AddHistory("user", "hello")
+	session.SetAgentSessionID("agent-id-2", "claudecode")
+	session.TryLock()
+
+	// LastUserActivity is only 5 minutes ago — should not idle-reset.
+	session.mu.Lock()
+	session.LastUserActivity = time.Now().Add(-5 * time.Minute)
+	session.mu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "sk2", ReplyCtx: "ctx"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk2", session)
+	if rotated != nil {
+		t.Fatal("expected no idle reset because LastUserActivity is only 5min ago")
 	}
 }

@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,9 @@ func TestTransformLocalReferences_PreservesInlineCodePathRange(t *testing.T) {
 }
 
 func TestTransformLocalReferences_PreservesWebMarkdownLinksAfterInlineCodeReference(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	cfg := ReferenceRenderCfg{
 		NormalizeAgents: []string{"claudecode"},
 		RenderPlatforms: []string{"feishu"},
@@ -100,6 +104,9 @@ func TestTransformLocalReferences_SmartDisplayFallsBackOnBasenameCollision(t *te
 }
 
 func TestTransformLocalReferences_RelativeDisplayUsesWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	cfg := ReferenceRenderCfg{
 		NormalizeAgents: []string{"codex"},
 		RenderPlatforms: []string{"feishu"},
@@ -131,6 +138,9 @@ func TestTransformLocalReferences_RelativeInputIsNotSplitByAbsoluteMatcher(t *te
 }
 
 func TestTransformLocalReferences_ChineseListSeparatorsDoNotMergeCandidates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	workspace := t.TempDir()
 	filePath := filepath.Join(workspace, "demo-repo", "README")
 	profileDir := filepath.Join(workspace, "demo-repo", "src", "components", "profile")
@@ -164,6 +174,9 @@ func TestTransformLocalReferences_ChineseListSeparatorsDoNotMergeCandidates(t *t
 }
 
 func TestTransformLocalReferences_ExistingDirectoryWithoutTrailingSlashIsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	workspace := t.TempDir()
 	dirPath := filepath.Join(workspace, "demo-repo", "src", "components")
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
@@ -185,6 +198,9 @@ func TestTransformLocalReferences_ExistingDirectoryWithoutTrailingSlashIsDir(t *
 }
 
 func TestTransformLocalReferences_WorkspaceRootDisplaysAsRelativeRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	workspace := t.TempDir()
 	cfg := ReferenceRenderCfg{
 		NormalizeAgents: []string{"codex"},
@@ -201,6 +217,9 @@ func TestTransformLocalReferences_WorkspaceRootDisplaysAsRelativeRoot(t *testing
 }
 
 func TestTransformLocalReferences_UnknownNoExtPathKeepsNoMarker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	workspace := t.TempDir()
 	unknown := filepath.Join(workspace, "mysterypath")
 	cfg := ReferenceRenderCfg{
