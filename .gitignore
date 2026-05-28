@@ -139,3 +139,5 @@ Desktop.ini
 *.pfx
 secrets/
 credentials/
+
+.codex

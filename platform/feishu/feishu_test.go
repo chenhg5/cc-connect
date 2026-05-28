@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,223 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 
 	if called {
 		t.Fatal("handler was called for a message already marked recalled")
+	}
+}
+
+func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
+	const appID = "cli_quote_image"
+	const appSecret = "secret-quote-image"
+	const parentMessageID = "om_parent_image"
+	const imageKey = "img_parent"
+
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+
+	tests := []struct {
+		name    string
+		msgType string
+		content string
+	}{
+		{
+			name:    "text reply",
+			msgType: "text",
+			content: `{"text":"这是什么图"}`,
+		},
+		{
+			name:    "post reply",
+			msgType: "post",
+			content: `{"content":[[{"tag":"text","text":"这是什么图"}]]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan *core.Message, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+				case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID:
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{
+						"code": 0,
+						"msg":  "success",
+						"data": map[string]any{
+							"items": []map[string]any{
+								{
+									"msg_type":  "image",
+									"parent_id": "",
+									"sender": map[string]any{
+										"id":          "",
+										"sender_type": "user",
+									},
+									"body": map[string]any{
+										"content": `{"image_key":"` + imageKey + `"}`,
+									},
+								},
+							},
+						},
+					})
+				case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID+"/resources/"+imageKey:
+					if r.URL.Query().Get("type") != "image" {
+						t.Fatalf("resource type = %q, want image", r.URL.Query().Get("type"))
+					}
+					w.Header().Set("Content-Type", "image/png")
+					if _, err := w.Write(imageData); err != nil {
+						t.Fatalf("write image: %v", err)
+					}
+				default:
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(_ core.Platform, msg *core.Message) {
+					got <- msg
+				},
+			}
+
+			p.dispatchMessage(
+				context.Background(),
+				tc.msgType,
+				tc.content,
+				nil,
+				"om_child",
+				"feishu:oc_chat:ou_user",
+				"",
+				"",
+				"",
+				parentMessageID,
+				"",
+				"",
+			)
+
+			select {
+			case msg := <-got:
+				if msg.Content != "这是什么图" {
+					t.Fatalf("Content = %q, want question text", msg.Content)
+				}
+				if !strings.Contains(msg.ExtraContent, "[image]") {
+					t.Fatalf("ExtraContent = %q, want quoted image marker", msg.ExtraContent)
+				}
+				if len(msg.Images) != 1 {
+					t.Fatalf("len(Images) = %d, want 1", len(msg.Images))
+				}
+				if string(msg.Images[0].Data) != string(imageData) {
+					t.Fatal("quoted image data did not match downloaded resource")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for dispatched message")
+			}
+		})
+	}
+}
+
+func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
+	const appID = "cli_quote_text"
+	const appSecret = "secret-quote-text"
+	const parentMessageID = "om_parent_text"
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"msg_type":  "text",
+							"parent_id": "",
+							"sender": map[string]any{
+								"id":          "ou_parent",
+								"sender_type": "user",
+							},
+							"body": map[string]any{
+								"content": `{"text":"请总结这条消息"}`,
+							},
+						},
+					},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		botOpenID:    "ou_bot",
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"@bot"}`,
+		[]*larkim.MentionEvent{
+			{Key: strPtr("@bot"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot")},
+		},
+		"om_child",
+		"feishu:oc_chat:ou_user",
+		"",
+		"",
+		"",
+		parentMessageID,
+		"",
+		"",
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty user text after bot mention stripping", msg.Content)
+		}
+		if !strings.Contains(msg.ExtraContent, "请总结这条消息") {
+			t.Fatalf("ExtraContent = %q, want quoted text", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for mention-only quoted text message")
 	}
 }
 
@@ -727,5 +945,264 @@ func TestResolveBotSenderName_NilMap(t *testing.T) {
 	}
 	if got := p.resolveBotSenderName(""); got != "Bot" {
 		t.Errorf("nil peerBots + empty id: got %q, want %q", got, "Bot")
+	}
+}
+
+func TestIsAttachmentMsgType(t *testing.T) {
+	tests := []struct {
+		msgType string
+		want    bool
+	}{
+		{"image", true},
+		{"file", true},
+		{"audio", true},
+		{"media", true},
+		{"text", false},
+		{"post", false},
+		{"sticker", false},
+		{"merge_forward", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isAttachmentMsgType(tt.msgType); got != tt.want {
+			t.Errorf("isAttachmentMsgType(%q) = %v, want %v", tt.msgType, got, tt.want)
+		}
+	}
+}
+
+func TestMarkAndIsActiveThreadSession(t *testing.T) {
+	const threadKey = "feishu:oc_chat:root:om_root"
+	const directKey = "feishu:oc_chat:ou_user"
+
+	t.Run("thread isolation disabled is no-op", func(t *testing.T) {
+		p := &Platform{threadIsolation: false}
+		p.markThreadSessionActive(threadKey)
+		if p.isActiveThreadSession(threadKey) {
+			t.Fatal("expected no-op when thread_isolation is off")
+		}
+	})
+
+	t.Run("non-thread sessionKey is ignored", func(t *testing.T) {
+		p := &Platform{threadIsolation: true}
+		p.markThreadSessionActive(directKey)
+		if p.isActiveThreadSession(directKey) {
+			t.Fatal("expected non-thread sessionKey to be ignored")
+		}
+	})
+
+	t.Run("thread sessionKey is recorded", func(t *testing.T) {
+		p := &Platform{threadIsolation: true}
+		if p.isActiveThreadSession(threadKey) {
+			t.Fatal("thread should not be active before mark")
+		}
+		p.markThreadSessionActive(threadKey)
+		if !p.isActiveThreadSession(threadKey) {
+			t.Fatal("thread should be active after mark")
+		}
+	})
+}
+
+// TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention covers the fix
+// for the case where a user @mentions the bot in a thread, then drops follow-up
+// images into the same thread without re-mentioning. Pre-fix, those images
+// were silently dropped by the group @bot filter; post-fix they should pass
+// through and be dispatched.
+func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
+	const appID = "cli_thread_admit"
+	const appSecret = "secret-thread-admit"
+	const botOpenID = "ou_bot"
+	const userOpenID = "ou_user"
+	const chatID = "oc_chat"
+	const rootMsgID = "om_root"
+	const imageKey = "img_in_thread"
+
+	imageBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageBytes); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			// Unknown calls (e.g. user/chat info lookups) return empty success
+			// so dispatch can continue past optional metadata fetches.
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 8)
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		botOpenID:       botOpenID,
+		threadIsolation: true,
+		dedup:           &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+
+	chatType := "group"
+	senderType := "user"
+	now := time.Now().UnixMilli()
+	createTime := func() *string {
+		s := strconv.FormatInt(now, 10)
+		now++
+		return &s
+	}
+
+	buildEvent := func(msgID, msgType, content string, mentions []*larkim.MentionEvent, rootID string) *larkim.P2MessageReceiveV1 {
+		ev := &larkim.P2MessageReceiveV1{
+			Event: &larkim.P2MessageReceiveV1Data{
+				Sender: &larkim.EventSender{
+					SenderId:   &larkim.UserId{OpenId: stringPtr(userOpenID)},
+					SenderType: &senderType,
+				},
+				Message: &larkim.EventMessage{
+					MessageId:   stringPtr(msgID),
+					ChatId:      stringPtr(chatID),
+					ChatType:    &chatType,
+					MessageType: stringPtr(msgType),
+					Content:     stringPtr(content),
+					CreateTime:  createTime(),
+					Mentions:    mentions,
+				},
+			},
+		}
+		if rootID != "" {
+			ev.Event.Message.RootId = stringPtr(rootID)
+		}
+		return ev
+	}
+
+	botMention := []*larkim.MentionEvent{
+		{
+			Key:  stringPtr("@_user_1"),
+			Id:   &larkim.UserId{OpenId: stringPtr(botOpenID)},
+			Name: stringPtr("claude code"),
+		},
+	}
+
+	// Step 1: opening message @mentions the bot — establishes the thread.
+	if err := p.onMessage(context.Background(), buildEvent(rootMsgID, "text", `{"text":"@_user_1 看看这个"}`, botMention, "")); err != nil {
+		t.Fatalf("onMessage(root) error = %v", err)
+	}
+	threadKey := "feishu:" + chatID + ":root:" + rootMsgID
+	if !p.isActiveThreadSession(threadKey) {
+		t.Fatalf("thread %q should be marked active after @bot text", threadKey)
+	}
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the opening @bot text to dispatch")
+	}
+
+	// Step 2: follow-up image in the same thread, no @mention — should pass through.
+	imgContent := `{"image_key":"` + imageKey + `"}`
+	if err := p.onMessage(context.Background(), buildEvent("om_thread_img", "image", imgContent, nil, rootMsgID)); err != nil {
+		t.Fatalf("onMessage(image in thread) error = %v", err)
+	}
+	select {
+	case msg := <-received:
+		if msg.MessageID != "om_thread_img" {
+			t.Fatalf("expected dispatched image om_thread_img, got %q", msg.MessageID)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("expected dispatched image to carry 1 attachment, got %d", len(msg.Images))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected image in active thread to be dispatched without @mention")
+	}
+
+	// Step 3: image in a *different* thread without @mention — should still be dropped.
+	if err := p.onMessage(context.Background(), buildEvent("om_other_img", "image", imgContent, nil, "om_other_root")); err != nil {
+		t.Fatalf("onMessage(image in unrelated thread) error = %v", err)
+	}
+	select {
+	case msg := <-received:
+		t.Fatalf("image in unrelated thread should be dropped, but handler received %q", msg.MessageID)
+	case <-time.After(300 * time.Millisecond):
+		// expected: nothing dispatched
+	}
+
+	// Step 4: text without @mention in the active thread — should be dropped
+	// (only attachments are admitted; otherwise unrelated thread chatter would
+	// flood the agent).
+	if err := p.onMessage(context.Background(), buildEvent("om_thread_text", "text", `{"text":"刚才那张图能看到吗"}`, nil, rootMsgID)); err != nil {
+		t.Fatalf("onMessage(text in thread without mention) error = %v", err)
+	}
+	select {
+	case msg := <-received:
+		t.Fatalf("text in active thread without @mention should be dropped, got %q", msg.MessageID)
+	case <-time.After(300 * time.Millisecond):
+		// expected
+	}
+}
+
+func extractBasePlatform(p core.Platform) *Platform {
+	if fp, ok := p.(*Platform); ok {
+		return fp
+	}
+	if ip, ok := p.(*interactivePlatform); ok {
+		return ip.Platform
+	}
+	return nil
+}
+
+func TestNewPlatform_RequireMentionFalseAliasesGroupReplyAll(t *testing.T) {
+	// Regression test for #1141: users set require_mention = false but feishu
+	// reads group_reply_all. The two options must be equivalent so that
+	// group messages without @mention are NOT silently dropped.
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":          "cli_test",
+		"app_secret":      "secret",
+		"require_mention": false,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil {
+		t.Fatal("expected *Platform or *interactivePlatform")
+	}
+	if !fp.groupReplyAll {
+		t.Error("require_mention=false should set groupReplyAll=true, but it is false")
+	}
+}
+
+func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
+	// require_mention = true (the default) must NOT set groupReplyAll.
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":          "cli_test",
+		"app_secret":      "secret",
+		"require_mention": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil {
+		t.Fatal("expected *Platform or *interactivePlatform")
+	}
+	if fp.groupReplyAll {
+		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
 	}
 }

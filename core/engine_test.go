@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -994,6 +995,36 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 }
 
+func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextIndicator(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	sideText := "已发送 AGENTS.md 文件给你。"
+	if err := e.SendToSessionWithAttachments(sessionKey, sideText, nil, []FileAttachment{{
+		MimeType: "text/markdown",
+		Data:     []byte("body"),
+		FileName: "AGENTS.md",
+	}}); err != nil {
+		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: sideText, InputTokens: 52000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
+		t.Fatalf("sent text = %#v, want only the side-channel message without duplicate ctx reply", got)
+	}
+}
+
 func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1030,6 +1061,7 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
@@ -1069,9 +1101,114 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := fmt.Sprintf("answer\n\n*xhigh · 100%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · 100%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-context"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-context")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-context",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 28000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-context", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := fmt.Sprintf("answer\n\n*[ctx: ~14%%] · glm-5.1 · %s*", compactReplyFooterPath(filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")))
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-tool-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-tool-footer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-tool-footer",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "已处理完成。"}
+	agentSession.events <- Event{Type: EventResult, Content: "已处理完成。", InputTokens: 28000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-tool-footer", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("sent = nil, want final reply")
+	}
+	final := sent[len(sent)-1]
+	want := fmt.Sprintf("已处理完成。\n\n*[ctx: ~14%%] · glm-5.1 · %s*", compactReplyFooterPath(filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")))
+	if final != want {
+		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
+	}
+}
+
+func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-ellipsis"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-ellipsis")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-ellipsis",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "..."}
+	agentSession.events <- Event{Type: EventText, Content: "..."}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ellipsis", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("sent = %#v, want only final answer without standalone ellipsis progress", sent)
 	}
 }
 
@@ -1125,6 +1262,7 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
@@ -1496,6 +1634,9 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 }
 
 func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
 	p := &stubPlatformEngine{n: "feishu"}
 	a := &namedStubModelModeAgent{name: "codex"}
 	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
@@ -2480,7 +2621,7 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: sessionKey, ReplyCtx: "ctx"}
 
-	if !e.handlePendingPermission(p, msg, "allow") {
+	if !e.handlePendingPermission(p, msg, "allow", "") {
 		t.Fatal("expected pending permission to be handled")
 	}
 
@@ -3009,8 +3150,8 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
-	session.Name = "Focus"
 	session.SetAgentSessionID("session-123", "test")
+	e.sessions.SetSessionName("session-123", "Focus")
 	session.History = append(session.History, HistoryEntry{Role: "user", Content: "hello", Timestamp: time.Now()})
 
 	e.cmdCurrent(p, msg)
@@ -3021,9 +3162,161 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Current session") {
 		t.Fatalf("current text = %q, want legacy current session text", p.sent[0])
 	}
+	if !strings.Contains(p.sent[0], "Focus") {
+		t.Fatalf("current text = %q, want session name 'Focus'", p.sent[0])
+	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
 	}
+}
+
+func TestCmdCurrent_ShowsAgentSummaryWhenNoCustomName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-abc", Summary: "Fix the login bug", MessageCount: 5},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Fix the login bug") {
+		t.Fatalf("current text = %q, want agent summary 'Fix the login bug'", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_ShowsUntitledWhenNoNameOrSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-xyz", Summary: "", MessageCount: 0},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-xyz", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "(untitled)") {
+		t.Fatalf("current text = %q, want '(untitled)' fallback", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_CustomNameOverridesSummary(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-override", Summary: "Agent summary", MessageCount: 3},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-override", "test")
+	e.sessions.SetSessionName("session-override", "MyCustomName")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "MyCustomName") {
+		t.Fatalf("current text = %q, want custom name 'MyCustomName'", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Agent summary") {
+		t.Fatalf("current text = %q, should not contain agent summary when custom name set", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_NotStartedSessionShowsUntitled(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "(untitled)") {
+		t.Fatalf("current text = %q, want '(untitled)' for not-started session", p.sent[0])
+	}
+}
+
+type stubTitleAgent struct {
+	stubAgent
+	titles map[string]string
+}
+
+func (a *stubTitleAgent) GetSessionTitle(sessionID string) string {
+	if a.titles == nil {
+		return ""
+	}
+	return a.titles[sessionID]
+}
+
+func TestCmdCurrent_SessionTitleProviderFallback(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubTitleAgent{
+		titles: map[string]string{
+			"session-not-in-list": "Title from DB",
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-not-in-list", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Title from DB") {
+		t.Fatalf("current text = %q, want 'Title from DB' from SessionTitleProvider", p.sent[0])
+	}
+}
+
+func TestCmdCurrent_SessionTitleProviderNotUsedWhenListMatches(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubListAgentWithTitle{
+		stubTitleAgent: stubTitleAgent{
+			titles: map[string]string{
+				"session-abc": "DB Title (should not appear)",
+			},
+		},
+		sessions: []AgentSessionInfo{
+			{ID: "session-abc", Summary: "List Summary", MessageCount: 5},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("session-abc", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "List Summary") {
+		t.Fatalf("current text = %q, want 'List Summary' from ListSessions", p.sent[0])
+	}
+}
+
+type stubListAgentWithTitle struct {
+	stubTitleAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *stubListAgentWithTitle) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.sessions, nil
 }
 
 func TestCmdDelete_BatchCommaList(t *testing.T) {
@@ -4490,6 +4783,162 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 }
 
+// TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions is a regression test
+// for the bug where cmdReasoning called e.sessions.Save() (global) instead of
+// sessions.Save() (workspace-resolved), leaving workspace session state unsaved.
+func TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubModelModeAgent{}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-reasoning-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubModelModeAgent{}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("ws-session-id", "test")
+	wsSession.AddHistory("user", "hello")
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session-id", "test")
+
+	e.cmdReasoning(p, msg, []string{"3"}) // selects "high"
+
+	if wsAgent.reasoningEffort != "high" {
+		t.Fatalf("workspace agent reasoning effort = %q, want high", wsAgent.reasoningEffort)
+	}
+	if got := wsSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+}
+
+// TestCmdProvider_ClearMultiWorkspaceUsesWorkspaceSessions is a regression test
+// for the bug where cmdProvider "clear" used e.sessions (global) instead of
+// the workspace-resolved sessions, and called providerSaveFunc in workspace mode.
+func TestCmdProvider_ClearMultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}},
+		active:    "openai",
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	var savedProvider string
+	e.SetProviderSaveFunc(func(name string) error {
+		savedProvider = name
+		return nil
+	})
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-provider-clear-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}},
+		active:    "openai",
+	}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("ws-session-id", "test")
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session-id", "test")
+
+	e.cmdProvider(p, msg, []string{"clear"})
+
+	if got := wsSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+	// providerSaveFunc must not be called when operating on a workspace agent.
+	if savedProvider != "" {
+		t.Fatalf("providerSaveFunc was called with %q in workspace mode, want no call", savedProvider)
+	}
+}
+
+// TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions is a regression test
+// for the bug where switchProvider used e.sessions (global) instead of the
+// workspace-resolved sessions, and called providerSaveFunc in workspace mode.
+func TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}, {Name: "azure"}},
+		active:    "openai",
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+
+	var savedProvider string
+	e.SetProviderSaveFunc(func(name string) error {
+		savedProvider = name
+		return nil
+	})
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-provider-switch-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "openai"}, {Name: "azure"}},
+		active:    "openai",
+	}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+
+	wsSession := ws.sessions.GetOrCreateActive(msg.SessionKey)
+	wsSession.SetAgentSessionID("ws-session-id", "test")
+
+	globalSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	globalSession.SetAgentSessionID("global-session-id", "test")
+
+	e.cmdProvider(p, msg, []string{"switch", "azure"})
+
+	if wsAgent.active != "azure" {
+		t.Fatalf("workspace agent active provider = %q, want azure", wsAgent.active)
+	}
+	if got := wsSession.GetAgentSessionID(); got != "" {
+		t.Fatalf("workspace session id = %q, want cleared", got)
+	}
+	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
+		t.Fatalf("global session id = %q, want untouched", got)
+	}
+	// providerSaveFunc must not be called when operating on a workspace agent.
+	if savedProvider != "" {
+		t.Fatalf("providerSaveFunc was called with %q in workspace mode, want no call", savedProvider)
+	}
+}
+
 func TestCmdMode_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	agent := &stubModelModeAgent{}
@@ -4635,6 +5084,28 @@ func TestHandleMessage_ExtraContentPreservedThroughAlias(t *testing.T) {
 	}
 	if !strings.Contains(msg.Content, "hello world") {
 		t.Fatalf("alias not resolved: msg.Content = %q", msg.Content)
+	}
+}
+
+func TestHandleMessage_ExtraContentOnlyIsProcessed(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{
+		SessionKey:   "test:user1",
+		ReplyCtx:     "ctx",
+		Content:      "",
+		ExtraContent: "> quoted reply context",
+		Platform:     "test",
+		UserID:       "user1",
+		MessageID:    "m-extra-only",
+	}
+
+	e.handleMessage(p, msg)
+
+	if msg.Content != "> quoted reply context" {
+		t.Fatalf("Content = %q, want ExtraContent to become message content", msg.Content)
 	}
 }
 
@@ -5319,7 +5790,7 @@ func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 		UserID:     "user1",
 		Content:    "2",
 		ReplyCtx:   "ctx",
-	}, "2")
+	}, "2", "")
 
 	if !handled {
 		t.Fatal("expected handlePendingPermission to return true")
@@ -5370,7 +5841,7 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 		UserID:     "user1",
 		Content:    "1",
 		ReplyCtx:   "ctx",
-	}, "1")
+	}, "1", "")
 	if !handled {
 		t.Fatal("expected handled=true for question 0")
 	}
@@ -5392,7 +5863,7 @@ func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *tes
 		UserID:     "user1",
 		Content:    "2",
 		ReplyCtx:   "ctx",
-	}, "2")
+	}, "2", "")
 	if !handled {
 		t.Fatal("expected handled=true for question 1")
 	}
@@ -5446,7 +5917,7 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 		UserID:     "user1",
 		Content:    "allow",
 		ReplyCtx:   "ctx",
-	}, "allow")
+	}, "allow", "")
 
 	if !handled {
 		t.Fatal("expected handled=true")
@@ -5520,12 +5991,16 @@ func (s *controllableAgentSession) Close() error {
 
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
-	nextSession AgentSession
-	listFn      func() ([]AgentSessionInfo, error)
+	nextSession    AgentSession
+	listFn         func() ([]AgentSessionInfo, error)
+	startSessionFn func(ctx context.Context, sessionID string) (AgentSession, error)
 }
 
 func (a *controllableAgent) Name() string { return "controllable" }
-func (a *controllableAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+func (a *controllableAgent) StartSession(ctx context.Context, sessionID string) (AgentSession, error) {
+	if a.startSessionFn != nil {
+		return a.startSessionFn(ctx, sessionID)
+	}
 	if a.nextSession != nil {
 		return a.nextSession, nil
 	}
@@ -5819,6 +6294,78 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 
 	if got != "existing-uuid" {
 		t.Fatalf("AgentSessionID = %q, want %q — writeback should not overwrite", got, "existing-uuid")
+	}
+}
+
+// TestCmdStop_ClearsAgentSessionID verifies that /stop clears the stale
+// AgentSessionID so the next message starts a fresh agent instead of trying
+// to resume the killed session (issue #830).
+func TestCmdStop_ClearsAgentSessionID(t *testing.T) {
+	sess := newControllableSession("agent-1")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Seed a live interactive state.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// Set the Session's AgentSessionID to match (simulates a normal turn).
+	active := e.sessions.GetOrCreateActive(key)
+	active.SetAgentSessionID("agent-1", "controllable")
+	e.sessions.Save()
+
+	// Simulate /stop: it uses interactiveKeyForSessionKey internally.
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+	e.cmdStop(p, msg)
+
+	// After /stop, AgentSessionID must be cleared.
+	got := active.GetAgentSessionID()
+	if got != "" {
+		t.Fatalf("AgentSessionID = %q, want empty after /stop", got)
+	}
+}
+
+// TestResumeFallback_ClearsStaleSessionID verifies that when agent.StartSession
+// fails with a stale session ID and falls back to a fresh session, the stale
+// AgentSessionID is cleared so CompareAndSetAgentSessionID can write the new ID
+// (issue #830, matching the relay fallback at engine.go:12640).
+func TestResumeFallback_ClearsStaleSessionID(t *testing.T) {
+	freshSess := newControllableSession("fresh-id")
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
+			if sessionID != "" {
+				return nil, errors.New("session not found")
+			}
+			return freshSess, nil
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Session has a stale AgentSessionID from a previously killed agent.
+	session := &Session{AgentSessionID: "stale-id", AgentType: "controllable"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	// The new agent session should be the fresh one.
+	if state.agentSession != freshSess {
+		t.Fatal("expected fresh agent session from fallback")
+	}
+
+	// The stale ID should have been replaced with the new ID.
+	got := session.GetAgentSessionID()
+	if got != "fresh-id" {
+		t.Fatalf("AgentSessionID = %q, want %q — stale ID should be replaced", got, "fresh-id")
 	}
 }
 
@@ -6505,7 +7052,7 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 		t.Fatal("permission inline buttons not sent while Send blocked")
 	}
 
-	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow") {
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "allow", "") {
 		t.Fatal("expected handlePendingPermission to resolve pending request")
 	}
 	close(sess.unblock)
@@ -6648,7 +7195,7 @@ func TestReapIdleWorkspaces_SkipsWorkspaceWaitingForPermission(t *testing.T) {
 		UserID:     "user2",
 		Content:    "allow",
 		ReplyCtx:   "ctx",
-	}, "allow") {
+	}, "allow", "") {
 		t.Fatal("expected pending permission to be handled")
 	}
 	close(sess.unblock)
@@ -8179,7 +8726,7 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123")
+	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123", "")
 	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -8190,7 +8737,7 @@ func TestBuildSenderPrompt_Disabled(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(false)
 
-	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "Alice", "feishu", "feishu:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when disabled, got %q", result)
 	}
@@ -8200,7 +8747,7 @@ func TestBuildSenderPrompt_EmptyUserID(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1")
+	result := e.buildSenderPrompt("hello", "", "Bob", "telegram", "telegram:ch:user1", "")
 	if result != "hello" {
 		t.Fatalf("expected raw content when userID is empty, got %q", result)
 	}
@@ -8210,7 +8757,7 @@ func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1")
+	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1", "")
 	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -8221,7 +8768,7 @@ func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999")
+	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
 	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -8237,7 +8784,14 @@ func TestExtractChannelID(t *testing.T) {
 		{"telegram:group123:user2", "group123"},
 		{"plain", ""},
 		{"a:b", "b"},
-		{"a:b:c:d", "b"},
+		{"a:bb:c:d", "bb"},
+		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
+		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
+		// 3-segment shared-session keys with single-char type tag — used by
+		// dingtalk/qq/qqbot when share_session_in_channel is enabled.
+		{"dingtalk:g:cidZZZ", "cidZZZ"},
+		{"qq:g:12345", "12345"},
+		{"qqbot:g:openid_abc", "openid_abc"},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -8261,7 +8815,7 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 		{"slack", "slack:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
-		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey)
+		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey, "")
 		if !strings.Contains(result, "platform="+tc.platform) {
 			t.Errorf("missing platform=%s in %q", tc.platform, result)
 		}
@@ -8275,12 +8829,38 @@ func TestBuildSenderPrompt_SanitizesSpecialChars(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1")
+	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1", "")
 	if strings.Contains(result, `"Name`) || strings.Contains(result, "\n"+`Inject`) {
 		t.Fatalf("quotes/newlines should be sanitized, got %q", result)
 	}
 	if !strings.Contains(result, `sender_name="Evil'Name Inject"`) {
 		t.Fatalf("expected sanitized name, got %q", result)
+	}
+}
+
+func TestBuildSenderPrompt_ChannelKeyOverridesSessionKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is provided, it should be used as chat_id instead of
+	// extracting from sessionKey (which would give "g" for dingtalk).
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "cidXXX")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
+	}
+}
+
+func TestBuildSenderPrompt_FallbackWithoutChannelKey(t *testing.T) {
+	e := newTestEngine()
+	e.SetInjectSender(true)
+
+	// When channelKey is empty, extractChannelID heuristic should detect
+	// the 4-segment format and extract the correct channel.
+	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "")
+	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	if result != expected {
+		t.Fatalf("got %q, want %q", result, expected)
 	}
 }
 
@@ -8771,7 +9351,11 @@ func TestRunShellWithProgress_EmptyOutput(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "true", t.TempDir(), 5*time.Second, 4000)
+	cmd := "true"
+	if runtime.GOOS == "windows" {
+		cmd = `cmd /c "exit /b 0"`
+	}
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -8797,7 +9381,11 @@ func TestRunShellWithProgress_StderrOutput(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "echo err >&2", t.TempDir(), 5*time.Second, 4000)
+	cmd := "echo err >&2"
+	if runtime.GOOS == "windows" {
+		cmd = `cmd /c "echo err >&2"`
+	}
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -8827,7 +9415,13 @@ func TestRunShellWithProgress_LongOutputTruncated(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
 	// Generate output longer than maxOutput
-	err := e.runShellWithProgress(p, "ctx", "python3 -c 'print(\"x\" * 5000)'", t.TempDir(), 5*time.Second, 100)
+	cmd := "python3 -c 'print(\"x\" * 5000)'"
+	timeout := 5 * time.Second
+	if runtime.GOOS == "windows" {
+		cmd = `Write-Host ('x' * 5000)`
+		timeout = 15 * time.Second
+	}
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), timeout, 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -8870,7 +9464,7 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 			if !strings.Contains(last, "❌") {
 				t.Errorf("expected failure emoji, got %q", last)
 			}
-			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") {
+			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") && !strings.Contains(last, "CommandNotFoundException") {
 				t.Errorf("expected start failure message, got %q", last)
 			}
 			return
@@ -9686,6 +10280,7 @@ func TestWorkspace_Init_LocalDirAbsolute(t *testing.T) {
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -9713,6 +10308,7 @@ func TestWorkspace_Init_LocalDirRelative(t *testing.T) {
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
 
 	// Use relative name — should resolve under baseDir.
 	msg := &Message{
@@ -9737,6 +10333,7 @@ func TestWorkspace_Init_LocalDirNotFound(t *testing.T) {
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetWorkspaceInitAllowLocalPaths(true)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -9754,6 +10351,35 @@ func TestWorkspace_Init_LocalDirNotFound(t *testing.T) {
 	projectKey := "project:test"
 	if got := e.workspaceBindings.Lookup(projectKey, workspaceChannelKey("test", "ch1")); got != nil {
 		t.Fatalf("expected no binding for nonexistent dir, got %+v", got)
+	}
+}
+
+func TestWorkspace_Init_LocalDirDisabledByDefault(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "my-project")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bindStore := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindStore)
+
+	msg := &Message{
+		SessionKey: "test:ch1:user1",
+		Content:    "/workspace init " + wsDir,
+		ReplyCtx:   "ctx",
+		UserID:     "user1",
+	}
+	e.handleCommand(p, msg, msg.Content)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "workspace_init_allow_local_paths") {
+		t.Fatalf("expected local-path disabled reply, got %v", sent)
+	}
+	if got := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("test", "ch1")); got != nil {
+		t.Fatalf("expected no binding when local init paths are disabled, got %+v", got)
 	}
 }
 
@@ -10710,6 +11336,91 @@ func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
 	}
 }
 
+func TestExecuteCronJob_ExpandsSlashSkillPrompt(t *testing.T) {
+	tests := []struct {
+		name          string
+		prompt        string
+		wantContains  []string
+		wantNotExpand bool // true = expected to be passed through literally
+	}{
+		{
+			name:         "registered skill expands with args",
+			prompt:       "/daily-brief today",
+			wantContains: []string{"## Skill:", "daily-brief", "Prompt body", "today"},
+		},
+		{
+			name:         "registered skill expands with no args",
+			prompt:       "/daily-brief",
+			wantContains: []string{"## Skill:", "daily-brief", "Prompt body"},
+		},
+		{
+			name:          "unknown slash command passes through literally",
+			prompt:        "/no-such-skill arg",
+			wantContains:  []string{"/no-such-skill arg"},
+			wantNotExpand: true,
+		},
+		{
+			name:          "non-slash prompt passes through unchanged",
+			prompt:        "summarize today's activity",
+			wantContains:  []string{"summarize today's activity"},
+			wantNotExpand: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			skillRoot := t.TempDir()
+			writeSkillFile(t, filepath.Join(skillRoot, "daily-brief", "SKILL.md"), "Daily brief skill")
+
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatalf("NewCronStore() error = %v", err)
+			}
+
+			platform := &stubCronReplyTargetPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			}
+			agentSession := newResultAgentSession("ok")
+			agent := &resultAgent{session: agentSession}
+
+			e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+			defer e.cancel()
+			e.skills.SetDirs([]string{skillRoot})
+
+			job := &CronJob{
+				ID:         "job-skill",
+				SessionKey: "discord:channel-1:user-1",
+				Prompt:     tt.prompt,
+			}
+			if err := store.Add(job); err != nil {
+				t.Fatalf("store.Add() error = %v", err)
+			}
+
+			if err := e.ExecuteCronJob(job); err != nil {
+				t.Fatalf("ExecuteCronJob() error = %v", err)
+			}
+
+			if len(agentSession.sentPrompts) != 1 {
+				t.Fatalf("sentPrompts = %d, want 1: %#v", len(agentSession.sentPrompts), agentSession.sentPrompts)
+			}
+			got := agentSession.sentPrompts[0]
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("agent prompt does not contain %q\ngot: %s", want, got)
+				}
+			}
+			if tt.wantNotExpand && strings.Contains(got, "## Skill Instructions:") {
+				t.Errorf("expected raw passthrough, but prompt was skill-expanded\ngot: %s", got)
+			}
+			// Stored prompt must not be rewritten on the job itself.
+			if job.Prompt != tt.prompt {
+				t.Errorf("job.Prompt = %q, want %q (unchanged)", job.Prompt, tt.prompt)
+			}
+		})
+	}
+}
+
 func TestExtractSessionKeyParts(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -10725,6 +11436,9 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"single colon", "discord:channel1", "discord", "channel1", "discord:channel1", ""},
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
+		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
+		{"three-segment with type tag (shared session)", "dingtalk:g:cidZZZ", "dingtalk", "cidZZZ", "dingtalk:cidZZZ", ""},
+		{"three-segment qq group", "qq:g:12345", "qq", "12345", "qq:12345", ""},
 	}
 
 	for _, tt := range tests {
@@ -10791,6 +11505,242 @@ type stubPlatformWithObserve struct {
 
 func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
 	return nil
+}
+
+// --- Instant Reply tests ---
+
+// stubStreamingCardPlatform simulates a platform that supports StreamingCardPlatform
+// (e.g. DingTalk with AI Card configured), so instant reply should be skipped.
+type stubStreamingCardPlatform struct {
+	stubPlatformEngine
+	cardCreated bool
+	cardFail    bool // when true, CreateStreamingCard returns an error
+}
+
+func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	if p.cardFail {
+		return nil, fmt.Errorf("stub: card_template_id not configured")
+	}
+	p.cardCreated = true
+	return &stubStreamingCard{}, nil
+}
+
+// stubStreamingCard is a minimal StreamingCard for tests.
+type stubStreamingCard struct{}
+
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
+func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Failed() bool                               { return false }
+
+func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for async processing to complete
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply '🤔 Thinking...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_UsesDefaultI18nWhenContentEmpty(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true}) // Content empty → use MsgStarting
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "⏳ 处理中..." {
+		t.Fatalf("first reply = %q, want i18n default '⏳ 处理中...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedWhenDisabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// InstantReply not set (default: disabled)
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	// The only reply should be the agent result, no instant reply
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want exactly 1 (no instant reply), got: %v", len(sent), sent)
+	}
+	if sent[0] != "agent reply" {
+		t.Fatalf("first reply = %q, want 'agent reply'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// When streaming card succeeds, the agent reply goes through streamCard.Finalize,
+	// not p.Send. Wait briefly then verify no instant reply was sent via p.Send.
+	time.Sleep(500 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_InstantReply_SentWhenStreamingCardFails(t *testing.T) {
+	p := &stubStreamingCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "dingtalk"},
+		cardFail:           true,
+	}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for replies, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	if sent[0] != "🤔 Thinking..." {
+		t.Fatalf("first reply = %q, want instant reply when card creation fails", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_SkippedForSlashCommands(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "/help",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Give a short time for any async processing
+	time.Sleep(200 * time.Millisecond)
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if s == "🤔 Thinking..." {
+			t.Fatalf("instant reply should be skipped for slash commands, but got: %v", sent)
+		}
+	}
 }
 
 // ===========================================================================
@@ -12183,5 +13133,113 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 	id2 := matchPrefix("ps", builtinCommands)
 	if id2 != "ps" {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
+}
+
+func TestHandlePendingPermission_AskQuestion_EmptyContentRejected(t *testing.T) {
+	// Regression test for #1086: empty or whitespace-only messages must NOT
+	// be accepted as AskUserQuestion answers. Some platforms deliver read-receipts
+	// or delivery notifications as empty messages within ~500ms; before this fix,
+	// they resolved the question with empty answers immediately.
+	e := newTestEngine()
+
+	session := &recordingAgentSession{}
+	pending := &pendingPermission{
+		RequestID: "req-askq",
+		Questions: testQuestions(),
+		Answers:   map[int]string{},
+		Resolved:  make(chan struct{}),
+	}
+
+	iKey := "ws:sk"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{
+		agentSession: session,
+		pending:      pending,
+	}
+	e.interactiveMu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "sk", ReplyCtx: "ctx"}
+
+	for _, emptyContent := range []string{"", "   ", "\t", "\n"} {
+		if e.handlePendingPermission(p, msg, emptyContent, iKey) {
+			t.Errorf("handlePendingPermission(%q) = true, want false (empty answer must be rejected)", emptyContent)
+		}
+		select {
+		case <-pending.Resolved:
+			t.Errorf("AskUserQuestion resolved with empty content %q", emptyContent)
+		default:
+		}
+		if session.calls != 0 {
+			t.Errorf("RespondPermission called with empty content %q", emptyContent)
+		}
+	}
+
+	// A real answer should still work after the empty ones were rejected.
+	if !e.handlePendingPermission(p, msg, "1", iKey) {
+		t.Fatal("handlePendingPermission(\"1\") = false, want true")
+	}
+	if session.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", session.calls)
+	}
+}
+
+func TestMaybeAutoResetSessionOnIdle_UsesLastUserActivity(t *testing.T) {
+	// Regression test for #1115 Bug 2: maybeAutoResetSessionOnIdle must use
+	// LastUserActivity (only updated on real user messages) rather than
+	// UpdatedAt (bumped by every session.Unlock including heartbeats).
+	// Without the fix, automated activity (heartbeats, unsolicited agent output)
+	// would continuously bump UpdatedAt and prevent idle reset from ever firing.
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := sm.GetOrCreateActive("user:sk")
+	// Simulate history so the session is eligible for reset.
+	session.AddHistory("user", "hello")
+	session.SetAgentSessionID("agent-id-1", "claudecode")
+	session.TryLock()
+
+	// Simulate that UpdatedAt is recent (heartbeat just updated it)
+	// but LastUserActivity is old (last real user message was 35 minutes ago).
+	old := time.Now().Add(-35 * time.Minute)
+	session.mu.Lock()
+	session.UpdatedAt = time.Now() // heartbeat bumped this just now
+	session.LastUserActivity = old // last real user message was 35 min ago
+	session.mu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "sk", ReplyCtx: "ctx"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk", session)
+	if rotated == nil {
+		t.Fatal("expected idle reset to fire because LastUserActivity is 35min ago, but it did not")
+	}
+}
+
+func TestMaybeAutoResetSessionOnIdle_NotFiredWhenUserActivityRecent(t *testing.T) {
+	// Complementary test: when LastUserActivity is recent, the reset must NOT fire
+	// even if UpdatedAt is also recent (normal case).
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := sm.GetOrCreateActive("user:sk2")
+	session.AddHistory("user", "hello")
+	session.SetAgentSessionID("agent-id-2", "claudecode")
+	session.TryLock()
+
+	// LastUserActivity is only 5 minutes ago — should not idle-reset.
+	session.mu.Lock()
+	session.LastUserActivity = time.Now().Add(-5 * time.Minute)
+	session.mu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{SessionKey: "sk2", ReplyCtx: "ctx"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk2", session)
+	if rotated != nil {
+		t.Fatal("expected no idle reset because LastUserActivity is only 5min ago")
 	}
 }

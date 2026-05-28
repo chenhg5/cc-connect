@@ -224,3 +224,115 @@ func envSliceToMap(env []string) map[string]string {
 	}
 	return out
 }
+
+func TestProviderEnv_BedrockThinkingRewrite(t *testing.T) {
+	a := &Agent{
+		providers: []core.ProviderConfig{
+			{
+				Name: "bedrock",
+				Env: map[string]string{
+					"CLAUDE_CODE_USE_BEDROCK": "1",
+					"AWS_PROFILE":             "bedrock",
+				},
+				Thinking: "disabled",
+			},
+		},
+		activeIdx: 0,
+	}
+
+	env := envSliceToMap(a.providerEnvLocked())
+
+	// Should set ANTHROPIC_BEDROCK_BASE_URL to local proxy URL.
+	baseURL := env["ANTHROPIC_BEDROCK_BASE_URL"]
+	if baseURL == "" {
+		t.Fatalf("ANTHROPIC_BEDROCK_BASE_URL should be set for Bedrock with thinking rewrite")
+	}
+	if !strings.HasPrefix(baseURL, "http://127.0.0.1:") {
+		t.Fatalf("ANTHROPIC_BEDROCK_BASE_URL = %q, want local proxy URL", baseURL)
+	}
+
+	// Should preserve Bedrock env vars.
+	if got := env["CLAUDE_CODE_USE_BEDROCK"]; got != "1" {
+		t.Fatalf("CLAUDE_CODE_USE_BEDROCK = %q, want 1", got)
+	}
+
+	// Should set NO_PROXY for local proxy.
+	if got := env["NO_PROXY"]; got != "127.0.0.1" {
+		t.Fatalf("NO_PROXY = %q, want 127.0.0.1", got)
+	}
+}
+
+func TestProviderEnv_VertexThinkingRewrite(t *testing.T) {
+	a := &Agent{
+		providers: []core.ProviderConfig{
+			{
+				Name: "vertex",
+				Env: map[string]string{
+					"CLAUDE_CODE_USE_VERTEX": "1",
+					"CLOUD_ML_REGION":        "us-east1",
+				},
+				Thinking: "disabled",
+			},
+		},
+		activeIdx: 0,
+	}
+
+	env := envSliceToMap(a.providerEnvLocked())
+
+	// Should set ANTHROPIC_VERTEX_BASE_URL to local proxy URL.
+	baseURL := env["ANTHROPIC_VERTEX_BASE_URL"]
+	if baseURL == "" {
+		t.Fatalf("ANTHROPIC_VERTEX_BASE_URL should be set for Vertex with thinking rewrite")
+	}
+	if !strings.HasPrefix(baseURL, "http://127.0.0.1:") {
+		t.Fatalf("ANTHROPIC_VERTEX_BASE_URL = %q, want local proxy URL", baseURL)
+	}
+}
+
+func TestProviderEnv_BedrockNoThinking(t *testing.T) {
+	// Without thinking override, Bedrock provider should not use proxy.
+	a := &Agent{
+		providers: []core.ProviderConfig{
+			{
+				Name: "bedrock",
+				Env: map[string]string{
+					"CLAUDE_CODE_USE_BEDROCK": "1",
+				},
+			},
+		},
+		activeIdx: 0,
+	}
+
+	env := envSliceToMap(a.providerEnvLocked())
+
+	// Should NOT set ANTHROPIC_BEDROCK_BASE_URL when thinking is not set.
+	if _, ok := env["ANTHROPIC_BEDROCK_BASE_URL"]; ok {
+		t.Fatalf("ANTHROPIC_BEDROCK_BASE_URL should not be set without thinking override")
+	}
+
+	// Should preserve Bedrock env var.
+	if got := env["CLAUDE_CODE_USE_BEDROCK"]; got != "1" {
+		t.Fatalf("CLAUDE_CODE_USE_BEDROCK = %q, want 1", got)
+	}
+}
+
+func TestDetectEnvOnlyProviderType(t *testing.T) {
+	tests := []struct {
+		env      map[string]string
+		expected string
+	}{
+		{map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"}, "bedrock"},
+		{map[string]string{"CLAUDE_CODE_USE_VERTEX": "1"}, "vertex"},
+		{map[string]string{"CLAUDE_CODE_USE_FOUNDRY": "1"}, "foundry"},
+		{map[string]string{"CLAUDE_CODE_USE_BEDROCK": "0"}, ""},
+		{map[string]string{"OTHER_VAR": "1"}, ""},
+		{nil, ""},
+	}
+
+	for _, tt := range tests {
+		got := detectEnvOnlyProviderType(tt.env)
+		if got != tt.expected {
+			t.Errorf("detectEnvOnlyProviderType(%v) = %q, want %q", tt.env, got, tt.expected)
+		}
+	}
+}

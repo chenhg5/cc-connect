@@ -392,20 +392,27 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			slog.Warn("weixin: getUpdates ret", "ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
 		}
 
-		p.syncBufMu.Lock()
-		if resp.GetUpdatesBuf != "" {
-			p.persistSyncBuf(resp.GetUpdatesBuf)
-		}
-		p.syncBufMu.Unlock()
-
 		p.mu.RLock()
 		h := p.handler
 		p.mu.RUnlock()
 		if h == nil {
 			continue
 		}
+		var wg sync.WaitGroup
 		for i := range resp.Msgs {
-			p.dispatchInbound(ctx, &resp.Msgs[i], h)
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				p.dispatchInbound(ctx, &resp.Msgs[i], h)
+			}()
+		}
+		wg.Wait()
+
+		if ctx.Err() == nil && resp.GetUpdatesBuf != "" {
+			p.syncBufMu.Lock()
+			p.persistSyncBuf(resp.GetUpdatesBuf)
+			p.syncBufMu.Unlock()
 		}
 	}
 }
@@ -663,7 +670,11 @@ func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, cont
 		rc.contextToken = p.getContextToken(rc.peerUserID)
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
-		return nil, fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
+		slog.Error("weixin: cannot send message - missing context_token",
+			"peer", rc.peerUserID,
+			"content_preview", truncatePreview(content, 100),
+			"hint", "user needs to send a new message to refresh context_token")
+		return nil, fmt.Errorf("weixin: missing context_token for peer %q - user must send a new message first", rc.peerUserID)
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil, nil
@@ -748,6 +759,13 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 		return err
 	}
 	return lastErr
+}
+
+func truncatePreview(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func splitUTF8(s string, maxRunes int) []string {

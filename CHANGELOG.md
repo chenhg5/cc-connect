@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.3.3-beta.4 (2026-05-28)
+
+### New Features
+- **`max_turn_time_mins`**: new config option — absolute wall-clock cap per agent turn that does NOT reset on tool-call events. Prevents long-running bash commands from permanently locking the session (#1091). Uses a two-phase shutdown: soft stop (10s grace) then force-kill. Session is preserved and resumed via `--resume` on the next message.
+
+### Fixed
+- **Web console 404 regression**: `make release-all` did not depend on `make web`, so release binaries were built without frontend assets when `web/dist/` was empty (gitignored). All routes on the management port returned `404`. Fixed by adding `web` as a prerequisite of `release-all` (#1136)
+- **Slack @mention without space**: `stripAppMentionText` only matched `"> "` (with trailing space), so `@Bot/command` (no space) was forwarded verbatim to Claude instead of being parsed as a command
+- **DingTalk `msgtype="picture"` dropped**: image messages delivered as `"picture"` (instead of `"image"`) were silently dropped. Both types now route to the image handler (#1128)
+- **Feishu `require_mention = false` ignored**: the platform read `group_reply_all` but users set `require_mention = false`; now both are treated as equivalent (#1141)
+- **AskUserQuestion resolved with empty answer**: delivery receipts and read-notifications (empty messages) were accepted as valid answers to `AskUserQuestion`, resolving it within ~500ms before the user could respond. Empty/whitespace content is now rejected (#1086)
+
+## v1.3.3-beta.3 (2026-05-24)
+
+Beta release with blackbox testing infrastructure, cursor/opencode agent support, and bug fixes.
+
+### New Features
+- **Blackbox testing framework**: Phase 1-2 blackbox testing with P0/P1/P2 coverage, config-switch, and NewEnvWithSetup infrastructure
+- **Cursor/OpenCode agents**: add cursor and opencode agent support in blackbox tests
+
+### Fixed
+- **Core italic wrapping**: restore italic wrapping on reply footer
+- **Feishu footer asterisks**: strip asterisks from footer to prevent Feishu markdown italic rendering
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout
+- **Codex stdio sentinel**: add stdio sentinel for Codex app_server backend
+- **Windows cross-compile**: add missing `CheckLinger` stub to `daemon/windows.go` and `daemon/unsupported.go` so `make release-all` succeeds for all target platforms
+
+## v1.3.3-beta.2 (2026-05-09)
+
+Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.
+
+### New Features
+- **Slack Assistant API**: support Slack Assistant API (Agent toggle) with natural on/off switching (#844)
+- **DingTalk richText**: support richText message type for DingTalk platform (#828)
+- **DingTalk image handling**: add DingTalk image message support (#828)
+- **MAX webhook delivery mode**: add webhook delivery mode for MAX messenger platform with deployment docs (#818)
+- **Claude Code env vars**: support project-level environment variables via `env` config section (#812)
+- **display_mode enum**: add `display_mode` enum to replace boolean `quiet` config, with quiet/compact/normal/full options (#655)
+- **Core reset_on_idle_mins default**: default to 30 minutes to prevent context drift (#494)
+- **Claude Code custom system prompt**: add support for custom system prompt configuration via `system_prompt` option (#534)
+
+### Fixed
+- **Bridge security**: require token when Bridge is enabled to prevent unauthorized access (#408)
+- **Feishu recalled messages**: handle recalled messages gracefully (#841)
+- **Feishu media download failure**: notify user when media download fails instead of silent drop (#815)
+- **WeChat video messages**: send video files as proper video messages in WeChat (#813)
+- **WeChat incomplete delivery**: notify user on incomplete message delivery and enhance retry logging (#771)
+- **Telegram private topics**: preserve private topic session keys (#804)
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout (#766)
+- **Codex app_server config**: app_server backend should honor model/effort/provider config + add stdio sentinel (#837)
+- **Codex progress rendering**: render progress in rich Card 2.0 format (#838)
+- **Core ellipsis events**: suppress ellipsis-only events and handle context indicator in footer
+- **Core Markdown table**: render inline formatting inside GFM table cells (#675)
+- **Feishu user id resolution**: guard user id resolution against edge cases
+- **Feishu thread topics**: skip quote injection in thread-isolated topics (#767)
+- **Config display mode**: honor project display mode setting
+- **Daemon restart**: add --force flag to daemon restart command (#736)
+- **AskUserQuestion**: use question text as answers key for proper answer routing (#822)
+
 ## v1.3.3-beta.1 (2026-04-25)
 
 Beta release with new agents, new features, and broad platform fixes. No breaking changes.

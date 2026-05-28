@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -828,6 +829,22 @@ func TestLark_ReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestUserIDFromEventFallsBackToUserID(t *testing.T) {
+	userID := "uid_user123"
+	if got := userIDFromEvent(&larkim.UserId{UserId: &userID}); got != userID {
+		t.Fatalf("userIDFromEvent() = %q, want %q", got, userID)
+	}
+}
+
+func TestResolveUserNameSkipsInvalidLookupID(t *testing.T) {
+	p := &Platform{}
+	for _, id := range []string{"", "feishu:oc_chat:ou_user", "ou user"} {
+		if got := p.resolveUserName(id); got != id {
+			t.Fatalf("resolveUserName(%q) = %q, want unchanged", id, got)
+		}
+	}
+}
+
 func stringPtr(s string) *string { return &s }
 
 func TestSanitizeMarkdownURLs(t *testing.T) {
@@ -1215,5 +1232,148 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 	}
 	if !strings.Contains(result, "A&lt;") {
 		t.Fatalf("expected HTML-escaped name, got %q", result)
+	}
+}
+
+type mockRefreshPlatform struct {
+	*Platform
+	refreshCalled atomic.Int32
+	refreshDone   chan struct{}
+	refreshCard   func(ctx context.Context, sessionKey string, card *core.Card) error
+}
+
+func newMockRefreshPlatform(p *Platform) *mockRefreshPlatform {
+	return &mockRefreshPlatform{Platform: p, refreshDone: make(chan struct{})}
+}
+
+func (m *mockRefreshPlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
+	m.refreshCalled.Add(1)
+	close(m.refreshDone)
+	if m.refreshCard != nil {
+		return m.refreshCard(ctx, sessionKey, card)
+	}
+	return nil
+}
+
+func TestCardAction_NavFast_ReturnsCard(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		return core.NewCard().Markdown("list content").Build()
+	}
+
+	start := time.Now()
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
+	}
+	if elapsed >= cardNavTimeout {
+		t.Fatalf("fast nav should return within cardNavTimeout, took %v", elapsed)
+	}
+	if resp.Toast != nil {
+		t.Fatalf("expected no toast for fast response, got %q", resp.Toast.Content)
+	}
+}
+
+func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	mock := newMockRefreshPlatform(ip.Platform)
+	ip.Platform.self = mock
+
+	handlerDone := make(chan struct{})
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 200*time.Millisecond)
+		close(handlerDone)
+		return core.NewCard().Markdown("async list content").Build()
+	}
+
+	start := time.Now()
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("should return within feishu timeout, took %v", elapsed)
+	}
+	if resp.Card != nil {
+		t.Fatalf("expected no card for timeout response, got non-nil card")
+	}
+
+	select {
+	case <-mock.refreshDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RefreshCard should have been called")
+	}
+
+	if got := mock.refreshCalled.Load(); got != 1 {
+		t.Fatalf("RefreshCard called %d times, want 1", got)
+	}
+}
+
+func TestCardAction_NavSlow_NilCard_NoRefresh(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	mock := newMockRefreshPlatform(ip.Platform)
+	ip.Platform.self = mock
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 200*time.Millisecond)
+		return nil
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	time.Sleep(cardNavTimeout + 500*time.Millisecond)
+
+	if got := mock.refreshCalled.Load(); got != 0 {
+		t.Fatalf("RefreshCard should not be called for nil card, called %d times", got)
 	}
 }

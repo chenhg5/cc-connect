@@ -81,6 +81,12 @@ type FileAttachment struct {
 // SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
 // and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.
+//
+// The attachment FileName is treated as untrusted user input (it comes from
+// the IM/HTTP upload metadata) and is sanitized to a basename before being
+// joined into attachDir. Without this, FileName="../../escape.txt" was
+// written to workDir/escape.txt — outside the intended attachments
+// directory.
 func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
@@ -92,7 +98,7 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 
 	var paths []string
 	for i, f := range files {
-		fname := f.FileName
+		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
 		}
@@ -105,6 +111,24 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
 	return paths
+}
+
+// sanitizeAttachmentFileName reduces a user-supplied attachment filename to a
+// safe basename suitable for joining into an attachment directory. It strips
+// any directory components (both `/` and `\`, the latter so Linux strips
+// Windows-style paths too) and rejects parent / current-directory references.
+// Returns "" when the input cannot produce a safe basename, so callers can
+// fall back to a generated name.
+func sanitizeAttachmentFileName(name string) string {
+	// Normalize backslashes to forward slashes so filepath.Base on any OS
+	// strips Windows-style separators in attacker-supplied paths too.
+	name = filepath.ToSlash(name)
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
 }
 
 // AppendFileRefs appends file path references to a prompt string.
@@ -145,6 +169,7 @@ type Message struct {
 	ParentMessageID string // direct parent/replied-to message ID when available
 	RootMessageID   string // root thread/conversation message ID when available
 	ThreadID        string // platform-native thread identifier when available
+	ChannelID       string
 	UserID          string
 	UserName        string
 	ChatName        string // human-readable chat/group name (optional)

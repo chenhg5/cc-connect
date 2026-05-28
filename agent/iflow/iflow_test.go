@@ -1,9 +1,11 @@
 package iflow
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -166,4 +168,44 @@ func contains(list []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// TestIFlowAgent_WorkDirRaceFreeReaders pins the bug where ListSessions,
+// DeleteSession, and ProjectMemoryFile read a.workDir without holding
+// a.mu, while SetWorkDir mutates it under the lock. Running this with
+// -race flags the data race; with the fix the race detector stays quiet.
+func TestIFlowAgent_WorkDirRaceFreeReaders(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{workDir: dir}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				a.SetWorkDir(filepath.Join(dir, "a"))
+			} else {
+				a.SetWorkDir(filepath.Join(dir, "b"))
+			}
+		}(i)
+	}
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = a.ListSessions(context.Background())
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = a.DeleteSession(context.Background(), "no-such-session")
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = a.ProjectMemoryFile()
+		}()
+	}
+	wg.Wait()
 }

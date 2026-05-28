@@ -928,7 +928,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # 或 dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
+type = "feishu"  # 或 wps-xiezuo, dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # 平台特定配置

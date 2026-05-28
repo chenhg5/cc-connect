@@ -100,6 +100,7 @@ type Config struct {
 	TTS                TTSConfig               `toml:"tts"`
 	Display            DisplayConfig           `toml:"display"`
 	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
 	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
 	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
@@ -110,7 +111,8 @@ type Config struct {
 	Management         ManagementConfig        `toml:"management"`
 	Audit              AuditConfig             `toml:"audit"`
 	Hooks              []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`    // max minutes between consecutive agent events; 0 = no timeout; default 120
+	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"`   // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -203,12 +205,14 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode             *string `toml:"mode"`              // "full" (default), "compact", or "quiet"
-	CardMode         *string `toml:"card_mode"`         // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages *bool   `toml:"thinking_messages"` // whether thinking messages are shown; default true
-	ThinkingMaxLen   *int    `toml:"thinking_max_len"`  // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen       *int    `toml:"tool_max_len"`      // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages     *bool   `toml:"tool_messages"`     // whether tool progress messages are shown; default true
+	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
+	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
+	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
+	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -218,6 +222,14 @@ type StreamPreviewConfig struct {
 	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
 	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
+}
+
+// InstantReplyConfig controls the immediate confirmation reply sent when a message
+// is received, before the agent starts processing. This gives users quick feedback
+// that their message was received (e.g. "🤔 Thinking...").
+type InstantReplyConfig struct {
+	Enabled *bool  `toml:"enabled"` // default false
+	Content string `toml:"content"` // custom reply text; empty = use i18n default ("⏳ Processing...")
 }
 
 // RateLimitConfig controls per-session message rate limiting.
@@ -286,8 +298,8 @@ type SpeechConfig struct {
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
 	Enabled    bool   `toml:"enabled"`
-	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak" | "pico" | "edge"
-	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh")
+	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
 	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
 	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
 	OpenAI     struct {
@@ -305,6 +317,11 @@ type TTSConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"minimax"`
+	Mimo struct {
+		APIKey  string `toml:"api_key"`
+		BaseURL string `toml:"base_url"`
+		Model   string `toml:"model"`
+	} `toml:"mimo"`
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.
@@ -342,13 +359,19 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name         string             `toml:"name"`
-	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
-	Agent        AgentConfig        `toml:"agent"`
-	Platforms    []PlatformConfig   `toml:"platforms"`
-	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
-	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	Name    string `toml:"name"`
+	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
+	SkipGit *bool  `toml:"skip_git,omitempty"`
+	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
+	// init flow to bind existing local directories. Default false keeps init
+	// limited to git URLs; use /workspace bind or /workspace route for explicit
+	// local bindings.
+	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
+	Agent                        AgentConfig        `toml:"agent"`
+	Platforms                    []PlatformConfig   `toml:"platforms"`
+	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
+	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
@@ -659,18 +682,26 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 // of the global [display] block, falling back to built-in defaults.
 //
 // Resolution order for mode (thinking/tool visibility):
-//  1. Explicit [display].mode wins.
-//  2. Legacy quiet = true (without display.mode) → "quiet".
-//  3. Default → "full".
+//  1. Explicit [projects.display].mode wins.
+//  2. Explicit [display].mode wins.
+//  3. Legacy quiet = true (without display.mode) → "quiet".
+//  4. Default → "full".
 //
 // Resolution order for thinking_messages / tool_messages:
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter bool) {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+
 	// Resolve mode.
 	mode = DisplayModeFull
-	if cfg.Display.Mode != nil {
+	if projDisp != nil && projDisp.Mode != nil {
+		mode = *projDisp.Mode
+	} else if cfg.Display.Mode != nil {
 		mode = *cfg.Display.Mode
 	} else if projectQuietEffective(cfg, proj) {
 		mode = DisplayModeQuiet
@@ -702,10 +733,6 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		return dflt
 	}
 
-	var projDisp *DisplayConfig
-	if proj != nil {
-		projDisp = proj.Display
-	}
 	getProjBool := func(f func(*DisplayConfig) *bool) *bool {
 		if projDisp == nil {
 			return nil
@@ -739,6 +766,29 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		cfg.Display.ToolMaxLen,
 		500,
 	)
+
+	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
+	if proj != nil && proj.ShowContextIndicator != nil {
+		showContextIndicator = *proj.ShowContextIndicator
+	} else if projDisp != nil && projDisp.ShowContextIndicator != nil {
+		showContextIndicator = *projDisp.ShowContextIndicator
+	} else if cfg.Display.ShowContextIndicator != nil {
+		showContextIndicator = *cfg.Display.ShowContextIndicator
+	} else {
+		showContextIndicator = true
+	}
+
+	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default true
+	if proj != nil && proj.ReplyFooter != nil {
+		replyFooter = *proj.ReplyFooter
+	} else if projDisp != nil && projDisp.ReplyFooter != nil {
+		replyFooter = *projDisp.ReplyFooter
+	} else if cfg.Display.ReplyFooter != nil {
+		replyFooter = *cfg.Display.ReplyFooter
+	} else {
+		replyFooter = true
+	}
+
 	return
 }
 
@@ -763,19 +813,8 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 }
 
 func (c *Config) validate() error {
-	if c.Display.Mode != nil {
-		switch *c.Display.Mode {
-		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
-		default:
-			return fmt.Errorf("config: display.mode must be \"full\", \"compact\", or \"quiet\"")
-		}
-	}
-	if c.Display.CardMode != nil {
-		switch strings.ToLower(strings.TrimSpace(*c.Display.CardMode)) {
-		case "legacy", "rich":
-		default:
-			return fmt.Errorf("config: display.card_mode must be \"legacy\" or \"rich\"")
-		}
+	if err := validateDisplayConfig("display", &c.Display); err != nil {
+		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
@@ -829,6 +868,30 @@ func (c *Config) validate() error {
 		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
+		}
+		if err := validateDisplayConfig(prefix+".display", proj.Display); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDisplayConfig(prefix string, display *DisplayConfig) error {
+	if display == nil {
+		return nil
+	}
+	if display.Mode != nil {
+		switch *display.Mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: %s.mode must be \"full\", \"compact\", or \"quiet\"", prefix)
+		}
+	}
+	if display.CardMode != nil {
+		switch strings.ToLower(strings.TrimSpace(*display.CardMode)) {
+		case "legacy", "rich":
+		default:
+			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
 		}
 	}
 	return nil
@@ -3383,6 +3446,11 @@ func GetGlobalSettings() map[string]any {
 		result["idle_timeout_mins"] = *cfg.IdleTimeoutMins
 	} else {
 		result["idle_timeout_mins"] = 120
+	}
+	if cfg.MaxTurnTimeMins != nil {
+		result["max_turn_time_mins"] = *cfg.MaxTurnTimeMins
+	} else {
+		result["max_turn_time_mins"] = 0
 	}
 	// Display
 	if cfg.Display.ThinkingMessages != nil {

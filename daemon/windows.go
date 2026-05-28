@@ -249,3 +249,8 @@ Unregister-ScheduledTask -TaskName %s -Confirm:$false
 	}
 	return nil
 }
+
+// CheckLinger is a no-op on Windows (always returns false).
+func CheckLinger() (enabled bool, user string) {
+	return false, ""
+}

@@ -39,6 +39,7 @@ type Agent struct {
 	cliExtraArgs    []string // extra args parsed from cli_path after the binary
 	providers       []core.ProviderConfig
 	activeIdx       int // -1 = no provider set
+	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	mu              sync.RWMutex
 }
@@ -56,12 +57,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	codexHome, _ := opts["codex_home"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
-
-	if appServerURL == "" {
-		appServerURL = "ws://127.0.0.1:3845"
-	} else if strings.EqualFold(strings.TrimSpace(appServerURL), "stdio") {
-		appServerURL = ""
-	}
+	appServerURL = normalizeAppServerURL(appServerURL)
 
 	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
 	cliBin := "codex"
@@ -78,6 +74,23 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cliBin)
 	}
 
+	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
+	// Stored separately from runtime sessionEnv so SetSessionEnv calls cannot overwrite it.
+	// MergeEnv semantics ensure these override any same-named keys inherited from os.Environ()
+	// when the codex subprocess is spawned (e.g. user-scoped HTTPS_PROXY leaking into the agent).
+	var configEnv []string
+	if envMap, ok := opts["env"].(map[string]string); ok {
+		for k, v := range envMap {
+			configEnv = append(configEnv, k+"="+v)
+		}
+	} else if envMap, ok := opts["env"].(map[string]any); ok {
+		for k, v := range envMap {
+			if s, ok := v.(string); ok {
+				configEnv = append(configEnv, k+"="+s)
+			}
+		}
+	}
+
 	return &Agent{
 		workDir:         workDir,
 		model:           model,
@@ -88,6 +101,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		codexHome:       strings.TrimSpace(codexHome),
 		cliBin:          cliBin,
 		cliExtraArgs:    cliExtraArgs,
+		configEnv:       configEnv,
 		activeIdx:       -1,
 	}, nil
 }
@@ -99,6 +113,17 @@ func normalizeBackend(raw string) string {
 	default:
 		return "exec"
 	}
+}
+
+func normalizeAppServerURL(raw string) string {
+	url := strings.TrimSpace(raw)
+	if url == "" {
+		return "ws://127.0.0.1:3845"
+	}
+	if strings.EqualFold(url, "stdio") {
+		return "stdio://"
+	}
+	return url
 }
 
 func normalizeMode(raw string) string {
@@ -339,7 +364,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
-	extraEnv := a.providerEnvLocked()
+	workDir := a.workDir
+	// Order matters for MergeEnv override semantics (later wins):
+	//   1. configEnv — static env from [projects.agent.options.env]
+	//   2. providerEnv — per-provider keys (OPENAI_API_KEY etc.)
+	//   3. sessionEnv — runtime overrides from /env or admin actions
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	var baseURL string
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
@@ -361,13 +392,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -438,11 +469,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
-	return codexSkillDirs(absDir, a.codexHome)
+	return codexSkillDirs(absDir, codexHome)
 }
 
 // ── ContextCompressor implementation ──────────────────────────

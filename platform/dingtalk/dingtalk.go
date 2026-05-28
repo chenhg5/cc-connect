@@ -18,6 +18,8 @@ import (
 
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	dingtalkClient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
+	"github.com/open-dingtalk/dingtalk-stream-sdk-go/payload"
+	"github.com/open-dingtalk/dingtalk-stream-sdk-go/utils"
 )
 
 func init() {
@@ -32,7 +34,29 @@ type replyContext struct {
 	sessionKey     string
 	userName       string
 	chatName       string
+	isGroup        bool
+	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
+
+// richTextContent mirrors the full structure of the DingTalk "text" JSON field,
+// which the Go SDK's BotCallbackDataTextModel (Content string) silently drops.
+// When a user quotes/replies to a message, DingTalk sends isReplyMsg + repliedMsg.
+type richTextContent struct {
+	Content    string          `json:"content"`
+	IsReplyMsg bool            `json:"isReplyMsg"`
+	RepliedMsg *repliedMessage `json:"repliedMsg"`
+}
+
+type repliedMessage struct {
+	MsgType string          `json:"msgType"`
+	Content json.RawMessage `json:"content"`
+}
+
+type repliedTextContent struct {
+	Text string `json:"text"`
+}
+
+const maxQuotedMessageRunes = 4000
 
 type downloadResponse struct {
 	DownloadUrl string `json:"downloadUrl"`
@@ -53,6 +77,12 @@ type Platform struct {
 	tokenMu               sync.Mutex
 	accessToken           string
 	tokenExpiry           time.Time
+	// AI Card configuration
+	cardTemplateID  string
+	cardTemplateKey string
+	cardThrottleMs  int
+	degradeUntil    time.Time
+	degradeMu       sync.Mutex
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -85,6 +115,21 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	// agent_id can be 0 for testing, but will fail in production
 
+	// AI Card configuration
+	cardTemplateID, _ := opts["card_template_id"].(string)
+	cardTemplateKey, _ := opts["card_template_key"].(string)
+	if cardTemplateKey == "" {
+		cardTemplateKey = "content"
+	}
+	cardThrottleMs := 300
+	if v, ok := opts["card_throttle_ms"].(float64); ok && v > 0 {
+		cardThrottleMs = int(v)
+	} else if v, ok := opts["card_throttle_ms"].(int64); ok && v > 0 {
+		cardThrottleMs = int(v)
+	} else if v, ok := opts["card_throttle_ms"].(int); ok && v > 0 {
+		cardThrottleMs = v
+	}
+
 	return &Platform{
 		clientID:              clientID,
 		clientSecret:          clientSecret,
@@ -93,6 +138,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
 		httpClient:            &http.Client{Timeout: 30 * time.Second},
+		cardTemplateID:        cardTemplateID,
+		cardTemplateKey:       cardTemplateKey,
+		cardThrottleMs:        cardThrottleMs,
 	}, nil
 }
 
@@ -124,10 +172,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		dingtalkClient.WithAppCredential(dingtalkClient.NewAppCredentialConfig(p.clientID, p.clientSecret)),
 	)
 
-	p.streamClient.RegisterChatBotCallbackRouter(func(ctx context.Context, data *chatbot.BotCallbackDataModel) ([]byte, error) {
-		p.onMessage(data)
-		return []byte(""), nil
-	})
+	// Register a raw frame handler instead of RegisterChatBotCallbackRouter so we
+	// can access the original JSON (df.Data). The SDK's BotCallbackDataModel drops
+	// fields like text.isReplyMsg and text.repliedMsg during deserialization.
+	p.streamClient.RegisterRouter(utils.SubscriptionTypeKCallback, payload.BotMessageCallbackTopic,
+		func(ctx context.Context, df *payload.DataFrame) (*payload.DataFrameResponse, error) {
+			p.onRawMessage(df.Data)
+			return payload.NewSuccessDataFrameResponse(), nil
+		})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.streamCtxCancel = cancel
@@ -162,7 +214,30 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
+// onRawMessage is the entry point for incoming messages. It receives the raw
+// JSON from the DingTalk Stream SDK (df.Data) and parses it into the SDK's
+// BotCallbackDataModel plus our own richTextContent to recover fields that
+// the SDK's typed model silently drops (isReplyMsg, repliedMsg).
+func (p *Platform) onRawMessage(rawJSON string) {
+	var data chatbot.BotCallbackDataModel
+	if err := json.Unmarshal([]byte(rawJSON), &data); err != nil {
+		slog.Error("dingtalk: failed to parse callback data", "error", err)
+		return
+	}
+
+	// Parse the full "text" object from raw JSON to recover isReplyMsg/repliedMsg.
+	// The SDK's BotCallbackDataTextModel only has Content string, losing these fields.
+	var envelope struct {
+		Text richTextContent `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(rawJSON), &envelope); err != nil {
+		slog.Warn("dingtalk: failed to parse rich text content", "error", err)
+	}
+
+	p.onMessage(&data, &envelope.Text)
+}
+
+func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richTextContent) {
 	slog.Debug("dingtalk: message received", "user", data.SenderNick, "msgtype", data.Msgtype)
 
 	if p.dedup.IsDuplicate(data.MsgId) {
@@ -183,11 +258,16 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		return
 	}
 
+	convType := "d" // direct (1:1)
+	if data.ConversationType == "2" {
+		convType = "g" // group
+	}
+
 	var sessionKey string
 	if p.shareSessionInChannel {
-		sessionKey = fmt.Sprintf("dingtalk:%s", data.ConversationId)
+		sessionKey = fmt.Sprintf("dingtalk:%s:%s", convType, data.ConversationId)
 	} else {
-		sessionKey = fmt.Sprintf("dingtalk:%s:%s", data.ConversationId, data.SenderStaffId)
+		sessionKey = fmt.Sprintf("dingtalk:%s:%s:%s", convType, data.ConversationId, data.SenderStaffId)
 	}
 
 	// Handle audio messages
@@ -222,9 +302,18 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 	}
 
 	// Handle image messages
-	if data.Msgtype == "image" {
+	// DingTalk delivers image messages as either "image" or "picture" depending
+	// on the client and robot type. Both carry the same downloadCode field.
+	if data.Msgtype == "image" || data.Msgtype == "picture" {
 		p.handleImageMessage(data, sessionKey)
 		return
+	}
+
+	// Extract message content, recovering quoted/reply info from richText.
+	messageContent := data.Text.Content
+	if richText != nil && richText.IsReplyMsg && richText.RepliedMsg != nil {
+		slog.Debug("dingtalk: reply message detected", "msgType", richText.RepliedMsg.MsgType)
+		messageContent = p.formatReplyContent(richText, messageContent)
 	}
 
 	// Handle text messages (default)
@@ -234,7 +323,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 		UserID:     data.SenderStaffId,
 		UserName:   data.SenderNick,
 		ChatName:   data.ConversationTitle,
-		Content:    data.Text.Content,
+		Content:    messageContent,
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
@@ -245,6 +334,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel) {
 			sessionKey:     sessionKey,
 			userName:       data.SenderNick,
 			chatName:       data.ConversationTitle,
+			isGroup:        data.ConversationType == "2",
 		},
 		AuditExtra: map[string]any{
 			"conversation_id": data.ConversationId,
@@ -320,6 +410,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 					sessionKey:     sessionKey,
 					userName:       data.SenderNick,
 					chatName:       data.ConversationTitle,
+					isGroup:        data.ConversationType == "2",
 				},
 				FromVoice: true,
 				AuditExtra: map[string]any{
@@ -351,6 +442,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionKey:     sessionKey,
 			userName:       data.SenderNick,
 			chatName:       data.ConversationTitle,
+			isGroup:        data.ConversationType == "2",
 		},
 		FromVoice: true,
 		AuditExtra: map[string]any{
@@ -427,9 +519,9 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		MessageID:  data.MsgId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
@@ -574,9 +666,17 @@ func (p *Platform) getAccessToken() (string, error) {
 		return "", fmt.Errorf("empty accessToken in response")
 	}
 
-	// Cache token with 5 minutes buffer before expiry
+	// Cache token with 5 minutes buffer before expiry.
+	// When the server omits expireIn (or sends 0/negative), fall back to the
+	// documented DingTalk default (7200s = 2h) — without this, tokenExpiry
+	// would land at time.Now() and every subsequent getAccessToken() would
+	// re-fetch a fresh token, hammering the access-token API.
 	p.accessToken = tokenResp.AccessToken
 	expiry := tokenResp.ExpireIn
+	if expiry <= 0 {
+		slog.Warn("dingtalk: missing/invalid expireIn in token response, defaulting to 7200s", "got", tokenResp.ExpireIn)
+		expiry = 7200
+	}
 	if expiry > 300 {
 		expiry -= 300 // 5 minute buffer
 	}
@@ -595,6 +695,19 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content strin
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
+	}
+
+	// Fall back to proactive API when sessionWebhook is unavailable
+	if rc.proactive || rc.sessionWebhook == "" {
+		if err := p.sendProactiveMessage(ctx, rc, content); err != nil {
+			return nil, err
+		}
+		return &core.SendReceipt{
+			ParentMessageID: rc.messageID,
+			Extra: map[string]any{
+				"conversation_id": rc.conversationId,
+			},
+		}, nil
 	}
 
 	content = preprocessDingTalkMarkdown(content)
@@ -631,7 +744,8 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content strin
 	}, nil
 }
 
-// Send sends a new message (same as Reply for DingTalk)
+// Send sends a new message. For proactive contexts (no sessionWebhook),
+// it uses the DingTalk group/direct message API instead.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	_, err := p.SendWithReceipt(ctx, rctx, content)
 	return err
@@ -706,6 +820,24 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.StreamingCardPlatform = (*Platform)(nil)
+var _ core.ReplyContextReconstructor = (*Platform)(nil)
+
+// CreateStreamingCard creates a new streaming card for the given reply context.
+// Implements core.StreamingCardPlatform.
+func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.StreamingCard, error) {
+	if p.cardTemplateID == "" {
+		return nil, fmt.Errorf("dingtalk: card_template_id not configured")
+	}
+	if p.isCardDegraded() {
+		return nil, fmt.Errorf("dingtalk: card API temporarily degraded")
+	}
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", replyCtx)
+	}
+	return p.createAICard(ctx, rc)
+}
 
 // SendFile uploads and sends a file via DingTalk oToMessages API.
 // Implements core.FileSender.
@@ -1025,6 +1157,292 @@ func (p *Platform) Stop() error {
 	if p.streamClient != nil {
 		p.streamClient.Close()
 	}
+	return nil
+}
+
+// formatReplyContent prepends quoted text to the message content when the user
+// replies to / quotes a previous message. richText is parsed from the raw JSON
+// "text" object which the SDK's BotCallbackDataTextModel silently drops.
+func (p *Platform) formatReplyContent(richText *richTextContent, fallback string) string {
+	content := richText.Content
+	if content == "" {
+		content = fallback
+	}
+
+	if richText.RepliedMsg == nil {
+		return content
+	}
+
+	quotedText := p.extractQuotedMessageText(richText.RepliedMsg)
+	if quotedText == "" {
+		return content
+	}
+
+	return fmt.Sprintf("引用: \"%s\"\n\n%s", quotedText, content)
+}
+
+func (p *Platform) extractQuotedMessageText(msg *repliedMessage) string {
+	if msg == nil {
+		return ""
+	}
+
+	switch msg.MsgType {
+	case "text":
+		return p.extractQuotedTextMessageText(msg.Content)
+	case "interactiveCard":
+		return p.extractInteractiveCardQuotedText(msg.Content)
+	default:
+		slog.Debug("dingtalk: quoted message type not supported", "type", msg.MsgType)
+		return ""
+	}
+}
+
+func (p *Platform) extractQuotedTextMessageText(raw json.RawMessage) string {
+	var repliedContent repliedTextContent
+	if err := json.Unmarshal(raw, &repliedContent); err != nil {
+		slog.Debug("dingtalk: failed to parse replied message content", "error", err)
+		return ""
+	}
+	return repliedContent.Text
+}
+
+func (p *Platform) extractInteractiveCardQuotedText(raw json.RawMessage) string {
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		slog.Debug("dingtalk: failed to parse quoted interactiveCard content", "error", err)
+		return ""
+	}
+	text := p.extractInteractiveCardTextValue(payload, 0)
+	if text == "" {
+		slog.Debug("dingtalk: quoted interactiveCard content has no extractable text")
+	}
+	return normalizeQuotedMessageText(text)
+}
+
+func (p *Platform) extractInteractiveCardTextValue(value any, depth int) string {
+	if depth > 4 {
+		return ""
+	}
+
+	switch v := value.(type) {
+	case string:
+		decoded, ok := decodeJSONObjectOrArray(v)
+		if !ok {
+			return ""
+		}
+		return p.extractInteractiveCardTextValue(decoded, depth+1)
+	case map[string]any:
+		for _, key := range p.interactiveCardTemplateKeys() {
+			if text := p.extractInteractiveCardPath(v, depth, "cardData", "cardParamMap", key); text != "" {
+				return text
+			}
+		}
+		for _, key := range p.interactiveCardTemplateKeys() {
+			if text := p.extractInteractiveCardPath(v, depth, "cardParamMap", key); text != "" {
+				return text
+			}
+		}
+		for _, key := range p.interactiveCardTopLevelKeys() {
+			if text := p.extractInteractiveCardPath(v, depth, key); text != "" {
+				return text
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if text := p.extractInteractiveCardTextValue(item, depth+1); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func (p *Platform) extractInteractiveCardPath(root map[string]any, depth int, path ...string) string {
+	var current any = root
+	for _, part := range path {
+		m, ok := mapFromJSONValue(current)
+		if !ok {
+			return ""
+		}
+		next, ok := m[part]
+		if !ok {
+			return ""
+		}
+		current = next
+	}
+	return p.extractInteractiveCardLeafText(current, depth+1)
+}
+
+func (p *Platform) extractInteractiveCardLeafText(value any, depth int) string {
+	if depth > 4 {
+		return ""
+	}
+
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any, []any:
+		return p.extractInteractiveCardTextValue(value, depth+1)
+	default:
+		return ""
+	}
+}
+
+func (p *Platform) interactiveCardTemplateKeys() []string {
+	key := strings.TrimSpace(p.cardTemplateKey)
+	if key == "" {
+		key = "content"
+	}
+	if key == "content" {
+		return []string{"content"}
+	}
+	return []string{key, "content"}
+}
+
+func (p *Platform) interactiveCardTopLevelKeys() []string {
+	return []string{"content", "text", "markdown", "title"}
+}
+
+func mapFromJSONValue(value any) (map[string]any, bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		return v, true
+	case string:
+		decoded, ok := decodeJSONObjectOrArray(v)
+		if !ok {
+			return nil, false
+		}
+		m, ok := decoded.(map[string]any)
+		return m, ok
+	default:
+		return nil, false
+	}
+}
+
+func decodeJSONObjectOrArray(s string) (any, bool) {
+	text := strings.TrimSpace(s)
+	if text == "" || (!strings.HasPrefix(text, "{") && !strings.HasPrefix(text, "[")) {
+		return nil, false
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return nil, false
+	}
+	return decoded, true
+}
+
+func normalizeQuotedMessageText(s string) string {
+	text := strings.TrimSpace(s)
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxQuotedMessageRunes {
+		return text
+	}
+	return string(runes[:maxQuotedMessageRunes]) + "..."
+}
+
+// ReconstructReplyCtx implements core.ReplyContextReconstructor.
+// Session key format: "dingtalk:{convType}:{conversationId}:{senderStaffId}" or "dingtalk:{convType}:{conversationId}"
+// where convType is "g" (group) or "d" (direct/1:1).
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	if !strings.HasPrefix(sessionKey, "dingtalk:") {
+		return nil, fmt.Errorf("dingtalk: not a dingtalk session key: %q", sessionKey)
+	}
+
+	stripped := strings.TrimPrefix(sessionKey, "dingtalk:")
+	parts := strings.SplitN(stripped, ":", 3)
+
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("dingtalk: invalid session key format: %q", sessionKey)
+	}
+
+	convType := parts[0]
+	if convType != "g" && convType != "d" {
+		return nil, fmt.Errorf("dingtalk: invalid conversation type %q in session key: %q", convType, sessionKey)
+	}
+
+	conversationId := parts[1]
+	if conversationId == "" {
+		return nil, fmt.Errorf("dingtalk: empty conversationId in session key: %q", sessionKey)
+	}
+
+	var senderStaffId string
+	if len(parts) > 2 {
+		senderStaffId = parts[2]
+	}
+
+	return replyContext{
+		conversationId: conversationId,
+		senderStaffId:  senderStaffId,
+		isGroup:        convType == "g",
+		proactive:      true,
+	}, nil
+}
+
+// sendProactiveMessage sends a message using the DingTalk group/direct message API
+// instead of the temporary sessionWebhook. This enables cc-connect send, cron,
+// webhook, and other proactive messaging features.
+func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, content string) error {
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("dingtalk: get access token for proactive send: %w", err)
+	}
+
+	content = preprocessDingTalkMarkdown(content)
+
+	var apiURL string
+	var requestBody map[string]any
+
+	if rc.isGroup && rc.conversationId != "" {
+		// Group message via /v1.0/robot/groupMessages/send
+		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+		msgParam, _ := json.Marshal(map[string]string{"text": content})
+		requestBody = map[string]any{
+			"robotCode":          p.robotCode,
+			"openConversationId": rc.conversationId,
+			"msgKey":             "sampleMarkdown",
+			"msgParam":           string(msgParam),
+		}
+	} else if rc.senderStaffId != "" {
+		// Direct message via /v1.0/robot/oToMessages/batchSend
+		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+		msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
+		requestBody = map[string]any{
+			"robotCode": p.robotCode,
+			"userIds":   []string{rc.senderStaffId},
+			"msgKey":    "sampleMarkdown",
+			"msgParam":  string(msgParam),
+		}
+	} else {
+		return fmt.Errorf("dingtalk: proactive send requires conversationId (group) or senderStaffId (direct)")
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal proactive message: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create proactive request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: proactive send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: proactive send failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
+	slog.Debug("dingtalk: proactive message sent", "api", apiURL, "status", resp.StatusCode)
 	return nil
 }
 

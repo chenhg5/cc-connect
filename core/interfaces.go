@@ -479,12 +479,27 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+type SessionTitleProvider interface {
+	GetSessionTitle(sessionID string) string
+}
+
 // WorkDirSwitcher is an optional interface for agents that support runtime
 // work directory switching. The change takes effect on the next session start;
 // the current running session is terminated automatically by the engine.
 type WorkDirSwitcher interface {
 	SetWorkDir(dir string)
 	GetWorkDir() string
+}
+
+// AgentOptsProvider is an optional interface for agents that need to carry
+// their full configuration options when the engine clones a per-workspace
+// agent instance in multi-workspace mode. The engine merges the returned map
+// into the workspace opts before calling the agent factory, giving workspace
+// agents access to agent-specific options (e.g. "session" for the tmux agent)
+// that are not covered by the standard GetModel / GetMode accessors.
+// work_dir is always overridden by the engine and must not be returned here.
+type AgentOptsProvider interface {
+	BaseOpts() map[string]any
 }
 
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.
@@ -535,6 +550,28 @@ type CommandRegistrar interface {
 // channel IDs to human-readable names.
 type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
+}
+
+// StreamingCard represents an active streaming card that aggregates
+// an entire agent turn (tool calls, thinking, text) into a single
+// updatable message.
+type StreamingCard interface {
+	// Update replaces the card content with the given markdown.
+	// Implementations should throttle calls internally.
+	Update(ctx context.Context, content string) error
+	// Finalize sends the final content and marks the card as complete.
+	Finalize(ctx context.Context, content string) error
+	// Failed returns true if the card has entered a failed state.
+	Failed() bool
+}
+
+// StreamingCardPlatform is an optional interface for platforms that support
+// aggregating an entire agent turn into a single updatable card message
+// (e.g. DingTalk AI Card). When the engine detects this interface, it
+// creates a streaming card at the start of each turn and routes all
+// events through it instead of sending individual messages.
+type StreamingCardPlatform interface {
+	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
 }
 
 // CardStatus represents the visual status of a card header.
