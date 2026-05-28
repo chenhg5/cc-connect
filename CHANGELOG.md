@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.3-beta.4 (2026-05-28)
+
+### New Features
+- **`max_turn_time_mins`**: new config option — absolute wall-clock cap per agent turn that does NOT reset on tool-call events. Prevents long-running bash commands from permanently locking the session (#1091). Uses a two-phase shutdown: soft stop (10s grace) then force-kill. Session is preserved and resumed via `--resume` on the next message.
+
+### Fixed
+- **Web console 404 regression**: `make release-all` did not depend on `make web`, so release binaries were built without frontend assets when `web/dist/` was empty (gitignored). All routes on the management port returned `404`. Fixed by adding `web` as a prerequisite of `release-all` (#1136)
+- **Slack @mention without space**: `stripAppMentionText` only matched `"> "` (with trailing space), so `@Bot/command` (no space) was forwarded verbatim to Claude instead of being parsed as a command
+- **DingTalk `msgtype="picture"` dropped**: image messages delivered as `"picture"` (instead of `"image"`) were silently dropped. Both types now route to the image handler (#1128)
+- **Feishu `require_mention = false` ignored**: the platform read `group_reply_all` but users set `require_mention = false`; now both are treated as equivalent (#1141)
+- **AskUserQuestion resolved with empty answer**: delivery receipts and read-notifications (empty messages) were accepted as valid answers to `AskUserQuestion`, resolving it within ~500ms before the user could respond. Empty/whitespace content is now rejected (#1086)
+
 ## v1.3.3-beta.3 (2026-05-24)
 
 Beta release with blackbox testing infrastructure, cursor/opencode agent support, and bug fixes.

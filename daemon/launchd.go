@@ -25,9 +25,10 @@ var runLaunchctl = func(args ...string) (string, error) {
 
 type launchdManager struct{}
 
-// CheckLinger is a no-op on darwin (always returns false).
+// CheckLinger always returns true on macOS: launchd user agents persist
+// independently of login sessions, so no "linger" warning is needed.
 func CheckLinger() (enabled bool, user string) {
-	return false, ""
+	return true, ""
 }
 
 func newPlatformManager() (Manager, error) {
@@ -303,3 +304,4 @@ func xmlEscape(s string) string {
 	}
 	return b.String()
 }
+
