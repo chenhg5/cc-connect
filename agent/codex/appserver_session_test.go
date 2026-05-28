@@ -132,8 +132,8 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 
 func TestAppServerSession_InterruptSessionSendsTurnInterrupt(t *testing.T) {
 	reader, writer := io.Pipe()
-	defer reader.Close()
-	defer writer.Close()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
 
 	s := &appServerSession{
 		ctx:        context.Background(),
