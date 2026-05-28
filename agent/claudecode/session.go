@@ -706,7 +706,9 @@ func (cs *claudeSession) Close() error {
 	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
 	// stdin close, running Stop hooks (e.g. claude-mem session summary).
 	cs.stdinMu.Lock()
-	_ = cs.stdin.Close()
+	if err := cs.stdin.Close(); err != nil {
+		slog.Warn("claudeSession: close stdin", "error", err)
+	}
 	cs.stdinMu.Unlock()
 
 	graceful := cs.gracefulStopTimeout
@@ -726,7 +728,9 @@ func (cs *claudeSession) Close() error {
 	// Phase 2: SIGTERM the whole process group — gives the process and its
 	// descendants (e.g. MCP server bridges) a second chance to run cleanup
 	// handlers that respond to signals but not stdin EOF.
-	_ = signalProcessGroup(cs.cmd, syscall.SIGTERM)
+	if err := signalProcessGroup(cs.cmd, syscall.SIGTERM); err != nil {
+			slog.Warn("claudeSession: signal SIGTERM", "error", err)
+		}
 
 	select {
 	case <-cs.done:
@@ -741,7 +745,9 @@ func (cs *claudeSession) Close() error {
 	// such as the Telegram bridge) are reaped along with the direct child;
 	// otherwise they can survive as orphans and spin at 100% CPU.
 	cs.cancel()
-	_ = forceKillCmd(cs.cmd)
+	if err := forceKillCmd(cs.cmd); err != nil {
+		slog.Warn("claudeSession: force kill", "error", err)
+	}
 	<-cs.done
 	return nil
 }

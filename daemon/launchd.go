@@ -25,6 +25,12 @@ var runLaunchctl = func(args ...string) (string, error) {
 
 type launchdManager struct{}
 
+// CheckLinger always returns true on macOS: launchd user agents persist
+// independently of login sessions, so no "linger" warning is needed.
+func CheckLinger() (enabled bool, user string) {
+	return true, ""
+}
+
 func newPlatformManager() (Manager, error) {
 	return &launchdManager{}, nil
 }
@@ -298,3 +304,4 @@ func xmlEscape(s string) string {
 	}
 	return b.String()
 }
+
