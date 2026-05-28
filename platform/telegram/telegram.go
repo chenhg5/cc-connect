@@ -1275,12 +1275,18 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	case 3:
 		if p.shareSessionInChannel {
 			// telegram:{chatID}:{threadID}
-			threadID, _ = strconv.Atoi(parts[2])
+			threadID, err = strconv.Atoi(parts[2])
+			if err != nil {
+				slog.Warn("telegram: invalid thread ID", "raw", parts[2], "error", err)
+			}
 		}
 		// else: telegram:{chatID}:{userID} — no threadID
 	case 4:
 		// telegram:{chatID}:{threadID}:{userID}
-		threadID, _ = strconv.Atoi(parts[2])
+		threadID, err = strconv.Atoi(parts[2])
+		if err != nil {
+			slog.Warn("telegram: invalid thread ID", "raw", parts[2], "error", err)
+		}
 	}
 
 	return replyContext{chatID: chatID, threadID: threadID}, nil
