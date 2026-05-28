@@ -69,7 +69,7 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 }
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
-	args := buildAntigravityArgs("sid-1", true, "gemini-2.5-pro", "plan", "What is 1+1?")
+	args := buildAntigravityArgs("sid-1", true, "plan", "What is 1+1?")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}
@@ -78,6 +78,21 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	}
 	if !contains(args, "--sandbox") {
 		t.Fatalf("expected --sandbox in args, got: %v", args)
+	}
+	if contains(args, "-m") || contains(args, "--model") {
+		t.Fatalf("did not expect model flags in args, got: %v", args)
+	}
+}
+
+func TestUsesInteractivePermission(t *testing.T) {
+	if !usesInteractivePermission("default") {
+		t.Fatal("default mode should use interactive permission stdin")
+	}
+	if usesInteractivePermission("yolo") {
+		t.Fatal("yolo mode should not use interactive permission stdin")
+	}
+	if usesInteractivePermission("plan") {
+		t.Fatal("plan mode should not use interactive permission stdin")
 	}
 }
 

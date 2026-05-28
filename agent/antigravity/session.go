@@ -139,7 +139,10 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 		}
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
-	args := buildAntigravityArgs(chatID, isResume, as.model, as.mode, fullPrompt)
+	args := buildAntigravityArgs(chatID, isResume, as.mode, fullPrompt)
+	if strings.TrimSpace(as.model) != "" {
+		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
+	}
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -170,9 +173,12 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	if err != nil {
 		return fmt.Errorf("antigravitySession: stdout pipe: %w", err)
 	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("antigravitySession: stdin pipe: %w", err)
+	var stdin io.WriteCloser
+	if usesInteractivePermission(as.mode) {
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("antigravitySession: stdin pipe: %w", err)
+		}
 	}
 
 	var stderrBuf bytes.Buffer
@@ -195,14 +201,11 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	return nil
 }
 
-func buildAntigravityArgs(chatID string, isResume bool, model, mode, fullPrompt string) []string {
+func buildAntigravityArgs(chatID string, isResume bool, mode, fullPrompt string) []string {
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
 	args := make([]string, 0, 10)
 	if isResume {
 		args = append(args, "--conversation", chatID)
-	}
-	if model != "" {
-		args = append(args, "-m", model)
 	}
 	switch mode {
 	case "yolo":
@@ -212,6 +215,10 @@ func buildAntigravityArgs(chatID string, isResume bool, model, mode, fullPrompt 
 	}
 	args = append(args, "-p", fullPrompt)
 	return args
+}
+
+func usesInteractivePermission(mode string) bool {
+	return strings.EqualFold(strings.TrimSpace(mode), "default")
 }
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
