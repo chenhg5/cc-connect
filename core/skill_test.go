@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -32,6 +33,9 @@ func TestSkillRegistryListAll_RecursesIntoGroupedDirectories(t *testing.T) {
 }
 
 func TestSkillRegistryListAll_FollowsDirectorySymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires administrator on Windows")
+	}
 	root := t.TempDir()
 	targetRoot := t.TempDir()
 	writeSkillFile(t, filepath.Join(targetRoot, "automation", "telegram-codex-bot", "SKILL.md"), "Telegram bot skill")
@@ -61,6 +65,9 @@ func TestSkillRegistryListAll_FollowsDirectorySymlinks(t *testing.T) {
 }
 
 func TestSkillRegistryListAll_DoesNotLoopOnDirectorySymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires administrator on Windows")
+	}
 	root := t.TempDir()
 	writeSkillFile(t, filepath.Join(root, "automation", "telegram-codex-bot", "SKILL.md"), "Telegram bot skill")
 

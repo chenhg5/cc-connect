@@ -54,6 +54,8 @@ type repliedTextContent struct {
 	Text string `json:"text"`
 }
 
+const maxQuotedMessageRunes = 4000
+
 type downloadResponse struct {
 	DownloadUrl string `json:"downloadUrl"`
 }
@@ -357,7 +359,9 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	}
 
 	// Handle image messages
-	if data.Msgtype == "image" {
+	// DingTalk delivers image messages as either "image" or "picture" depending
+	// on the client and robot type. Both carry the same downloadCode field.
+	if data.Msgtype == "image" || data.Msgtype == "picture" {
 		p.handleImageMessage(data, sessionKey, inboundRobotCode)
 		return
 	}
@@ -1257,22 +1261,174 @@ func (p *Platform) formatReplyContent(richText *richTextContent, fallback string
 		return content
 	}
 
-	if richText.RepliedMsg.MsgType != "text" {
-		slog.Debug("dingtalk: quoted message type not supported", "type", richText.RepliedMsg.MsgType)
+	quotedText := p.extractQuotedMessageText(richText.RepliedMsg)
+	if quotedText == "" {
 		return content
 	}
 
+	return fmt.Sprintf("引用: \"%s\"\n\n%s", quotedText, content)
+}
+
+func (p *Platform) extractQuotedMessageText(msg *repliedMessage) string {
+	if msg == nil {
+		return ""
+	}
+
+	switch msg.MsgType {
+	case "text":
+		return p.extractQuotedTextMessageText(msg.Content)
+	case "interactiveCard":
+		return p.extractInteractiveCardQuotedText(msg.Content)
+	default:
+		slog.Debug("dingtalk: quoted message type not supported", "type", msg.MsgType)
+		return ""
+	}
+}
+
+func (p *Platform) extractQuotedTextMessageText(raw json.RawMessage) string {
 	var repliedContent repliedTextContent
-	if err := json.Unmarshal(richText.RepliedMsg.Content, &repliedContent); err != nil {
+	if err := json.Unmarshal(raw, &repliedContent); err != nil {
 		slog.Debug("dingtalk: failed to parse replied message content", "error", err)
-		return content
+		return ""
+	}
+	return repliedContent.Text
+}
+
+func (p *Platform) extractInteractiveCardQuotedText(raw json.RawMessage) string {
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		slog.Debug("dingtalk: failed to parse quoted interactiveCard content", "error", err)
+		return ""
+	}
+	text := p.extractInteractiveCardTextValue(payload, 0)
+	if text == "" {
+		slog.Debug("dingtalk: quoted interactiveCard content has no extractable text")
+	}
+	return normalizeQuotedMessageText(text)
+}
+
+func (p *Platform) extractInteractiveCardTextValue(value any, depth int) string {
+	if depth > 4 {
+		return ""
 	}
 
-	if repliedContent.Text == "" {
-		return content
+	switch v := value.(type) {
+	case string:
+		decoded, ok := decodeJSONObjectOrArray(v)
+		if !ok {
+			return ""
+		}
+		return p.extractInteractiveCardTextValue(decoded, depth+1)
+	case map[string]any:
+		for _, key := range p.interactiveCardTemplateKeys() {
+			if text := p.extractInteractiveCardPath(v, depth, "cardData", "cardParamMap", key); text != "" {
+				return text
+			}
+		}
+		for _, key := range p.interactiveCardTemplateKeys() {
+			if text := p.extractInteractiveCardPath(v, depth, "cardParamMap", key); text != "" {
+				return text
+			}
+		}
+		for _, key := range p.interactiveCardTopLevelKeys() {
+			if text := p.extractInteractiveCardPath(v, depth, key); text != "" {
+				return text
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if text := p.extractInteractiveCardTextValue(item, depth+1); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func (p *Platform) extractInteractiveCardPath(root map[string]any, depth int, path ...string) string {
+	var current any = root
+	for _, part := range path {
+		m, ok := mapFromJSONValue(current)
+		if !ok {
+			return ""
+		}
+		next, ok := m[part]
+		if !ok {
+			return ""
+		}
+		current = next
+	}
+	return p.extractInteractiveCardLeafText(current, depth+1)
+}
+
+func (p *Platform) extractInteractiveCardLeafText(value any, depth int) string {
+	if depth > 4 {
+		return ""
 	}
 
-	return fmt.Sprintf("引用: \"%s\"\n\n%s", repliedContent.Text, content)
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any, []any:
+		return p.extractInteractiveCardTextValue(value, depth+1)
+	default:
+		return ""
+	}
+}
+
+func (p *Platform) interactiveCardTemplateKeys() []string {
+	key := strings.TrimSpace(p.cardTemplateKey)
+	if key == "" {
+		key = "content"
+	}
+	if key == "content" {
+		return []string{"content"}
+	}
+	return []string{key, "content"}
+}
+
+func (p *Platform) interactiveCardTopLevelKeys() []string {
+	return []string{"content", "text", "markdown", "title"}
+}
+
+func mapFromJSONValue(value any) (map[string]any, bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		return v, true
+	case string:
+		decoded, ok := decodeJSONObjectOrArray(v)
+		if !ok {
+			return nil, false
+		}
+		m, ok := decoded.(map[string]any)
+		return m, ok
+	default:
+		return nil, false
+	}
+}
+
+func decodeJSONObjectOrArray(s string) (any, bool) {
+	text := strings.TrimSpace(s)
+	if text == "" || (!strings.HasPrefix(text, "{") && !strings.HasPrefix(text, "[")) {
+		return nil, false
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return nil, false
+	}
+	return decoded, true
+}
+
+func normalizeQuotedMessageText(s string) string {
+	text := strings.TrimSpace(s)
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxQuotedMessageRunes {
+		return text
+	}
+	return string(runes[:maxQuotedMessageRunes]) + "..."
 }
 
 // ReconstructReplyCtx implements core.ReplyContextReconstructor.
