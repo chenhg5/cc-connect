@@ -311,6 +311,9 @@ func (c *aiCard) flush(ctx context.Context) {
 
 // doStream sends content to the DingTalk streaming API.
 func (c *aiCard) doStream(ctx context.Context, content string, isFinalize bool) error {
+	// AI Cards don't support @mentions; strip markers to avoid displaying raw tags.
+	content = StripAtMentions(content)
+
 	token, err := c.platform.getAccessToken()
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
