@@ -1085,8 +1085,10 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// Skip quote injection when thread_isolation is enabled and the message is
 	// inside a thread — the thread already provides conversational context, and
 	// long quoted prefixes can drown out the user's actual text (issue #764).
+	// Exception: always fetch quoted content when parentID is set, so that
+	// quoting a historical message with only @bot (no extra text) still works.
 	var quoted quotedMessage
-	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
+	if parentID != "" {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
@@ -1100,7 +1102,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			return
 		}
 		text := stripMentions(textBody.Text, mentions, p.botOpenID)
-		if text == "" {
+		if text == "" && quoted.text == "" && len(quoted.images) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
