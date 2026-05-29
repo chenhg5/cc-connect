@@ -110,10 +110,6 @@ func (p *Platform) Stop() error {
 var _ core.InlineButtonSender = (*Platform)(nil)
 
 func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]core.ButtonOption) error {
-	// Metadata query runs between commands (handlerMu held), not during.
-	// Blocking buttons here is safe: mode/model cards are suppressed,
-	// and permission requests (which only occur during command processing)
-	// are never affected because metadataActive is false during commands.
 	if p.metadataActive.Load() {
 		return nil
 	}
@@ -198,33 +194,144 @@ type silkStreamingCard struct {
 	mu       sync.Mutex
 	failed   bool
 	lastSent time.Time
+
+	// Structured content tracking (StructuredContentStreamer)
+	lastThinking string
+	lastTools    []core.StructuredTool
+	lastAnswer   string
 }
 
+func buildBlocksFromStructured(thinking string, tools []core.StructuredTool, answer string) []map[string]any {
+	var blocks []map[string]any
+	index := 0
+	hasPostThinking := len(tools) > 0 || answer != ""
+
+	if thinking != "" {
+		blocks = append(blocks, map[string]any{
+			"index":      index,
+			"type":       "thinking",
+			"content":    thinking,
+			"isComplete": hasPostThinking,
+		})
+		index++
+	}
+	for _, t := range tools {
+		blocks = append(blocks, map[string]any{
+			"index":      index,
+			"type":       "tool_use",
+			"content":    t.Input,
+			"isComplete": true,
+			"toolName":   t.Name,
+		})
+		index++
+	}
+	if answer != "" {
+		blocks = append(blocks, map[string]any{
+			"index":      index,
+			"type":       "text",
+			"content":    answer,
+			"isComplete": true,
+		})
+	}
+	return blocks
+}
+
+// Update implements core.StreamingCard (legacy flat-text path, unused when StructuredContentStreamer is active).
 func (c *silkStreamingCard) Update(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.platform.metadataActive.Load() {
+		return nil
+	}
+	if time.Since(c.lastSent) < 500*time.Millisecond {
+		return nil
+	}
+	return c.sendBlocks(nil, false)
+}
+
+// UpdateStructured implements core.StructuredContentStreamer.
+func (c *silkStreamingCard) UpdateStructured(ctx context.Context, thinking string, tools []core.StructuredTool, answer string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.platform.metadataActive.Load() {
+		return nil
+	}
 	if time.Since(c.lastSent) < 500*time.Millisecond {
 		return nil
 	}
 	c.lastSent = time.Now()
-	return c.platform.sendJSON(map[string]any{
-		"type":        "reply_stream",
-		"content":     content,
-		"done":        false,
-		"incremental": false,
-	})
+	c.lastThinking = thinking
+	c.lastTools = tools
+	c.lastAnswer = answer
+	return c.sendBlocks(buildBlocksFromStructured(thinking, tools, answer), false)
 }
 
 func (c *silkStreamingCard) Finalize(ctx context.Context, content string) error {
-	// Intentional error: the engine's fallback calls Reply(fullResponse) which
-	// sends only the clean answer text, without thinking/tool card metadata.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Ensure answer text is present even if EventText never fired (the full
+	// response may only be in the buildCardContent content parameter).
+	answers := c.lastAnswer
+	if answers == "" && content != "" {
+		answers = extractAnswerFromCardContent(content, c.lastThinking, c.lastTools)
+	}
+
+	blocks := buildBlocksFromStructured(c.lastThinking, c.lastTools, answers)
+	if err := c.sendBlocks(blocks, true); err != nil {
+		return err
+	}
 	return fmt.Errorf("silk: finalize triggers reply fallback for clean answer")
+}
+
+// extractAnswerFromCardContent extracts the answer text portion from the
+// buildCardContent format:
+//
+//	💭 **Thinking**\n\n[thinking]\n\n---\n\n🔧 **Tool #N**: `name`\n[input]\n\n---\n\n[answer]
+//
+// It removes the thinking and tool prefix portions, returning the raw answer.
+func extractAnswerFromCardContent(cardContent, thinking string, tools []core.StructuredTool) string {
+	// Reconstruct the prefix (thinking + tools, same format as buildCardContent)
+	var prefix strings.Builder
+	if thinking != "" {
+		prefix.WriteString("💭 **Thinking**\n\n")
+		prefix.WriteString(thinking)
+		prefix.WriteString("\n\n---\n\n")
+	}
+	for _, t := range tools {
+		prefix.WriteString(fmt.Sprintf("🔧 **Tool #%d**: `%s`\n", t.Index, t.Name))
+		if t.Input != "" {
+			prefix.WriteString(t.Input)
+			prefix.WriteString("\n")
+		}
+		prefix.WriteString("\n")
+	}
+
+	rest := strings.TrimPrefix(cardContent, prefix.String())
+	rest = strings.TrimPrefix(rest, "---\n\n")
+	return strings.TrimSpace(rest)
 }
 
 func (c *silkStreamingCard) Failed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.failed
+}
+
+func (c *silkStreamingCard) sendBlocks(blocks []map[string]any, done bool) error {
+	if c.platform.metadataActive.Load() {
+		return nil
+	}
+	msg := map[string]any{
+		"type":        "reply_stream",
+		"content":     "",
+		"done":        done,
+		"incremental": false,
+	}
+	if len(blocks) > 0 {
+		msg["contentBlocks"] = blocks
+	}
+	return c.platform.sendJSON(msg)
 }
 
 // --- internal ---
@@ -399,12 +506,16 @@ func (p *Platform) connect(ctx context.Context) error {
 				p.handlerMu.Lock()
 				p.handler(p, coreMsg)
 				p.handlerMu.Unlock()
-				go func() {
-					time.Sleep(2 * time.Second)
-					p.handlerMu.Lock()
-					p.queryAndSendMetadataOnce()
-					p.handlerMu.Unlock()
-				}()
+				// 仅对 /mode 和 /model 命令重新查询 metadata（更新前端的徽章状态）
+				cmdText := strings.TrimSpace(cmd.Text)
+				if cmdText == "/mode" || cmdText == "/model" || strings.HasPrefix(cmdText, "/mode ") || strings.HasPrefix(cmdText, "/model ") {
+					go func() {
+						time.Sleep(2 * time.Second)
+						p.handlerMu.Lock()
+						p.queryAndSendMetadataOnce()
+						p.handlerMu.Unlock()
+					}()
+				}
 			}
 		case "ping":
 			_ = p.sendJSON(map[string]any{"type": "pong"})
@@ -439,15 +550,7 @@ func (p *Platform) pingLoop(ctx context.Context, conn *websocket.Conn) {
 // --- metadata query ---
 
 func (p *Platform) queryAndSendMetadata() {
-	if !p.queryAndSendMetadataOnce() {
-		// If metadata was empty, retry after a delay (agent may still be loading)
-		slog.Debug("[silk] metadata empty, scheduling retry in 15s...")
-		time.AfterFunc(15*time.Second, func() {
-			p.handlerMu.Lock()
-			p.queryAndSendMetadataOnce()
-			p.handlerMu.Unlock()
-		})
-	}
+	p.queryAndSendMetadataOnce()
 }
 
 // Returns true if metadata was successfully collected and sent.
