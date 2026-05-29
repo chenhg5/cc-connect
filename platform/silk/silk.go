@@ -44,6 +44,8 @@ type Platform struct {
 
 	metadataActive atomic.Bool
 	metadataReply  chan string
+
+	handlerMu sync.Mutex // serialises all p.handler() calls (Claude CLI is not concurrent-safe)
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -102,6 +104,28 @@ func (p *Platform) Stop() error {
 		conn.Close()
 	}
 	return nil
+}
+
+// Compile-time interface check: silk implements core.InlineButtonSender
+var _ core.InlineButtonSender = (*Platform)(nil)
+
+func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]core.ButtonOption) error {
+	var rows []map[string]any
+	for _, row := range buttons {
+		var btns []map[string]any
+		for _, btn := range row {
+			btns = append(btns, map[string]any{
+				"label": btn.Text,
+				"value": btn.Data,
+			})
+		}
+		rows = append(rows, map[string]any{"row": btns})
+	}
+	return p.sendJSON(map[string]any{
+		"type":    "question",
+		"content": content,
+		"options": rows,
+	})
 }
 
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
@@ -293,8 +317,16 @@ func (p *Platform) connect(ctx context.Context) error {
 
 	slog.Info("[silk] connected", "groupId", ack.GroupID, "groupName", ack.GroupName)
 
+	// Run metadata query inline (before accepting messages) to prevent
+	// concurrent engine processing — the engine and Claude CLI do NOT
+	// support concurrent requests. Without this, a racing metadata
+	// goroutine and the main read loop both call p.handler, causing
+	// Claude CLI to reject one with "上一个请求仍在处理中".
+	p.handlerMu.Lock()
+	p.queryAndSendMetadata()
+	p.handlerMu.Unlock()
+
 	go p.pingLoop(ctx, conn)
-	go p.queryAndSendMetadata()
 
 	for {
 		_, data, err := conn.ReadMessage()
@@ -337,7 +369,9 @@ func (p *Platform) connect(ctx context.Context) error {
 				},
 			}
 			if p.handler != nil {
+				p.handlerMu.Lock()
 				p.handler(p, coreMsg)
+				p.handlerMu.Unlock()
 			}
 		case "command":
 			var cmd struct {
@@ -355,10 +389,14 @@ func (p *Platform) connect(ctx context.Context) error {
 					Platform:   "silk",
 					ReplyCtx:   &replyContext{userID: "__silk_cmd__", userName: "Silk"},
 				}
+				p.handlerMu.Lock()
 				p.handler(p, coreMsg)
+				p.handlerMu.Unlock()
 				go func() {
 					time.Sleep(2 * time.Second)
-					p.queryAndSendMetadata()
+					p.handlerMu.Lock()
+					p.queryAndSendMetadataOnce()
+					p.handlerMu.Unlock()
 				}()
 			}
 		case "ping":
@@ -394,6 +432,19 @@ func (p *Platform) pingLoop(ctx context.Context, conn *websocket.Conn) {
 // --- metadata query ---
 
 func (p *Platform) queryAndSendMetadata() {
+	if !p.queryAndSendMetadataOnce() {
+		// If metadata was empty, retry after a delay (agent may still be loading)
+		slog.Debug("[silk] metadata empty, scheduling retry in 15s...")
+		time.AfterFunc(15*time.Second, func() {
+			p.handlerMu.Lock()
+			p.queryAndSendMetadataOnce()
+			p.handlerMu.Unlock()
+		})
+	}
+}
+
+// Returns true if metadata was successfully collected and sent.
+func (p *Platform) queryAndSendMetadataOnce() bool {
 	// Drain any stale replies
 	select {
 	case <-p.metadataReply:
@@ -410,7 +461,7 @@ func (p *Platform) queryAndSendMetadata() {
 		Platform:   "silk",
 		ReplyCtx:   &replyContext{userID: "__silk_meta__"},
 	})
-	modeText := waitChan(p.metadataReply, 3*time.Second)
+	modeText := waitChan(p.metadataReply, 8*time.Second)
 	slog.Debug("[silk] raw /mode response", "text", modeText)
 
 	// Drain again before next query
@@ -427,7 +478,7 @@ func (p *Platform) queryAndSendMetadata() {
 		Platform:   "silk",
 		ReplyCtx:   &replyContext{userID: "__silk_meta__"},
 	})
-	modelText := waitChan(p.metadataReply, 5*time.Second)
+	modelText := waitChan(p.metadataReply, 15*time.Second)
 	slog.Debug("[silk] raw /model response", "text", modelText)
 
 	p.metadataActive.Store(false)
@@ -437,7 +488,7 @@ func (p *Platform) queryAndSendMetadata() {
 
 	if mode == "" && model == "" && len(modes) == 0 && len(models) == 0 {
 		slog.Debug("[silk] metadata query returned nothing, skipping send")
-		return
+		return false
 	}
 
 	_ = p.sendJSON(map[string]any{
@@ -449,6 +500,7 @@ func (p *Platform) queryAndSendMetadata() {
 	})
 	slog.Info("[silk] metadata sent", "mode", mode, "model", model,
 		"modes", len(modes), "models", len(models))
+	return true
 }
 
 func waitChan(ch chan string, timeout time.Duration) string {
