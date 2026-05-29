@@ -47,8 +47,11 @@ type richTextContent struct {
 }
 
 type repliedMessage struct {
-	MsgType string          `json:"msgType"`
-	Content json.RawMessage `json:"content"`
+	MsgType         string          `json:"msgType"`
+	MsgId           string          `json:"msgId"`
+	CreatedAt       int64           `json:"createdAt"`
+	Content         json.RawMessage `json:"content"`
+	InteractiveCard json.RawMessage `json:"interactiveCard"`
 }
 
 type repliedTextContent struct {
@@ -80,6 +83,17 @@ type Platform struct {
 	cardThrottleMs  int
 	degradeUntil    time.Time
 	degradeMu       sync.Mutex
+
+	// Outgoing message cache for quoted-message lookup.
+	// When the assistant sends a reply, we store (timestamp, content).
+	// When a user quotes an interactiveCard, we match by createdAt timestamp.
+	outgoingMu    sync.Mutex
+	outgoingCache []outgoingEntry
+}
+
+type outgoingEntry struct {
+	TS      int64  `json:"ts"`
+	Content string `json:"content"`
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -288,8 +302,11 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	// Extract message content, recovering quoted/reply info from richText.
 	messageContent := data.Text.Content
 	if richText != nil && richText.IsReplyMsg && richText.RepliedMsg != nil {
-		slog.Debug("dingtalk: reply message detected", "msgType", richText.RepliedMsg.MsgType)
+		slog.Info("dingtalk: reply message detected — extracting quoted content", "msgType", richText.RepliedMsg.MsgType, "contentLen", len(richText.RepliedMsg.Content), "cardLen", len(richText.RepliedMsg.InteractiveCard))
 		messageContent = p.formatReplyContent(richText, messageContent)
+		slog.Info("dingtalk: reply content merged", "totalLen", len(messageContent))
+	} else {
+		slog.Info("dingtalk: plain message (no quote)", "contentLen", len(messageContent), "isReplyMsg", richText != nil && richText.IsReplyMsg)
 	}
 
 	// Handle text messages (default)
@@ -700,6 +717,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("dingtalk: reply returned status %d body=%s", resp.StatusCode, string(respBody))
 	}
 	slog.Info("dingtalk: Reply response", "status", resp.StatusCode, "body", string(respBody))
+	p.cacheOutgoing(content)
 	return nil
 }
 
@@ -1121,6 +1139,37 @@ func (p *Platform) Stop() error {
 	return nil
 }
 
+const maxOutgoingCache = 50
+
+// cacheOutgoing stores a sent message in the local cache for later lookup.
+func (p *Platform) cacheOutgoing(content string) {
+	p.outgoingMu.Lock()
+	defer p.outgoingMu.Unlock()
+	p.outgoingCache = append(p.outgoingCache, outgoingEntry{
+		TS:      time.Now().UnixMilli(),
+		Content: content,
+	})
+	if len(p.outgoingCache) > maxOutgoingCache {
+		p.outgoingCache = p.outgoingCache[len(p.outgoingCache)-maxOutgoingCache:]
+	}
+}
+
+// cacheLookup finds a cached outgoing message by timestamp (±1s window).
+func (p *Platform) cacheLookup(createdAt int64) string {
+	p.outgoingMu.Lock()
+	defer p.outgoingMu.Unlock()
+	for i := len(p.outgoingCache) - 1; i >= 0; i-- {
+		diff := createdAt - p.outgoingCache[i].TS
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff < 1000 { // ±1 second
+			return p.outgoingCache[i].Content
+		}
+	}
+	return ""
+}
+
 // formatReplyContent prepends quoted text to the message content when the user
 // replies to / quotes a previous message. richText is parsed from the raw JSON
 // "text" object which the SDK's BotCallbackDataTextModel silently drops.
@@ -1134,24 +1183,80 @@ func (p *Platform) formatReplyContent(richText *richTextContent, fallback string
 		return content
 	}
 
-	if richText.RepliedMsg.MsgType != "text" {
+	switch richText.RepliedMsg.MsgType {
+	case "text":
+		var repliedContent repliedTextContent
+		if err := json.Unmarshal(richText.RepliedMsg.Content, &repliedContent); err != nil {
+			slog.Debug("dingtalk: failed to parse replied message content", "error", err)
+			return content
+		}
+		if repliedContent.Text == "" {
+			return content
+		}
+		return fmt.Sprintf("引用: \"%s\"\n\n%s", repliedContent.Text, content)
+
+		case "interactiveCard":
+		// Try to recover the card content from the outgoing message cache.
+		// The Stream SDK only sends metadata (msgId, senderId, createdAt) for
+		// replied interactive cards — the card body is NOT included.
+		cached := p.cacheLookup(richText.RepliedMsg.CreatedAt)
+		slog.Info("dingtalk: interactiveCard cache lookup", "cached", cached != "", "cachedLen", len(cached))
+		if cached != "" {
+			quoted := extractPlainText(cached)
+			if quoted != "" {
+				return fmt.Sprintf("引用: \"%s\"\n\n%s", quoted, content)
+			}
+		}
+		// Fallback: include msgId as reference
+		return fmt.Sprintf("引用消息(msgId=%s, type=interactiveCard)\n\n%s",
+			richText.RepliedMsg.MsgId, content)
+	default:
 		slog.Debug("dingtalk: quoted message type not supported", "type", richText.RepliedMsg.MsgType)
 		return content
 	}
-
-	var repliedContent repliedTextContent
-	if err := json.Unmarshal(richText.RepliedMsg.Content, &repliedContent); err != nil {
-		slog.Debug("dingtalk: failed to parse replied message content", "error", err)
-		return content
-	}
-
-	if repliedContent.Text == "" {
-		return content
-	}
-
-	return fmt.Sprintf("引用: \"%s\"\n\n%s", repliedContent.Text, content)
 }
 
+// extractPlainText strips markdown formatting to produce a plain-text summary
+// suitable for quoted-message context. Handles the subset of DingTalk markdown
+// that interactive cards emit: bold, italic, links, images, headings, and list markers.
+func extractPlainText(md string) string {
+	if md == "" {
+		return ""
+	}
+	// Remove images: ![](url) or ![alt](url)
+	re := regexp.MustCompile(`!\[[^\]]*\]\([^)]+\)`)
+	md = re.ReplaceAllString(md, "")
+	// Remove links: [text](url) → text
+	re = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+	md = re.ReplaceAllString(md, "$1")
+	// Remove bold markers **text**
+	re = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	md = re.ReplaceAllString(md, "$1")
+	// Remove italic markers *text*
+	re = regexp.MustCompile(`\*([^*]+)\*`)
+	md = re.ReplaceAllString(md, "$1")
+	// Remove heading markers # ## ### etc
+	re = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	md = re.ReplaceAllString(md, "")
+	// Remove > blockquote markers
+	re = regexp.MustCompile(`(?m)^>\s?`)
+	md = re.ReplaceAllString(md, "")
+	// Remove - * + list markers
+	re = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+	md = re.ReplaceAllString(md, "")
+	// Collapse multiple blank lines
+	re = regexp.MustCompile(`\n{3,}`)
+	md = re.ReplaceAllString(md, "\n\n")
+	// Trim
+	md = strings.TrimSpace(md)
+	// Limit length to avoid bloating prompts
+	if len(md) > 500 {
+		md = md[:500] + "..."
+	}
+	return md
+}
+
+// ReconstructReplyCtx implements core.ReplyContextReconstructor.
 // ReconstructReplyCtx implements core.ReplyContextReconstructor.
 // Session key format: "dingtalk:{convType}:{conversationId}:{senderStaffId}" or "dingtalk:{convType}:{conversationId}"
 // where convType is "g" (group) or "d" (direct/1:1).
@@ -1267,6 +1372,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	}
 
 	slog.Debug("dingtalk: proactive message sent", "api", apiURL, "status", resp.StatusCode)
+	p.cacheOutgoing(content)
 	return nil
 }
 
