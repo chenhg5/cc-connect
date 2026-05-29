@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -660,16 +661,27 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return p.sendProactiveMessage(ctx, rc, content)
 	}
 
+	// Extract @mentions from content to populate atUserIds for clickable mentions
+	atUserIds := extractAtUserIds(content)
+
 	content = preprocessDingTalkMarkdown(content)
 
 	payload := map[string]any{
 		"msgtype":  "markdown",
 		"markdown": map[string]string{"title": "reply", "text": content},
 	}
+	if len(atUserIds) > 0 {
+		payload["at"] = map[string]any{
+			"atUserIds": atUserIds,
+			"isAtAll":   false,
+		}
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("dingtalk: marshal reply: %w", err)
 	}
+
+	slog.Info("dingtalk: Reply payload", "payload", string(body), "webhook", rc.sessionWebhook)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
 	if err != nil {
@@ -683,9 +695,11 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
+		return fmt.Errorf("dingtalk: reply returned status %d body=%s", resp.StatusCode, string(respBody))
 	}
+	slog.Info("dingtalk: Reply response", "status", resp.StatusCode, "body", string(respBody))
 	return nil
 }
 
@@ -1193,12 +1207,27 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	if rc.isGroup && rc.conversationId != "" {
 		// Group message via /v1.0/robot/groupMessages/send
 		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
-		msgParam, _ := json.Marshal(map[string]string{"text": content})
-		requestBody = map[string]any{
-			"robotCode":          p.robotCode,
-			"openConversationId": rc.conversationId,
-			"msgKey":             "sampleMarkdown",
-			"msgParam":           string(msgParam),
+
+		// If message contains @mentions, use sampleText (supports clickable @userId)
+		// Otherwise use sampleMarkdown for rich formatting
+		if strings.HasPrefix(content, "@") || strings.Contains(content, "@") {
+			slog.Info("dingtalk: proactive group message — using sampleText for @mention", "content", content)
+			msgParam, _ := json.Marshal(map[string]string{"content": content})
+			requestBody = map[string]any{
+				"robotCode":          p.robotCode,
+				"openConversationId": rc.conversationId,
+				"msgKey":             "sampleText",
+				"msgParam":           string(msgParam),
+			}
+		} else {
+			content = preprocessDingTalkMarkdown(content)
+			msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
+			requestBody = map[string]any{
+				"robotCode":          p.robotCode,
+				"openConversationId": rc.conversationId,
+				"msgKey":             "sampleMarkdown",
+				"msgParam":           string(msgParam),
+			}
 		}
 	} else if rc.senderStaffId != "" {
 		// Direct message via /v1.0/robot/oToMessages/batchSend
@@ -1239,6 +1268,22 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 
 	slog.Debug("dingtalk: proactive message sent", "api", apiURL, "status", resp.StatusCode)
 	return nil
+}
+
+// extractAtUserIds extracts @userId patterns from content for DingTalk's atUserIds field.
+// Matches @ followed by numeric DingTalk user IDs (e.g. @194252073827812352).
+func extractAtUserIds(content string) []string {
+	re := regexp.MustCompile(`@(\d{10,})`)
+	matches := re.FindAllStringSubmatch(content, -1)
+	seen := make(map[string]bool)
+	var ids []string
+	for _, m := range matches {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			ids = append(ids, m[1])
+		}
+	}
+	return ids
 }
 
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
