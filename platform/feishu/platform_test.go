@@ -1168,7 +1168,7 @@ func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 }
 
 func TestResolveMentions_CardFormat(t *testing.T) {
-	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p := &Platform{platformName: "feishu", resolveMentions: true, useInteractiveCard: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
 		members:   map[string]string{"张三": "ou_zhangsan"},
 		fetchedAt: time.Now(),

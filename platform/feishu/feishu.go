@@ -1474,7 +1474,7 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
 
-	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
+	useCardFormat := predictMsgType(content, p.useInteractiveCard) == larkim.MsgTypeInteractive
 	result := content
 	for _, name := range names {
 		pattern := "@" + name
@@ -2200,7 +2200,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := buildReplyContent(content, p.useInteractiveCard)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -2222,7 +2222,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := buildReplyContent(content, p.useInteractiveCard)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
@@ -2410,21 +2410,39 @@ func detectMimeType(data []byte) string {
 // predictMsgType returns the message type that buildReplyContent will choose,
 // without actually building the content. Used to select the correct at syntax
 // before building.
-func predictMsgType(content string) string {
+func predictMsgType(content string, useInteractiveCard bool) string {
 	if !containsMarkdown(content) {
+		if containsAtTag(content) {
+			return larkim.MsgTypePost
+		}
 		return larkim.MsgTypeText
 	}
-	if countMarkdownTables(content) <= maxCardTables {
+	if useInteractiveCard && !containsAtTag(content) && countMarkdownTables(content) <= maxCardTables {
 		return larkim.MsgTypeInteractive
 	}
 	return larkim.MsgTypePost
 }
 
-func buildReplyContent(content string) (msgType string, body string) {
+func buildReplyContent(content string, useInteractiveCard bool) (msgType string, body string) {
 	if !containsMarkdown(content) {
+		if containsAtTag(content) {
+			// Plain text MsgTypeText doesn't support <at> tags properly;
+			// use MsgTypePost so @mentions trigger bot events.
+			body = buildPostMdJSON(content)
+			slog.Debug("feishu send debug", "msg_type", larkim.MsgTypePost, "body", body)
+			return larkim.MsgTypePost, body
+		}
 		b, _ := json.Marshal(map[string]string{"text": content})
 		slog.Debug("feishu send debug", "msg_type", larkim.MsgTypeText, "body", string(b))
 		return larkim.MsgTypeText, string(b)
+	}
+	// When interactive card is disabled or content contains <at> tags, send markdown
+	// as post (MsgTypePost) so that <at> tags trigger bot events. Card <at> tags
+	// only render visually but don't populate the mentions field.
+	if !useInteractiveCard || containsAtTag(content) {
+		body = buildPostMdJSON(content)
+		slog.Debug("feishu send debug", "msg_type", larkim.MsgTypePost, "body", body)
+		return larkim.MsgTypePost, body
 	}
 	// Prefer card for all markdown content — card schema 2.0 has the best
 	// markdown rendering (headings, blockquotes, code blocks, tables, links,
@@ -2521,6 +2539,15 @@ func containsMarkdown(s string) bool {
 		}
 	}
 	return false
+}
+
+// containsAtTag returns true if the content contains a Feishu <at> tag
+// (e.g. <at user_id="ou_xxx">name</at> or <at id=ou_xxx></at>).
+// When present, the message must NOT be sent as an interactive card,
+// because card <at> tags only render visually and don't populate the
+// mentions field that triggers im.message.receive_v1 for bots.
+func containsAtTag(content string) bool {
+	return strings.Contains(content, "<at ")
 }
 
 // buildPostJSON converts markdown content to Feishu post (rich text) format.
