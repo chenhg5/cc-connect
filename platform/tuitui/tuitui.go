@@ -31,6 +31,7 @@ const (
 	initialReconnectBackoff = time.Second
 	maxReconnectBackoff     = 30 * time.Second
 	attachmentDownloadTO    = 60 * time.Second
+	reactionTimeout         = 5 * time.Second
 	maxAttachmentBytes      = 25 * 1024 * 1024
 
 	chatTypeDirect  = "direct"
@@ -52,6 +53,7 @@ type Platform struct {
 	allowFrom             string
 	groupAllowFrom        string
 	groupPolicy           string
+	receiveReaction       string
 	requireMention        bool
 	shareSessionInChannel bool
 
@@ -112,6 +114,10 @@ func New(opts map[string]any) (core.Platform, error) {
 	if v, ok := opts["require_mention"].(bool); ok {
 		requireMention = v
 	}
+	receiveReaction := "收到"
+	if v, ok := opts["receive_reaction"].(string); ok {
+		receiveReaction = strings.TrimSpace(v)
+	}
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
 	return &Platform{
@@ -122,6 +128,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		groupAllowFrom:        groupAllowFrom,
 		groupPolicy:           groupPolicy,
+		receiveReaction:       receiveReaction,
 		requireMention:        requireMention,
 		shareSessionInChannel: shareSessionInChannel,
 		client:                &http.Client{Timeout: httpTimeout},
@@ -314,6 +321,9 @@ func (p *Platform) handleEvent(ctx context.Context, frame *tuituiFrame) {
 		return
 	}
 
+	rctx := replyContext{chatID: env.chatID, chatType: env.chatType, messageID: env.messageID}
+	p.reactOnReceive(rctx)
+
 	images, files, audio := p.fetchInboundMedia(ctx, env)
 	text := env.text
 	if text == "" && audio == nil && (len(images) > 0 || len(files) > 0) {
@@ -328,7 +338,6 @@ func (p *Platform) handleEvent(ctx context.Context, frame *tuituiFrame) {
 	}
 
 	sessionKey := p.sessionKey(env)
-	rctx := replyContext{chatID: env.chatID, chatType: env.chatType, messageID: env.messageID}
 	handler := p.getHandler()
 	if handler == nil {
 		return
@@ -432,6 +441,47 @@ func (p *Platform) sendText(ctx context.Context, replyCtx any, content string) e
 	}
 	addTargets(payload, rctx.chatID, rctx.chatType)
 	return p.postJSON(ctx, "/robot/message/custom/send", payload, nil)
+}
+
+func (p *Platform) reactOnReceive(rctx replyContext) {
+	emoji := strings.TrimSpace(p.receiveReaction)
+	if emoji == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), reactionTimeout)
+		defer cancel()
+		if err := p.reactToMessage(ctx, rctx, emoji); err != nil {
+			slog.Warn("tuitui: receive reaction failed", "error", err)
+		}
+	}()
+}
+
+func (p *Platform) reactToMessage(ctx context.Context, rctx replyContext, emoji string) error {
+	if rctx.chatType == "" {
+		rctx.chatType = guessChatType(rctx.chatID)
+	}
+	payload := map[string]any{
+		"msgtype":        "emoji_reaction",
+		"tousers":        []map[string]string{},
+		"togroups":       []map[string]string{},
+		"toteams":        []map[string]string{},
+		"emoji_reaction": map[string]any{"emoji": emoji, "cancel": false},
+	}
+	switch rctx.chatType {
+	case chatTypeDirect:
+		payload["tousers"] = []map[string]string{{"user": rctx.chatID, "msgid": rctx.messageID}}
+	case chatTypeGroup:
+		payload["togroups"] = []map[string]string{{"group": rctx.chatID, "msgid": rctx.messageID}}
+	case chatTypeChannel:
+		team := teamsParseChatID(rctx.chatID)
+		team["parent_id"] = ""
+		team["post_id"] = rctx.messageID
+		payload["toteams"] = []map[string]string{team}
+	default:
+		return fmt.Errorf("tuitui: invalid chat type %q", rctx.chatType)
+	}
+	return p.postJSON(ctx, "/robot/message/custom/modify", payload, nil)
 }
 
 func (p *Platform) sendMediaID(ctx context.Context, rctx replyContext, mediaID, filename string, isImage bool) error {

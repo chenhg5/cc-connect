@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestNewRequiresCredentials(t *testing.T) {
@@ -283,6 +285,109 @@ func TestSendTextGroupPayload(t *testing.T) {
 	ats, ok := gotPayload["at"].([]any)
 	if !ok || len(ats) != 1 || ats[0] != "alice" {
 		t.Fatalf("at = %#v", gotPayload["at"])
+	}
+}
+
+func TestReactToMessageGroupPayload(t *testing.T) {
+	var gotPath string
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"errcode":0}`))
+	}))
+	defer server.Close()
+
+	p := &Platform{appID: "app", appSecret: "secret", apiBase: server.URL, client: server.Client()}
+	err := p.reactToMessage(context.Background(), replyContext{chatID: "g1", chatType: chatTypeGroup, messageID: "m1"}, "收到")
+	if err != nil {
+		t.Fatalf("reactToMessage() error = %v", err)
+	}
+	if gotPath != "/robot/message/custom/modify" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotPayload["msgtype"] != "emoji_reaction" {
+		t.Fatalf("msgtype = %v", gotPayload["msgtype"])
+	}
+	reaction, ok := gotPayload["emoji_reaction"].(map[string]any)
+	if !ok {
+		t.Fatalf("emoji_reaction = %#v", gotPayload["emoji_reaction"])
+	}
+	if reaction["emoji"] != "收到" || reaction["cancel"] != false {
+		t.Fatalf("emoji_reaction = %#v", reaction)
+	}
+	groups, ok := gotPayload["togroups"].([]any)
+	if !ok || len(groups) != 1 {
+		t.Fatalf("togroups = %#v", gotPayload["togroups"])
+	}
+	group, ok := groups[0].(map[string]any)
+	if !ok || group["group"] != "g1" || group["msgid"] != "m1" {
+		t.Fatalf("group target = %#v", groups[0])
+	}
+}
+
+func TestHandleEventReactsAfterPolicyAllowsMessage(t *testing.T) {
+	gotReaction := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/robot/message/custom/modify" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		gotReaction <- payload
+		_, _ = w.Write([]byte(`{"errcode":0}`))
+	}))
+	defer server.Close()
+
+	gotMessage := make(chan string, 1)
+	p := &Platform{
+		appID:           "app",
+		appSecret:       "secret",
+		apiBase:         server.URL,
+		client:          server.Client(),
+		groupAllowFrom:  "g1",
+		groupPolicy:     "allowlist",
+		receiveReaction: "收到",
+		requireMention:  true,
+	}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		gotMessage <- msg.Content
+	}
+
+	p.handleEvent(context.Background(), &tuituiFrame{
+		ID: "event-1",
+		Body: tuituiBody{
+			Event: "group_chat",
+			User:  "alice",
+			Data: tuituiData{
+				MsgType: "text",
+				Text:    "@bot hello",
+				MsgID:   "m1",
+				GroupID: "g1",
+				AtMe:    true,
+			},
+		},
+	})
+
+	select {
+	case got := <-gotMessage:
+		if got != "@bot hello" {
+			t.Fatalf("message content = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler was not called")
+	}
+	select {
+	case payload := <-gotReaction:
+		if payload["msgtype"] != "emoji_reaction" {
+			t.Fatalf("reaction payload = %#v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receive reaction was not sent")
 	}
 }
 
