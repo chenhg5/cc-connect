@@ -199,12 +199,29 @@ type silkStreamingCard struct {
 	lastThinking string
 	lastTools    []core.StructuredTool
 	lastAnswer   string
+
+	// Completed thinking segments saved when a new thinking segment arrives
+	// after tool calls (the engine only tracks the latest thinking text and
+	// does not accumulate previous segments).
+	completedThinking []string
 }
 
-func buildBlocksFromStructured(thinking string, tools []core.StructuredTool, answer string) []map[string]any {
+func buildBlocksFromStructured(completedThinking []string, thinking string, tools []core.StructuredTool, answer string) []map[string]any {
 	var blocks []map[string]any
 	index := 0
 	hasPostThinking := len(tools) > 0 || answer != ""
+
+	// Emit all completed thinking segments first (pre-tool thinking that was
+	// replaced by later thinking — the engine only tracks the latest text).
+	for _, t := range completedThinking {
+		blocks = append(blocks, map[string]any{
+			"index":      index,
+			"type":       "thinking",
+			"content":    t,
+			"isComplete": true,
+		})
+		index++
+	}
 
 	if thinking != "" {
 		blocks = append(blocks, map[string]any{
@@ -260,10 +277,19 @@ func (c *silkStreamingCard) UpdateStructured(ctx context.Context, thinking strin
 		return nil
 	}
 	c.lastSent = time.Now()
+
+	// Detect a new thinking segment: if thinking content differs from what we
+	// last held, and tools have already been emitted, the previous thinking was
+	// a pre-tool segment that the engine's cardThinkingText replaced, not
+	// accumulated. Save it as a completed segment so it isn't lost.
+	if thinking != "" && thinking != c.lastThinking && len(c.lastTools) > 0 && c.lastThinking != "" {
+		c.completedThinking = append(c.completedThinking, c.lastThinking)
+	}
+
 	c.lastThinking = thinking
 	c.lastTools = tools
 	c.lastAnswer = answer
-	return c.sendBlocks(buildBlocksFromStructured(thinking, tools, answer), false)
+	return c.sendBlocks(buildBlocksFromStructured(c.completedThinking, thinking, tools, answer), false)
 }
 
 func (c *silkStreamingCard) Finalize(ctx context.Context, content string) error {
@@ -277,7 +303,7 @@ func (c *silkStreamingCard) Finalize(ctx context.Context, content string) error 
 		answers = extractAnswerFromCardContent(content, c.lastThinking, c.lastTools)
 	}
 
-	blocks := buildBlocksFromStructured(c.lastThinking, c.lastTools, answers)
+	blocks := buildBlocksFromStructured(c.completedThinking, c.lastThinking, c.lastTools, answers)
 	if err := c.sendBlocks(blocks, true); err != nil {
 		return err
 	}
