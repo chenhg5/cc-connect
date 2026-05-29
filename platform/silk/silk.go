@@ -110,6 +110,13 @@ func (p *Platform) Stop() error {
 var _ core.InlineButtonSender = (*Platform)(nil)
 
 func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]core.ButtonOption) error {
+	// Metadata query runs between commands (handlerMu held), not during.
+	// Blocking buttons here is safe: mode/model cards are suppressed,
+	// and permission requests (which only occur during command processing)
+	// are never affected because metadataActive is false during commands.
+	if p.metadataActive.Load() {
+		return nil
+	}
 	var rows []map[string]any
 	for _, row := range buttons {
 		var btns []map[string]any
