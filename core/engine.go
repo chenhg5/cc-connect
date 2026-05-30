@@ -2127,7 +2127,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
+				e.safeGo(func() { e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace) })
 			}
 			return
 		}
@@ -2156,7 +2156,7 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	e.safeGo(func() { e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey) })
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -2707,6 +2707,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in agent Send", "error", r, "session", msg.SessionKey)
+				sendDone <- fmt.Errorf("panic in Send: %v", r)
+			}
+		}()
 		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
 
@@ -3131,6 +3137,11 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in agent Close", "error", r, "session", sessionKey)
+			}
+		}()
 		agentSession.Close()
 		close(done)
 	}()
@@ -3251,7 +3262,7 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 	state.unsolicitedDone = done
 	state.mu.Unlock()
 
-	go e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, sessions, sessionKey, workspaceDir)
+	e.safeGo(func() { e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, sessions, sessionKey, workspaceDir) })
 }
 
 // runUnsolicitedReader is the goroutine body for the unsolicited event reader.
@@ -4434,6 +4445,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("panic in agent Send (queued)", "error", r)
+							nextSend <- fmt.Errorf("panic in Send: %v", r)
+						}
+					}()
 					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
@@ -4722,6 +4739,12 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		sendDone := make(chan error, 1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("panic in agent Send (drain)", "error", r)
+					sendDone <- fmt.Errorf("panic in Send: %v", r)
+				}
+			}()
 			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
 		}()
 
@@ -11775,7 +11798,7 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	e.safeGo(func() { e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey) })
 }
 
 // executeShellCommand runs a shell command and sends the output to the user.
@@ -12003,7 +12026,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	e.safeGo(func() { e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey) })
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
