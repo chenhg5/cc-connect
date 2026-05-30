@@ -109,6 +109,12 @@ type PreviewFinishPreference interface {
 	KeepPreviewOnFinish() bool
 }
 
+// PreviewFinalizer is an optional interface for platforms that need an explicit
+// terminal action when a preview finishes successfully.
+type PreviewFinalizer interface {
+	FinalizePreview(ctx context.Context, previewHandle any, finalText string) error
+}
+
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
 	return &streamPreview{
 		cfg:       cfg,
@@ -376,6 +382,21 @@ func (sp *streamPreview) finish(finalText string) bool {
 	if finalText == "" {
 		slog.Debug("stream preview finish: empty final text")
 		return false
+	}
+
+	if finalizer, ok := sp.platform.(PreviewFinalizer); ok {
+		slog.Debug("stream preview finish: finalizing preview via platform hook",
+			"text_len", len(finalText), "lastSent_len", len(sp.lastSentText),
+			"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate)
+		if err := finalizer.FinalizePreview(sp.ctx, sp.previewMsgID, finalText); err != nil {
+			slog.Debug("stream preview finish: finalize hook FAILED, cleaning up preview", "error", err)
+			if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+				_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+			}
+			return false
+		}
+		slog.Debug("stream preview finish: success via platform hook")
+		return true
 	}
 
 	// If the final text is identical to what was last sent via UpdateMessage,
