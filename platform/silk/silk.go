@@ -300,13 +300,20 @@ func (c *silkStreamingCard) UpdateStructured(ctx context.Context, thinking strin
 
 	case "text":
 		// Answer text accumulates incrementally via EventText.  Merge into
-		// the last segment when it is also text; otherwise start a new one.
+		// the last segment when it is also text (full text, the frontend
+		// treats it as an update of the same element).  When a new segment
+		// must be created (preceded by thinking/tool_use), use only the
+		// delta so earlier text is not duplicated.
 		if answer != c.lastAnswer {
 			n := len(c.segments)
 			if n > 0 && c.segments[n-1].typ == "text" {
-				c.segments[n-1].content = answer
+				c.segments[n-1].content = answer // full accumulated text, same segment
 			} else {
-				c.segments = append(c.segments, blockSegment{typ: "text", content: answer})
+				delta := answer
+				if c.lastAnswer != "" && strings.HasPrefix(answer, c.lastAnswer) {
+					delta = answer[len(c.lastAnswer):]
+				}
+				c.segments = append(c.segments, blockSegment{typ: "text", content: delta})
 			}
 			c.lastAnswer = answer
 		}
