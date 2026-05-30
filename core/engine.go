@@ -1297,9 +1297,7 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 		shellCmd.Env = append(shellCmd.Env, "CC_DATA_DIR="+e.dataDir)
 	}
 	if ra, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
-		for _, kv := range ra.GetRunAsEnv() {
-			shellCmd.Env = append(shellCmd.Env, kv)
-		}
+		shellCmd.Env = append(shellCmd.Env, ra.GetRunAsEnv()...)
 	}
 	if ps, ok := e.agent.(ProviderSwitcher); ok {
 		var extra []string
