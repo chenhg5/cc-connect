@@ -3062,6 +3062,24 @@ type cardToolEntry struct {
 	Input string
 }
 
+// StructuredTool is a structured tool call entry for structured content streaming.
+type StructuredTool struct {
+	Index int    `json:"index"`
+	Name  string `json:"name"`
+	Input string `json:"input"`
+}
+
+// StructuredContentStreamer is an optional interface on StreamingCard.
+// When implemented, the engine sends thinking/tools/answer as structured data
+// instead of flattening them via buildCardContent.
+// eventType is "thinking", "tool_use", or "text" — reflecting the actual
+// EventThinking/EventToolUse/EventText that triggered the call, so the
+// implementation can preserve real event ordering.
+type StructuredContentStreamer interface {
+	StreamingCard
+	UpdateStructured(ctx context.Context, thinking string, tools []StructuredTool, answer string, eventType string) error
+}
+
 // buildCardContent constructs the full markdown for the streaming card.
 func buildCardContent(thinking string, tools []cardToolEntry, answer string) string {
 	var sb strings.Builder
@@ -3085,6 +3103,15 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 		sb.WriteString(answer)
 	}
 	return sb.String()
+}
+
+// structuredTools converts internal []cardToolEntry to exported []StructuredTool.
+func structuredTools(tools []cardToolEntry) []StructuredTool {
+	out := make([]StructuredTool, len(tools))
+	for i, t := range tools {
+		out[i] = StructuredTool{Index: t.Index, Name: t.Name, Input: t.Input}
+	}
+	return out
 }
 
 
@@ -3623,7 +3650,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					if structured, ok := streamCard.(StructuredContentStreamer); ok {
+						_ = structured.UpdateStructured(e.ctx, cardThinkingText, structuredTools(cardToolCalls), cardAnswerText.String(), "thinking")
+					} else {
+						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					}
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -3731,7 +3762,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Name:  event.ToolName,
 						Input: formattedInput,
 					})
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					{
+						sCard := streamCard
+						if structured, ok := sCard.(StructuredContentStreamer); ok {
+							_ = structured.UpdateStructured(e.ctx, cardThinkingText, structuredTools(cardToolCalls), cardAnswerText.String(), "tool_use")
+						} else {
+							_ = sCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+						}
+					}
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -3832,7 +3870,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// answer text into a single updatable card message.
 					textParts = append(textParts, event.Content) // always accumulate for history
 					cardAnswerText.WriteString(event.Content)
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					if structured, ok := streamCard.(StructuredContentStreamer); ok {
+						_ = structured.UpdateStructured(e.ctx, cardThinkingText, structuredTools(cardToolCalls), cardAnswerText.String(), "text")
+					} else {
+						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					}
 				} else {
 					if len(textParts) == 0 {
 						if hasRichCard {

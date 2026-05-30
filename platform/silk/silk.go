@@ -262,19 +262,17 @@ func (c *silkStreamingCard) UpdateStructured(ctx context.Context, thinking strin
 
 	switch eventType {
 	case "thinking":
-		// Mark the previous thinking segment complete (if any) when a new
-		// different thinking arrives.  The engine only tracks the latest
-		// thinking text; a change means the old one is finished.
-		if thinking != "" && thinking != c.lastThinking && c.lastThinking != "" {
-			for i := len(c.segments) - 1; i >= 0; i-- {
-				if c.segments[i].typ == "thinking" && !c.segments[i].complete {
-					c.segments[i].complete = true
-					break
-				}
-			}
-		}
+		// Update the last thinking segment in place when it grows,
+		// matching text's behavior — avoids accumulating stale snapshots.
+		// The engine only tracks the latest thinking text; replacing
+		// the segment content keeps a single block in the UI.
 		if thinking != "" && thinking != c.lastThinking {
-			c.segments = append(c.segments, blockSegment{typ: "thinking", content: thinking})
+			n := len(c.segments)
+			if n > 0 && c.segments[n-1].typ == "thinking" {
+				c.segments[n-1].content = thinking
+			} else {
+				c.segments = append(c.segments, blockSegment{typ: "thinking", content: thinking})
+			}
 		}
 		c.lastThinking = thinking
 
