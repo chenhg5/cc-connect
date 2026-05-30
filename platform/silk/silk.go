@@ -189,6 +189,11 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.
 	return &silkStreamingCard{platform: p}, nil
 }
 
+type thinkingEntry struct {
+	content            string
+	insertBeforeToolIdx int // emit this block before the tool at this index
+}
+
 type silkStreamingCard struct {
 	platform *Platform
 	mu       sync.Mutex
@@ -196,34 +201,76 @@ type silkStreamingCard struct {
 	lastSent time.Time
 
 	// Structured content tracking (StructuredContentStreamer)
-	lastThinking string
-	lastTools    []core.StructuredTool
-	lastAnswer   string
+	lastThinking             string
+	lastTools                []core.StructuredTool
+	lastAnswer               string
+	lastThinkingSetAtToolCnt int // how many tools existed when lastThinking was set
 
 	// Completed thinking segments saved when a new thinking segment arrives
 	// after tool calls (the engine only tracks the latest thinking text and
 	// does not accumulate previous segments).
-	completedThinking []string
+	completedThinking []thinkingEntry
 }
 
-func buildBlocksFromStructured(completedThinking []string, thinking string, tools []core.StructuredTool, answer string) []map[string]any {
+func buildBlocksFromStructured(completedThinking []thinkingEntry, thinking string, thinkingSetAtToolCnt int, tools []core.StructuredTool, answer string) []map[string]any {
 	var blocks []map[string]any
 	index := 0
 	hasPostThinking := len(tools) > 0 || answer != ""
 
-	// Emit all completed thinking segments first (pre-tool thinking that was
-	// replaced by later thinking — the engine only tracks the latest text).
-	for _, t := range completedThinking {
+	// Track whether lastThinking has been emitted yet (it goes at its set position
+	// among tools, or after all tools if set when no tools existed).
+	thinkingEmitted := false
+
+	for ti, tool := range tools {
+		// Emit any completed thinking block whose insert position is before this tool.
+		for _, ct := range completedThinking {
+			if ct.insertBeforeToolIdx == ti {
+				blocks = append(blocks, map[string]any{
+					"index":      index,
+					"type":       "thinking",
+					"content":    ct.content,
+					"isComplete": true,
+				})
+				index++
+			}
+		}
+		// Emit current (in-progress) thinking if it was set when this many tools existed.
+		if thinking != "" && !thinkingEmitted && thinkingSetAtToolCnt == ti {
+			blocks = append(blocks, map[string]any{
+				"index":      index,
+				"type":       "thinking",
+				"content":    thinking,
+				"isComplete": hasPostThinking,
+			})
+			index++
+			thinkingEmitted = true
+		}
+		// Emit the tool block.
 		blocks = append(blocks, map[string]any{
 			"index":      index,
-			"type":       "thinking",
-			"content":    t,
+			"type":       "tool_use",
+			"content":    tool.Input,
 			"isComplete": true,
+			"toolName":   tool.Name,
 		})
 		index++
 	}
 
-	if thinking != "" {
+	// Emit any completed thinking whose position is beyond all tools.
+	for _, ct := range completedThinking {
+		if ct.insertBeforeToolIdx >= len(tools) {
+			blocks = append(blocks, map[string]any{
+				"index":      index,
+				"type":       "thinking",
+				"content":    ct.content,
+				"isComplete": true,
+			})
+			index++
+		}
+	}
+
+	// Emit current thinking if not yet emitted (set when tools count >= len(tools)).
+	if thinking != "" && !thinkingEmitted {
 		blocks = append(blocks, map[string]any{
 			"index":      index,
 			"type":       "thinking",
@@ -232,16 +279,7 @@ func buildBlocksFromStructured(completedThinking []string, thinking string, tool
 		})
 		index++
 	}
-	for _, t := range tools {
-		blocks = append(blocks, map[string]any{
-			"index":      index,
-			"type":       "tool_use",
-			"content":    t.Input,
-			"isComplete": true,
-			"toolName":   t.Name,
-		})
-		index++
-	}
+
 	if answer != "" {
 		blocks = append(blocks, map[string]any{
 			"index":      index,
@@ -278,18 +316,25 @@ func (c *silkStreamingCard) UpdateStructured(ctx context.Context, thinking strin
 	}
 	c.lastSent = time.Now()
 
-	// Detect a new thinking segment: if thinking content differs from what we
-	// last held, and tools have already been emitted, the previous thinking was
-	// a pre-tool segment that the engine's cardThinkingText replaced, not
-	// accumulated. Save it as a completed segment so it isn't lost.
-	if thinking != "" && thinking != c.lastThinking && len(c.lastTools) > 0 && c.lastThinking != "" {
-		c.completedThinking = append(c.completedThinking, c.lastThinking)
+	// Detect a new thinking segment: if thinking content changed, the previous
+	// thinking was replaced by the engine (which only tracks the latest text).
+	// Save it as a completed segment with its insert position based on how
+	// many tools existed when it was originally set.
+	if thinking != "" && thinking != c.lastThinking && c.lastThinking != "" {
+		c.completedThinking = append(c.completedThinking, thinkingEntry{
+			content:            c.lastThinking,
+			insertBeforeToolIdx: c.lastThinkingSetAtToolCnt,
+		})
 	}
 
+	// Track when the current thinking was set (for positioning among tools).
+	if thinking != "" && thinking != c.lastThinking {
+		c.lastThinkingSetAtToolCnt = len(tools)
+	}
 	c.lastThinking = thinking
 	c.lastTools = tools
 	c.lastAnswer = answer
-	return c.sendBlocks(buildBlocksFromStructured(c.completedThinking, thinking, tools, answer), false)
+	return c.sendBlocks(buildBlocksFromStructured(c.completedThinking, thinking, c.lastThinkingSetAtToolCnt, tools, answer), false)
 }
 
 func (c *silkStreamingCard) Finalize(ctx context.Context, content string) error {
@@ -303,7 +348,7 @@ func (c *silkStreamingCard) Finalize(ctx context.Context, content string) error 
 		answers = extractAnswerFromCardContent(content, c.lastThinking, c.lastTools)
 	}
 
-	blocks := buildBlocksFromStructured(c.completedThinking, c.lastThinking, c.lastTools, answers)
+	blocks := buildBlocksFromStructured(c.completedThinking, c.lastThinking, c.lastThinkingSetAtToolCnt, c.lastTools, answers)
 	if err := c.sendBlocks(blocks, true); err != nil {
 		return err
 	}
