@@ -317,6 +317,7 @@ type interactiveState struct {
 	pendingMessages        []queuedMessage // messages queued while session was busy
 	approveAll             bool            // when true, auto-approve all permission requests for this session
 	fromVoice              bool            // true if current turn originated from voice transcription
+	preNotify              func()          // deferred notification callback (skipped on NO_REPLY)
 	sideText               string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
@@ -1112,9 +1113,10 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		effectivePlatform = &mutePlatform{targetPlatform}
 	}
 
-	// Notify user that a cron job is executing (unless silent/muted)
-	// Note: this notification uses targetPlatform directly, not the tracking wrapper,
-	// so it won't count as a "meaningful delivery" for empty response detection.
+	// Build a deferred notification callback so the "⏰ job" message is
+	// only sent when the agent actually responds (skipped on NO_REPLY).
+	// Shell jobs fire the notification immediately since they bypass the agent loop.
+	notifyFn := func() {}
 	if !job.Mute {
 		silent := false
 		if e.cronScheduler != nil {
@@ -1129,11 +1131,12 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+			notifyFn = func() { e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc)) }
 		}
 	}
 
 	if job.IsShellJob() {
+		notifyFn()
 		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
@@ -1156,6 +1159,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		Content:      content,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
+		PreNotify:    notifyFn,
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -1509,8 +1513,11 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 		return fmt.Errorf("reconstruct reply context: %w", err)
 	}
 
+	// Defer the heartbeat notification so it's only sent when the agent
+	// responds with something (skipped on NO_REPLY).
+	notifyFn := func() {}
 	if !silent {
-		e.send(targetPlatform, replyCtx, "💓 heartbeat")
+		notifyFn = func() { e.send(targetPlatform, replyCtx, "💓 heartbeat") }
 	}
 
 	msg := &Message{
@@ -1520,6 +1527,7 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 		UserName:   "heartbeat",
 		Content:    prompt,
 		ReplyCtx:   replyCtx,
+		PreNotify:  notifyFn,
 	}
 
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -2127,7 +2135,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
+				e.safeGo(func() { e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace) })
 			}
 			return
 		}
@@ -2156,7 +2164,7 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	e.safeGo(func() { e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey) })
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -2700,6 +2708,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
+	state.preNotify = msg.PreNotify
 	state.mu.Unlock()
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
@@ -2707,6 +2716,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in agent Send", "error", r, "session", interactiveKey)
+				sendDone <- fmt.Errorf("panic in agent Send: %v", r)
+			}
+		}()
 		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
 
@@ -3131,6 +3146,11 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in agent session Close", "error", r, "session", sessionKey)
+			}
+		}()
 		agentSession.Close()
 		close(done)
 	}()
@@ -3251,7 +3271,7 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 	state.unsolicitedDone = done
 	state.mu.Unlock()
 
-	go e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, sessions, sessionKey, workspaceDir)
+	e.safeGo(func() { e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, sessions, sessionKey, workspaceDir) })
 }
 
 // runUnsolicitedReader is the goroutine body for the unsolicited event reader.
@@ -3423,6 +3443,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				reqID := event.RequestID
 				respondCtx := ctx // capture current unsolicited reader context
 				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("panic in RespondPermission", "error", r)
+						}
+					}()
 					// Run in a goroutine to keep reader iterations fast, but honour
 					// the reader's context so we don't call into a dead session after
 					// stopUnsolicitedReader cancels the context.
@@ -4256,6 +4281,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			replyStart := time.Now()
 
+			// If the response is not silent, fire the deferred pre-notify
+			// (used by heartbeat/cron to show start notification only when agent has something to say).
+			if !isSilent && state.preNotify != nil {
+				state.preNotify()
+			}
+
 			// --- StreamingCard path ---
 			if streamCard != nil && !streamCard.Failed() {
 				sp.finish("") // cleanup preview (should be no-op if card was active)
@@ -4434,7 +4465,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+					nextSend <- func() error {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("panic in agent Send (queued)", "error", r, "session", sessionKey)
+					}
+				}()
+				return state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+			}()
 				}()
 				pendingSend = nextSend
 
@@ -4598,6 +4636,11 @@ channelClosed:
 			fullResponse = stripped
 		}
 
+		// Fire deferred pre-notify on non-silent abnormal exit.
+		if state.preNotify != nil {
+			state.preNotify()
+		}
+
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventMessageSent,
 			SessionKey: sessionKey,
@@ -4722,7 +4765,14 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
+			sendDone <- func() error {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("panic in agent Send (drain)", "error", r, "session", sessionKey)
+				}
+			}()
+			return state.agentSession.Send(prompt, queued.images, queued.files)
+		}()
 		}()
 
 		var stopTyping func()
@@ -11775,7 +11825,7 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	e.safeGo(func() { e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey) })
 }
 
 // executeShellCommand runs a shell command and sends the output to the user.
@@ -12003,7 +12053,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	e.safeGo(func() { e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey) })
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {

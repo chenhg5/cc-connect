@@ -180,6 +180,7 @@ type Message struct {
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
+	PreNotify    func()              // called after agent responds (skipped on NO_REPLY), used for deferred start notifications
 }
 
 // EventType distinguishes different kinds of agent output.
