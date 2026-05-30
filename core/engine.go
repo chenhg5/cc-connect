@@ -4450,14 +4450,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- func() error {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("panic in agent Send (queued)", "error", r, "session", sessionKey)
-					}
+					nextSend <- func() (err error) {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("panic in agent Send (queued)", "error", r, "session", sessionKey)
+							err = fmt.Errorf("panic in agent Send (queued): %v", r)
+						}
+					}()
+					return state.agentSession.Send(queuedPrompt, queued.images, queued.files)
 				}()
-				return state.agentSession.Send(queuedPrompt, queued.images, queued.files)
-			}()
 				}()
 				pendingSend = nextSend
 
@@ -4745,13 +4746,14 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- func() error {
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("panic in agent Send (drain)", "error", r, "session", sessionKey)
-				}
-			}()
-			return state.agentSession.Send(prompt, queued.images, queued.files)
+			sendDone <- func() (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("panic in agent Send (drain)", "error", r, "session", sessionKey)
+						err = fmt.Errorf("panic in agent Send (drain): %v", r)
+					}
+				}()
+				return state.agentSession.Send(prompt, queued.images, queued.files)
 			}()
 		}()
 
