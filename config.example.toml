@@ -253,6 +253,22 @@ level = "info" # debug, info, warn, error
 # max_per_second = 5
 
 # =============================================================================
+# TuiTui Platform / 推推平台
+# =============================================================================
+# [[projects.platforms]]
+# type = "tuitui"
+# [projects.platforms.options]
+# app_id = "${TUITUI_APP_ID}"
+# app_secret = "${TUITUI_APP_SECRET}"
+# allow_from = "*"              # DM users; explicit users may @ from any group / 私聊用户；明确用户可跨群 @
+# group_allow_from = ""         # group IDs, team IDs, or channel IDs / 群、团队或频道 ID
+# require_mention = true        # require @bot in group chats / 群聊需要 @ 机器人
+# group_policy = "allowlist"    # allowlist, open, or disabled
+# share_session_in_channel = false
+# api_base = "https://im.live.360.cn:8282"
+# ws_base = "wss://im.live.360.cn:8282"
+
+# =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
 # Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
