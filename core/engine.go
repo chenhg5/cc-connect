@@ -1289,6 +1289,29 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	}
 	shellCmd.Dir = workDir
 
+	// Set up environment so cron scripts can access the same env as the agent.
+	shellCmd.Env = os.Environ()
+	shellCmd.Env = append(shellCmd.Env, "CC_PROJECT="+e.name)
+	if e.dataDir != "" {
+		shellCmd.Env = append(shellCmd.Env, "CC_DATA_DIR="+e.dataDir)
+	}
+	if ra, ok := e.agent.(interface{ GetRunAsEnv() []string }); ok {
+		shellCmd.Env = append(shellCmd.Env, ra.GetRunAsEnv()...)
+	}
+	// Merge provider env vars (e.g. CLAUDE_CODE_USE_BEDROCK) so cron scripts
+	// inherit the same provider environment the agent subprocess sees.
+	if ps, ok := e.agent.(ProviderSwitcher); ok {
+		var extra []string
+		for _, prov := range ps.ListProviders() {
+			for k, v := range prov.Env {
+				extra = append(extra, k+"="+v)
+			}
+		}
+		if len(extra) > 0 {
+			shellCmd.Env = MergeEnv(shellCmd.Env, extra)
+		}
+	}
+
 	stdout, err := shellCmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("shell: stdout pipe: %w", err)
