@@ -223,7 +223,14 @@ func (a *Agent) AvailableReasoningEfforts() []string {
 	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
 }
 
-// ── GetWorkDir (for /status display) ─────────────────────────
+// ── WorkDirSwitcher ───────────────────────────────────────────
+
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	slog.Info("pi: work_dir changed", "work_dir", dir)
+}
 
 func (a *Agent) GetWorkDir() string { return a.workDir }
 
