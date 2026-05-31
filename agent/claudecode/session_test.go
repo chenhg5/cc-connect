@@ -362,6 +362,34 @@ func TestShellJoinArgs(t *testing.T) {
 	}
 }
 
+func TestBuildAppendSystemPrompt(t *testing.T) {
+	tests := []struct {
+		name           string
+		agentPrompt    string
+		platformPrompt string
+		userAppend     string
+		want           string
+	}{
+		{"all_empty", "", "", "", ""},
+		{"agent_only", "AGENT", "", "", "AGENT"},
+		{"agent_and_platform", "AGENT", "PLAT", "", "AGENT\n## Formatting\nPLAT\n"},
+		{"user_only", "", "", "USER", "USER"},
+		{"user_only_platform_ignored", "", "PLAT", "USER", "USER"},
+		{"agent_and_user", "AGENT", "", "USER", "AGENT\nUSER"},
+		{"all_three", "AGENT", "PLAT", "USER", "AGENT\n## Formatting\nPLAT\n\nUSER"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildAppendSystemPrompt(tt.agentPrompt, tt.platformPrompt, tt.userAppend)
+			if got != tt.want {
+				t.Errorf("buildAppendSystemPrompt(%q, %q, %q)\n  got  = %q\n  want = %q",
+					tt.agentPrompt, tt.platformPrompt, tt.userAppend, got, tt.want)
+			}
+		})
+	}
+}
+
 func helperCommand(ctx context.Context, mode string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", mode)
 	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")

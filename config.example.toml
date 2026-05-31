@@ -774,7 +774,17 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # disallowed_tools = ["WebSearch", "WebFetch"]
 
 # Optional: specify a custom system prompt / 可选：指定自定义系统提示
+# Replaces Claude's default system prompt (passed via --system-prompt).
+# 替换 Claude 默认系统提示（通过 --system-prompt 传入）。
 # system_prompt = "You are a helpful AI assistant that specializes in Python development."
+
+# Optional: append extra text to the system prompt / 可选：向系统提示追加额外内容
+# Keeps Claude's default system prompt and appends this text (via --append-system-prompt).
+# Use this instead of system_prompt when you want to add instructions without
+# discarding Claude's defaults. Can be combined with system_prompt.
+# 保留 Claude 默认系统提示，并在其后追加本内容（通过 --append-system-prompt）。
+# 想在不丢弃默认提示的前提下补充指令时用它；可与 system_prompt 同时使用。
+# append_system_prompt = "Always respond in Chinese and prefer concise answers."
 
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"

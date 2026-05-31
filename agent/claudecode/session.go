@@ -70,7 +70,26 @@ type claudeSession struct {
 // know about (e.g. bypassPermissions downgraded to auto under root).
 func (cs *claudeSession) StartupWarning() string { return cs.startupWarning }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+// buildAppendSystemPrompt concatenates the cc-connect functionality prompt,
+// platform formatting instructions, and the user's custom append prompt into
+// the single string passed to Claude's --append-system-prompt flag. That flag
+// only honors its last occurrence (a second flag overwrites the first), so all
+// appended content must be merged here. Returns "" when nothing is to append.
+func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) string {
+	var parts []string
+	if agentPrompt != "" {
+		if platformPrompt != "" {
+			agentPrompt += "\n## Formatting\n" + platformPrompt + "\n"
+		}
+		parts = append(parts, agentPrompt)
+	}
+	if userAppend != "" {
+		parts = append(parts, userAppend)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -113,17 +132,17 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
-	// Handle custom system prompt
+	// Handle custom system prompt (replaces Claude's default system prompt).
 	if systemPrompt != "" {
 		innerArgs = append(innerArgs, "--system-prompt", systemPrompt)
 	}
 
-	// Always append cc-connect system prompt for functionality awareness
-	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
-		if platformPrompt != "" {
-			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
-		}
-		innerArgs = append(innerArgs, "--append-system-prompt", sysPrompt)
+	// Append the cc-connect functionality prompt, platform formatting hints,
+	// and the user's custom append prompt — all as a single flag. Claude's
+	// --append-system-prompt only honors its last occurrence, so the pieces
+	// must be concatenated here rather than passed as repeated flags.
+	if appended := buildAppendSystemPrompt(core.AgentSystemPrompt(), platformPrompt, appendSystemPrompt); appended != "" {
+		innerArgs = append(innerArgs, "--append-system-prompt", appended)
 	}
 
 	if effort != "" {
