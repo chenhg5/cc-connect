@@ -79,6 +79,7 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 		"",
 		replyContext{messageID: "om_drop", sessionKey: "feishu:ou_user:ou_user"},
 		"",
+		false,
 	)
 
 	if called {
@@ -184,6 +185,7 @@ func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
 				"",
 				replyContext{messageID: "om_child", sessionKey: "feishu:oc_chat:ou_user"},
 				parentMessageID,
+				false,
 			)
 
 			select {
@@ -257,11 +259,13 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 	defer srv.Close()
 
 	p := &Platform{
-		platformName: "feishu",
-		domain:       srv.URL,
-		appID:        appID,
-		appSecret:    appSecret,
-		botOpenID:    "ou_bot",
+		platformName:              "feishu",
+		domain:                    srv.URL,
+		appID:                     appID,
+		appSecret:                 appSecret,
+		botOpenID:                 "ou_bot",
+		threadIsolation:           true,
+		feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
 		client: lark.NewClient(appID, appSecret,
 			lark.WithOpenBaseUrl(srv.URL),
 			lark.WithHttpClient(srv.Client()),
@@ -284,6 +288,7 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 		"oc_chat",
 		replyContext{messageID: "om_child", sessionKey: "feishu:oc_chat:ou_user"},
 		parentMessageID,
+		false,
 	)
 
 	select {
@@ -296,6 +301,178 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for mention-only quoted text message")
+	}
+}
+
+func TestDispatchMessageThreadOnlyFirstNativeThreadMessageInjectsQuote(t *testing.T) {
+	const appID = "cli_thread_quote"
+	const appSecret = "secret-thread-quote"
+	const parentMessageID = "om_thread_root"
+	const sessionKey = "feishu:oc_chat:thread:omt_thread"
+
+	got := make(chan *core.Message, 1)
+	parentFetches := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/" + parentMessageID:
+			parentFetches++
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"msg_type":  "text",
+							"parent_id": "",
+							"sender": map[string]any{
+								"id":          "cli_parent",
+								"sender_type": "app",
+							},
+							"body": map[string]any{
+								"content": `{"text":"@codex 测试 秦始皇多久出生的"}`,
+							},
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:              "feishu",
+		domain:                    srv.URL,
+		appID:                     appID,
+		appSecret:                 appSecret,
+		botOpenID:                 "ou_bot",
+		threadIsolation:           true,
+		feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"@bot 谢谢，我们之前都聊了啥"}`,
+		[]*larkim.MentionEvent{
+			{Key: strPtr("@bot"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot")},
+		},
+		"om_child",
+		sessionKey,
+		"",
+		"",
+		replyContext{messageID: "om_child", sessionKey: sessionKey},
+		parentMessageID,
+		false,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "谢谢，我们之前都聊了啥" {
+			t.Fatalf("Content = %q, want stripped thread message", msg.Content)
+		}
+		if !strings.Contains(msg.ExtraContent, "秦始皇多久出生的") {
+			t.Fatalf("ExtraContent = %q, want thread root quote", msg.ExtraContent)
+		}
+		if parentFetches != 1 {
+			t.Fatalf("parent fetches = %d, want 1", parentFetches)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first native thread message")
+	}
+}
+
+func TestDispatchMessageThreadOnlyActiveNativeThreadSkipsRepeatedQuote(t *testing.T) {
+	const appID = "cli_thread_no_repeat"
+	const appSecret = "secret-thread-no-repeat"
+	const parentMessageID = "om_thread_root"
+	const sessionKey = "feishu:oc_chat:thread:omt_thread"
+
+	got := make(chan *core.Message, 1)
+	parentFetches := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/" + parentMessageID:
+			parentFetches++
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{"items": []map[string]any{}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:              "feishu",
+		domain:                    srv.URL,
+		appID:                     appID,
+		appSecret:                 appSecret,
+		botOpenID:                 "ou_bot",
+		threadIsolation:           true,
+		feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"@bot 继续"}`,
+		[]*larkim.MentionEvent{
+			{Key: strPtr("@bot"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot")},
+		},
+		"om_child",
+		sessionKey,
+		"",
+		"",
+		replyContext{messageID: "om_child", sessionKey: sessionKey},
+		parentMessageID,
+		true,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "继续" {
+			t.Fatalf("Content = %q, want stripped follow-up text", msg.Content)
+		}
+		if msg.ExtraContent != "" {
+			t.Fatalf("ExtraContent = %q, want no repeated quote", msg.ExtraContent)
+		}
+		if parentFetches != 0 {
+			t.Fatalf("parent fetches = %d, want 0", parentFetches)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for active native thread message")
 	}
 }
 
@@ -933,13 +1110,14 @@ func TestIsAttachmentMsgType(t *testing.T) {
 }
 
 func TestMarkAndIsActiveThreadSession(t *testing.T) {
-	const threadKey = "feishu:oc_chat:root:om_root"
+	const rootThreadKey = "feishu:oc_chat:root:om_root"
+	const nativeThreadKey = "feishu:oc_chat:thread:omt_thread"
 	const directKey = "feishu:oc_chat:ou_user"
 
 	t.Run("thread isolation disabled is no-op", func(t *testing.T) {
 		p := &Platform{threadIsolation: false}
-		p.markThreadSessionActive(threadKey)
-		if p.isActiveThreadSession(threadKey) {
+		p.markThreadSessionActive(rootThreadKey)
+		if p.isActiveThreadSession(rootThreadKey) {
 			t.Fatal("expected no-op when thread_isolation is off")
 		}
 	})
@@ -954,12 +1132,23 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 
 	t.Run("thread sessionKey is recorded", func(t *testing.T) {
 		p := &Platform{threadIsolation: true}
-		if p.isActiveThreadSession(threadKey) {
+		if p.isActiveThreadSession(rootThreadKey) {
 			t.Fatal("thread should not be active before mark")
 		}
-		p.markThreadSessionActive(threadKey)
-		if !p.isActiveThreadSession(threadKey) {
+		p.markThreadSessionActive(rootThreadKey)
+		if !p.isActiveThreadSession(rootThreadKey) {
 			t.Fatal("thread should be active after mark")
+		}
+	})
+
+	t.Run("native thread sessionKey is recorded", func(t *testing.T) {
+		p := &Platform{threadIsolation: true}
+		if p.isActiveThreadSession(nativeThreadKey) {
+			t.Fatal("native thread should not be active before mark")
+		}
+		p.markThreadSessionActive(nativeThreadKey)
+		if !p.isActiveThreadSession(nativeThreadKey) {
+			t.Fatal("native thread should be active after mark")
 		}
 	})
 }

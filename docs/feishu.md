@@ -110,12 +110,13 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
+# feishu_thread_isolation_mode = "reply_and_thread" # 可选：reply_and_thread | thread_only
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
-> 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
+> 如果开启 `thread_isolation = true`，私聊行为保持原样，群聊行为由 `feishu_thread_isolation_mode` 决定。默认 `"reply_and_thread"` 保持历史行为：每条顶层 `@bot` 消息会成为一条独立任务线，bot 的回复会尽量发在飞书话题里，后续围绕同一根消息的普通 Reply / 话题回复继续进入同一个 agent session。如果设为 `"thread_only"`，普通 `@bot` 和普通 Reply 不会拆出新 session，只有用户显式进入飞书 Reply in Thread / 话题、事件带 `ThreadId` 时才会开启独立子会话；普通 Reply 仍会作为引用上下文注入。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先移除 "OnIt" 表情（如果有），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。

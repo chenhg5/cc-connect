@@ -5890,9 +5890,9 @@ func (s *controllableAgentSession) Close() error {
 
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
-	nextSession     AgentSession
-	listFn          func() ([]AgentSessionInfo, error)
-	startSessionFn  func(ctx context.Context, sessionID string) (AgentSession, error)
+	nextSession    AgentSession
+	listFn         func() ([]AgentSessionInfo, error)
+	startSessionFn func(ctx context.Context, sessionID string) (AgentSession, error)
 }
 
 func (a *controllableAgent) Name() string { return "controllable" }
@@ -8779,8 +8779,8 @@ func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != sub {
-		t.Fatalf("expected %q, got %q", sub, got)
+	if normalizeWorkspacePath(got) != normalizeWorkspacePath(sub) {
+		t.Fatalf("expected %q, got %q", normalizeWorkspacePath(sub), normalizeWorkspacePath(got))
 	}
 }
 

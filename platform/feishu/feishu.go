@@ -111,6 +111,29 @@ type replyContext struct {
 	sessionKey string
 }
 
+const (
+	feishuThreadIsolationReplyAndThread = "reply_and_thread"
+	feishuThreadIsolationThreadOnly     = "thread_only"
+)
+
+func normalizeFeishuThreadIsolationMode(name string, raw any) (string, error) {
+	if raw == nil {
+		return feishuThreadIsolationReplyAndThread, nil
+	}
+	mode, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s: invalid feishu_thread_isolation_mode %v (want reply_and_thread or thread_only)", name, raw)
+	}
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", feishuThreadIsolationReplyAndThread:
+		return feishuThreadIsolationReplyAndThread, nil
+	case feishuThreadIsolationThreadOnly:
+		return feishuThreadIsolationThreadOnly, nil
+	default:
+		return "", fmt.Errorf("%s: invalid feishu_thread_isolation_mode %q (want reply_and_thread or thread_only)", name, mode)
+	}
+}
+
 type Platform struct {
 	mu                         sync.RWMutex
 	platformName               string
@@ -129,6 +152,7 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	feishuThreadIsolationMode  string
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -221,6 +245,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	feishuThreadIsolationMode, err := normalizeFeishuThreadIsolationMode(name, opts["feishu_thread_isolation_mode"])
+	if err != nil {
+		return nil, err
+	}
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -284,6 +312,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		feishuThreadIsolationMode:  feishuThreadIsolationMode,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1047,6 +1076,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"mentions", mentionCount,
 		"group_reply_all", p.groupReplyAll,
 		"thread_isolation", p.threadIsolation,
+		"feishu_thread_isolation_mode", p.feishuThreadIsolationMode,
 	)
 
 	// Pre-compute sessionKey so the @bot filter below can consult the active
@@ -1108,6 +1138,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"reply_in_thread", p.shouldReplyInThread(rctx),
 	)
 
+	threadSessionAlreadyActive := p.isActiveThreadSession(sessionKey)
 	// Mark this thread as bot-engaged so subsequent attachment-only messages
 	// in the same thread can pass through without re-mentioning the bot.
 	p.markThreadSessionActive(sessionKey)
@@ -1116,7 +1147,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, threadSessionAlreadyActive)
 
 	return nil
 }
@@ -1124,7 +1155,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, threadSessionAlreadyActive bool) {
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -1139,12 +1170,21 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
-	// Skip quote injection when thread_isolation is enabled and the message is
-	// inside a thread — the thread already provides conversational context, and
-	// long quoted prefixes can drown out the user's actual text (issue #764).
+	// In thread sessions, avoid repeatedly prepending quoted history; the thread
+	// already carries conversational context. The exception is the first native
+	// Feishu thread message in thread_only mode, where the parent/root message is
+	// the user's chosen starting context for the new child session.
 	var quoted quotedMessage
-	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
+	if p.shouldFetchQuotedMessage(parentID, sessionKey, threadSessionAlreadyActive) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
+		if quoted.text != "" || len(quoted.images) > 0 {
+			slog.Debug(p.tag()+": injected quoted message context",
+				"parent_id", parentID,
+				"session_key", sessionKey,
+				"quoted_text_len", len(quoted.text),
+				"quoted_images", len(quoted.images),
+			)
+		}
 	}
 
 	switch msgType {
@@ -1971,7 +2011,9 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			if label == "" {
 				// label may be in property.text.property.content
 				var textElem struct {
-					Property struct{ Content string `json:"content"` } `json:"property"`
+					Property struct {
+						Content string `json:"content"`
+					} `json:"property"`
 				}
 				if json.Unmarshal(elem.Property.Text, &textElem) == nil {
 					label = textElem.Property.Content
@@ -2906,6 +2948,18 @@ func (p *Platform) isActiveThreadSession(sessionKey string) bool {
 	return ok
 }
 
+func (p *Platform) shouldFetchQuotedMessage(parentID, sessionKey string, threadSessionAlreadyActive bool) bool {
+	if parentID == "" {
+		return false
+	}
+	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+		return true
+	}
+	return p.feishuThreadIsolationMode == feishuThreadIsolationThreadOnly &&
+		isNativeThreadSessionKey(sessionKey) &&
+		!threadSessionAlreadyActive
+}
+
 // stripMentions processes @mention placeholders (e.g. @_user_1) in text.
 // The bot's own mention is removed; other user mentions are replaced with
 // their display name so the agent can see who was referenced.
@@ -2932,12 +2986,19 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
-		rootID := stringValue(msg.RootId)
-		if rootID == "" {
-			rootID = stringValue(msg.MessageId)
-		}
-		if rootID != "" {
-			return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
+		if p.feishuThreadIsolationMode == feishuThreadIsolationThreadOnly {
+			threadID := stringValue(msg.ThreadId)
+			if threadID != "" {
+				return fmt.Sprintf("%s:%s:thread:%s", p.tag(), chatID, threadID)
+			}
+		} else {
+			rootID := stringValue(msg.RootId)
+			if rootID == "" {
+				rootID = stringValue(msg.MessageId)
+			}
+			if rootID != "" {
+				return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
+			}
 		}
 	}
 	if p.shareSessionInChannel {
@@ -3219,6 +3280,15 @@ func isThreadSessionKey(sessionKey string) bool {
 	}
 	_, ok := parseThreadRootID(parts[2])
 	return ok
+}
+
+func isNativeThreadSessionKey(sessionKey string) bool {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) != 3 {
+		return false
+	}
+	threadID := strings.TrimPrefix(parts[2], "thread:")
+	return threadID != "" && threadID != parts[2]
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.

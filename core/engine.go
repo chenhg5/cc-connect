@@ -630,7 +630,6 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
 
-
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
@@ -3631,7 +3630,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.markStopped()
 			gracePeriod := 10 * time.Second
 			graceTimer := time.NewTimer(gracePeriod)
-			graceLoop:
+		graceLoop:
 			for {
 				select {
 				case evt, ok := <-state.agentSession.Events():
@@ -5765,15 +5764,8 @@ func compactReplyFooterPath(path string) string {
 		return ""
 	}
 	path = normalizeWorkspacePath(path)
-	if home, err := os.UserHomeDir(); err == nil {
-		home = normalizeWorkspacePath(home)
-		if path == home {
-			return "~"
-		}
-		prefix := home + string(os.PathSeparator)
-		if strings.HasPrefix(path, prefix) {
-			return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
-		}
+	if rel := compactHomeRelativeReplyFooterPath(path); rel != "" {
+		return rel
 	}
 
 	slash := filepath.ToSlash(path)
@@ -5793,6 +5785,44 @@ func compactReplyFooterPath(path string) string {
 		return "…/" + strings.Join(parts[start:], "/")
 	}
 	return slash
+}
+
+func compactHomeRelativeReplyFooterPath(path string) string {
+	for _, home := range []string{os.Getenv("HOME"), os.Getenv("USERPROFILE")} {
+		home = strings.TrimSpace(home)
+		if home == "" {
+			continue
+		}
+		if rel := compactPathUnderHome(path, home); rel != "" {
+			return rel
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return compactPathUnderHome(path, home)
+	}
+	return ""
+}
+
+func compactPathUnderHome(path, home string) string {
+	candidates := []string{filepath.Clean(home), normalizeWorkspacePath(home)}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if path == candidate {
+			return "~"
+		}
+		prefix := candidate + string(os.PathSeparator)
+		if strings.HasPrefix(path, prefix) {
+			return "~" + filepath.ToSlash(strings.TrimPrefix(path, candidate))
+		}
+	}
+	return ""
 }
 
 func appendReplyFooter(content, footer string) string {
