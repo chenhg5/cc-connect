@@ -46,9 +46,9 @@ func TestNew_DefaultValues(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	t.Cleanup(func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	})
 	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
@@ -184,9 +184,9 @@ func TestReadSettingsModels(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	t.Cleanup(func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	})
 
@@ -244,9 +244,9 @@ func TestReadDefaultModel(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	t.Cleanup(func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	})
 
@@ -265,7 +265,9 @@ func TestReadDefaultModel(t *testing.T) {
 		"defaultProvider": "provider-a",
 	}
 	data, _ := json.Marshal(settings)
-	os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
 
 	model, err := readDefaultModel()
 	if err != nil {
@@ -281,7 +283,9 @@ func TestReadDefaultModel(t *testing.T) {
 		"defaultProvider": "provider-b",
 	}
 	data2, _ := json.Marshal(settings2)
-	os.WriteFile(filepath.Join(tmpDir, "settings.json"), data2, 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data2, 0o644); err != nil {
+		t.Fatalf("write settings2: %v", err)
+	}
 
 	model2, _ := readDefaultModel()
 	if model2 != "provider-b/gpt-4o" {
