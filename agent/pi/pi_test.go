@@ -297,9 +297,9 @@ func TestPiSettingsDir(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	defer func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	}()
 
@@ -310,7 +310,7 @@ func TestPiSettingsDir(t *testing.T) {
 	}
 
 	// Unset env var -> default.
-	os.Unsetenv("PI_CODING_AGENT_DIR")
+	_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 	home, _ := os.UserHomeDir()
 	want := filepath.Join(home, ".pi", "agent")
 	if d := piSettingsDir(); d != want {
@@ -322,9 +322,9 @@ func TestSettingsPath(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	defer func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	}()
 
