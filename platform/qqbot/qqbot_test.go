@@ -622,6 +622,7 @@ func TestSendWithButtons_GroupMessage(t *testing.T) {
 		groupOpenID: "group-1",
 		userOpenID:  "user-1",
 		eventMsgID:  "evt-123",
+		sessionKey:  "qqbot:group-1:user-1",
 	}
 
 	buttons := [][]core.ButtonOption{
@@ -762,6 +763,7 @@ func TestSendWithButtons_C2CMessage(t *testing.T) {
 	rctx := &replyContext{
 		messageType: "c2c",
 		userOpenID:  "user-1",
+		sessionKey:  "qqbot:user-1",
 	}
 
 	buttons := [][]core.ButtonOption{
@@ -784,6 +786,228 @@ func TestSendWithButtons_C2CMessage(t *testing.T) {
 
 	if data, ok := act0["data"].(string); !ok || !strings.HasPrefix(data, "perm:allow:qqbot:user-1") {
 		t.Errorf("C2C button_data = %v, want prefix perm:allow:qqbot:user-1", act0["data"])
+	}
+}
+
+// TestSendWithButtons_ShareSessionInChannel verifies that when shareSessionInChannel
+// is enabled, the button_data embedded session key uses the "qqbot:g:" prefix
+// so it matches the session key the engine uses for shared channel sessions.
+func TestSendWithButtons_ShareSessionInChannel(t *testing.T) {
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id": "msg-out"}`)
+	}))
+	defer server.Close()
+
+	origClient := core.HTTPClient
+	t.Cleanup(func() { core.HTTPClient = origClient })
+	core.HTTPClient = server.Client()
+
+	origProd := apiBaseProduction
+	apiBaseProduction = server.URL
+	t.Cleanup(func() { apiBaseProduction = origProd })
+
+	p := &Platform{
+		token:       "test-token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+	// Simulate replyContext built with shareSessionInChannel = true
+	// (sessionKey would be "qqbot:g:<groupOpenID>")
+	rctx := &replyContext{
+		messageType: "group",
+		groupOpenID: "group-1",
+		userOpenID:  "user-1",
+		eventMsgID:  "evt-123",
+		sessionKey:  "qqbot:g:group-1",
+	}
+
+	err := p.SendWithButtons(context.Background(), rctx, "test", [][]core.ButtonOption{
+		{{Text: "允许", Data: "perm:allow"}},
+	})
+	if err != nil {
+		t.Fatalf("SendWithButtons returned error: %v", err)
+	}
+
+	keyboard := receivedBody["keyboard"].(map[string]any)
+	content := keyboard["content"].(map[string]any)
+	rows := content["rows"].([]any)
+	row0 := rows[0].(map[string]any)
+	btns0 := row0["buttons"].([]any)
+	btn0 := btns0[0].(map[string]any)
+	act0 := btn0["action"].(map[string]any)
+
+	// Must use the shared session key from replyContext, not the default group key
+	if data, ok := act0["data"].(string); !ok || data != "perm:allow:qqbot:g:group-1" {
+		t.Errorf("button_data = %v, want perm:allow:qqbot:g:group-1", act0["data"])
+	}
+}
+
+// TestSendWithButtons_EmptySessionKey verifies that SendWithButtons returns
+// an error when the replyContext has no sessionKey (e.g., constructed externally).
+func TestSendWithButtons_EmptySessionKey(t *testing.T) {
+	p := &Platform{
+		token:       "test-token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+	rctx := &replyContext{
+		messageType: "group",
+		groupOpenID: "group-1",
+		userOpenID:  "user-1",
+		// sessionKey intentionally empty
+	}
+
+	err := p.SendWithButtons(context.Background(), rctx, "test", nil)
+	if err == nil {
+		t.Fatal("expected error for empty sessionKey, got nil")
+	}
+}
+
+// TestHandleInteractionCreate_RouterPermission is a table-driven test covering
+// all permission decision routing for INTERACTION_CREATE events.
+func TestHandleInteractionCreate_RouterPermission(t *testing.T) {
+	tests := []struct {
+		name        string
+		buttonData  string
+		chatType    int
+		wantContent string
+		wantSession string
+		wantMsgType string // "group" or "c2c"
+		wantCall    bool   // whether handler should be called
+	}{
+		{
+			name:        "group allow",
+			buttonData:  "perm:allow:qqbot:group-1:user-1",
+			chatType:    1,
+			wantContent: "allow",
+			wantSession: "qqbot:group-1:user-1",
+			wantMsgType: "group",
+			wantCall:    true,
+		},
+		{
+			name:        "group deny",
+			buttonData:  "perm:deny:qqbot:group-2:user-2",
+			chatType:    1,
+			wantContent: "deny",
+			wantSession: "qqbot:group-2:user-2",
+			wantMsgType: "group",
+			wantCall:    true,
+		},
+		{
+			name:        "group allow_all",
+			buttonData:  "perm:allow_all:qqbot:group-3:user-3",
+			chatType:    1,
+			wantContent: "allow all",
+			wantSession: "qqbot:group-3:user-3",
+			wantMsgType: "group",
+			wantCall:    true,
+		},
+		{
+			name:        "c2c allow",
+			buttonData:  "perm:allow:qqbot:user-1",
+			chatType:    2,
+			wantContent: "allow",
+			wantSession: "qqbot:user-1",
+			wantMsgType: "c2c",
+			wantCall:    true,
+		},
+		{
+			name:        "c2c deny",
+			buttonData:  "perm:deny:qqbot:user-2",
+			chatType:    2,
+			wantContent: "deny",
+			wantSession: "qqbot:user-2",
+			wantMsgType: "c2c",
+			wantCall:    true,
+		},
+		{
+			name:        "shared channel allow",
+			buttonData:  "perm:allow:qqbot:g:group-shared",
+			chatType:    1,
+			wantContent: "allow",
+			wantSession: "qqbot:g:group-shared",
+			wantMsgType: "group",
+			wantCall:    true,
+		},
+		{
+			name:       "unknown button_data prefix",
+			buttonData: "something_else:data",
+			chatType:   2,
+			wantCall:   false,
+		},
+		{
+			name:       "empty decision",
+			buttonData: "perm:",
+			chatType:   2,
+			wantCall:   false,
+		},
+		{
+			name:       "invalid decision",
+			buttonData: "perm:unknown:qqbot:user-1",
+			chatType:   2,
+			wantCall:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{
+				allowFrom: "*",
+			}
+			var got *core.Message
+			p.handler = func(_ core.Platform, msg *core.Message) {
+				got = msg
+			}
+
+			payload := map[string]any{
+				"id":                  "interact-" + tt.name,
+				"group_openid":        "group-1",
+				"group_member_openid": "user-1",
+				"user_openid":         "user-1",
+				"chat_type":           tt.chatType,
+				"data": map[string]any{
+					"type": 11,
+					"resolved": map[string]any{
+						"button_data": tt.buttonData,
+						"button_id":   "b_0_0",
+					},
+				},
+			}
+			data, _ := json.Marshal(payload)
+			p.handleInteractionCreate(data)
+
+			if tt.wantCall && got == nil {
+				t.Fatal("expected synthetic message, got nil")
+			}
+			if !tt.wantCall && got != nil {
+				t.Fatal("expected no message, but handler was called")
+			}
+			if !tt.wantCall {
+				return
+			}
+
+			if got.Content != tt.wantContent {
+				t.Errorf("content = %q, want %q", got.Content, tt.wantContent)
+			}
+			if got.SessionKey != tt.wantSession {
+				t.Errorf("session_key = %q, want %q", got.SessionKey, tt.wantSession)
+			}
+			if got.Platform != "qqbot" {
+				t.Errorf("platform = %q, want qqbot", got.Platform)
+			}
+
+			rctx, ok := got.ReplyCtx.(*replyContext)
+			if !ok {
+				t.Fatal("replyCtx is not *replyContext")
+			}
+			if rctx.messageType != tt.wantMsgType {
+				t.Errorf("messageType = %q, want %q", rctx.messageType, tt.wantMsgType)
+			}
+			if rctx.sessionKey != tt.wantSession {
+				t.Errorf("replyCtx.sessionKey = %q, want %q", rctx.sessionKey, tt.wantSession)
+			}
+		})
 	}
 }
 
@@ -819,6 +1043,7 @@ func TestSendWithButtons_EmptyEventMsgID(t *testing.T) {
 	rctx := &replyContext{
 		messageType: "c2c",
 		userOpenID:  "user-1",
+		sessionKey:  "qqbot:user-1",
 		// eventMsgID is empty
 	}
 

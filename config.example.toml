@@ -1434,6 +1434,12 @@ app_secret = "your-feishu-app-secret"
 #                       # 允许的用户 openid，如 "OPEN_ID_1,OPEN_ID_2"；"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # markdown_support = false  # Enable Markdown messages (msg_type: 2). Requires bot permission. / 启用 Markdown 消息（msg_type: 2）。需要机器人具备该权限。
+# intents = 100663296  # WebSocket identify intents. Default: (1<<25)|(1<<26) = 100663296
+#                       #   bit 25 (33554432): GROUP_AT_MESSAGE_CREATE — 群聊 @ 消息
+#                       #   bit 26 (67108864): INTERACTION_CREATE — 按键交互回调（inline keyboard 必需）
+#                       #   If you override this, include both bits for full functionality.
+#                       #   Override 时需包含 bit 25+26，否则群聊 @消息或按键交互可能失效。
+#                       #   QQ 开放平台需申请对应 Intent 权限。
 
 # =============================================================================
 # Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)

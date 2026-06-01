@@ -117,6 +117,7 @@ type replyContext struct {
 	groupOpenID string // for group messages
 	userOpenID  string // user's openid (member_openid for group, user_openid for c2c)
 	eventMsgID  string // msg_id from the incoming event, used for passive reply
+	sessionKey  string // pre-computed session key for button_data embedding and session routing
 }
 
 type quotedMessage struct {
@@ -428,15 +429,10 @@ func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content st
 		return fmt.Errorf("qqbot: SendWithButtons: invalid reply context type %T", replyCtx)
 	}
 
-	// Build session key from replyContext to embed in button_data
-	var sessionKey string
-	switch rctx.messageType {
-	case "group":
-		sessionKey = fmt.Sprintf("qqbot:%s:%s", rctx.groupOpenID, rctx.userOpenID)
-	case "c2c":
-		sessionKey = fmt.Sprintf("qqbot:%s", rctx.userOpenID)
-	default:
-		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	// Use session key from replyContext to embed in button_data
+	sessionKey := rctx.sessionKey
+	if sessionKey == "" {
+		return fmt.Errorf("qqbot: empty session key in reply context")
 	}
 
 	// Build QQ Bot keyboard rows from button options
@@ -548,17 +544,20 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 			return &replyContext{
 				messageType: "group",
 				groupOpenID: parts[2],
+				sessionKey:  sessionKey,
 			}, nil
 		}
 		return &replyContext{
 			messageType: "group",
 			groupOpenID: parts[1],
 			userOpenID:  parts[2],
+			sessionKey:  sessionKey,
 		}, nil
 	}
 	return &replyContext{
 		messageType: "c2c",
 		userOpenID:  parts[1],
+		sessionKey:  sessionKey,
 	}, nil
 }
 
@@ -1115,12 +1114,14 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 			messageType: "group",
 			groupOpenID: d.GroupOpenID,
 			userOpenID:  d.GroupMemberOpenID,
+			sessionKey:  sessionKey,
 		}
 		userID = d.GroupMemberOpenID
 	case 2: // c2c
 		rctx = &replyContext{
 			messageType: "c2c",
 			userOpenID:  d.UserOpenID,
+			sessionKey:  sessionKey,
 		}
 		userID = d.UserOpenID
 	default:
@@ -1219,6 +1220,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		groupOpenID: d.GroupOpenID,
 		userOpenID:  d.Author.MemberOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
 	}
 
 	msg := &core.Message{
@@ -1299,6 +1301,7 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		messageType: "c2c",
 		userOpenID:  d.Author.UserOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
 	}
 
 	msg := &core.Message{
