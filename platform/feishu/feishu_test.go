@@ -461,7 +461,7 @@ func TestExtractPostParts_WithLink(t *testing.T) {
 	if len(texts) != 2 {
 		t.Fatalf("expected 2 text parts, got %d", len(texts))
 	}
-	if texts[0] != "点击 " || texts[1] != "这里" {
+	if texts[0] != "点击 " || texts[1] != "[这里](https://example.com)" {
 		t.Errorf("unexpected texts: %v", texts)
 	}
 }
@@ -749,8 +749,8 @@ func TestExtractPostPlainText_Empty(t *testing.T) {
 func TestExtractPostPlainText_LinkText(t *testing.T) {
 	content := `{"content":[[{"tag":"text","text":"hello "},{"tag":"a","text":"link","href":"http://x.com"}]]}`
 	got := extractPostPlainText(content)
-	if got != "hello link" {
-		t.Errorf("expected 'hello link', got %q", got)
+	if got != "hello [link](http://x.com)" {
+		t.Errorf("expected 'hello [link](http://x.com)', got %q", got)
 	}
 }
 
