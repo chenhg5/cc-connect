@@ -303,8 +303,3 @@ func xmlEscape(s string) string {
 	}
 	return b.String()
 }
-
-// CheckLinger is a no-op on macOS (logind linger is a Linux/systemd concept).
-func CheckLinger() (enabled bool, user string) {
-	return false, ""
-}
