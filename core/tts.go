@@ -633,6 +633,7 @@ func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 // EdgeTTS implements TextToSpeech using Microsoft Edge's free TTS API.
 // This uses the edge-tts CLI command under the hood.
 type EdgeTTS struct {
+	Path  string // path to edge-tts executable (empty = "edge-tts")
 	Voice string // default voice (e.g. "zh-CN-XiaoxiaoNeural")
 }
 
@@ -671,7 +672,11 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 		"--write-media", tmpPath,
 	}
 
-	cmd := exec.CommandContext(ctx, "edge-tts", args...)
+	path := e.Path
+	if path == "" {
+		path = "edge-tts"
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, "", fmt.Errorf("edge-tts: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))

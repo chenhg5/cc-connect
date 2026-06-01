@@ -1785,6 +1785,7 @@ func extractPostPlainText(content string) string {
 		Content [][]struct {
 			Tag      string `json:"tag"`
 			Text     string `json:"text"`
+			Href     string `json:"href,omitempty"`
 			Language string `json:"language,omitempty"`
 			UserId   string `json:"user_id,omitempty"`
 			UserName string `json:"user_name,omitempty"`
@@ -1819,7 +1820,9 @@ func extractPostPlainText(content string) string {
 					line = append(line, elem.Text)
 				}
 			case "a":
-				if elem.Text != "" {
+				if elem.Text != "" && elem.Href != "" {
+					line = append(line, fmt.Sprintf("[%s](%s)", elem.Text, elem.Href))
+				} else if elem.Text != "" {
 					line = append(line, elem.Text)
 				}
 			case "markdown":
@@ -1940,27 +1943,60 @@ func extractInteractiveCardText(content string) string {
 
 // extractCardElements recursively extracts text from schema 2.0 card elements.
 // Handles: property.content, property.text (nested element), property.elements (recursive),
-// code_span, code_block (with tokenized contents), text_tag, hr, etc.
+// code_span, code_block (with tokenized contents), text_tag, hr, button (with open_url), etc.
 func extractCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
 			Tag      string `json:"tag"`
 			Content  string `json:"content"`
 			Property struct {
-				Content  string            `json:"content"`
-				Contents json.RawMessage   `json:"contents"`
-				Language string            `json:"language"`
-				Elements []json.RawMessage `json:"elements"`
-				Text     json.RawMessage   `json:"text"`
-				Items    json.RawMessage   `json:"items"`
-				Columns  json.RawMessage   `json:"columns"`
-				Rows     json.RawMessage   `json:"rows"`
+				Content   string            `json:"content"`
+				Contents  json.RawMessage   `json:"contents"`
+				Language  string            `json:"language"`
+				Elements  []json.RawMessage `json:"elements"`
+				Text      json.RawMessage   `json:"text"`
+				Items     json.RawMessage   `json:"items"`
+				Columns   json.RawMessage   `json:"columns"`
+				Rows      json.RawMessage   `json:"rows"`
+				Behaviors json.RawMessage   `json:"behaviors"`
 			} `json:"property"`
 		}
 		if json.Unmarshal(raw, &elem) != nil {
 			continue
 		}
 		switch elem.Tag {
+		case "button":
+			// Extract button label text and open_url from behaviors.
+			label := elem.Property.Content
+			if label == "" {
+				// label may be in property.text.property.content
+				var textElem struct {
+					Property struct{ Content string `json:"content"` } `json:"property"`
+				}
+				if json.Unmarshal(elem.Property.Text, &textElem) == nil {
+					label = textElem.Property.Content
+				}
+			}
+			var openURL string
+			if len(elem.Property.Behaviors) > 0 {
+				var behaviors []struct {
+					Type string `json:"type"`
+					URL  string `json:"url"`
+				}
+				if json.Unmarshal(elem.Property.Behaviors, &behaviors) == nil {
+					for _, b := range behaviors {
+						if b.Type == "open_url" && b.URL != "" {
+							openURL = b.URL
+							break
+						}
+					}
+				}
+			}
+			if label != "" && openURL != "" {
+				*parts = append(*parts, fmt.Sprintf("[%s](%s)", label, openURL))
+			} else if label != "" {
+				*parts = append(*parts, label)
+			}
 		case "code_block":
 			var lines []struct {
 				Contents []struct {
@@ -3894,7 +3930,9 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 					textParts = append(textParts, elem.Text)
 				}
 			case "a":
-				if elem.Text != "" {
+				if elem.Text != "" && elem.Href != "" {
+					textParts = append(textParts, fmt.Sprintf("[%s](%s)", elem.Text, elem.Href))
+				} else if elem.Text != "" {
 					textParts = append(textParts, elem.Text)
 				}
 			case "code_block":

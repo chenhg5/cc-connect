@@ -6,47 +6,125 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
-// InstanceLock is a no-op on Windows for now.
-// TODO: implement proper Windows locking using CreateFile with exclusive mode.
+const killWaitTimeout = 5 * time.Second
+const killWaitInterval = 25 * time.Millisecond
+
+const processQueryLimitedInformation = 0x1000
+
 type InstanceLock struct {
-	path string
+	handle   syscall.Handle
+	path     string
+	acquired bool
 }
 
-// AcquireInstanceLock attempts to acquire an exclusive lock for the given config path.
-// On Windows, this currently always succeeds (no-op).
 func AcquireInstanceLock(configPath string) (*InstanceLock, error) {
 	configDir := filepath.Dir(configPath)
 	configBase := filepath.Base(configPath)
 	lockName := fmt.Sprintf(".%s.lock", configBase)
 	lockPath := filepath.Join(configDir, lockName)
 
-	// Write our PID to the lock file for diagnostics
-	pid := os.Getpid()
-	// Non-fatal on Windows
-	_ = os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", pid)), 0644)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return nil, fmt.Errorf("cannot create config directory: %w", err)
+	}
 
-	return &InstanceLock{path: lockPath}, nil
+	pathPtr, err := syscall.UTF16PtrFromString(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot convert lock path: %w", err)
+	}
+
+	handle, createErr := syscall.CreateFile(
+		pathPtr,
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		syscall.FILE_SHARE_READ,
+		nil,
+		syscall.OPEN_ALWAYS,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+
+	if createErr != nil {
+		pid := readPIDFromLockFile(lockPath)
+		if pid > 0 {
+			return nil, fmt.Errorf("another cc-connect instance is already running (PID %d) with config %s", pid, configPath)
+		}
+		return nil, fmt.Errorf("another cc-connect instance is already running with config %s", configPath)
+	}
+
+	pid := os.Getpid()
+	syscall.SetFilePointer(handle, 0, nil, syscall.FILE_BEGIN)
+	syscall.SetEndOfFile(handle)
+	var written uint32
+	syscall.WriteFile(handle, []byte(fmt.Sprintf("%d\n", pid)), &written, nil)
+	syscall.FlushFileBuffers(handle)
+
+	return &InstanceLock{
+		handle:   handle,
+		path:     lockPath,
+		acquired: true,
+	}, nil
 }
 
-// Release releases the instance lock.
 func (l *InstanceLock) Release() {
-	if l == nil {
+	if l == nil || !l.acquired {
 		return
 	}
-	// Remove lock file
-	if l.path != "" {
-		_ = os.Remove(l.path)
+	if l.handle != 0 {
+		syscall.SetFilePointer(l.handle, 0, nil, syscall.FILE_BEGIN)
+		syscall.SetEndOfFile(l.handle)
+		syscall.CloseHandle(l.handle)
+		l.handle = 0
 	}
+	l.acquired = false
 }
 
-// Path returns the path to the lock file.
 func (l *InstanceLock) Path() string {
 	return l.path
 }
 
-// KillExistingInstance is not implemented on Windows.
 func KillExistingInstance(configPath string) bool {
-	return false
+	configDir := filepath.Dir(configPath)
+	configBase := filepath.Base(configPath)
+	lockName := fmt.Sprintf(".%s.lock", configBase)
+	lockPath := filepath.Join(configDir, lockName)
+
+	pid := readPIDFromLockFile(lockPath)
+	if pid <= 0 {
+		return false
+	}
+
+	handle, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer syscall.CloseHandle(handle)
+
+	if err := syscall.TerminateProcess(handle, 1); err != nil {
+		return false
+	}
+
+	deadline := time.Now().Add(killWaitTimeout)
+	for time.Now().Before(deadline) {
+		_, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
+		if err != nil {
+			return true
+		}
+		time.Sleep(killWaitInterval)
+	}
+	return true
+}
+
+func readPIDFromLockFile(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
+		return 0
+	}
+	return pid
 }
