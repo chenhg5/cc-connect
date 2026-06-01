@@ -1076,6 +1076,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		p.replyUnauthorizedAccess(ctx, replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey})
 		return nil
 	}
 
@@ -1119,6 +1120,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
 
 	return nil
+}
+
+func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContext) {
+	if rctx.messageID == "" && rctx.chatID == "" {
+		return
+	}
+	if err := p.Reply(ctx, rctx, core.UnauthorizedAccessMessage); err != nil {
+		slog.Warn(p.tag()+": unauthorized reply failed", "error", err)
+	}
 }
 
 // dispatchMessage handles the message content parsing, media download, and
@@ -1971,7 +1981,9 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			if label == "" {
 				// label may be in property.text.property.content
 				var textElem struct {
-					Property struct{ Content string `json:"content"` } `json:"property"`
+					Property struct {
+						Content string `json:"content"`
+					} `json:"property"`
 				}
 				if json.Unmarshal(elem.Property.Text, &textElem) == nil {
 					label = textElem.Property.Content

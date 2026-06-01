@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// UnauthorizedAccessMessage is safe to show to an inbound sender when the
+// platform boundary rejects their identity. Keep it user-facing: do not mention
+// allow_from, user IDs, or chat IDs.
+const UnauthorizedAccessMessage = "角色未授权，请联系管理员添加权限。"
+
 // MergeEnv returns base env with entries from extra overriding same-key entries.
 // This prevents duplicate keys (e.g. two PATH entries) which cause the override
 // to be silently ignored on Linux (getenv returns the first match).

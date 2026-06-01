@@ -232,6 +232,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 
 	if !core.AllowList(p.allowFrom, data.SenderStaffId) {
 		slog.Debug("dingtalk: message from unauthorized user", "user", data.SenderStaffId)
+		p.replyUnauthorized(data)
 		return
 	}
 
@@ -312,6 +313,23 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	}
 
 	p.handler(p, msg)
+}
+
+func (p *Platform) replyUnauthorized(data *chatbot.BotCallbackDataModel) {
+	if data == nil || data.SessionWebhook == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := p.Reply(ctx, replyContext{
+		sessionWebhook: data.SessionWebhook,
+		conversationId: data.ConversationId,
+		senderStaffId:  data.SenderStaffId,
+		isGroup:        data.ConversationType == "2",
+	}, core.UnauthorizedAccessMessage)
+	if err != nil {
+		slog.Warn("dingtalk: unauthorized reply failed", "error", err)
+	}
 }
 
 // extractRichText extracts plain text from a DingTalk richText content payload.
