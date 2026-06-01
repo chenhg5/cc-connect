@@ -575,6 +575,9 @@ func TestPicoTTS_Constructors(t *testing.T) {
 
 func TestEdgeTTS_Constructors(t *testing.T) {
 	tts := NewEdgeTTS("")
+	if tts.Path != "" {
+		t.Errorf("expected empty default path, got %q", tts.Path)
+	}
 	if tts.Voice != "zh-CN-XiaoxiaoNeural" {
 		t.Errorf("expected default voice 'zh-CN-XiaoxiaoNeural', got %q", tts.Voice)
 	}
@@ -681,6 +684,26 @@ func TestPicoTTS_HonorsContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got nil after %v", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize ignored ctx cancellation, took %v (want < 5s); err=%v", elapsed, err)
+	}
+}
+
+func TestEdgeTTS_HonorsContextCancellation(t *testing.T) {
+	fakePath := writeFakeTTSBinary(t)
+	tts := NewEdgeTTS("en-US-JennyNeural")
+	tts.Path = fakePath
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: a correctly wired CommandContext kills immediately.
 
 	start := time.Now()
 	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
