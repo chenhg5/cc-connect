@@ -2,6 +2,7 @@ package silk
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,12 +28,22 @@ type replyContext struct {
 	userName string
 }
 
+// silkHistoryEntry mirrors Silk's ChatHistoryEntry sent in UserMessage.history.
+type silkHistoryEntry struct {
+	SenderID    string `json:"sender_id"`
+	SenderName  string `json:"sender_name"`
+	Content     string `json:"content"`
+	MessageType string `json:"message_type"`
+	Timestamp   int64  `json:"timestamp"`
+}
+
 type Platform struct {
-	serverURL string
-	token     string
-	project   string
-	agentType string
-	cwd       string
+	serverURL   string
+	token       string
+	project     string
+	agentType   string
+	cwd         string
+	tlsInsecure bool
 
 	mu       sync.RWMutex
 	conn     *websocket.Conn
@@ -66,12 +77,17 @@ func New(opts map[string]any) (core.Platform, error) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	normalized, err := normalizeWebSocketURL(server)
+	if err != nil {
+		return nil, fmt.Errorf("silk: invalid server URL: %w", err)
+	}
 	return &Platform{
-		serverURL:     server,
+		serverURL:     normalized,
 		token:         token,
 		project:       project,
 		agentType:     agentType,
 		cwd:           cwd,
+		tlsInsecure:   parseBoolOpt(opts["tls_insecure"]),
 		metadataReply: make(chan string, 1),
 	}, nil
 }
@@ -458,7 +474,15 @@ func (p *Platform) connect(ctx context.Context) error {
 	u.RawQuery = q.Encode()
 
 	slog.Info("[silk] connecting", "url", u.String())
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
+	dialer := websocket.DefaultDialer
+	if p.tlsInsecure && u.Scheme == "wss" {
+		dialer = &websocket.Dialer{
+			Proxy:            websocket.DefaultDialer.Proxy,
+			HandshakeTimeout: websocket.DefaultDialer.HandshakeTimeout,
+			TLSClientConfig:  &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in for self-signed certs
+		}
+	}
+	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("silk: dial failed: %w", err)
 	}
@@ -529,16 +553,39 @@ func (p *Platform) connect(ctx context.Context) error {
 		switch envelope.Type {
 		case "message":
 			var msg struct {
-				Content  string `json:"content"`
-				UserID   string `json:"user_id"`
-				UserName string `json:"user_name"`
-				MsgID    string `json:"msg_id"`
+				Content  string         `json:"content"`
+				UserID   string         `json:"user_id"`
+				UserName string         `json:"user_name"`
+				MsgID    string         `json:"msg_id"`
+				History  []silkHistoryEntry `json:"history"`
 			}
 			if json.Unmarshal(data, &msg) != nil {
 				continue
 			}
+			content := msg.Content
+			if len(msg.History) > 0 {
+				var ctx strings.Builder
+				ctx.WriteString("以下是群聊中的最近聊天记录，用于理解上下文。请根据上下文理解对话的来龙去脉，然后用最后一条消息作为当前输入作答。\n\n")
+				for _, h := range msg.History {
+					if h.Content == "" {
+						continue
+					}
+					name := h.SenderName
+					if name == "" {
+						name = h.SenderID
+					}
+					ctx.WriteString(name)
+					ctx.WriteString(": ")
+					ctx.WriteString(h.Content)
+					ctx.WriteString("\n")
+				}
+				ctx.WriteString("\n---\n")
+				ctx.WriteString("当前消息: ")
+				ctx.WriteString(content)
+				content = ctx.String()
+			}
 			coreMsg := &core.Message{
-				Content:    msg.Content,
+				Content:    content,
 				UserID:     msg.UserID,
 				UserName:   msg.UserName,
 				SessionKey: p.groupID,

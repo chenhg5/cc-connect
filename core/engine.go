@@ -2641,14 +2641,26 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		unlocked = true
 	}
 
-	// Start unsolicited reader if the session is still alive and the last
-	// turn ended cleanly. This goroutine will consume agent-initiated events
-	// (e.g. background task completions) and relay them to the platform.
+	// Close the agent session after each turn to avoid stale process reuse.
+	// The Claude stream-json protocol can enter a stuck state when the same
+	// process is reused for a second turn without --resume (since the first
+	// turn started fresh without a session ID). By closing after each turn
+	// and relying on the captured AgentSessionID for the next --resume, we
+	// guarantee a clean process per turn while preserving conversation
+	// continuity via Claude's built-in session resume mechanism.
+	//
+	// The close is async to avoid blocking the session lock — cleanup can
+	// take up to 130s for graceful Stop hooks, but state.agentSession is
+	// nilled immediately so the next turn goes through fresh session spawn.
 	state.mu.Lock()
 	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
 	state.mu.Unlock()
 	if alive {
-		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
+		if !unlocked {
+			session.Unlock()
+			unlocked = true
+		}
+		go e.cleanupInteractiveState(interactiveKey, state)
 	}
 }
 
