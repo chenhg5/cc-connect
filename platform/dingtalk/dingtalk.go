@@ -278,7 +278,9 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	}
 
 	// Handle image messages
-	if data.Msgtype == "image" {
+	// DingTalk delivers image messages as either "image" or "picture" depending
+	// on the client and robot type. Both carry the same downloadCode field.
+	if data.Msgtype == "image" || data.Msgtype == "picture" {
 		p.handleImageMessage(data, sessionKey)
 		return
 	}
@@ -1348,7 +1350,10 @@ func parseAtMentions(content string, senderStaffId string, isGroup bool) (string
 }
 
 // StripAtMentions removes <<at:...>> markers from content without adding
-// @placeholders. Used for contexts that don't support @mentions (e.g. AI Cards).
+// @placeholders or at payload fields. This is only needed for delivery channels
+// that don't support DingTalk's "at" mechanism (e.g. AI Card streaming).
+// Normal text replies use parseAtMentions() instead, which converts markers into
+// proper @userId placeholders + at payload fields for the sessionWebhook API.
 func StripAtMentions(content string) string {
 	return atMentionRe.ReplaceAllString(content, "")
 }
