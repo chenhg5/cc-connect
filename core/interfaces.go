@@ -98,12 +98,14 @@ Examples:
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
   cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
 
-You can also list, edit, or delete cron jobs:
+You can also list, inspect, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron info <job-id> [field]
   cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
 
-Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes.
+When changing an existing job, first run ` + "`cc-connect cron info <job-id>`" + ` to inspect the current values, then use ` + "`cron edit`" + ` for only the field(s) the user asked to change.
+Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes. Do not delete and recreate a job unless the user explicitly asks to replace it.
 Common editable fields:
   cron_expr     new schedule, e.g. "0 9 * * *"
   prompt        new task prompt (or ` + "`exec`" + ` for shell command)
