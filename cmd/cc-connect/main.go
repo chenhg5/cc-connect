@@ -461,8 +461,11 @@ func main() {
 		// Wire instant reply
 		if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
 			engine.SetInstantReply(core.InstantReplyCfg{
-				Enabled: true,
-				Content: cfg.InstantReply.Content,
+				Enabled:    true,
+				Content:    cfg.InstantReply.Content,
+				Initial:    cfg.InstantReply.Initial,
+				Superseded: cfg.InstantReply.Superseded,
+				Queued:     cfg.InstantReply.Queued,
 			})
 		}
 
@@ -534,6 +537,7 @@ func main() {
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
 			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
 		}
+		engine.SetQueueMode(cfg.Queue.Mode)
 
 		// Wire auto-compress settings
 		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1489,8 +1493,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload instant reply
 	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
 		engine.SetInstantReply(core.InstantReplyCfg{
-			Enabled: true,
-			Content: cfg.InstantReply.Content,
+			Enabled:    true,
+			Content:    cfg.InstantReply.Content,
+			Initial:    cfg.InstantReply.Initial,
+			Superseded: cfg.InstantReply.Superseded,
+			Queued:     cfg.InstantReply.Queued,
 		})
 	} else {
 		engine.SetInstantReply(core.InstantReplyCfg{})

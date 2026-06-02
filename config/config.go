@@ -128,7 +128,8 @@ type CronConfig struct {
 
 // QueueConfig controls the per-session message queue.
 type QueueConfig struct {
-	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
+	MaxDepth *int   `toml:"max_depth"` // max queued messages per session; default 5
+	Mode     string `toml:"mode"`      // "queue" (default) or "interrupt"
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -199,8 +200,11 @@ type StreamPreviewConfig struct {
 // is received, before the agent starts processing. This gives users quick feedback
 // that their message was received (e.g. "🤔 Thinking...").
 type InstantReplyConfig struct {
-	Enabled *bool  `toml:"enabled"` // default false
-	Content string `toml:"content"` // custom reply text; empty = use i18n default ("⏳ Processing...")
+	Enabled    *bool  `toml:"enabled"`    // default false
+	Content    string `toml:"content"`    // legacy alias for initial
+	Initial    string `toml:"initial"`    // first turn starts immediately
+	Superseded string `toml:"superseded"` // busy follow-up replaces the active turn
+	Queued     string `toml:"queued"`     // busy follow-up is queued behind the active turn
 }
 
 // RateLimitConfig controls per-session message rate limiting.
@@ -782,6 +786,11 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Queue.Mode)) {
+	case "", "queue", "interrupt":
+	default:
+		return fmt.Errorf("config: queue.mode must be \"queue\" or \"interrupt\"")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
