@@ -3,8 +3,10 @@ package claudecode
 import (
 	"bufio"
 	"context"
+	cryptoRand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +21,17 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// expandHome replaces a leading ~/ in path with the user's home directory.
+// Go's exec.Cmd does not expand ~, so this must be done explicitly.
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
 
 func init() {
 	core.RegisterAgent("claudecode", New)
@@ -117,13 +130,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	workDir = expandHome(workDir)
 	cliBin := "claude"
 	var cliExtraArgs []string
 	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
 		// NOTE: paths containing spaces are not supported because Fields
 		// splits on whitespace. Use a symlink or wrapper script instead.
+		cliPath = expandHome(cliPath)
 		parts := strings.Fields(cliPath)
-		cliBin = parts[0]
+		cliBin = expandHome(parts[0])
 		if len(parts) > 1 {
 			cliExtraArgs = parts[1:]
 		}
@@ -530,12 +545,50 @@ func extractStringContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
+	// Try plain string first (older format: "content": "hello")
 	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return ""
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
 	}
-	return s
+	// Try array of content blocks (newer format: "content": [{"type":"text","text":"hello"}])
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	}
+	return ""
 }
+// isToolResult checks whether a content block is a tool_result (agent internal response),
+// not a genuine user query. tool_result entries have a "tool_use_id" field.
+func isToolResult(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	// Array format: [{"tool_use_id": "...", "type": "tool_result", ...}]
+	var blocks []struct {
+		ToolUseID string `json:"tool_use_id"`
+		Type      string `json:"type"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil && len(blocks) > 0 {
+		for _, b := range blocks {
+			if b.ToolUseID != "" || b.Type == "tool_result" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
@@ -646,6 +699,362 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 
 // extractTextContent extracts readable text from Claude Code message content.
 // Content can be a plain string or an array of content blocks.
+// WriteSessionName appends a custom-title entry to the Claude Code JSONL file
+// for the given session. Claude Code reads the last custom-title entry for a
+// session, so this effectively sets the display name shown in the CLI sidebar
+// and VSCode extension.
+func (a *Agent) WriteSessionName(sessionID, name string) error {
+	if sessionID == "" || name == "" {
+		return nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return fmt.Errorf("claudecode: project dir not found for work_dir %s", absWorkDir)
+	}
+
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	entry := map[string]any{
+		"type":        "custom-title",
+		"customTitle": name,
+		"sessionId":   sessionID,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("claudecode: marshal custom-title: %w", err)
+	}
+
+	f, err := os.OpenFile(jsonlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("claudecode: open JSONL for append: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("claudecode: write custom-title: %w", err)
+	}
+	return nil
+}
+
+// GetSessionTitle reads the display title for a Claude Code session.
+// Priority: custom-title (last entry) > ai-title > "".
+func (a *Agent) GetSessionTitle(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return ""
+	}
+
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var customTitle, aiTitle string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type        string `json:"type"`
+			CustomTitle string `json:"customTitle"`
+			AiTitle     string `json:"aiTitle"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Type == "custom-title" && raw.CustomTitle != "" {
+			customTitle = raw.CustomTitle // last one wins
+		}
+		if raw.Type == "ai-title" && raw.AiTitle != "" && customTitle == "" {
+			aiTitle = raw.AiTitle
+		}
+	}
+	if customTitle != "" {
+		return customTitle
+	}
+	return aiTitle
+}
+
+// ForkSession copies the source session's JSONL to a new UUID-based file,
+// returning the new session ID immediately. No "activation" step needed.
+func (a *Agent) ForkSession(sourceSessionID string, atTurn int) (string, error) {
+	if sourceSessionID == "" {
+		return "", fmt.Errorf("claudecode: source session ID required for fork")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("claudecode: home dir: %w", err)
+	}
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return "", fmt.Errorf("claudecode: work dir: %w", err)
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return "", fmt.Errorf("claudecode: project directory not found for fork")
+	}
+	srcPath := filepath.Join(projectDir, sourceSessionID+".jsonl")
+	if _, err := os.Stat(srcPath); err != nil {
+		return "", fmt.Errorf("claudecode: source JSONL not found: %w", err)
+	}
+
+	newID := generateUUID()
+	dstPath := filepath.Join(projectDir, newID+".jsonl")
+
+	// Copy the JSONL file first
+	tmpPath := dstPath + ".tmp"
+	if err := copyFile(srcPath, tmpPath); err != nil {
+		return "", fmt.Errorf("claudecode: copy JSONL: %w", err)
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("claudecode: rename JSONL: %w", err)
+	}
+
+	// If atTurn > 0, remove the last atTurn turns from the fork
+	// (same logic as rollback — keep earlier part, remove later part)
+	if atTurn > 0 {
+		remaining, truncErr := a.TruncateSessionHistory(newID, atTurn)
+		if truncErr != nil {
+			os.Remove(dstPath)
+			return "", fmt.Errorf("claudecode: truncate fork: %w", truncErr)
+		}
+		slog.Info("claudecode: fork truncated", "newID", newID, "removedTurns", atTurn, "remainingTurns", remaining)
+	}
+
+	slog.Info("claudecode: forked session", "source", sourceSessionID, "new", newID, "atTurn", atTurn)
+	return newID, nil
+}
+
+// ReadSessionTurnCount counts user/assistant turn pairs in the JSONL file.
+func (a *Agent) ReadSessionTurnCount(sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("claudecode: session ID required")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return 0, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: open session file: %w", err)
+	}
+	defer f.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Type == "user" || raw.Type == "human" {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// TruncateSessionHistory removes the last N turns from the session's JSONL file.
+// A turn is counted by user/human messages. Returns remaining turn count.
+func (a *Agent) TruncateSessionHistory(sessionID string, turns int) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("claudecode: session ID required")
+	}
+	if turns <= 0 {
+		return a.ReadSessionTurnCount(sessionID)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return 0, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		return 0, fmt.Errorf("claudecode: read session file: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	// Remove trailing empty line from Split
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// Find cutoff: scan from end, count N user/human messages
+	userCount := 0
+	cutoffIdx := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		var raw struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(lines[i]), &raw) != nil {
+			continue
+		}
+		if raw.Type == "user" || raw.Type == "human" {
+			userCount++
+			if userCount == turns {
+				cutoffIdx = i
+				break
+			}
+		}
+	}
+
+	if cutoffIdx == len(lines) {
+		// More turns requested than exist — truncate everything
+		return 0, fmt.Errorf("claudecode: cannot remove %d turns (only %d exist)", turns, userCount)
+	}
+
+	// Keep everything before cutoffIdx
+	truncated := lines[:cutoffIdx]
+	content := strings.Join(truncated, "\n") + "\n"
+
+	// Atomic write
+	tmpPath := jsonlPath + ".rollback.tmp"
+	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
+		return 0, fmt.Errorf("claudecode: write truncated file: %w", err)
+	}
+	if err := os.Rename(tmpPath, jsonlPath); err != nil {
+		return 0, fmt.Errorf("claudecode: replace session file: %w", err)
+	}
+
+	// Count remaining turns
+	remaining := 0
+	for _, line := range truncated {
+		var raw struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(line), &raw) != nil {
+			continue
+		}
+		if raw.Type == "user" || raw.Type == "human" {
+			remaining++
+		}
+	}
+	return remaining, nil
+}
+
+// ListRecentTurns returns the last N turns with a short summary of each.
+// Index is 1-based counting from the end (1 = last/most recent turn).
+func (a *Agent) ListRecentTurns(sessionID string, n int) ([]core.TurnSummary, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("claudecode: session ID required")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: home dir: %w", err)
+	}
+	absWorkDir, err := filepath.Abs(a.workDir)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: work dir: %w", err)
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("claudecode: project dir not found")
+	}
+
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: read session file: %w", err)
+	}
+	slog.Debug("claudecode: ListRecentTurns", "jsonlPath", jsonlPath, "lines", len(strings.Split(string(data), "\n")), "requestN", n)
+
+	// Collect all user messages with their content, skipping tool_result entries
+	var allTurns []core.TurnSummary
+	lines := strings.Split(string(data), "\n")
+	totalUsers := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if entry.Type != "user" && entry.Type != "human" {
+			continue
+		}
+		// Skip tool_result entries — they are agent internal responses, not user queries
+		if isToolResult(entry.Message.Content) {
+			continue
+		}
+		totalUsers++
+		summary := extractStringContent(entry.Message.Content)
+		slog.Debug("claudecode: ListRecentTurns user entry", "totalUsers", totalUsers, "summaryLen", len(summary))
+		// Truncate for display
+		if len([]rune(summary)) > 80 {
+			summary = string([]rune(summary)[:80]) + "…"
+		}
+		allTurns = append(allTurns, core.TurnSummary{
+			Index:   totalUsers,
+			Summary: summary,
+		})
+	}
+
+	// Return only the last N, with index re-numbered from the end
+	if len(allTurns) == 0 {
+		return nil, nil
+	}
+	start := len(allTurns) - n
+	if start < 0 {
+		start = 0
+	}
+	result := allTurns[start:]
+	// Re-index: 1 = last turn, 2 = second-to-last, etc.
+	for i := range result {
+		result[i].Index = len(result) - i
+	}
+	slog.Debug("claudecode: ListRecentTurns result", "allTurns", len(allTurns), "returned", len(result))
+	return result, nil
+}
+
 func extractTextContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -1409,4 +1818,33 @@ func findProjectDir(homeDir, absWorkDir string) string {
 	}
 
 	return ""
+}
+
+// generateUUID produces a v4-random UUID string (xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx).
+func generateUUID() string {
+	var buf [16]byte
+	_, _ = cryptoRand.Read(buf[:])
+	buf[6] = (buf[6] & 0x0f) | 0x40 // version 4
+	buf[8] = (buf[8] & 0x3f) | 0x80 // variant 2
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
