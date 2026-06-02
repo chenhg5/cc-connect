@@ -26,8 +26,8 @@ func init() {
 }
 
 const (
-	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
-	defaultIntents = 1 << 25
+	// Default intents: GROUP_AT_MESSAGE_CREATE (1 << 25) | INTERACTION_CREATE (1 << 26)
+	defaultIntents = (1 << 25) | (1 << 26)
 
 	maxReconnectBackoff  = 60 * time.Second
 	maxReconnectAttempts = 30
@@ -70,7 +70,7 @@ type Platform struct {
 	intents               int
 	markdownSupport       bool // enable markdown messages (msg_type: 2)
 	handler               core.MessageHandler
-	ctx                   context.Context    // lifetime context for the platform
+	ctx                   context.Context // lifetime context for the platform
 	cancel                context.CancelFunc
 
 	// OAuth2 token management
@@ -117,6 +117,7 @@ type replyContext struct {
 	groupOpenID string // for group messages
 	userOpenID  string // user's openid (member_openid for group, user_openid for c2c)
 	eventMsgID  string // msg_id from the incoming event, used for passive reply
+	sessionKey  string // pre-computed session key for button_data embedding and session routing
 }
 
 type quotedMessage struct {
@@ -378,6 +379,10 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 
 var _ core.ImageSender = (*Platform)(nil)
 
+// buttonDataPrefix is the prefix for QQ Bot keyboard button_data values.
+// Format: perm:<decision>:<session_key>
+const buttonDataPrefix = "perm:"
+
 // SendFile uploads and sends a file via QQ Bot rich media API.
 // Implements core.FileSender.
 func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAttachment) error {
@@ -414,6 +419,105 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 }
 
 var _ core.FileSender = (*Platform)(nil)
+var _ core.InlineButtonSender = (*Platform)(nil)
+
+// SendWithButtons sends a message with QQ Bot inline keyboard buttons.
+// Implements core.InlineButtonSender.
+func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]core.ButtonOption) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qqbot: SendWithButtons: invalid reply context type %T", replyCtx)
+	}
+
+	// Use session key from replyContext to embed in button_data
+	sessionKey := rctx.sessionKey
+	if sessionKey == "" {
+		return fmt.Errorf("qqbot: empty session key in reply context")
+	}
+
+	// Build QQ Bot keyboard rows from button options
+	var rows []map[string]any
+	for i, row := range buttons {
+		var btns []map[string]any
+		for j, btn := range row {
+			// Encode decision + session key into button_data so we can route
+			// the INTERACTION_CREATE event back to the right session.
+			// btn.Data is already "perm:allow", "perm:deny", or "perm:allow_all"
+			buttonData := btn.Data + ":" + sessionKey
+
+			btnID := fmt.Sprintf("b_%d_%d", i, j)
+			visitedLabel := "已操作"
+			style := 1 // blue
+			if strings.Contains(btn.Data, "deny") {
+				visitedLabel = "已拒绝"
+				style = 0 // grey
+			} else if strings.Contains(btn.Data, "allow_all") || strings.Contains(btn.Data, "allow all") {
+				visitedLabel = "已始终允许"
+			} else if strings.Contains(btn.Data, "allow") {
+				visitedLabel = "已允许"
+			}
+
+			btns = append(btns, map[string]any{
+				"id": btnID,
+				"render_data": map[string]any{
+					"label":         btn.Text,
+					"visited_label": visitedLabel,
+					"style":         style,
+				},
+				"action": map[string]any{
+					"type":        1, // callback
+					"data":        buttonData,
+					"permission":  map[string]int{"type": 2},
+					"click_limit": 1,
+				},
+				"group_id": "perm",
+			})
+		}
+		rows = append(rows, map[string]any{"buttons": btns})
+	}
+
+	keyboard := map[string]any{
+		"content": map[string]any{"rows": rows},
+	}
+
+	// Send message with keyboard.
+	// When markdown support is enabled, use msg_type 2 so QQ Bot
+	// properly renders the keyboard alongside markdown content.
+	msgType := 0
+	sendContent := content
+	if p.markdownSupport {
+		msgType = 2
+	}
+	body := map[string]any{
+		"msg_type": msgType,
+		"keyboard": keyboard,
+	}
+	if p.markdownSupport {
+		body["markdown"] = map[string]any{"content": sendContent}
+	} else {
+		body["content"] = sendContent
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+	}
+
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/messages", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	default:
+		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	slog.Debug("qqbot: sending message with keyboard",
+		"type", rctx.messageType, "session_key", sessionKey,
+		"num_buttons", len(rows), "content_len", len(content))
+
+	return p.apiRequest("POST", url, body)
+}
 
 // Stop shuts down the platform.
 func (p *Platform) Stop() error {
@@ -440,17 +544,20 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 			return &replyContext{
 				messageType: "group",
 				groupOpenID: parts[2],
+				sessionKey:  sessionKey,
 			}, nil
 		}
 		return &replyContext{
 			messageType: "group",
 			groupOpenID: parts[1],
 			userOpenID:  parts[2],
+			sessionKey:  sessionKey,
 		}, nil
 	}
 	return &replyContext{
 		messageType: "c2c",
 		userOpenID:  parts[1],
+		sessionKey:  sessionKey,
 	}, nil
 }
 
@@ -921,11 +1028,129 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 		p.handleGroupMessage(data)
 	case "C2C_MESSAGE_CREATE":
 		p.handleC2CMessage(data)
+	case "INTERACTION_CREATE":
+		p.handleInteractionCreate(data)
 	case "RESUMED":
 		slog.Info("qqbot: session resumed successfully")
 	default:
 		slog.Debug("qqbot: unhandled event", "type", eventType)
 	}
+}
+
+// handleInteractionCreate handles inline keyboard button click events.
+// When a user clicks a button on a message with keyboard, QQ Bot dispatches
+// an INTERACTION_CREATE event. This method parses the button_data to extract
+// the permission decision and session key, then creates a synthetic message
+// so the engine can process it as a permission response.
+func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+	var d struct {
+		ID                string `json:"id"`
+		GroupOpenID       string `json:"group_openid"`
+		GroupMemberOpenID string `json:"group_member_openid"`
+		UserOpenID        string `json:"user_openid"`
+		ChatType          int    `json:"chat_type"` // 1=group, 2=c2c
+		Data              struct {
+			Type     int `json:"type"`
+			Resolved struct {
+				ButtonData string `json:"button_data"`
+				ButtonID   string `json:"button_id"`
+			} `json:"resolved"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		slog.Warn("qqbot: failed to parse interaction create event", "error", err)
+		return
+	}
+
+	if d.ID == "" {
+		return
+	}
+	slog.Debug("qqbot: INTERACTION_CREATE", "id", d.ID, "button_data", d.Data.Resolved.ButtonData)
+
+	// ACK the interaction (required by QQ Bot API to prevent "请求超时" on buttons)
+	_ = p.ackInteraction(d.ID)
+
+	// Parse button_data: perm:<decision>:<session_key>
+	buttonData := d.Data.Resolved.ButtonData
+	if !strings.HasPrefix(buttonData, buttonDataPrefix) {
+		slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+		return
+	}
+
+	rest := strings.TrimPrefix(buttonData, buttonDataPrefix)
+	// rest = "<decision>:<session_key>"
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx < 0 {
+		slog.Warn("qqbot: invalid interaction button_data", "data", buttonData)
+		return
+	}
+	decision := rest[:colonIdx]
+	sessionKey := rest[colonIdx+1:]
+	if decision == "" || sessionKey == "" {
+		slog.Warn("qqbot: empty decision or session_key in button_data", "data", buttonData)
+		return
+	}
+
+	// Map decision to response text the engine understands
+	var responseText string
+	switch decision {
+	case "allow":
+		responseText = "allow"
+	case "deny":
+		responseText = "deny"
+	case "allow_all":
+		responseText = "allow all"
+	default:
+		slog.Warn("qqbot: unknown interaction decision", "decision", decision)
+		return
+	}
+
+	// Build reply context for sending confirmation messages
+	var rctx *replyContext
+	var userID string
+	switch d.ChatType {
+	case 1: // group
+		rctx = &replyContext{
+			messageType: "group",
+			groupOpenID: d.GroupOpenID,
+			userOpenID:  d.GroupMemberOpenID,
+			sessionKey:  sessionKey,
+		}
+		userID = d.GroupMemberOpenID
+	case 2: // c2c
+		rctx = &replyContext{
+			messageType: "c2c",
+			userOpenID:  d.UserOpenID,
+			sessionKey:  sessionKey,
+		}
+		userID = d.UserOpenID
+	default:
+		slog.Warn("qqbot: unknown interaction chat_type", "chat_type", d.ChatType)
+		return
+	}
+
+	// Create synthetic message and forward to engine as a permission response
+	msg := &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "qqbot",
+		MessageID:  d.ID,
+		UserID:     userID,
+		Content:    responseText,
+		ReplyCtx:   rctx,
+	}
+
+	slog.Debug("qqbot: forwarding button click as permission response",
+		"decision", decision, "session_key", sessionKey, "chat_type", d.ChatType)
+	p.handler(p, msg)
+}
+
+// ackInteraction acknowledges an INTERACTION_CREATE event.
+// Uses the same pattern as hermes-agent: PUT /interactions/{id}
+// with JSON body {"code": 0}. Note: no /v2/ prefix for this endpoint.
+func (p *Platform) ackInteraction(interactionID string) error {
+	url := fmt.Sprintf("%s/interactions/%s", p.apiBase(), interactionID)
+	body := map[string]int{"code": 0}
+	return p.apiRequestJSON("PUT", url, body, nil)
 }
 
 func (p *Platform) handleGroupMessage(data json.RawMessage) {
@@ -995,6 +1220,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		groupOpenID: d.GroupOpenID,
 		userOpenID:  d.Author.MemberOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
 	}
 
 	msg := &core.Message{
@@ -1075,6 +1301,7 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		messageType: "c2c",
 		userOpenID:  d.Author.UserOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
 	}
 
 	msg := &core.Message{
