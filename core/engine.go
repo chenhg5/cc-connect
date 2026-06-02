@@ -630,7 +630,6 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
 
-
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
@@ -4164,6 +4163,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
+			cleanWithoutAttachments, attachmentDirectives, attachmentErr := extractAttachmentDirectives(baseResponse)
+			if attachmentErr != nil {
+				baseResponse = strings.TrimSpace(baseResponse) + "\n\nAttachment directive error: " + attachmentErr.Error()
+				cleanResponse = baseResponse
+			} else if len(attachmentDirectives) > 0 {
+				baseResponse = strings.TrimSpace(cleanWithoutAttachments)
+				cleanResponse = baseResponse
+			}
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 
@@ -4234,6 +4241,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			fullResponse = cleanResponse
+			attachmentOnly := strings.TrimSpace(fullResponse) == "" && len(attachmentDirectives) > 0
 
 			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
@@ -4270,7 +4278,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				}
-			} else if isSilent {
+			} else if isSilent || attachmentOnly {
 				// Silent reply: drop any in-flight preview and skip all send paths.
 				// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
 				// preventing a stray done_emoji push.
@@ -4288,7 +4296,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					cardMessageID = nil
 				}
-				slog.Info("silent reply suppressed", "session", session.ID)
+				if isSilent {
+					slog.Info("silent reply suppressed", "session", session.ID)
+				}
 			} else if hasRichCard {
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
@@ -4350,6 +4360,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+
+			if len(attachmentDirectives) > 0 {
+				e.sendAttachmentDirectivesWithNotice(p, replyCtx, attachmentDirectives, workspaceDir)
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
@@ -8921,6 +8935,8 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 }
 
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+	hasAttachments := len(images) > 0 || len(files) > 0
+
 	e.interactiveMu.Lock()
 
 	var state *interactiveState
@@ -8939,7 +8955,7 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 			state = s
 			break
 		}
-	} else if len(e.interactiveStates) > 1 && (len(images) > 0 || len(files) > 0) {
+	} else if len(e.interactiveStates) > 1 && hasAttachments {
 		// Multiple sessions with attachments but no explicit sessionKey: ambiguous
 		e.interactiveMu.Unlock()
 		return fmt.Errorf("multiple active sessions; must specify --session to send attachments")
@@ -9004,10 +9020,10 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
 	}
 
-	if message == "" && len(images) == 0 && len(files) == 0 {
+	if message == "" && !hasAttachments {
 		return fmt.Errorf("message or attachment is required")
 	}
-	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
+	if hasAttachments && !e.attachmentSendEnabled {
 		return ErrAttachmentSendDisabled
 	}
 
@@ -9251,6 +9267,54 @@ func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, wo
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
 	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+func (e *Engine) sendAttachmentDirectivesWithNotice(p Platform, replyCtx any, directives []outboundAttachmentDirective, workspaceDir string) {
+	var imageSender ImageSender
+	var fileSender FileSender
+	for _, dir := range directives {
+		attachment, err := buildAttachmentFromDirective(dir)
+		if err != nil {
+			_ = e.sendWithErrorForWorkspace(p, replyCtx, "Attachment send failed: "+err.Error(), workspaceDir)
+			continue
+		}
+		switch attachment.kind {
+		case "image":
+			if imageSender == nil {
+				var ok bool
+				imageSender, ok = p.(ImageSender)
+				if !ok {
+					_ = e.sendWithErrorForWorkspace(p, replyCtx, fmt.Sprintf("Attachment send failed: platform %s does not support images", p.Name()), workspaceDir)
+					continue
+				}
+			}
+			if err := e.waitOutgoing(p); err != nil {
+				slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+				return
+			}
+			if err := imageSender.SendImage(e.ctx, replyCtx, attachment.image); err != nil {
+				slog.Error("image attachment send failed", "platform", p.Name(), "error", err, "file", attachment.image.FileName)
+				_ = e.sendWithErrorForWorkspace(p, replyCtx, "Attachment send failed: "+err.Error(), workspaceDir)
+			}
+		case "file":
+			if fileSender == nil {
+				var ok bool
+				fileSender, ok = p.(FileSender)
+				if !ok {
+					_ = e.sendWithErrorForWorkspace(p, replyCtx, fmt.Sprintf("Attachment send failed: platform %s does not support files", p.Name()), workspaceDir)
+					continue
+				}
+			}
+			if err := e.waitOutgoing(p); err != nil {
+				slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
+				return
+			}
+			if err := fileSender.SendFile(e.ctx, replyCtx, attachment.file); err != nil {
+				slog.Error("file attachment send failed", "platform", p.Name(), "error", err, "file", attachment.file.FileName)
+				_ = e.sendWithErrorForWorkspace(p, replyCtx, "Attachment send failed: "+err.Error(), workspaceDir)
+			}
+		}
+	}
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
