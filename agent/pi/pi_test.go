@@ -212,7 +212,7 @@ func TestAgent_MemoryFiles(t *testing.T) {
 	}
 
 	global := a.GlobalMemoryFile()
-	if !strings.HasSuffix(global, filepath.Join(".pi", "AGENTS.md")) {
+	if !strings.HasSuffix(global, filepath.Join(".pi", "agent", "AGENTS.md")) {
 		t.Errorf("GlobalMemoryFile() = %q", global)
 	}
 }

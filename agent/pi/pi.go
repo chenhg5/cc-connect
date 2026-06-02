@@ -197,11 +197,16 @@ func (a *Agent) ProjectMemoryFile() string {
 }
 
 func (a *Agent) GlobalMemoryFile() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	// Use PI_CODING_AGENT_DIR if set, otherwise default to ~/.pi/agent/.
+	agentDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if agentDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		agentDir = filepath.Join(homeDir, ".pi", "agent")
 	}
-	return filepath.Join(homeDir, ".pi", "AGENTS.md")
+	return filepath.Join(agentDir, "AGENTS.md")
 }
 
 // ── ReasoningEffortSwitcher ──────────────────────────────────
