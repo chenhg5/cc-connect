@@ -568,6 +568,72 @@ func TestNewFeishu_InvalidCustomDomain(t *testing.T) {
 	}
 }
 
+func TestNewFeishu_ThreadIsolationMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		options map[string]any
+		want    string
+		wantErr bool
+	}{
+		{
+			name:    "default keeps reply and thread behavior",
+			options: map[string]any{},
+			want:    feishuThreadIsolationReplyAndThread,
+		},
+		{
+			name: "explicit reply and thread",
+			options: map[string]any{
+				"feishu_thread_isolation_mode": "reply_and_thread",
+			},
+			want: feishuThreadIsolationReplyAndThread,
+		},
+		{
+			name: "explicit thread only",
+			options: map[string]any{
+				"feishu_thread_isolation_mode": "thread_only",
+			},
+			want: feishuThreadIsolationThreadOnly,
+		},
+		{
+			name: "invalid mode",
+			options: map[string]any{
+				"feishu_thread_isolation_mode": "root",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid non-string mode",
+			options: map[string]any{
+				"feishu_thread_isolation_mode": true,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false}
+			for k, v := range tt.options {
+				opts[k] = v
+			}
+			p, err := New(opts)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			base := p.(*Platform)
+			if base.feishuThreadIsolationMode != tt.want {
+				t.Fatalf("feishuThreadIsolationMode = %q, want %q", base.feishuThreadIsolationMode, tt.want)
+			}
+		})
+	}
+}
+
 func TestLark_SessionKeyPrefix(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
@@ -747,6 +813,114 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 	}
 }
 
+func TestFeishuMakeSessionKey_ThreadIsolationMode(t *testing.T) {
+	chatType := "group"
+	messageID := "om_message"
+	rootID := "om_root"
+	parentID := "om_parent"
+	threadID := "omt_thread"
+	msg := &larkim.EventMessage{
+		MessageId: &messageID,
+		RootId:    &rootID,
+		ParentId:  &parentID,
+		ThreadId:  &threadID,
+		ChatType:  &chatType,
+	}
+	replyMsgWithoutThread := &larkim.EventMessage{
+		MessageId: &messageID,
+		RootId:    &rootID,
+		ParentId:  &parentID,
+		ChatType:  &chatType,
+	}
+	rootMsgWithoutRootID := &larkim.EventMessage{
+		MessageId: &messageID,
+		ChatType:  &chatType,
+	}
+
+	tests := []struct {
+		name string
+		p    *Platform
+		msg  *larkim.EventMessage
+		want string
+	}{
+		{
+			name: "empty mode preserves reply and thread behavior",
+			p:    &Platform{platformName: "feishu", threadIsolation: true},
+			msg:  msg,
+			want: "feishu:oc_chat:root:om_root",
+		},
+		{
+			name: "reply and thread mode prefers root id even when thread id exists",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				feishuThreadIsolationMode: feishuThreadIsolationReplyAndThread,
+			},
+			msg:  msg,
+			want: "feishu:oc_chat:root:om_root",
+		},
+		{
+			name: "reply and thread mode falls back to message id",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				feishuThreadIsolationMode: feishuThreadIsolationReplyAndThread,
+			},
+			msg:  rootMsgWithoutRootID,
+			want: "feishu:oc_chat:root:om_message",
+		},
+		{
+			name: "thread only mode uses native thread id",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
+			},
+			msg:  msg,
+			want: "feishu:oc_chat:thread:omt_thread",
+		},
+		{
+			name: "thread only mode keeps normal reply in user session",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
+			},
+			msg:  replyMsgWithoutThread,
+			want: "feishu:oc_chat:ou_user",
+		},
+		{
+			name: "thread only mode falls back to shared channel session",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
+				shareSessionInChannel:     true,
+			},
+			msg:  replyMsgWithoutThread,
+			want: "feishu:oc_chat",
+		},
+		{
+			name: "thread isolation disabled ignores mode",
+			p: &Platform{
+				platformName:              "feishu",
+				feishuThreadIsolationMode: feishuThreadIsolationThreadOnly,
+			},
+			msg:  msg,
+			want: "feishu:oc_chat:ou_user",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.p.makeSessionKey(tt.msg, "oc_chat", "ou_user")
+			if got != tt.want {
+				t.Fatalf("makeSessionKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -758,6 +932,12 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 			name:          "thread isolation enabled",
 			platform:      &Platform{threadIsolation: true},
 			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root"},
+			wantThreading: true,
+		},
+		{
+			name:          "thread id session is threaded",
+			platform:      &Platform{threadIsolation: true},
+			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:thread:omt_thread"},
 			wantThreading: true,
 		},
 		{
