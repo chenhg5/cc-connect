@@ -9,8 +9,10 @@ export interface ProjectSummary {
 }
 
 export interface PlatformConfigInfo {
+  index?: number;
   type: string;
   allow_from?: string;
+  options?: Record<string, any>;
 }
 
 export interface ProjectDetail {
@@ -50,6 +52,11 @@ export interface ProjectSettingsUpdate {
   reply_footer?: boolean;
   inject_sender?: boolean;
   platform_allow_from?: Record<string, string>;
+  platform_options?: {
+    index: number;
+    type: string;
+    options: Record<string, any>;
+  }[];
 }
 
 export const listAgentTypes = () => api.get<{ agents: string[]; platforms: string[] }>('/agents');

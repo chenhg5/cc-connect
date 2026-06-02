@@ -28,6 +28,15 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	PlatformOptions      []PlatformOptionsUpdate
+}
+
+// PlatformOptionsUpdate updates non-secret platform options for one platform
+// instance in a project. Index is the zero-based position in [[projects.platforms]].
+type PlatformOptionsUpdate struct {
+	Index   int            `json:"index"`
+	Type    string         `json:"type"`
+	Options map[string]any `json:"options"`
 }
 
 // ManagementServer provides an HTTP REST API for external management tools
@@ -141,10 +150,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -706,16 +715,17 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 	if r.Method == http.MethodPatch {
 		var body struct {
-			Language             *string           `json:"language"`
-			AdminFrom            *string           `json:"admin_from"`
-			DisabledCommands     []string          `json:"disabled_commands"`
-			WorkDir              *string           `json:"work_dir"`
-			Mode                 *string           `json:"mode"`
-			AgentType            *string           `json:"agent_type"`
-			ShowContextIndicator *bool             `json:"show_context_indicator"`
-			ReplyFooter          *bool             `json:"reply_footer"`
-			InjectSender         *bool             `json:"inject_sender"`
-			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
+			Language             *string                 `json:"language"`
+			AdminFrom            *string                 `json:"admin_from"`
+			DisabledCommands     []string                `json:"disabled_commands"`
+			WorkDir              *string                 `json:"work_dir"`
+			Mode                 *string                 `json:"mode"`
+			AgentType            *string                 `json:"agent_type"`
+			ShowContextIndicator *bool                   `json:"show_context_indicator"`
+			ReplyFooter          *bool                   `json:"reply_footer"`
+			InjectSender         *bool                   `json:"inject_sender"`
+			PlatformAllowFrom    map[string]string       `json:"platform_allow_from"`
+			PlatformOptions      []PlatformOptionsUpdate `json:"platform_options"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -778,6 +788,9 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 			restartRequired = true
 		}
+		if len(body.PlatformOptions) > 0 {
+			restartRequired = true
+		}
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
@@ -791,9 +804,12 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				ReplyFooter:          body.ReplyFooter,
 				InjectSender:         body.InjectSender,
 				PlatformAllowFrom:    body.PlatformAllowFrom,
+				PlatformOptions:      body.PlatformOptions,
 			}
 			if err := m.saveProjectSettings(name, patch); err != nil {
 				slog.Warn("management: failed to persist project settings", "project", name, "error", err)
+				mgmtError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 		}
 
@@ -1859,10 +1875,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

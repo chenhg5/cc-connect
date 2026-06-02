@@ -2834,6 +2834,22 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	PlatformOptions      []PlatformOptionsUpdate
+}
+
+// PlatformOptionsUpdate updates non-secret platform options for one platform
+// instance in a project. Index is the zero-based position in [[projects.platforms]].
+type PlatformOptionsUpdate struct {
+	Index   int
+	Type    string
+	Options map[string]any
+}
+
+var editablePlatformOptionKeys = map[string]struct{}{
+	"allow_from":               {},
+	"group_reply_all":          {},
+	"share_session_in_channel": {},
+	"thread_isolation":         {},
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -2962,6 +2978,38 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 				proj.Platforms[j].Options["allow_from"] = strings.TrimSpace(af)
 			}
 		}
+		for _, platformUpdate := range update.PlatformOptions {
+			if platformUpdate.Index < 0 || platformUpdate.Index >= len(proj.Platforms) {
+				return fmt.Errorf("platform index %d out of range", platformUpdate.Index)
+			}
+			platform := &proj.Platforms[platformUpdate.Index]
+			if !strings.EqualFold(strings.TrimSpace(platformUpdate.Type), strings.TrimSpace(platform.Type)) {
+				return fmt.Errorf("platform index %d type mismatch: got %q, want %q", platformUpdate.Index, platformUpdate.Type, platform.Type)
+			}
+			if platform.Options == nil {
+				platform.Options = map[string]any{}
+			}
+			for key, value := range platformUpdate.Options {
+				normalizedKey := strings.ToLower(strings.TrimSpace(key))
+				if _, ok := editablePlatformOptionKeys[normalizedKey]; !ok {
+					return fmt.Errorf("platform option %q is not editable", key)
+				}
+				switch normalizedKey {
+				case "allow_from":
+					if s, ok := value.(string); ok {
+						platform.Options[normalizedKey] = strings.TrimSpace(s)
+						continue
+					}
+					return fmt.Errorf("platform option %q must be a string", normalizedKey)
+				default:
+					if b, ok := value.(bool); ok {
+						platform.Options[normalizedKey] = b
+						continue
+					}
+					return fmt.Errorf("platform option %q must be a boolean", normalizedKey)
+				}
+			}
+		}
 		return saveConfig(cfg)
 	}
 	return fmt.Errorf("project %q not found", projectName)
@@ -3004,10 +3052,19 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {
-			pc := map[string]any{"type": plat.Type}
+			pc := map[string]any{"index": j, "type": plat.Type}
 			if plat.Options != nil {
 				if af, ok := plat.Options["allow_from"].(string); ok {
 					pc["allow_from"] = af
+				}
+				options := make(map[string]any)
+				for key := range editablePlatformOptionKeys {
+					if value, ok := plat.Options[key]; ok {
+						options[key] = value
+					}
+				}
+				if len(options) > 0 {
+					pc["options"] = options
 				}
 			}
 			platConfigs[j] = pc
