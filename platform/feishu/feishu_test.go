@@ -2,6 +2,8 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -13,6 +15,216 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestDetectFeishuFileType_NativeMedia(t *testing.T) {
+	tests := []struct {
+		name     string
+		mimeType string
+		fileName string
+		want     string
+	}{
+		{name: "mp4 mime", mimeType: "video/mp4", fileName: "clip.bin", want: larkim.FileTypeMp4},
+		{name: "mp4 extension", mimeType: "application/octet-stream", fileName: "clip.mp4", want: larkim.FileTypeMp4},
+		{name: "opus mime", mimeType: "audio/opus", fileName: "voice.bin", want: larkim.FileTypeOpus},
+		{name: "mp3 extension", mimeType: "application/octet-stream", fileName: "voice.mp3", want: larkim.FileTypeOpus},
+		{name: "wav mime", mimeType: "audio/wav", fileName: "voice", want: larkim.FileTypeOpus},
+		{name: "regular file", mimeType: "application/zip", fileName: "archive.zip", want: larkim.FileTypeStream},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectFeishuFileType(tt.mimeType, tt.fileName); got != tt.want {
+				t.Fatalf("detectFeishuFileType(%q, %q) = %q, want %q", tt.mimeType, tt.fileName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildFeishuUploadedFileMessage_UsesNativeMsgTypes(t *testing.T) {
+	tests := []struct {
+		name        string
+		fileType    string
+		wantMsgType string
+	}{
+		{name: "audio", fileType: larkim.FileTypeOpus, wantMsgType: larkim.MsgTypeAudio},
+		{name: "video", fileType: larkim.FileTypeMp4, wantMsgType: larkim.MsgTypeMedia},
+		{name: "file", fileType: larkim.FileTypeStream, wantMsgType: larkim.MsgTypeFile},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgType, content, err := buildFeishuUploadedFileMessage(tt.fileType, "file_key_123")
+			if err != nil {
+				t.Fatalf("buildFeishuUploadedFileMessage: %v", err)
+			}
+			if msgType != tt.wantMsgType {
+				t.Fatalf("msgType = %q, want %q", msgType, tt.wantMsgType)
+			}
+			var body map[string]string
+			if err := json.Unmarshal([]byte(content), &body); err != nil {
+				t.Fatalf("content is not json: %v", err)
+			}
+			if body["file_key"] != "file_key_123" {
+				t.Fatalf("file_key = %q, want file_key_123", body["file_key"])
+			}
+		})
+	}
+}
+
+func TestBuildFeishuCreateFileReqBody_IncludesDuration(t *testing.T) {
+	body := buildFeishuCreateFileReqBody(larkim.FileTypeOpus, "voice.opus", []byte("opus"), 1234)
+	if body.Duration == nil || *body.Duration != 1234 {
+		t.Fatalf("Duration = %v, want 1234", body.Duration)
+	}
+	if body.FileType == nil || *body.FileType != larkim.FileTypeOpus {
+		t.Fatalf("FileType = %v, want opus", body.FileType)
+	}
+	if body.FileName == nil || *body.FileName != "voice.opus" {
+		t.Fatalf("FileName = %v, want voice.opus", body.FileName)
+	}
+	if body.File == nil {
+		t.Fatal("File reader is nil")
+	}
+}
+
+func TestBuildFeishuCreateFileReqBody_OmitsEmptyDuration(t *testing.T) {
+	body := buildFeishuCreateFileReqBody(larkim.FileTypeMp4, "clip.mp4", []byte("mp4"), 0)
+	if body.Duration != nil {
+		t.Fatalf("Duration = %v, want nil", *body.Duration)
+	}
+}
+
+func TestSendFileFallsBackToGenericFileWhenAudioConversionUnavailable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	const appID = "cli_file_fallback"
+	const appSecret = "secret-file-fallback"
+
+	uploadCalls := 0
+	createCalls := 0
+	var uploadedFileType string
+	var uploadedFileName string
+	var uploadedFileData string
+	var sentMsgType string
+	var sentContent string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "valid-token",
+			})
+		case "/open-apis/im/v1/files":
+			uploadCalls++
+			fileType, fileName, fileData := readFeishuFileUpload(t, r)
+			uploadedFileType = fileType
+			uploadedFileName = fileName
+			uploadedFileData = fileData
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"file_key": "file_key_stream"},
+			})
+		case "/open-apis/im/v1/messages":
+			createCalls++
+			var body struct {
+				MsgType string `json:"msg_type"`
+				Content string `json:"content"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create message body: %v", err)
+			}
+			sentMsgType = body.MsgType
+			sentContent = body.Content
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_file_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{chatID: "oc_chat"}, core.FileAttachment{
+		Data:     []byte("mp3 bytes"),
+		MimeType: "audio/mpeg",
+		FileName: "voice.mp3",
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if uploadCalls != 1 {
+		t.Fatalf("uploadCalls = %d, want 1", uploadCalls)
+	}
+	if createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", createCalls)
+	}
+	if uploadedFileType != larkim.FileTypeStream {
+		t.Fatalf("uploaded file_type = %q, want %q", uploadedFileType, larkim.FileTypeStream)
+	}
+	if uploadedFileName != "voice.mp3" {
+		t.Fatalf("uploaded file_name = %q, want voice.mp3", uploadedFileName)
+	}
+	if uploadedFileData != "mp3 bytes" {
+		t.Fatalf("uploaded file data = %q, want original data", uploadedFileData)
+	}
+	if sentMsgType != larkim.MsgTypeFile {
+		t.Fatalf("sent msg_type = %q, want %q", sentMsgType, larkim.MsgTypeFile)
+	}
+	var content map[string]string
+	if err := json.Unmarshal([]byte(sentContent), &content); err != nil {
+		t.Fatalf("sent content is not json: %v", err)
+	}
+	if content["file_key"] != "file_key_stream" {
+		t.Fatalf("sent file_key = %q, want file_key_stream", content["file_key"])
+	}
+}
+
+func TestDetectFeishuAudioFormat(t *testing.T) {
+	if got := detectFeishuAudioFormat("application/octet-stream", "reply.mp3"); got != "mp3" {
+		t.Fatalf("extension format = %q, want mp3", got)
+	}
+	if got := detectFeishuAudioFormat("audio/x-m4a", "reply"); got != "m4a" {
+		t.Fatalf("mime format = %q, want m4a", got)
+	}
+	if got := detectFeishuAudioFormat("audio/opus", "reply.bin"); got != "opus" {
+		t.Fatalf("opus mime format = %q, want opus", got)
+	}
+}
+
+func TestReplaceFileExtension(t *testing.T) {
+	tests := map[string]string{
+		"voice.mp3":      "voice.opus",
+		"voice":          "voice.opus",
+		"/tmp/voice.wav": "/tmp/voice.opus",
+		"":               "attachment.opus",
+	}
+	for in, want := range tests {
+		if got := replaceFileExtension(in, ".opus"); got != want {
+			t.Fatalf("replaceFileExtension(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
 
 func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
 	got := make(chan *core.Message, 1)
@@ -792,6 +1004,45 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func readFeishuFileUpload(t *testing.T, r *http.Request) (string, string, string) {
+	t.Helper()
+
+	reader, err := r.MultipartReader()
+	if err != nil {
+		t.Fatalf("multipart reader: %v", err)
+	}
+
+	var fileType, fileName, fileData string
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read multipart part: %v", err)
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatalf("read multipart field %q: %v", part.FormName(), err)
+		}
+		switch part.FormName() {
+		case "file_type":
+			fileType = string(data)
+		case "file_name":
+			fileName = string(data)
+		case "file":
+			fileData = string(data)
+		}
+	}
+	if fileType == "" {
+		t.Fatal("missing multipart file_type")
+	}
+	if fileName == "" {
+		t.Fatal("missing multipart file_name")
+	}
+	return fileType, fileName, fileData
+}
 
 func TestStripMentions(t *testing.T) {
 	tests := []struct {
