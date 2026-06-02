@@ -1165,6 +1165,7 @@ bot_token = "token_xxx"
 const relayConfigFixture = `
 [relay]
 timeout_secs = 300
+visibility = "none"
 
 [[projects]]
 name = "alpha"
@@ -1185,6 +1186,26 @@ bot_token = "token_xxx"
 const relayConfigNegativeFixture = `
 [relay]
 timeout_secs = -1
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const relayConfigInvalidVisibilityFixture = `
+[relay]
+visibility = "verbose"
 
 [[projects]]
 name = "alpha"
@@ -1742,6 +1763,9 @@ func TestLoadRelayTimeoutConfig(t *testing.T) {
 	if *cfg.Relay.TimeoutSecs != 300 {
 		t.Fatalf("cfg.Relay.TimeoutSecs = %d, want 300", *cfg.Relay.TimeoutSecs)
 	}
+	if cfg.Relay.Visibility != "none" {
+		t.Fatalf("cfg.Relay.Visibility = %q, want none", cfg.Relay.Visibility)
+	}
 }
 
 func TestLoadRejectsNegativeRelayTimeout(t *testing.T) {
@@ -1753,6 +1777,18 @@ func TestLoadRejectsNegativeRelayTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "relay.timeout_secs must be >= 0") {
 		t.Fatalf("error = %q, want contains %q", err.Error(), "relay.timeout_secs must be >= 0")
+	}
+}
+
+func TestLoadRejectsInvalidRelayVisibility(t *testing.T) {
+	configPath := writeConfigFixture(t, relayConfigInvalidVisibilityFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid relay visibility, got nil")
+	}
+	if !strings.Contains(err.Error(), `relay.visibility must be "full", "summary", or "none"`) {
+		t.Fatalf("error = %q, want relay.visibility validation error", err.Error())
 	}
 }
 func writeConfigFixture(t *testing.T, content string) string {

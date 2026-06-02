@@ -14,6 +14,12 @@ import (
 
 const relayTimeout = 120 * time.Second
 
+const (
+	RelayVisibilityFull    = "full"
+	RelayVisibilitySummary = "summary"
+	RelayVisibilityNone    = "none"
+)
+
 // RelayBinding represents a bot-to-bot relay binding in a group chat.
 type RelayBinding struct {
 	Platform string            `json:"platform"`
@@ -23,18 +29,20 @@ type RelayBinding struct {
 
 // RelayManager coordinates bot-to-bot message relay across engines.
 type RelayManager struct {
-	mu        sync.RWMutex
-	engines   map[string]*Engine       // project name → engine (runtime only)
-	bindings  map[string]*RelayBinding // chatID → binding
-	storePath string                   // empty = no persistence
-	timeout   time.Duration
+	mu         sync.RWMutex
+	engines    map[string]*Engine       // project name → engine (runtime only)
+	bindings   map[string]*RelayBinding // chatID → binding
+	storePath  string                   // empty = no persistence
+	timeout    time.Duration
+	visibility string
 }
 
 func NewRelayManager(dataDir string) *RelayManager {
 	rm := &RelayManager{
-		engines:  make(map[string]*Engine),
-		bindings: make(map[string]*RelayBinding),
-		timeout:  relayTimeout,
+		engines:    make(map[string]*Engine),
+		bindings:   make(map[string]*RelayBinding),
+		timeout:    relayTimeout,
+		visibility: RelayVisibilityFull,
 	}
 	if dataDir != "" {
 		rm.storePath = filepath.Join(dataDir, "relay_bindings.json")
@@ -57,6 +65,15 @@ func (rm *RelayManager) SetTimeout(d time.Duration) {
 		d = 0
 	}
 	rm.timeout = d
+}
+
+// SetVisibility controls whether relay request/response visibility messages are
+// echoed into the source group chat. The relay transport still returns the
+// target response to the caller regardless of this setting.
+func (rm *RelayManager) SetVisibility(mode string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.visibility = normalizeRelayVisibility(mode)
 }
 
 // Bind establishes a relay binding between bots in a group chat.
@@ -195,6 +212,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	binding := rm.bindings[chatID]
 	targetEngine := rm.engines[req.To]
 	sourceEngine := rm.engines[req.From]
+	visibility := rm.visibility
 	rm.mu.RUnlock()
 
 	if binding == nil {
@@ -222,10 +240,10 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		toName = binding.Bots[req.To]
 	}
 
-	// Post the forwarded message to the group chat for visibility
+	// Post the forwarded message to the group chat for visibility.
 	groupSessionKey := platform + ":" + chatID + ":relay"
-	if sourceEngine != nil {
-		label := fmt.Sprintf("[%s → %s] %s", fromName, toName, req.Message)
+	if sourceEngine != nil && visibility != RelayVisibilityNone {
+		label := relayVisibilityRequestLabel(visibility, fromName, toName, req.Message)
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
 	}
 
@@ -238,9 +256,9 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		return nil, fmt.Errorf("relay: %w", err)
 	}
 
-	// Post the response to the group chat for visibility
-	if targetEngine != nil {
-		label := fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
+	// Post the response to the group chat for visibility.
+	if targetEngine != nil && visibility != RelayVisibilityNone {
+		label := relayVisibilityResponseLabel(visibility, toName, response)
 		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
 	}
 
@@ -275,6 +293,33 @@ func truncateRelay(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "…"
+}
+
+func normalizeRelayVisibility(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case RelayVisibilityNone:
+		return RelayVisibilityNone
+	case RelayVisibilitySummary:
+		return RelayVisibilitySummary
+	case "", RelayVisibilityFull:
+		return RelayVisibilityFull
+	default:
+		return RelayVisibilityFull
+	}
+}
+
+func relayVisibilityRequestLabel(mode, fromName, toName, message string) string {
+	if normalizeRelayVisibility(mode) == RelayVisibilitySummary {
+		return fmt.Sprintf("[%s → %s] relay request sent", fromName, toName)
+	}
+	return fmt.Sprintf("[%s → %s] %s", fromName, toName, message)
+}
+
+func relayVisibilityResponseLabel(mode, toName, response string) string {
+	if normalizeRelayVisibility(mode) == RelayVisibilitySummary {
+		return fmt.Sprintf("[%s] relay response ready (%d chars)", toName, len([]rune(response)))
+	}
+	return fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
 }
 
 func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, context.CancelFunc) {

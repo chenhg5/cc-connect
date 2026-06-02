@@ -255,12 +255,17 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
-# Bot-to-bot relay timeout. Controls how long cc-connect waits for the target
-# bot to finish responding during `cc-connect relay send`.
-# Bot 间 relay 超时。控制 `cc-connect relay send` 时等待目标 bot 完成回复的最长时间。
+# Bot-to-bot relay settings. timeout_secs controls how long cc-connect waits for
+# the target bot to finish responding during `cc-connect relay send`.
+# visibility controls the extra group-chat echo only; the caller still receives
+# the target response from the relay command when visibility is "none".
+# Bot 间 relay 设置。timeout_secs 控制 `cc-connect relay send` 等待目标 bot
+# 完成回复的最长时间。visibility 只控制群内额外可见消息；设为 "none" 时调用方
+# 仍会从 relay 命令拿到目标回复。
 
 # [relay]
 # timeout_secs = 120        # Max relay wait in seconds; 0 = disabled (default: 120) / relay 最大等待秒数；0 = 禁用（默认 120）
+# visibility = "full"       # "full" (default), "summary", or "none" / 群内可见消息：完整、摘要或不显示
 
 # =============================================================================
 # Auto-Compress / 自动压缩
@@ -1856,4 +1861,3 @@ app_secret = "your-feishu-app-secret"
 # [[projects.agent.providers]]
 # name = "google"
 # api_key = "your-gemini-api-key"    # GEMINI_API_KEY
-

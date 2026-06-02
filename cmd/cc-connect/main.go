@@ -1056,6 +1056,7 @@ func main() {
 				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
 			}
 		}
+		relayMgr.SetVisibility(cfg.Relay.Visibility)
 		apiSrv.SetRelayManager(relayMgr)
 
 		// Create shared DirHistory for all engines
