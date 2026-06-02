@@ -153,8 +153,9 @@ type Platform struct {
 	callbackPath string
 	encryptKey   string
 	eventHandler *dispatcher.EventDispatcher
-	sharedGroup  *sharedWSGroup // non-nil when sharing WebSocket with other platforms
-	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
+	sharedGroup      *sharedWSGroup // non-nil when sharing WebSocket with other platforms
+	isWSPrimary      bool           // true if this platform owns the shared WebSocket connection
+	lifecycleHandler core.PlatformLifecycleHandler
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
@@ -346,6 +347,32 @@ func (p *Platform) KeepPreviewOnFinish() bool {
 	return p.useInteractiveCard
 }
 
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
+
+func (p *Platform) getLifecycleHandler() core.PlatformLifecycleHandler {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.lifecycleHandler
+}
+
+func (p *Platform) notifyReady() {
+	handler := p.getLifecycleHandler()
+	if handler != nil {
+		handler.OnPlatformReady(p)
+	}
+}
+
+func (p *Platform) notifyUnavailable(err error) {
+	handler := p.getLifecycleHandler()
+	if handler != nil {
+		handler.OnPlatformUnavailable(p, err)
+	}
+}
+
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
 	p.handler = handler
@@ -473,7 +500,8 @@ func (p *Platform) startWebSocketMode() error {
 
 	go func() {
 		if err := p.wsClient.Start(ctx); err != nil {
-			slog.Error(p.tag()+": websocket error", "error", err)
+			slog.Error(p.tag()+": websocket fatal error, platform unavailable", "error", err)
+			p.notifyUnavailable(err)
 		}
 	}()
 
