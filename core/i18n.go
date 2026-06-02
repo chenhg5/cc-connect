@@ -392,6 +392,8 @@ const (
 	MsgAskQuestionMulti    MsgKey = "ask_question_multi"
 	MsgAskQuestionPrompt   MsgKey = "ask_question_prompt"
 	MsgAskQuestionAnswered MsgKey = "ask_question_answered"
+	MsgAskQuestionSubmit   MsgKey = "ask_question_submit"
+	MsgAskQuestionCancel   MsgKey = "ask_question_cancel"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -2514,6 +2516,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已回答",
 		LangJapanese:           "回答済み",
 		LangSpanish:            "Respondido",
+	},
+	MsgAskQuestionSubmit: {
+		LangEnglish:            "Submit",
+		LangChinese:            "提交",
+		LangTraditionalChinese: "提交",
+		LangJapanese:           "送信",
+		LangSpanish:            "Enviar",
+	},
+	MsgAskQuestionCancel: {
+		LangEnglish:            "Cancel",
+		LangChinese:            "取消",
+		LangTraditionalChinese: "取消",
+		LangJapanese:           "キャンセル",
+		LangSpanish:            "Cancelar",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -243,6 +245,73 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				"tag":     "action",
 				"actions": []map[string]any{selectElem},
 			})
+		case core.CardAskQuestionMultiSelect:
+			// Build a form with checker elements for multi-select
+			formElements := make([]map[string]any, 0)
+			// Add question as markdown
+			formElements = append(formElements, map[string]any{
+				"tag":     "markdown",
+				"content": "**" + e.Question + "**",
+			})
+			// Add checker for each option
+			for i, opt := range e.Options {
+				optIdx := i + 1 // 1-based index for callback
+				checkerName := askQuestionCheckerName(e.QuestionIdx, optIdx)
+				formElements = append(formElements, map[string]any{
+					"tag":     "checker",
+					"name":    checkerName,
+					"checked": false,
+					"text": map[string]any{
+						"tag":     "lark_md",
+						"content": opt.Text,
+					},
+				})
+			}
+			// Add submit/cancel buttons
+			buttonColumns := []map[string]any{
+				{
+					"tag":            "column",
+					"width":          "auto",
+					"vertical_align": "center",
+					"elements": []map[string]any{
+						{
+							"tag":              "button",
+							"text":             plainText(e.SubmitText),
+							"type":             "primary",
+							"name":             "askq_multiselect_submit",
+							"form_action_type": "submit",
+							"value":            map[string]string{"action": fmt.Sprintf("askq:%d:multi", e.QuestionIdx)},
+						},
+					},
+				},
+			}
+			if e.CancelText != "" {
+				buttonColumns = append(buttonColumns, map[string]any{
+					"tag":            "column",
+					"width":          "auto",
+					"vertical_align": "center",
+					"elements": []map[string]any{
+						{
+							"tag":   "button",
+							"text":  plainText(e.CancelText),
+							"type":  "default",
+							"name":  "askq_multiselect_cancel",
+							"value": map[string]string{"action": fmt.Sprintf("askq:%d:cancel", e.QuestionIdx)},
+						},
+					},
+				})
+			}
+			formElements = append(formElements, map[string]any{
+				"tag":              "column_set",
+				"horizontal_align": "left",
+				"columns":          buttonColumns,
+			})
+			// Wrap in a form
+			elements = append(elements, map[string]any{
+				"tag":      "form",
+				"name":     fmt.Sprintf("askq_form_%d", e.QuestionIdx),
+				"elements": formElements,
+			})
 		case core.CardNote:
 			elements = append(elements, map[string]any{
 				"tag":      "note",
@@ -461,4 +530,50 @@ func renderCard(card *core.Card, sessionKey string) string {
 		return `{"config":{"wide_screen_mode":true},"elements":[]}`
 	}
 	return string(b)
+}
+
+// askQuestionCheckerNamePrefix is used for multi-select AskUserQuestion form elements.
+const askQuestionCheckerNamePrefix = "askq_sel_"
+
+// askQuestionCheckerName generates a unique checker name for an AskUserQuestion option.
+func askQuestionCheckerName(qIdx, optIdx int) string {
+	// Encode as "askq_sel_<qIdx>_<optIdx>"
+	return fmt.Sprintf("%s%d_%d", askQuestionCheckerNamePrefix, qIdx, optIdx)
+}
+
+// parseAskQuestionCheckerName extracts qIdx and optIdx from a checker name.
+func parseAskQuestionCheckerName(name string) (qIdx, optIdx int, ok bool) {
+	if !strings.HasPrefix(name, askQuestionCheckerNamePrefix) {
+		return 0, 0, false
+	}
+	parts := strings.Split(strings.TrimPrefix(name, askQuestionCheckerNamePrefix), "_")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	q, err1 := strconv.Atoi(parts[0])
+	o, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return q, o, true
+}
+
+// collectAskQuestionMultiSelectFromFormValue extracts selected option indices from
+// a form submission for multi-select AskUserQuestion.
+func collectAskQuestionMultiSelectFromFormValue(formValue map[string]any, qIdx int) []int {
+	if len(formValue) == 0 {
+		return nil
+	}
+	var selected []int
+	for key, val := range formValue {
+		parsedQIdx, optIdx, ok := parseAskQuestionCheckerName(key)
+		if !ok || parsedQIdx != qIdx {
+			continue
+		}
+		if isTruthyFormValue(val) {
+			selected = append(selected, optIdx)
+		}
+	}
+	sort.Ints(selected)
+	return selected
 }

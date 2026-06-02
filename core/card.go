@@ -68,12 +68,24 @@ type CardSelectOption struct {
 	Value string
 }
 
-func (CardMarkdown) cardElement() {}
-func (CardDivider) cardElement()  {}
-func (CardActions) cardElement()  {}
-func (CardNote) cardElement()     {}
-func (CardListItem) cardElement() {}
-func (CardSelect) cardElement()   {}
+// CardAskQuestionMultiSelect renders a multi-select form for AskUserQuestion.
+// On Feishu this maps to a form with checker elements; on other platforms it
+// degrades to numbered text instructions.
+type CardAskQuestionMultiSelect struct {
+	Question     string              // the question text
+	Options      []CardSelectOption  // available options
+	QuestionIdx  int                 // question index (for callback routing)
+	SubmitText   string              // submit button text
+	CancelText   string              // cancel button text (optional)
+}
+
+func (CardMarkdown) cardElement()                {}
+func (CardDivider) cardElement()                 {}
+func (CardActions) cardElement()                 {}
+func (CardNote) cardElement()                    {}
+func (CardListItem) cardElement()                {}
+func (CardSelect) cardElement()                  {}
+func (CardAskQuestionMultiSelect) cardElement()  {}
 
 // CardButton represents a clickable button inside a CardActions element.
 type CardButton struct {
@@ -200,6 +212,21 @@ func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, ini
 	return b
 }
 
+// AskQuestionMultiSelect appends a multi-select form element for AskUserQuestion.
+// This is rendered as a form with checkboxes on Feishu, and as numbered text on other platforms.
+func (b *CardBuilder) AskQuestionMultiSelect(question string, options []CardSelectOption, qIdx int, submitText, cancelText string) *CardBuilder {
+	if len(options) > 0 {
+		b.card.Elements = append(b.card.Elements, CardAskQuestionMultiSelect{
+			Question:     question,
+			Options:      options,
+			QuestionIdx:  qIdx,
+			SubmitText:   submitText,
+			CancelText:   cancelText,
+		})
+	}
+	return b
+}
+
 // Note appends a footnote element.
 func (b *CardBuilder) Note(text string) *CardBuilder {
 	if text != "" {
@@ -267,6 +294,13 @@ func (c *Card) RenderText() string {
 				sb.WriteString(opt.Text)
 			}
 			sb.WriteString("\n\n")
+		case CardAskQuestionMultiSelect:
+			sb.WriteString(e.Question)
+			sb.WriteString("\n")
+			for i, opt := range e.Options {
+				sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, opt.Text))
+			}
+			sb.WriteString("\n")
 		case CardNote:
 			sb.WriteString(e.Text)
 			sb.WriteString("\n")
@@ -280,7 +314,7 @@ func (c *Card) RenderText() string {
 func (c *Card) HasButtons() bool {
 	for _, elem := range c.Elements {
 		switch elem.(type) {
-		case CardActions, CardListItem, CardSelect:
+		case CardActions, CardListItem, CardSelect, CardAskQuestionMultiSelect:
 			return true
 		}
 	}

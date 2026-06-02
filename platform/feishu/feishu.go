@@ -695,6 +695,27 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
+		// Handle multi-select form submission
+		if strings.HasSuffix(actionVal, ":multi") {
+			// Extract question index from actionVal (format: "askq:<qIdx>:multi")
+			parts := strings.Split(actionVal, ":")
+			if len(parts) >= 2 {
+				qIdxStr := parts[1]
+				qIdx, err := strconv.Atoi(qIdxStr)
+				if err == nil {
+					// Collect selected options from form value
+					selected := collectAskQuestionMultiSelectFromFormValue(event.Event.Action.FormValue, qIdx)
+					if len(selected) > 0 {
+						// Build response with selected indices (format: "askq:<qIdx>:<opt1>,<opt2>,...")
+						actionVal = fmt.Sprintf("askq:%d:%s", qIdx, intSliceJoin(selected, ","))
+					} else {
+						// No selection - treat as empty response
+						actionVal = fmt.Sprintf("askq:%d:0", qIdx)
+					}
+				}
+			}
+		}
+
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		h := p.getHandler()
 		go h(p.dispatchPlatform(), &core.Message{
@@ -745,6 +766,21 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	return nil, nil
+}
+
+// intSliceJoin joins a slice of ints with a separator.
+func intSliceJoin(ints []int, sep string) string {
+	if len(ints) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, v := range ints {
+		if i > 0 {
+			sb.WriteString(sep)
+		}
+		sb.WriteString(strconv.Itoa(v))
+	}
+	return sb.String()
 }
 
 func (p *Platform) addReaction(messageID string) string {
