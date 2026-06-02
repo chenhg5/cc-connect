@@ -1283,7 +1283,37 @@ app_secret = "your-feishu-app-secret"
 # app_secret = "your-feishu-app-secret"
 
 # =============================================================================
-# Project 3: Using Gemini CLI / 项目 3：使用 Gemini CLI (uncomment to enable / 取消注释以启用)
+# Project 3: Using Agy (Antigravity CLI) / 项目 3：使用 Agy（Antigravity CLI）(uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: Agy CLI
+# 需要安装：Agy CLI
+# Agy uses `agy --dangerously-skip-permissions -p -` under the hood.
+# Agy 底层使用 `agy --dangerously-skip-permissions -p -` 命令。
+#
+# Authentication / 认证方式:
+#   Run `agy install` once to authenticate via Google Account.
+#   先运行 `agy install` 完成 Google 账号认证。
+
+# [[projects]]
+# name = "my-agy-project"
+#
+# [projects.agent]
+# type = "agy"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# cmd = "agy"           # CLI binary name (default: "agy") / CLI 二进制名称（默认 "agy"）
+# timeout_mins = 10     # 每次对话超时时间（分钟），0 表示不限制
+#
+# [[projects.platforms]]
+# type = "feishu"
+#
+# [projects.platforms.options]
+# app_id = "your-feishu-app-id"
+# app_secret = "your-feishu-app-secret"
+
+# =============================================================================
+# Project 4: Using Gemini CLI / 项目 4：使用 Gemini CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @google/gemini-cli
 # 需要安装：npm install -g @google/gemini-cli
@@ -1334,7 +1364,7 @@ app_secret = "your-feishu-app-secret"
 # app_secret = "your-feishu-app-secret"
 
 # =============================================================================
-# Project 4: Using Codex agent / 项目 4：使用 Codex agent (uncomment to enable / 取消注释以启用)
+# Project 5: Using Codex agent / 项目 5：使用 Codex agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @openai/codex
 # 需要安装：npm install -g @openai/codex
@@ -1436,7 +1466,7 @@ app_secret = "your-feishu-app-secret"
 # markdown_support = false  # Enable Markdown messages (msg_type: 2). Requires bot permission. / 启用 Markdown 消息（msg_type: 2）。需要机器人具备该权限。
 
 # =============================================================================
-# Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
+# Project 6: Using Qoder CLI / 项目 6：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: curl -fsSL https://qoder.com/install | bash
 # 需要安装：curl -fsSL https://qoder.com/install | bash
@@ -1507,7 +1537,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
+# Project 7: Using OpenCode / 项目 7：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
 # 需要安装：OpenCode CLI
@@ -1682,7 +1712,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
+# Project 8: Using iFlow CLI / 项目 8：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli
 # 需要安装：npm install -g @iflow-ai/iflow-cli
@@ -1765,7 +1795,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
+# Project 9: Another example / 项目 9：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 
 # [[projects]]
