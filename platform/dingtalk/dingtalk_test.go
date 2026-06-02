@@ -1,6 +1,7 @@
 package dingtalk
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -581,6 +582,176 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 	}
 	if rc.senderStaffId != "user111" {
 		t.Errorf("direct routing: senderStaffId=%q, want %q", rc.senderStaffId, "user111")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// mediaSendTarget: image/file/audio sends must route on rc.isGroup the
+// same way sendProactiveMessage does. Without this, an image generated
+// in a group session is delivered to a 1:1 DM with the original sender
+// instead of being posted back to the group.
+// ──────────────────────────────────────────────────────────────
+
+func TestMediaSendTarget_GroupRoutesToGroupAPI(t *testing.T) {
+	p := &Platform{robotCode: "robot-x"}
+	rc := replyContext{
+		isGroup:        true,
+		conversationId: "cidGroupA",
+		senderStaffId:  "staff_42",
+	}
+	url, body, err := p.mediaSendTarget(rc, "sampleImageMsg", `{"photoURL":"@media-id"}`)
+	if err != nil {
+		t.Fatalf("mediaSendTarget: %v", err)
+	}
+	if url != "https://api.dingtalk.com/v1.0/robot/groupMessages/send" {
+		t.Errorf("group URL = %q, want groupMessages/send", url)
+	}
+	if got, ok := body["openConversationId"].(string); !ok || got != "cidGroupA" {
+		t.Errorf("openConversationId = %v, want \"cidGroupA\"", body["openConversationId"])
+	}
+	if _, hasUserIds := body["userIds"]; hasUserIds {
+		t.Errorf("group body must not include userIds: %v", body)
+	}
+}
+
+func TestMediaSendTarget_DirectRoutesToOToAPI(t *testing.T) {
+	p := &Platform{robotCode: "robot-x"}
+	rc := replyContext{
+		isGroup:       false,
+		senderStaffId: "staff_42",
+	}
+	url, body, err := p.mediaSendTarget(rc, "sampleImageMsg", `{"photoURL":"@media-id"}`)
+	if err != nil {
+		t.Fatalf("mediaSendTarget: %v", err)
+	}
+	if url != "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend" {
+		t.Errorf("direct URL = %q, want oToMessages/batchSend", url)
+	}
+	ids, ok := body["userIds"].([]string)
+	if !ok || len(ids) != 1 || ids[0] != "staff_42" {
+		t.Errorf("userIds = %v, want [\"staff_42\"]", body["userIds"])
+	}
+	if _, hasOpen := body["openConversationId"]; hasOpen {
+		t.Errorf("direct body must not include openConversationId: %v", body)
+	}
+}
+
+func TestMediaSendTarget_GroupWithEmptyConversationIdFallsBack(t *testing.T) {
+	p := &Platform{robotCode: "robot-x"}
+	rc := replyContext{
+		isGroup:        true,
+		conversationId: "",
+		senderStaffId:  "staff_99",
+	}
+	url, body, err := p.mediaSendTarget(rc, "sampleFile", `{"mediaId":"m"}`)
+	if err != nil {
+		t.Fatalf("mediaSendTarget: %v", err)
+	}
+	if url != "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend" {
+		t.Errorf("fallback URL = %q, want oToMessages/batchSend when conversationId empty", url)
+	}
+	if _, ok := body["userIds"]; !ok {
+		t.Errorf("fallback must use userIds, got body=%v", body)
+	}
+}
+
+func TestMediaSendTarget_NoTargetReturnsError(t *testing.T) {
+	p := &Platform{robotCode: "robot-x"}
+	rc := replyContext{} // no isGroup, no senderStaffId
+	_, _, err := p.mediaSendTarget(rc, "sampleImageMsg", `{}`)
+	if err == nil {
+		t.Fatal("expected error when neither group nor direct target is available")
+	}
+}
+
+// stubDingTalkRT intercepts every outbound HTTP call made by the dingtalk
+// Platform so a send test can run without real network. It records the URL
+// path of each request, returns stub success bodies for the token / upload
+// / send endpoints, and 404s anything else.
+type stubDingTalkRT struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (rt *stubDingTalkRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.mu.Lock()
+	rt.paths = append(rt.paths, req.URL.Path)
+	rt.mu.Unlock()
+	mk := func(body string) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}
+	}
+	switch {
+	case strings.Contains(req.URL.Path, "/media/upload"):
+		return mk(`{"errcode":0,"media_id":"@fake-media","type":"image"}`), nil
+	case strings.Contains(req.URL.Path, "/oToMessages/batchSend"),
+		strings.Contains(req.URL.Path, "/groupMessages/send"):
+		return mk(`{"processQueryKey":"abc"}`), nil
+	default:
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header)}, nil
+	}
+}
+
+func (rt *stubDingTalkRT) hit(suffix string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, p := range rt.paths {
+		if strings.HasSuffix(p, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func newSendTestPlatform() (*Platform, *stubDingTalkRT) {
+	rt := &stubDingTalkRT{}
+	p := &Platform{
+		clientID:     "test",
+		clientSecret: "test",
+		robotCode:    "robot-x",
+		httpClient:   &http.Client{Transport: rt, Timeout: 10 * time.Second},
+		accessToken:  "cached-fake-token",
+		tokenExpiry:  time.Now().Add(time.Hour),
+	}
+	return p, rt
+}
+
+func TestSendImage_GroupSessionPostsToGroupAPI(t *testing.T) {
+	p, rt := newSendTestPlatform()
+	rc := replyContext{isGroup: true, conversationId: "cidGroupA", senderStaffId: "staff_42"}
+	if err := p.SendImage(context.Background(), rc, core.ImageAttachment{Data: []byte("png"), FileName: "x.png"}); err != nil {
+		t.Fatalf("SendImage: %v", err)
+	}
+	if !rt.hit("/groupMessages/send") {
+		t.Errorf("group SendImage did not hit /groupMessages/send; got paths=%v", rt.paths)
+	}
+	if rt.hit("/oToMessages/batchSend") {
+		t.Errorf("group SendImage also hit 1:1 oToMessages/batchSend (would deliver as private DM); paths=%v", rt.paths)
+	}
+}
+
+func TestSendImage_DirectSessionPostsTo1on1API(t *testing.T) {
+	p, rt := newSendTestPlatform()
+	rc := replyContext{senderStaffId: "staff_99"}
+	if err := p.SendImage(context.Background(), rc, core.ImageAttachment{Data: []byte("png"), FileName: "y.png"}); err != nil {
+		t.Fatalf("SendImage: %v", err)
+	}
+	if !rt.hit("/oToMessages/batchSend") {
+		t.Errorf("direct SendImage did not hit /oToMessages/batchSend; got paths=%v", rt.paths)
+	}
+}
+
+func TestSendFile_GroupSessionPostsToGroupAPI(t *testing.T) {
+	p, rt := newSendTestPlatform()
+	rc := replyContext{isGroup: true, conversationId: "cidGroupB", senderStaffId: "staff_42"}
+	if err := p.SendFile(context.Background(), rc, core.FileAttachment{Data: []byte("doc"), FileName: "x.txt"}); err != nil {
+		t.Fatalf("SendFile: %v", err)
+	}
+	if !rt.hit("/groupMessages/send") {
+		t.Errorf("group SendFile did not hit /groupMessages/send; got paths=%v", rt.paths)
 	}
 }
 
