@@ -109,6 +109,10 @@ All agents support permission modes switchable at runtime via `/mode`.
 | YOLO | `yolo` | Auto-approve all |
 | Plan | `plan` | Read-only plan mode |
 
+### Agy
+
+Agy runs headless with `--dangerously-skip-permissions`; approval prompts are not surfaced to cc-connect.
+
 ### Qoder CLI / OpenCode / iFlow CLI
 
 | Mode | Config Value | Behavior |
@@ -823,6 +827,11 @@ cc-connect daemon logs [-f]
 cc-connect daemon uninstall
 ```
 
+Systemd services do not read interactive shell startup files such as `~/.bashrc`.
+Environment variables needed by cc-connect or spawned agents must be provided
+explicitly through the service environment, an EnvironmentFile, or agent/provider
+`env` config.
+
 ---
 
 ## Multi-Workspace Mode
@@ -1008,7 +1017,7 @@ See [config.example.toml](../config.example.toml) for full examples.
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # or agy, codex, cursor, gemini, qoder, opencode, iflow
 
 [projects.agent.options]
 work_dir = "/path/to/project"

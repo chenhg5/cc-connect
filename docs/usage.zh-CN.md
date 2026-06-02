@@ -107,6 +107,10 @@ reset_on_idle_mins = 60
 | 全自动 | `yolo` | 自动批准所有 |
 | 规划模式 | `plan` | 只读规划 |
 
+### Agy
+
+Agy 以 `--dangerously-skip-permissions` 无头模式运行；权限确认不会转发到 cc-connect。
+
 ### Qoder CLI / OpenCode / iFlow CLI
 
 | 模式 | 配置值 | 行为 |
@@ -735,6 +739,10 @@ cc-connect daemon logs [-f]
 cc-connect daemon uninstall
 ```
 
+systemd 服务不会读取 `~/.bashrc` 等交互式 shell 启动文件。cc-connect
+或其启动的 Agent 需要的环境变量，应通过服务环境、EnvironmentFile，或
+agent/provider 的 `env` 配置显式提供。
+
 ---
 
 ## 多工作区模式
@@ -920,7 +928,7 @@ WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Age
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # 或 agy, codex, cursor, gemini, qoder, opencode, iflow
 
 [projects.agent.options]
 work_dir = "/path/to/project"

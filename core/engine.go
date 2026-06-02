@@ -3002,10 +3002,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	if newID := agentSession.CurrentSessionID(); newID != "" {
-		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
-			pendingName := session.GetName()
-			if pendingName != "" && pendingName != "session" && pendingName != "default" {
-				sessions.SetSessionName(newID, pendingName)
+		// Track the latest session ID Claude reports. Each --resume forks a new
+		// session_id, so the stored ID must follow the live process or a later
+		// resume (after /stop or /model) would target a stale node and lose
+		// context. Session naming binds only on first assignment to avoid
+		// polluting sessionNames with every forked ID.
+		wasEmpty := session.GetAgentSessionID() == ""
+		if session.GetAgentSessionID() != newID {
+			session.SetAgentSessionID(newID, agent.Name())
+			if wasEmpty {
+				pendingName := session.GetName()
+				if pendingName != "" && pendingName != "session" && pendingName != "default" {
+					sessions.SetSessionName(newID, pendingName)
+				}
 			}
 			sessions.Save()
 		}
@@ -4035,10 +4044,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			if event.SessionID != "" {
-				if session.CompareAndSetAgentSessionID(event.SessionID, e.agent.Name()) {
-					pendingName := session.GetName()
-					if pendingName != "" && pendingName != "session" && pendingName != "default" {
-						sessions.SetSessionName(event.SessionID, pendingName)
+				wasEmpty := session.GetAgentSessionID() == ""
+				if session.GetAgentSessionID() != event.SessionID {
+					session.SetAgentSessionID(event.SessionID, e.agent.Name())
+					if wasEmpty {
+						pendingName := session.GetName()
+						if pendingName != "" && pendingName != "session" && pendingName != "default" {
+							sessions.SetSessionName(event.SessionID, pendingName)
+						}
 					}
 					sessions.Save()
 				}
@@ -4130,10 +4143,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// to not be persisted to disk, breaking session resume on next startup.
 			if state != nil && state.agentSession != nil {
 				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
-					if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
-						pendingName := session.GetName()
-						if pendingName != "" && pendingName != "session" && pendingName != "default" {
-							sessions.SetSessionName(currentID, pendingName)
+					wasEmpty := session.GetAgentSessionID() == ""
+					if session.GetAgentSessionID() != currentID {
+						session.SetAgentSessionID(currentID, e.agent.Name())
+						if wasEmpty {
+							pendingName := session.GetName()
+							if pendingName != "" && pendingName != "session" && pendingName != "default" {
+								sessions.SetSessionName(currentID, pendingName)
+							}
 						}
 					}
 					sessions.Save()
@@ -8109,17 +8126,12 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
-	// clearStaleSessionID removes the stale AgentSessionID so the next message
-	// starts a fresh agent instead of trying to resume the killed session
-	// (recycling loop — see issue #830).
-	clearStaleSessionID := func() {
-		if _, sessions, _, err := e.commandContext(p, msg); err == nil {
-			s := sessions.GetOrCreateActive(msg.SessionKey)
-			s.SetAgentSessionID("", "")
-			sessions.Save()
-		}
-	}
-
+	// /stop only tears down the live agent process; it preserves the stored
+	// AgentSessionID so the next message can --resume the conversation. This
+	// matches the card-button stop path (see executeCardAction "/stop"). The
+	// session-tracking write-back keeps AgentSessionID pointing at Claude's
+	// latest forked session, so resuming after /stop is safe and no longer
+	// triggers the recycling loop from issue #830.
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
 		// Fallback: try suffix scan in case interactiveKeyForSessionKey
@@ -8127,7 +8139,6 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		// (e.g. workspace binding lookup inconsistency).
 		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
 			if e.stopInteractiveSession(found, p, msg.ReplyCtx) {
-				clearStaleSessionID()
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 				return
 			}
@@ -8135,7 +8146,6 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
-	clearStaleSessionID()
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 

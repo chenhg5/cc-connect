@@ -6176,9 +6176,12 @@ func TestSessionIDWriteback_MapsSessionName(t *testing.T) {
 	}
 }
 
-// TestSessionIDWriteback_DoesNotOverwriteExisting verifies that immediate
-// writeback does not clobber an existing AgentSessionID (e.g. from --resume).
-func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
+// TestSessionIDWriteback_TracksLiveForkedID verifies that write-back follows
+// the ID the live process actually reports. Claude forks a new session_id on
+// every --resume, so even when the session already holds an ID, the stored ID
+// must update to the live one — otherwise a later /stop or /model would resume
+// a stale node and lose context.
+func TestSessionIDWriteback_TracksLiveForkedID(t *testing.T) {
 	sess := newControllableSession("new-uuid")
 	agent := &controllableAgent{nextSession: sess}
 	p := &stubPlatformEngine{n: "test"}
@@ -6191,15 +6194,75 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 
 	got := session.GetAgentSessionID()
 
-	if got != "existing-uuid" {
-		t.Fatalf("AgentSessionID = %q, want %q — writeback should not overwrite", got, "existing-uuid")
+	if got != "new-uuid" {
+		t.Fatalf("AgentSessionID = %q, want %q — writeback should track the live forked ID", got, "new-uuid")
 	}
 }
 
-// TestCmdStop_ClearsAgentSessionID verifies that /stop clears the stale
-// AgentSessionID so the next message starts a fresh agent instead of trying
-// to resume the killed session (issue #830).
-func TestCmdStop_ClearsAgentSessionID(t *testing.T) {
+// TestInteractiveWriteBack_TracksForkedSessionID verifies that when the live
+// agent process reports a session ID different from the one stored (Claude
+// forks a new session_id on every --resume), the stored AgentSessionID is
+// updated to follow the live process. Without this, a later /stop or /model
+// would resume a stale node and lose context. Regression for the model-switch
+// context-loss bug.
+func TestInteractiveWriteBack_TracksForkedSessionID(t *testing.T) {
+	// StartSession succeeds but the live process reports a forked ID.
+	forkedSess := newControllableSession("forked-id")
+	agent := &controllableAgent{nextSession: forkedSess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	// Session already holds the original (now stale) ID from a prior turn.
+	session := &Session{AgentSessionID: "orig-id", AgentType: "controllable"}
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	if got := session.GetAgentSessionID(); got != "forked-id" {
+		t.Fatalf("AgentSessionID = %q, want %q — must track the live forked ID", got, "forked-id")
+	}
+}
+
+// TestInteractiveWriteBack_NamingBindsOnlyOnFirstAssignment verifies that the
+// custom session name is bound only when the session first acquires an ID, not
+// on every forked ID. Otherwise sessionNames would be polluted with a stale
+// name on each --resume fork.
+func TestInteractiveWriteBack_NamingBindsOnlyOnFirstAssignment(t *testing.T) {
+	firstSess := newControllableSession("first-id")
+	agent := &controllableAgent{nextSession: firstSess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	// Fresh session with a custom name but no ID yet.
+	session := &Session{Name: "my-feature", AgentType: "controllable"}
+
+	// First assignment: name should bind to first-id.
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	if got := e.sessions.GetSessionName("first-id"); got != "my-feature" {
+		t.Fatalf("first-id name = %q, want %q on first assignment", got, "my-feature")
+	}
+
+	// Now simulate a forked ID on a subsequent start. The name must NOT be
+	// rebound to the forked ID.
+	forkedSess := newControllableSession("forked-id")
+	agent.nextSession = forkedSess
+	e.interactiveMu.Lock()
+	delete(e.interactiveStates, key) // force a fresh start path
+	e.interactiveMu.Unlock()
+
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	if got := session.GetAgentSessionID(); got != "forked-id" {
+		t.Fatalf("AgentSessionID = %q, want %q after fork", got, "forked-id")
+	}
+	if got := e.sessions.GetSessionName("forked-id"); got != "" {
+		t.Fatalf("forked-id name = %q, want empty — name must bind only on first assignment", got)
+	}
+}
+
+// TestCmdStop_PreservesAgentSessionID verifies /stop tears down the live
+// process but keeps the stored AgentSessionID so the next message can --resume.
+func TestCmdStop_PreservesAgentSessionID(t *testing.T) {
 	sess := newControllableSession("agent-1")
 	agent := &controllableAgent{nextSession: sess}
 	p := &stubPlatformEngine{n: "test"}
@@ -6225,10 +6288,11 @@ func TestCmdStop_ClearsAgentSessionID(t *testing.T) {
 	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
 	e.cmdStop(p, msg)
 
-	// After /stop, AgentSessionID must be cleared.
+	// After /stop, AgentSessionID must be preserved so the next message can
+	// --resume the conversation (matching the card-button stop path).
 	got := active.GetAgentSessionID()
-	if got != "" {
-		t.Fatalf("AgentSessionID = %q, want empty after /stop", got)
+	if got != "agent-1" {
+		t.Fatalf("AgentSessionID = %q, want %q preserved after /stop", got, "agent-1")
 	}
 }
 
