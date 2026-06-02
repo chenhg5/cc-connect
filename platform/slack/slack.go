@@ -29,18 +29,94 @@ type replyContext struct {
 	timestamp string // thread_ts for threading replies
 }
 
+type slackMentionPolicy struct {
+	requireMention         bool
+	requireMentionChannels map[string]bool
+	requireMentionThreads  map[string]bool
+}
+
 type Platform struct {
 	botToken              string
 	appToken              string
 	allowFrom             string
 	shareSessionInChannel bool
+	mentionPolicy         slackMentionPolicy
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
+	botUserID             string
 	channelNameCache      map[string]string
 	channelCacheMu        sync.RWMutex
+	seenEvents            sync.Map // channel:ts dedup across message and app_mention events
 	userNameCache         sync.Map // userID -> display name
+}
+
+func defaultSlackMentionPolicy() slackMentionPolicy {
+	return slackMentionPolicy{requireMention: true}
+}
+
+func newSlackMentionPolicy(opts map[string]any) (slackMentionPolicy, error) {
+	policy := defaultSlackMentionPolicy()
+	if v, ok := opts["require_mention"]; ok {
+		b, ok := v.(bool)
+		if !ok {
+			return policy, fmt.Errorf("slack: require_mention must be a boolean")
+		}
+		policy.requireMention = b
+	}
+
+	var err error
+	policy.requireMentionChannels, err = parseSlackBoolMapOption("require_mention_channels", opts["require_mention_channels"])
+	if err != nil {
+		return policy, err
+	}
+	policy.requireMentionThreads, err = parseSlackBoolMapOption("require_mention_threads", opts["require_mention_threads"])
+	if err != nil {
+		return policy, err
+	}
+
+	return policy, nil
+}
+
+func parseSlackBoolMapOption(name string, raw any) (map[string]bool, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if values, ok := raw.(map[string]bool); ok {
+		out := make(map[string]bool, len(values))
+		for k, v := range values {
+			key := strings.TrimSpace(k)
+			if key == "" {
+				return nil, fmt.Errorf("slack: %s contains an empty key", name)
+			}
+			out[key] = v
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return out, nil
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("slack: %s must be a map of Slack IDs to booleans", name)
+	}
+	out := make(map[string]bool, len(values))
+	for k, v := range values {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			return nil, fmt.Errorf("slack: %s contains an empty key", name)
+		}
+		b, ok := v.(bool)
+		if !ok {
+			return nil, fmt.Errorf("slack: %s[%q] must be a boolean", name, k)
+		}
+		out[key] = b
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -49,6 +125,10 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("slack", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	mentionPolicy, err := newSlackMentionPolicy(opts)
+	if err != nil {
+		return nil, err
+	}
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
@@ -57,6 +137,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		mentionPolicy:         mentionPolicy,
 		channelNameCache:      make(map[string]string),
 	}, nil
 }
@@ -69,6 +150,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.client = slack.New(p.botToken,
 		slack.OptionAppLevelToken(p.appToken),
 	)
+	authCtx, authCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if auth, err := p.client.AuthTestContext(authCtx); err != nil {
+		slog.Warn("slack: auth.test failed; mention stripping may be less precise", "error", err)
+	} else {
+		p.botUserID = auth.UserID
+	}
+	authCancel()
+
 	p.socket = socketmode.New(p.client)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -127,7 +216,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					}
 				}
 
-				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel)
+				slog.Debug("slack: app_mention received", "user", ev.User, "channel", ev.Channel, "thread_ts", ev.ThreadTimeStamp)
 
 				if !core.AllowList(p.allowFrom, ev.User) {
 					slog.Debug("slack: app_mention from unauthorized user", "user", ev.User)
@@ -150,6 +239,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+				if !p.rememberSlackEvent(ev.Channel, ev.TimeStamp) {
+					slog.Debug("slack: ignoring duplicate app_mention event", "channel", ev.Channel, "ts", ev.TimeStamp)
+					return
+				}
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
@@ -159,7 +252,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: appMentionReplyTS(ev)},
 				}
 				p.handler(p, msg)
 
@@ -193,7 +286,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					}
 				}
 
-				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel)
+				slog.Debug("slack: message received", "user", ev.User, "channel", ev.Channel, "channel_type", ev.ChannelType, "thread_ts", ev.ThreadTimeStamp)
+
+				if !shouldHandleSlackMessageEvent(ev, p.mentionPolicy) {
+					slog.Debug("slack: ignoring message because mention is required",
+						"user", ev.User,
+						"channel", ev.Channel,
+						"channel_type", ev.ChannelType,
+						"thread_ts", ev.ThreadTimeStamp)
+					return
+				}
 
 				if !core.AllowList(p.allowFrom, ev.User) {
 					slog.Debug("slack: message from unauthorized user", "user", ev.User)
@@ -210,7 +312,12 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				images, audio, docFiles := p.processSlackFileShares(ev.Files)
 
-				if ev.Text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
+				content := stripSlackBotMentionText(ev.Text, p.botUserID)
+				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
+					return
+				}
+				if !p.rememberSlackEvent(ev.Channel, ev.TimeStamp) {
+					slog.Debug("slack: ignoring duplicate message event", "channel", ev.Channel, "ts", ev.TimeStamp)
 					return
 				}
 
@@ -218,7 +325,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
+					Content:  content, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev)},
 				}
@@ -279,6 +386,80 @@ func stripAppMentionText(text string) string {
 		return strings.TrimSpace(text[idx+2:])
 	}
 	return text
+}
+
+func stripSlackBotMentionText(text, botUserID string) string {
+	if botUserID == "" || text == "" {
+		return text
+	}
+	text = strings.ReplaceAll(text, "<@"+botUserID+">", "")
+	text = strings.ReplaceAll(text, "<@!"+botUserID+">", "")
+	return strings.TrimSpace(text)
+}
+
+func (p *Platform) rememberSlackEvent(channel, ts string) bool {
+	if channel == "" || ts == "" {
+		return true
+	}
+	key := channel + ":" + ts
+	if _, loaded := p.seenEvents.LoadOrStore(key, struct{}{}); loaded {
+		return false
+	}
+	time.AfterFunc(2*time.Minute, func() { p.seenEvents.Delete(key) })
+	return true
+}
+
+func appMentionReplyTS(ev *slackevents.AppMentionEvent) string {
+	if ev == nil {
+		return ""
+	}
+	if ev.ThreadTimeStamp != "" {
+		return ev.ThreadTimeStamp
+	}
+	return ev.TimeStamp
+}
+
+func shouldHandleSlackMessageEvent(ev *slackevents.MessageEvent, policy slackMentionPolicy) bool {
+	if ev == nil {
+		return false
+	}
+	return !policy.requiresMention(ev)
+}
+
+func (p slackMentionPolicy) requiresMention(ev *slackevents.MessageEvent) bool {
+	if ev == nil || isSlackDirectMessage(ev) {
+		return false
+	}
+	if v, ok := p.threadOverride(ev); ok {
+		return v
+	}
+	if v, ok := p.requireMentionChannels[ev.Channel]; ok {
+		return v
+	}
+	return p.requireMention
+}
+
+func (p slackMentionPolicy) threadOverride(ev *slackevents.MessageEvent) (bool, bool) {
+	if ev == nil || ev.ThreadTimeStamp == "" {
+		return false, false
+	}
+	if ev.Channel != "" {
+		if v, ok := p.requireMentionThreads[ev.Channel+":"+ev.ThreadTimeStamp]; ok {
+			return v, true
+		}
+	}
+	v, ok := p.requireMentionThreads[ev.ThreadTimeStamp]
+	return v, ok
+}
+
+func isSlackDirectMessage(ev *slackevents.MessageEvent) bool {
+	if ev == nil {
+		return false
+	}
+	if ev.ChannelType == "im" {
+		return true
+	}
+	return ev.ChannelType == "" && strings.HasPrefix(ev.Channel, "D")
 }
 
 // parseSlackInnerEventFiles extracts the files array from a raw Events API inner
@@ -366,7 +547,6 @@ func slackFileDisplayName(f slackevents.File) string {
 	return f.Title
 }
 
-
 // assistantOrThreadTS returns the thread_ts to use for the bot's reply.
 //
 // For Slack Assistant apps (Agent toggle on), the user's "Chat" tab is a
@@ -378,17 +558,20 @@ func slackFileDisplayName(f slackevents.File) string {
 //
 // For regular channel messages (not DM, not already in a thread): use the
 // message's own TimeStamp so replies are threaded under the user's message,
-// preserving the old behavior of keeping conversations in threads.
+// preserving the old behavior for any non-DM message path.
 //
 // For DM messages (channel_type=im) that are not in an Assistant thread:
 // return empty so replies go top-level (natural 1-on-1 conversation).
 func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
+	if ev == nil {
+		return ""
+	}
 	if ev.ThreadTimeStamp != "" {
 		// Already in a thread (Assistant Chat tab or regular thread reply).
 		return ev.ThreadTimeStamp
 	}
 	// For non-DM channels, thread under the user's message.
-	if ev.ChannelType != "im" {
+	if !isSlackDirectMessage(ev) {
 		return ev.TimeStamp
 	}
 	// DM top-level: top-level reply is natural.

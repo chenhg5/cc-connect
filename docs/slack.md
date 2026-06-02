@@ -173,6 +173,7 @@ type = "slack"
 [projects.platforms.options]
 bot_token = "xoxb-xxxxxxx..."
 app_token = "xapp-xxxxxxx..."
+require_mention = true
 ```
 
 ### Token Reference
@@ -219,6 +220,21 @@ level=INFO msg="cc-connect is running" projects=1
 1. Add the bot to a channel (`/invite @cc_connect`)
 2. @mention the bot: `@cc_connect help me analyze the code`
 3. The bot will respond
+
+By default, channel, private-channel, and thread messages require @mention.
+DMs never require @mention. You can override the mention requirement globally,
+per channel, or per thread:
+
+```toml
+[projects.platforms.options]
+require_mention = true
+require_mention_channels = { "C0123456789" = false, "G0123456789" = true }
+require_mention_threads = { "C0123456789:1778324804.987389" = false }
+```
+
+When you set any channel or thread to `false`, subscribe the Slack app to
+`message.channels` for public channels and `message.groups` for private
+channels, in addition to `app_mention` and `message.im`.
 
 ---
 

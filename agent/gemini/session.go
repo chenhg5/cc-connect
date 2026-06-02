@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +41,10 @@ type geminiSession struct {
 	alive    atomic.Bool
 
 	pendingMsgs []string // buffered assistant messages awaiting classification
+
+	runtimeMu    sync.RWMutex
+	runtimeModel string
+	contextUsage *core.ContextUsage
 }
 
 func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*geminiSession, error) {
@@ -55,6 +61,7 @@ func newGeminiSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 		ctx:      sessionCtx,
 		cancel:   cancel,
 	}
+	gs.storeRuntimeModel(model)
 	gs.alive.Store(true)
 
 	if resumeID != "" && resumeID != core.ContinueSession {
@@ -292,6 +299,7 @@ func (gs *geminiSession) handleEvent(raw map[string]any) {
 func (gs *geminiSession) handleInit(raw map[string]any) {
 	sid, _ := raw["session_id"].(string)
 	model, _ := raw["model"].(string)
+	gs.storeRuntimeModel(model)
 
 	if sid != "" {
 		gs.chatID.Store(sid)
@@ -395,6 +403,9 @@ func (gs *geminiSession) handleResult(raw map[string]any) {
 	gs.flushPendingAsText()
 
 	status, _ := raw["status"].(string)
+	model, usage := geminiStatsUsage(raw, gs.GetModel())
+	gs.storeRuntimeModel(model)
+	gs.storeContextUsage(usage)
 
 	var errMsg string
 	if status == "error" {
@@ -406,15 +417,22 @@ func (gs *geminiSession) handleResult(raw map[string]any) {
 
 	sid := gs.CurrentSessionID()
 
+	evt := core.Event{
+		Type:         core.EventResult,
+		SessionID:    sid,
+		Done:         true,
+		InputTokens:  inputTokensFromContextUsage(usage),
+		OutputTokens: outputTokensFromContextUsage(usage),
+	}
 	if errMsg != "" {
-		evt := core.Event{Type: core.EventResult, Content: errMsg, SessionID: sid, Done: true, Error: fmt.Errorf("%s", errMsg)}
+		evt.Content = errMsg
+		evt.Error = fmt.Errorf("%s", errMsg)
 		select {
 		case gs.events <- evt:
 		case <-gs.ctx.Done():
 			return
 		}
 	} else {
-		evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 		select {
 		case gs.events <- evt:
 		case <-gs.ctx.Done():
@@ -465,6 +483,18 @@ func (gs *geminiSession) Events() <-chan core.Event {
 func (gs *geminiSession) CurrentSessionID() string {
 	v, _ := gs.chatID.Load().(string)
 	return v
+}
+
+func (gs *geminiSession) GetModel() string {
+	gs.runtimeMu.RLock()
+	defer gs.runtimeMu.RUnlock()
+	return gs.runtimeModel
+}
+
+func (gs *geminiSession) GetContextUsage() *core.ContextUsage {
+	gs.runtimeMu.RLock()
+	defer gs.runtimeMu.RUnlock()
+	return cloneGeminiContextUsage(gs.contextUsage)
 }
 
 func (gs *geminiSession) Alive() bool {
@@ -695,4 +725,148 @@ func truncate(s string, maxRunes int) string {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
+}
+
+func (gs *geminiSession) storeRuntimeModel(model string) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	gs.runtimeMu.Lock()
+	defer gs.runtimeMu.Unlock()
+	gs.runtimeModel = model
+}
+
+func (gs *geminiSession) storeContextUsage(usage *core.ContextUsage) {
+	if usage == nil {
+		return
+	}
+	gs.runtimeMu.Lock()
+	defer gs.runtimeMu.Unlock()
+	gs.contextUsage = cloneGeminiContextUsage(usage)
+}
+
+func cloneGeminiContextUsage(usage *core.ContextUsage) *core.ContextUsage {
+	if usage == nil {
+		return nil
+	}
+	cloned := *usage
+	return &cloned
+}
+
+func geminiStatsUsage(raw map[string]any, preferredModel string) (string, *core.ContextUsage) {
+	stats, ok := raw["stats"].(map[string]any)
+	if !ok || len(stats) == 0 {
+		return "", nil
+	}
+
+	model := strings.TrimSpace(preferredModel)
+	modelStats := map[string]any(nil)
+	if models, ok := stats["models"].(map[string]any); ok && len(models) > 0 {
+		if model != "" {
+			if entry, ok := models[model].(map[string]any); ok {
+				modelStats = entry
+			}
+		}
+		if modelStats == nil {
+			keys := make([]string, 0, len(models))
+			for key := range models {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			model = keys[0]
+			modelStats, _ = models[model].(map[string]any)
+		}
+	}
+
+	totalTokens := intFromGeminiJSONValue(stats["total_tokens"])
+	inputTokens := intFromGeminiJSONValue(stats["input_tokens"])
+	outputTokens := intFromGeminiJSONValue(stats["output_tokens"])
+	cachedTokens := intFromGeminiJSONValue(stats["cached"])
+	if modelStats != nil {
+		if totalTokens == 0 {
+			totalTokens = intFromGeminiJSONValue(modelStats["total_tokens"])
+		}
+		if inputTokens == 0 {
+			inputTokens = intFromGeminiJSONValue(modelStats["input_tokens"])
+		}
+		if outputTokens == 0 {
+			outputTokens = intFromGeminiJSONValue(modelStats["output_tokens"])
+		}
+		if cachedTokens == 0 {
+			cachedTokens = intFromGeminiJSONValue(modelStats["cached"])
+		}
+	}
+	if totalTokens <= 0 {
+		totalTokens = inputTokens + outputTokens + cachedTokens
+	}
+	if totalTokens <= 0 && inputTokens <= 0 && outputTokens <= 0 {
+		return model, nil
+	}
+
+	return model, &core.ContextUsage{
+		UsedTokens:        totalTokens,
+		TotalTokens:       totalTokens,
+		InputTokens:       inputTokens,
+		CachedInputTokens: cachedTokens,
+		OutputTokens:      outputTokens,
+		ContextWindow:     geminiStatsContextWindow(stats, modelStats),
+	}
+}
+
+func geminiStatsContextWindow(stats, modelStats map[string]any) int {
+	for _, source := range []map[string]any{modelStats, stats} {
+		if source == nil {
+			continue
+		}
+		for _, key := range []string{
+			"contextWindow",
+			"context_window",
+			"inputTokenLimit",
+			"input_token_limit",
+			"input_token_limit_tokens",
+		} {
+			if v := intFromGeminiJSONValue(source[key]); v > 0 {
+				return v
+			}
+		}
+	}
+	return 0
+}
+
+func intFromGeminiJSONValue(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		if i, err := strconv.Atoi(v.String()); err == nil {
+			return i
+		}
+		if f, err := strconv.ParseFloat(v.String(), 64); err == nil {
+			return int(f)
+		}
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+func inputTokensFromContextUsage(usage *core.ContextUsage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.InputTokens
+}
+
+func outputTokensFromContextUsage(usage *core.ContextUsage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.OutputTokens
 }

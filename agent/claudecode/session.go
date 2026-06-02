@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,10 @@ type claudeSession struct {
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
+
+	runtimeMu    sync.RWMutex
+	runtimeModel string
+	contextUsage *core.ContextUsage
 }
 
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
@@ -210,6 +215,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		done:                make(chan struct{}),
 		gracefulStopTimeout: 120 * time.Second,
 	}
+	cs.storeRuntimeModel(model)
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
@@ -343,6 +349,9 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
+	if model, ok := raw["model"].(string); ok {
+		cs.storeRuntimeModel(model)
+	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 		evt := core.Event{Type: core.EventText, SessionID: sid}
@@ -358,6 +367,9 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
+	}
+	if model, ok := msg["model"].(string); ok {
+		cs.storeRuntimeModel(model)
 	}
 	contentArr, ok := msg["content"].([]any)
 	if !ok {
@@ -436,6 +448,10 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
+	}
+	if model, usage := claudeModelUsage(raw, cs.GetModel()); model != "" || usage != nil {
+		cs.storeRuntimeModel(model)
+		cs.storeContextUsage(usage)
 	}
 
 	var inputTokens, outputTokens int
@@ -698,6 +714,18 @@ func (cs *claudeSession) CurrentSessionID() string {
 	return v
 }
 
+func (cs *claudeSession) GetModel() string {
+	cs.runtimeMu.RLock()
+	defer cs.runtimeMu.RUnlock()
+	return cs.runtimeModel
+}
+
+func (cs *claudeSession) GetContextUsage() *core.ContextUsage {
+	cs.runtimeMu.RLock()
+	defer cs.runtimeMu.RUnlock()
+	return cloneClaudeContextUsage(cs.contextUsage)
+}
+
 func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
@@ -793,4 +821,102 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+func (cs *claudeSession) storeRuntimeModel(model string) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	cs.runtimeMu.Lock()
+	defer cs.runtimeMu.Unlock()
+	cs.runtimeModel = model
+}
+
+func (cs *claudeSession) storeContextUsage(usage *core.ContextUsage) {
+	if usage == nil {
+		return
+	}
+	cs.runtimeMu.Lock()
+	defer cs.runtimeMu.Unlock()
+	cs.contextUsage = cloneClaudeContextUsage(usage)
+}
+
+func cloneClaudeContextUsage(usage *core.ContextUsage) *core.ContextUsage {
+	if usage == nil {
+		return nil
+	}
+	cloned := *usage
+	return &cloned
+}
+
+func claudeModelUsage(raw map[string]any, preferredModel string) (string, *core.ContextUsage) {
+	modelUsage, ok := raw["modelUsage"].(map[string]any)
+	if !ok || len(modelUsage) == 0 {
+		return "", nil
+	}
+
+	model := strings.TrimSpace(preferredModel)
+	if model != "" {
+		if _, ok := modelUsage[model]; !ok {
+			model = ""
+		}
+	}
+	if model == "" {
+		keys := make([]string, 0, len(modelUsage))
+		for key := range modelUsage {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		model = keys[0]
+	}
+
+	entry, ok := modelUsage[model].(map[string]any)
+	if !ok {
+		return model, nil
+	}
+
+	inputTokens := intFromJSONValue(entry["inputTokens"])
+	outputTokens := intFromJSONValue(entry["outputTokens"])
+	cacheReadTokens := intFromJSONValue(entry["cacheReadInputTokens"])
+	cacheCreationTokens := intFromJSONValue(entry["cacheCreationInputTokens"])
+	reasoningOutputTokens := intFromJSONValue(entry["reasoningOutputTokens"])
+	contextWindow := intFromJSONValue(entry["contextWindow"])
+	usedTokens := inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens + reasoningOutputTokens
+	if usedTokens <= 0 || contextWindow <= 0 {
+		return model, nil
+	}
+
+	return model, &core.ContextUsage{
+		UsedTokens:            usedTokens,
+		TotalTokens:           usedTokens,
+		InputTokens:           inputTokens,
+		CachedInputTokens:     cacheReadTokens + cacheCreationTokens,
+		OutputTokens:          outputTokens,
+		ReasoningOutputTokens: reasoningOutputTokens,
+		ContextWindow:         contextWindow,
+	}
+}
+
+func intFromJSONValue(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		if i, err := strconv.Atoi(v.String()); err == nil {
+			return i
+		}
+		if f, err := strconv.ParseFloat(v.String(), 64); err == nil {
+			return int(f)
+		}
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return i
+		}
+	}
+	return 0
 }

@@ -44,6 +44,94 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	}
 }
 
+func TestHandleSystemStoresRuntimeModel(t *testing.T) {
+	cs := &claudeSession{}
+
+	cs.handleSystem(map[string]any{
+		"type":  "system",
+		"model": "claude-sonnet-4-6",
+	})
+
+	if got := cs.GetModel(); got != "claude-sonnet-4-6" {
+		t.Fatalf("GetModel() = %q, want claude-sonnet-4-6", got)
+	}
+}
+
+func TestHandleAssistantStoresRuntimeModel(t *testing.T) {
+	cs := &claudeSession{}
+
+	cs.handleAssistant(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"model":   "claude-opus-4-5",
+			"content": []any{},
+		},
+	})
+
+	if got := cs.GetModel(); got != "claude-opus-4-5" {
+		t.Fatalf("GetModel() = %q, want claude-opus-4-5", got)
+	}
+}
+
+func TestHandleResultStoresModelUsageContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	raw := map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "test-session",
+		"usage": map[string]any{
+			"input_tokens":  float64(3),
+			"output_tokens": float64(4),
+		},
+		"modelUsage": map[string]any{
+			"claude-sonnet-4-6": map[string]any{
+				"inputTokens":              float64(3),
+				"outputTokens":             float64(4),
+				"cacheReadInputTokens":     float64(1000),
+				"cacheCreationInputTokens": float64(25358),
+				"reasoningOutputTokens":    float64(12),
+				"contextWindow":            float64(200000),
+			},
+		},
+	}
+
+	cs.handleResult(raw)
+
+	if got := cs.GetModel(); got != "claude-sonnet-4-6" {
+		t.Fatalf("GetModel() = %q, want claude-sonnet-4-6", got)
+	}
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want usage")
+	}
+	if usage.UsedTokens != 26377 {
+		t.Fatalf("UsedTokens = %d, want 26377", usage.UsedTokens)
+	}
+	if usage.ContextWindow != 200000 {
+		t.Fatalf("ContextWindow = %d, want 200000", usage.ContextWindow)
+	}
+	if usage.CachedInputTokens != 26358 {
+		t.Fatalf("CachedInputTokens = %d, want 26358", usage.CachedInputTokens)
+	}
+	if usage.ReasoningOutputTokens != 12 {
+		t.Fatalf("ReasoningOutputTokens = %d, want 12", usage.ReasoningOutputTokens)
+	}
+
+	usage.UsedTokens = 1
+	if got := cs.GetContextUsage().UsedTokens; got != 26377 {
+		t.Fatalf("GetContextUsage() returned mutable pointer, got UsedTokens %d", got)
+	}
+}
+
 func TestHandleResultNoUsage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

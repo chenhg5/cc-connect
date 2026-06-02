@@ -68,6 +68,107 @@ func drainEvents(ch <-chan core.Event, timeout time.Duration) []core.Event {
 	}
 }
 
+func TestHandleInitStoresRuntimeModel(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type":       "init",
+		"session_id": "test-session",
+		"model":      "gemini-3.1-pro-preview",
+	})
+
+	if got := gs.GetModel(); got != "gemini-3.1-pro-preview" {
+		t.Fatalf("GetModel() = %q, want gemini-3.1-pro-preview", got)
+	}
+}
+
+func TestHandleResultParsesStatsUsage(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+	gs.chatID.Store("test-session")
+	gs.storeRuntimeModel("gemini-3.1-pro-preview")
+
+	gs.handleEvent(map[string]any{
+		"type":   "result",
+		"status": "success",
+		"stats": map[string]any{
+			"total_tokens":  float64(9401),
+			"input_tokens":  float64(9289),
+			"output_tokens": float64(2),
+			"cached":        float64(0),
+			"models": map[string]any{
+				"gemini-3.1-pro-preview": map[string]any{
+					"total_tokens":  float64(9401),
+					"input_tokens":  float64(9289),
+					"output_tokens": float64(2),
+					"cached":        float64(0),
+				},
+			},
+		},
+	})
+
+	events := drainEvents(gs.events, 50*time.Millisecond)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != core.EventResult {
+		t.Fatalf("event type = %v, want EventResult", events[0].Type)
+	}
+	if events[0].InputTokens != 9289 {
+		t.Fatalf("InputTokens = %d, want 9289", events[0].InputTokens)
+	}
+	if events[0].OutputTokens != 2 {
+		t.Fatalf("OutputTokens = %d, want 2", events[0].OutputTokens)
+	}
+
+	usage := gs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want usage")
+	}
+	if usage.UsedTokens != 9401 {
+		t.Fatalf("UsedTokens = %d, want 9401", usage.UsedTokens)
+	}
+	if usage.ContextWindow != 0 {
+		t.Fatalf("ContextWindow = %d, want 0 when stream-json omits context window", usage.ContextWindow)
+	}
+
+	usage.UsedTokens = 1
+	if got := gs.GetContextUsage().UsedTokens; got != 9401 {
+		t.Fatalf("GetContextUsage() returned mutable pointer, got UsedTokens %d", got)
+	}
+}
+
+func TestHandleResultParsesStatsContextWindowWhenPresent(t *testing.T) {
+	gs := &geminiSession{
+		events: make(chan core.Event, 64),
+		ctx:    context.Background(),
+	}
+
+	gs.handleEvent(map[string]any{
+		"type":   "result",
+		"status": "success",
+		"stats": map[string]any{
+			"total_tokens":    json.Number("12000"),
+			"input_tokens":    json.Number("11000"),
+			"output_tokens":   json.Number("1000"),
+			"inputTokenLimit": json.Number("1048576"),
+		},
+	})
+
+	usage := gs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want usage")
+	}
+	if usage.ContextWindow != 1048576 {
+		t.Fatalf("ContextWindow = %d, want 1048576", usage.ContextWindow)
+	}
+}
+
 func TestHandleMessage_DeltaEmitsEventTextImmediately(t *testing.T) {
 	gs := &geminiSession{
 		events: make(chan core.Event, 64),
@@ -250,9 +351,9 @@ func TestHandleMessage_MixedDeltaAndNonDelta(t *testing.T) {
 		"content": "Let me look at the files.",
 	})
 	gs.handleEvent(map[string]any{
-		"type":      "tool_use",
-		"tool_name": "shell",
-		"tool_id":   "t1",
+		"type":       "tool_use",
+		"tool_name":  "shell",
+		"tool_id":    "t1",
 		"parameters": map[string]any{"command": "ls"},
 	})
 	gs.handleEvent(map[string]any{
@@ -445,10 +546,10 @@ func TestSessionMessage_TextContent(t *testing.T) {
 
 func TestComputeLineDiff(t *testing.T) {
 	tests := []struct {
-		name     string
-		old      string
-		new_     string
-		want     string
+		name string
+		old  string
+		new_ string
+		want string
 	}{
 		{
 			"single line fully different",
