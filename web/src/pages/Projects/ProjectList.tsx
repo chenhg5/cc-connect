@@ -14,6 +14,7 @@ const AGENT_OPTIONS = [
   { key: 'gemini', label: 'Gemini CLI' },
   { key: 'cursor', label: 'Cursor' },
   { key: 'devin', label: 'Devin' },
+  { key: 'copilot', label: 'Copilot (GitHub)' },
   { key: 'acp', label: 'ACP (Generic)' },
   { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
   { key: 'opencode', label: 'OpenCode' },
