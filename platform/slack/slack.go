@@ -34,6 +34,7 @@ type Platform struct {
 	appToken              string
 	allowFrom             string
 	shareSessionInChannel bool
+	replyInThread         bool // thread replies under the triggering message (default: true)
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
@@ -49,6 +50,12 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("slack", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	// reply_in_thread defaults to true (thread replies under triggering message)
+	// Set to false to send replies as top-level channel messages instead.
+	replyInThread := true
+	if v, ok := opts["reply_in_thread"].(bool); ok {
+		replyInThread = v
+	}
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
@@ -57,6 +64,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		replyInThread:         replyInThread,
 		channelNameCache:      make(map[string]string),
 	}, nil
 }
@@ -150,6 +158,15 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
+
+				// Determine thread_ts for reply:
+				// - If reply_in_thread is true (default), thread under the triggering message
+				// - If reply_in_thread is false, send as top-level message (empty timestamp)
+				threadTS := ""
+				if p.replyInThread {
+					threadTS = ev.TimeStamp
+				}
+
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
@@ -159,7 +176,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
 				}
 				p.handler(p, msg)
 
@@ -214,13 +231,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				// Determine thread_ts for reply using platform config and message context
+				threadTS := p.threadTSForMessage(ev)
+
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev)},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
 				}
 				p.handler(p, msg)
 			}
@@ -367,7 +387,7 @@ func slackFileDisplayName(f slackevents.File) string {
 }
 
 
-// assistantOrThreadTS returns the thread_ts to use for the bot's reply.
+// threadTSForMessage determines the thread_ts to use for the bot's reply.
 //
 // For Slack Assistant apps (Agent toggle on), the user's "Chat" tab is a
 // dedicated thread. Messages typed there arrive as message.im events with
@@ -376,22 +396,39 @@ func slackFileDisplayName(f slackevents.File) string {
 // — without it, the reply goes to the DM root and surfaces in the History
 // tab feed instead, breaking the conversational UX.
 //
-// For regular channel messages (not DM, not already in a thread): use the
-// message's own TimeStamp so replies are threaded under the user's message,
-// preserving the old behavior of keeping conversations in threads.
+// For regular channel messages (not DM, not already in a thread):
+// - If reply_in_thread is true (default), thread under the user's message
+// - If reply_in_thread is false, return empty to send as top-level message
 //
 // For DM messages (channel_type=im) that are not in an Assistant thread:
 // return empty so replies go top-level (natural 1-on-1 conversation).
-func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
+func (p *Platform) threadTSForMessage(ev *slackevents.MessageEvent) string {
 	if ev.ThreadTimeStamp != "" {
 		// Already in a thread (Assistant Chat tab or regular thread reply).
 		return ev.ThreadTimeStamp
 	}
-	// For non-DM channels, thread under the user's message.
+	// For non-DM channels, check reply_in_thread config.
+	if ev.ChannelType != "im" {
+		if p.replyInThread {
+			return ev.TimeStamp
+		}
+		return ""
+	}
+	// DM top-level: top-level reply is natural.
+	return ""
+}
+
+// assistantOrThreadTS is kept for backward compatibility but delegates to threadTSForMessage.
+// Deprecated: Use threadTSForMessage instead.
+func assistantOrThreadTS(ev *slackevents.MessageEvent) string {
+	// This function is no longer used but kept for reference.
+	// The logic has been moved to threadTSForMessage which respects reply_in_thread config.
+	if ev.ThreadTimeStamp != "" {
+		return ev.ThreadTimeStamp
+	}
 	if ev.ChannelType != "im" {
 		return ev.TimeStamp
 	}
-	// DM top-level: top-level reply is natural.
 	return ""
 }
 

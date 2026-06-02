@@ -196,3 +196,115 @@ func TestProcessSlackFileShares_EmptyMimeBecomesOctetStream(t *testing.T) {
 		t.Fatalf("got %+v", docs)
 	}
 }
+
+func TestThreadTSForMessage_ReplyInThreadConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		replyInThread  bool
+		threadTS       string // ev.ThreadTimeStamp
+		channelType    string // ev.ChannelType
+		msgTS          string // ev.TimeStamp
+		want           string
+	}{
+		{
+			name:          "already_in_thread_returns_thread_ts",
+			replyInThread: true,
+			threadTS:      "1234567890.123456",
+			channelType:   "channel",
+			msgTS:         "1234567891.123457",
+			want:          "1234567890.123456",
+		},
+		{
+			name:          "channel_reply_in_thread_true",
+			replyInThread: true,
+			threadTS:      "",
+			channelType:   "channel",
+			msgTS:         "1234567890.123456",
+			want:          "1234567890.123456",
+		},
+		{
+			name:          "channel_reply_in_thread_false",
+			replyInThread: false,
+			threadTS:      "",
+			channelType:   "channel",
+			msgTS:         "1234567890.123456",
+			want:          "",
+		},
+		{
+			name:          "dm_top_level_empty",
+			replyInThread: true,
+			threadTS:      "",
+			channelType:   "im",
+			msgTS:         "1234567890.123456",
+			want:          "",
+		},
+		{
+			name:          "dm_in_thread_returns_thread_ts",
+			replyInThread: false,
+			threadTS:      "1234567890.123456",
+			channelType:   "im",
+			msgTS:         "1234567891.123457",
+			want:          "1234567890.123456",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{replyInThread: tt.replyInThread}
+			ev := &slackevents.MessageEvent{
+				ThreadTimeStamp: tt.threadTS,
+				ChannelType:     tt.channelType,
+				TimeStamp:       tt.msgTS,
+			}
+			got := p.threadTSForMessage(ev)
+			if got != tt.want {
+				t.Errorf("threadTSForMessage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNew_ReplyInThreadDefault(t *testing.T) {
+	// Test that reply_in_thread defaults to true
+	p, err := New(map[string]any{
+		"bot_token": "xoxb-test",
+		"app_token": "xapp-test",
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	slackP := p.(*Platform)
+	if !slackP.replyInThread {
+		t.Error("reply_in_thread should default to true")
+	}
+}
+
+func TestNew_ReplyInThreadExplicit(t *testing.T) {
+	// Test explicit false value
+	p, err := New(map[string]any{
+		"bot_token":       "xoxb-test",
+		"app_token":       "xapp-test",
+		"reply_in_thread": false,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	slackP := p.(*Platform)
+	if slackP.replyInThread {
+		t.Error("reply_in_thread should be false when explicitly set")
+	}
+
+	// Test explicit true value
+	p2, err := New(map[string]any{
+		"bot_token":       "xoxb-test",
+		"app_token":       "xapp-test",
+		"reply_in_thread": true,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	slackP2 := p2.(*Platform)
+	if !slackP2.replyInThread {
+		t.Error("reply_in_thread should be true when explicitly set")
+	}
+}
