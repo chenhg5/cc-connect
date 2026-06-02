@@ -5765,8 +5765,7 @@ func compactReplyFooterPath(path string) string {
 		return ""
 	}
 	path = normalizeWorkspacePath(path)
-	if home, err := os.UserHomeDir(); err == nil {
-		home = normalizeWorkspacePath(home)
+	for _, home := range replyFooterHomeDirs() {
 		if path == home {
 			return "~"
 		}
@@ -5793,6 +5792,30 @@ func compactReplyFooterPath(path string) string {
 		return "…/" + strings.Join(parts[start:], "/")
 	}
 	return slash
+}
+
+func replyFooterHomeDirs() []string {
+	candidates := []string{os.Getenv("HOME"), os.Getenv("USERPROFILE")}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, home)
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	homes := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, home := range []string{filepath.Clean(candidate), normalizeWorkspacePath(candidate)} {
+			if home == "." || seen[home] {
+				continue
+			}
+			seen[home] = true
+			homes = append(homes, home)
+		}
+	}
+	return homes
 }
 
 func appendReplyFooter(content, footer string) string {

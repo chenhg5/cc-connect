@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -500,6 +501,139 @@ func TestWSPlatformSendImage_UploadsAndSendsMedia(t *testing.T) {
 }
 
 func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error {
+	return assertWeComWSSendMediaFrames(conn, "image", "chart.png", imageData)
+}
+
+// ---------------------------------------------------------------------------
+// SendFile
+// ---------------------------------------------------------------------------
+
+func TestWSPlatformSendFile_UploadsAndSendsMedia(t *testing.T) {
+	fileData := []byte("hello from a file")
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		serverDone <- assertWeComWSSendFileFrames(conn, fileData)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	p := &WSPlatform{conn: conn}
+	go func() {
+		for {
+			var frame wsFrame
+			if err := conn.ReadJSON(&frame); err != nil {
+				return
+			}
+			p.handleFrame(frame)
+		}
+	}()
+
+	err = p.SendFile(context.Background(), wsReplyContext{chatID: "chat1", userID: "u1"}, core.FileAttachment{
+		MimeType: "text/plain",
+		Data:     fileData,
+		FileName: "notes.txt",
+	})
+	if err != nil {
+		t.Fatalf("SendFile returned error: %v", err)
+	}
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe all expected frames")
+	}
+}
+
+func TestWSPlatformSendFile_RejectsInvalidInputs(t *testing.T) {
+	p := &WSPlatform{}
+	validFile := core.FileAttachment{Data: []byte("doc"), FileName: "doc.txt"}
+
+	tests := []struct {
+		name    string
+		rctx    any
+		file    core.FileAttachment
+		wantErr string
+	}{
+		{
+			name:    "invalid reply context",
+			rctx:    struct{}{},
+			file:    validFile,
+			wantErr: "invalid reply context",
+		},
+		{
+			name:    "empty chatID",
+			rctx:    wsReplyContext{},
+			file:    validFile,
+			wantErr: "chatID is empty",
+		},
+		{
+			name:    "empty file data",
+			rctx:    wsReplyContext{chatID: "chat1"},
+			file:    core.FileAttachment{FileName: "empty.txt"},
+			wantErr: "file data is empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := p.SendFile(context.Background(), tt.rctx, tt.file)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestWSFileName_SanitizesPathLikeNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileName string
+		want     string
+	}{
+		{name: "unix parent path", fileName: "../x.pdf", want: "x.pdf"},
+		{name: "windows drive path", fileName: `C:\tmp\doc.pdf`, want: "doc.pdf"},
+		{name: "windows parent path", fileName: `..\secret.txt`, want: "secret.txt"},
+		{name: "unix parent directory", fileName: "../", want: "file"},
+		{name: "parent directory", fileName: "..", want: "file"},
+		{name: "current directory", fileName: ".", want: "file"},
+		{name: "empty", fileName: "   ", want: "file"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wsFileName(core.FileAttachment{FileName: tt.fileName})
+			if got != tt.want {
+				t.Fatalf("wsFileName(%q) = %q, want %q", tt.fileName, got, tt.want)
+			}
+		})
+	}
+}
+
+func assertWeComWSSendFileFrames(conn *websocket.Conn, fileData []byte) error {
+	return assertWeComWSSendMediaFrames(conn, "file", "notes.txt", fileData)
+}
+
+func assertWeComWSSendMediaFrames(conn *websocket.Conn, mediaType, filename string, data []byte) error {
 	var initFrame struct {
 		Cmd     string         `json:"cmd"`
 		Headers wsFrameHeaders `json:"headers"`
@@ -514,11 +648,11 @@ func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error 
 	if err := conn.ReadJSON(&initFrame); err != nil {
 		return fmt.Errorf("read init frame: %w", err)
 	}
-	sum := md5.Sum(imageData)
+	sum := md5.Sum(data)
 	if initFrame.Cmd != "aibot_upload_media_init" ||
-		initFrame.Body.Type != "image" ||
-		initFrame.Body.Filename != "chart.png" ||
-		initFrame.Body.TotalSize != len(imageData) ||
+		initFrame.Body.Type != mediaType ||
+		initFrame.Body.Filename != filename ||
+		initFrame.Body.TotalSize != len(data) ||
 		initFrame.Body.TotalChunks != 1 ||
 		initFrame.Body.MD5 != hex.EncodeToString(sum[:]) {
 		return fmt.Errorf("unexpected init frame: %#v", initFrame)
@@ -547,7 +681,7 @@ func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error 
 	if chunkFrame.Cmd != "aibot_upload_media_chunk" ||
 		chunkFrame.Body.UploadID != "upload-1" ||
 		chunkFrame.Body.ChunkIndex != 0 ||
-		chunkFrame.Body.Base64Data != base64.StdEncoding.EncodeToString(imageData) {
+		chunkFrame.Body.Base64Data != base64.StdEncoding.EncodeToString(data) {
 		return fmt.Errorf("unexpected chunk frame: %#v", chunkFrame)
 	}
 	if err := conn.WriteJSON(map[string]any{
@@ -580,24 +714,33 @@ func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error 
 		return fmt.Errorf("write finish ack: %w", err)
 	}
 
-	var sendFrame struct {
-		Cmd     string         `json:"cmd"`
-		Headers wsFrameHeaders `json:"headers"`
-		Body    struct {
-			ChatID  string `json:"chatid"`
-			MsgType string `json:"msgtype"`
-			Image   struct {
-				MediaID string `json:"media_id"`
-			} `json:"image"`
-		} `json:"body"`
-	}
+	var sendFrame wsFrame
 	if err := conn.ReadJSON(&sendFrame); err != nil {
 		return fmt.Errorf("read send frame: %w", err)
 	}
+	var sendBody struct {
+		ChatID  string `json:"chatid"`
+		MsgType string `json:"msgtype"`
+	}
+	if err := json.Unmarshal(sendFrame.Body, &sendBody); err != nil {
+		return fmt.Errorf("decode send frame body: %w", err)
+	}
 	if sendFrame.Cmd != "aibot_send_msg" ||
-		sendFrame.Body.ChatID != "chat1" ||
-		sendFrame.Body.MsgType != "image" ||
-		sendFrame.Body.Image.MediaID != "media-1" {
+		sendBody.ChatID != "chat1" ||
+		sendBody.MsgType != mediaType {
+		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
+	}
+	var rawSendBody map[string]json.RawMessage
+	if err := json.Unmarshal(sendFrame.Body, &rawSendBody); err != nil {
+		return fmt.Errorf("decode send frame body: %w", err)
+	}
+	var mediaBody struct {
+		MediaID string `json:"media_id"`
+	}
+	if err := json.Unmarshal(rawSendBody[mediaType], &mediaBody); err != nil {
+		return fmt.Errorf("decode send frame %s body: %w", mediaType, err)
+	}
+	if mediaBody.MediaID != "media-1" {
 		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
 	}
 	if err := conn.WriteJSON(map[string]any{
