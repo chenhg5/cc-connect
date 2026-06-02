@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated_at": "2026-05-23",
+  "updated_at": "2026-06-02",
   "providers": [
     {
       "name": "minimax",
@@ -14,19 +14,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },
@@ -42,19 +42,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },
