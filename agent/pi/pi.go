@@ -28,7 +28,7 @@ type Agent struct {
 	mode       string // "default" | "yolo"
 	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
 	sessionEnv []string
-	mu         sync.Mutex
+	mu         sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -83,8 +83,92 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return nil // Pi uses its own model registry; no static list here.
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	cmd := a.cmd
+	a.mu.RUnlock()
+
+	models := a.discoverModels(ctx, cmd)
+	if len(models) > 0 {
+		return models
+	}
+	return nil
+}
+
+// discoverModels runs `pi --list-models` and parses the output.
+func (a *Agent) discoverModels(ctx context.Context, cmd string) []core.ModelOption {
+	c := exec.CommandContext(ctx, cmd, "--list-models")
+	c.Dir = a.workDir
+
+	a.mu.RLock()
+	extraEnv := append([]string(nil), a.sessionEnv...)
+	a.mu.RUnlock()
+
+	if len(extraEnv) > 0 {
+		c.Env = append(os.Environ(), extraEnv...)
+	}
+
+	out, err := c.Output()
+	if err != nil {
+		slog.Warn("pi: discoverModels failed", "err", err)
+		return nil
+	}
+
+	return parseModelsOutput(string(out))
+}
+
+// parseModelsOutput parses the `pi --list-models` table output.
+// Expected format:
+//
+//	provider     model                  context  max-out  thinking  images
+//	opencode-go  deepseek-v4-flash      1M       384K     yes       no
+//
+// Rows containing "Use /login" (providers needing auth) are skipped.
+func parseModelsOutput(output string) []core.ModelOption {
+	lines := strings.Split(output, "\n")
+	var models []core.ModelOption
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "provider") || strings.HasPrefix(line, "No models") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		provider := fields[0]
+		modelName := fields[1]
+
+		// Skip if this provider requires login (no API key)
+		if strings.Contains(line, "Use /login") {
+			continue
+		}
+
+		fullName := provider + "/" + modelName
+		models = append(models, core.ModelOption{Name: fullName})
+	}
+
+	if len(models) == 0 {
+		return nil
+	}
+
+	// Deduplicate and sort
+	seen := make(map[string]bool)
+	var unique []core.ModelOption
+	for _, m := range models {
+		if !seen[m.Name] {
+			seen[m.Name] = true
+			unique = append(unique, m)
+		}
+	}
+
+	sort.Slice(unique, func(i, j int) bool {
+		return unique[i].Name < unique[j].Name
+	})
+
+	return unique
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
