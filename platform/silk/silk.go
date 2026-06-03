@@ -3,6 +3,7 @@ package silk
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -558,6 +559,11 @@ func (p *Platform) connect(ctx context.Context) error {
 				UserName string         `json:"user_name"`
 				MsgID    string         `json:"msg_id"`
 				History  []silkHistoryEntry `json:"history"`
+				Images   []struct {
+					MimeType string `json:"mime_type"`
+					Data     string `json:"data"`     // base64-encoded
+					FileName string `json:"file_name"`
+				} `json:"images"`
 			}
 			if json.Unmarshal(data, &msg) != nil {
 				continue
@@ -596,6 +602,21 @@ func (p *Platform) connect(ctx context.Context) error {
 					userID:   msg.UserID,
 					userName: msg.UserName,
 				},
+			}
+			// Decode base64 images from the message into core.ImageAttachment.
+			// The engine and Claude Code session already handle coreMsg.Images.
+			for _, img := range msg.Images {
+				data, err := base64.StdEncoding.DecodeString(img.Data)
+				if err != nil {
+					slog.Warn("[silk] failed to decode base64 image",
+						"file", img.FileName, "error", err)
+					continue
+				}
+				coreMsg.Images = append(coreMsg.Images, core.ImageAttachment{
+					MimeType: img.MimeType,
+					Data:     data,
+					FileName: img.FileName,
+				})
 			}
 			if p.handler != nil {
 				p.handlerMu.Lock()

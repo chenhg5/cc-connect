@@ -30,7 +30,7 @@ const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
 const (
-	defaultThinkingMaxLen = 300
+	defaultThinkingMaxLen = 0     // 0 = no truncation; structured blocks provide collapsible thinking
 	defaultToolMaxLen     = 500
 )
 
