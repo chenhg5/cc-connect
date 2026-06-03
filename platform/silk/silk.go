@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -411,13 +412,18 @@ var imageExtensions = map[string]string{
 
 // detectNewImages walks the project working directory and any configured
 // image_scan_dirs (up to 5 levels deep) for image files created or modified
-// after c.startTime. Returns at most 5 images. Each result is a map with
-// mime_type, data, and file_name fields.
+// after c.startTime. Returns at most 5 images, sorted newest-first.
+// Each result is a map with mime_type, data, and file_name fields.
 func (c *silkStreamingCard) detectNewImages() []map[string]any {
 	const maxImages = 5
 	const maxDepth = 5
-	var results []map[string]any
 	startTs := c.startTime
+
+	type entry struct {
+		result  map[string]any
+		modTime time.Time
+	}
+	var entries []entry
 
 	// Build scan directories: cwd + configured image_scan_dirs
 	scanRoots := []string{c.platform.cwd}
@@ -472,20 +478,29 @@ func (c *silkStreamingCard) detectNewImages() []map[string]any {
 			}
 
 			slog.Info("[silk] detectNewImages: found", "file", path, "mime", mime, "size", len(data))
-			results = append(results, map[string]any{
-				"mime_type": mime,
-				"data":      base64.StdEncoding.EncodeToString(data),
-				"file_name": d.Name(),
+			entries = append(entries, entry{
+				result: map[string]any{
+					"mime_type": mime,
+					"data":      base64.StdEncoding.EncodeToString(data),
+					"file_name": d.Name(),
+				},
+				modTime: info.ModTime(),
 			})
-
-			if len(results) >= maxImages {
-				return filepath.SkipAll
-			}
 			return nil
 		})
-		if len(results) >= maxImages {
+	}
+
+	// Sort by modification time, newest first
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].modTime.After(entries[j].modTime)
+	})
+
+	var results []map[string]any
+	for i, e := range entries {
+		if i >= maxImages {
 			break
 		}
+		results = append(results, e.result)
 	}
 
 	return results
