@@ -381,13 +381,10 @@ var ansiRe = regexp.MustCompile(
 )
 
 // extractNew returns the response text that appeared in current after the baseline.
-// It handles three cases:
 //  1. Linear shell output — current is baseline + new lines (HasPrefix fast path).
-//  2. TUI redraws (e.g. Claude Code) — terminal overwrites lines in place; find the
-//     longest common line prefix shared by both snapshots, then return the new lines
-//     that follow it in current, stripping the repeated trailing prompt lines.
-//  3. Terminal scrolled and/or the volatile prompt was redrawn — anchor on a
-//     stable multi-line block of baseline's content (sliding up past the input box).
+//  2. Otherwise (TUI redraw and/or scrolled-off history) — align the top of current
+//     into baseline, then return the lines that follow the shared history run, with
+//     the redrawn trailing prompt / input box trimmed off.
 func extractNew(baseline, current string) string {
 	if current == baseline {
 		return ""
@@ -404,55 +401,40 @@ func extractNew(baseline, current string) string {
 	baseLines := strings.Split(baseline, "\n")
 	curLines := strings.Split(current, "\n")
 
-	// TUI path: find how many leading lines the two snapshots share (the static
-	// frame/header), then return the new lines that follow in current.
-	commonLen := 0
-	for i := 0; i < len(baseLines) && i < len(curLines); i++ {
-		if baseLines[i] != curLines[i] {
-			break
-		}
-		commonLen = i + 1
-	}
-	if commonLen > 0 && commonLen < len(curLines) {
-		newLines := curLines[commonLen:]
-		// Strip trailing lines that duplicate the baseline's suffix (e.g. the prompt ">").
-		bl := baseLines
-		for len(newLines) > 0 && len(bl) > 0 && newLines[len(newLines)-1] == bl[len(bl)-1] {
-			newLines = newLines[:len(newLines)-1]
-			bl = bl[:len(bl)-1]
-		}
-		result := strings.TrimRight(strings.Join(newLines, "\n"), "\n")
-		if result != "" {
-			return result
-		}
-	}
-
-	// Scroll path: the top of baseline scrolled off the buffer (so the prefix path
-	// found nothing) and/or the volatile bottom — a TUI input box / prompt that the
-	// agent redraws every turn — changed, so an exact tail match also misses. Slide
-	// a small multi-line window upward from the bottom of baseline and take its LAST
-	// occurrence in current: that is the lowest stable block the two snapshots still
-	// share, i.e. the boundary between old content and the agent's new output.
+	// The agent's new output is sandwiched between two stable regions: old history
+	// above it and a redrawn input box / prompt below it. Anchoring on the bottom is
+	// unreliable — the input-box borders are byte-identical every turn, so a bottom
+	// search lands *below* the response and yields only the trailing status line.
 	//
-	// A multi-line block (not a single line) avoids latching onto a lone repeated
-	// line such as a bare prompt, and LastIndex avoids latching onto an identical
-	// block from far back in history — the bug where stale scrollback was returned.
-	const win = 3
-	if len(baseLines) >= win {
-		for end := len(baseLines); end >= win; end-- {
-			block := baseLines[end-win : end]
-			start := lastIndexOfBlock(curLines, block)
-			if start < 0 {
-				continue
-			}
-			newLines := trimCommonTail(curLines[start+win:], baseLines)
-			if res := strings.TrimRight(strings.Join(newLines, "\n"), "\n"); res != "" {
-				return res
-			}
+	// Instead anchor on the TOP. curLines[0] is the oldest line still in the buffer
+	// (frozen history). Find the offset in baseLines where current begins and the
+	// longest run of history that follows it; everything in current after that run
+	// is the new output. This also covers the no-scroll case (offset 0 == the old
+	// common-prefix path) and the scrolled-off case (offset > 0) with one mechanism.
+	bestRun := 0
+	for d := 0; d < len(baseLines); d++ {
+		if baseLines[d] != curLines[0] {
+			continue
+		}
+		run := 0
+		for d+run < len(baseLines) && run < len(curLines) && baseLines[d+run] == curLines[run] {
+			run++
+		}
+		if run > bestRun {
+			bestRun = run
 		}
 	}
 
-	// No shared block: baseline and current barely overlap, so current is
+	if bestRun > 0 {
+		// curLines[:bestRun] is the shared history; the rest is new output, with the
+		// redrawn input box / prompt trimmed off its tail.
+		newLines := trimCommonTail(curLines[bestRun:], baseLines)
+		if res := strings.TrimRight(strings.Join(newLines, "\n"), "\n"); res != "" {
+			return res
+		}
+	}
+
+	// No shared history: baseline and current barely overlap, so current is
 	// effectively all-new (e.g. the buffer fully scrolled). Emit at most the last
 	// visibleFallbackLines lines so a stale multi-thousand-line scrollback can
 	// never be returned as "the response".
@@ -461,27 +443,6 @@ func extractNew(baseline, current string) string {
 		curLines = curLines[len(curLines)-visibleFallbackLines:]
 	}
 	return strings.TrimRight(strings.Join(curLines, "\n"), "\n")
-}
-
-// lastIndexOfBlock returns the start index of the last contiguous occurrence of
-// block within lines, or -1 if block does not occur.
-func lastIndexOfBlock(lines, block []string) int {
-	if len(block) == 0 || len(block) > len(lines) {
-		return -1
-	}
-	for i := len(lines) - len(block); i >= 0; i-- {
-		match := true
-		for j := range block {
-			if lines[i+j] != block[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
 }
 
 // trimCommonTail drops trailing lines of newLines that duplicate the tail of

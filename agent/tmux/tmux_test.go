@@ -67,13 +67,23 @@ func TestExtractNew(t *testing.T) {
 		{
 			// Real bug: a long session fills the tmux scrollback so the oldest
 			// lines (h1, h2) scroll off the top — defeating the prefix path — and
-			// the response lands above the unchanged input box (UIa, UIb). The old
-			// tail-anchor scroll path returned the whole capture (stale history);
-			// the block-anchor path must return only RESP.
+			// the response lands above the unchanged input box (UIa, UIb). Must
+			// return only RESP, not the whole stale capture.
 			name:     "scrolled off top, response above stable input box",
 			baseline: "h1\nh2\nh3\nh4\nh5\nUIa\nUIb",
 			current:  "h3\nh4\nh5\nRESP\nUIa\nUIb",
 			want:     "RESP",
+		},
+		{
+			// "Only the statusline" bug: the response sits above an input box whose
+			// borders (B1,B2,B3) are byte-identical every turn but whose status line
+			// (S) changes. A bottom-anchored search latches onto the box at current's
+			// bottom and returns only the trailing status. Top-anchoring returns the
+			// response (box borders are trimmed downstream by cleanTUIContent).
+			name:     "response above redrawn input box, top scrolled",
+			baseline: "h1\nh2\nh3\nB1\nB2\nB3\nS_old",
+			current:  "h3\nR1\nR2\nB1\nB2\nB3\nS_new",
+			want:     "R1\nR2\nB1\nB2\nB3\nS_new",
 		},
 	}
 
