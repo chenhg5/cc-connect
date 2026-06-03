@@ -359,17 +359,17 @@ func (p *Platform) getLifecycleHandler() core.PlatformLifecycleHandler {
 	return p.lifecycleHandler
 }
 
-func (p *Platform) notifyReady() {
-	handler := p.getLifecycleHandler()
-	if handler != nil {
-		handler.OnPlatformReady(p)
-	}
-}
-
 func (p *Platform) notifyUnavailable(err error) {
 	handler := p.getLifecycleHandler()
 	if handler != nil {
 		handler.OnPlatformUnavailable(p, err)
+	}
+}
+
+func (p *Platform) notifyReady() {
+	handler := p.getLifecycleHandler()
+	if handler != nil {
+		handler.OnPlatformReady(p)
 	}
 }
 
@@ -487,6 +487,30 @@ func (p *Platform) startWebSocketMode() error {
 		larkws.WithEventHandler(p.eventHandler),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 		larkws.WithLogger(&sanitizingLogger{inner: larkcore.NewEventLogger()}),
+		// Use SDK-provided lifecycle callbacks to track connection state.
+		// These fire on actual WebSocket state transitions, solving the
+		// silent-disconnect problem where the SDK reconnects internally
+		// but the engine has no visibility into the state change.
+		larkws.WithOnReady(func() {
+			slog.Info(p.tag() + ": websocket connected, platform ready")
+			p.notifyReady()
+		}),
+		larkws.WithOnDisconnected(func() {
+			slog.Warn(p.tag() + ": websocket disconnected")
+			p.notifyUnavailable(fmt.Errorf("feishu: websocket disconnected"))
+		}),
+		larkws.WithOnReconnecting(func() {
+			slog.Warn(p.tag() + ": websocket reconnecting")
+			p.notifyUnavailable(fmt.Errorf("feishu: websocket reconnecting"))
+		}),
+		larkws.WithOnReconnected(func() {
+			slog.Info(p.tag() + ": websocket reconnected, platform ready")
+			p.notifyReady()
+		}),
+		larkws.WithOnError(func(err error) {
+			slog.Error(p.tag()+": websocket error", "error", err)
+			p.notifyUnavailable(err)
+		}),
 	}
 	if p.domain != lark.FeishuBaseUrl {
 		wsOpts = append(wsOpts, larkws.WithDomain(p.domain))
@@ -922,7 +946,7 @@ func (p *Platform) IsMessageRecalled(ctx context.Context, rctx any) (bool, error
 
 	req := larkim.NewGetMessageReqBuilder().
 		MessageId(messageID).
-		UserIdType(larkim.UserIdTypeGetMessageOpenId).
+		UserIdType(larkim.UserIdTypeOpenId).
 		Build()
 
 	var resp *larkim.GetMessageResp
@@ -2453,19 +2477,19 @@ func detectFeishuFileType(mimeType, fileName string) string {
 	name := strings.ToLower(fileName)
 	switch {
 	case mimeType == "application/pdf" || strings.HasSuffix(name, ".pdf"):
-		return larkim.FileTypePdf
+		return larkim.CreateFileFileTypePdf
 	case strings.HasSuffix(name, ".doc") || strings.HasSuffix(name, ".docx"):
-		return larkim.FileTypeDoc
+		return larkim.CreateFileFileTypeDoc
 	case strings.HasSuffix(name, ".xls") || strings.HasSuffix(name, ".xlsx") || strings.HasSuffix(name, ".csv"):
-		return larkim.FileTypeXls
+		return larkim.CreateFileFileTypeXls
 	case strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx"):
-		return larkim.FileTypePpt
+		return larkim.CreateFileFileTypePpt
 	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
-		return larkim.FileTypeMp4
+		return larkim.CreateFileFileTypeMp4
 	case mimeType == "audio/ogg" || mimeType == "audio/opus" || strings.HasSuffix(name, ".opus"):
-		return larkim.FileTypeOpus
+		return larkim.CreateFileFileTypeOpus
 	default:
-		return larkim.FileTypeStream
+		return larkim.CreateFileFileTypeStream
 	}
 }
 
@@ -3039,7 +3063,7 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		ReceiveIdType("chat_id").
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType(msgType).
@@ -3716,7 +3740,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		}
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			ReceiveIdType("chat_id").
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
@@ -3875,7 +3899,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateFileReqBuilder().
 				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(larkim.FileTypeOpus).
+					FileType(larkim.CreateFileFileTypeOpus).
 					FileName("tts_audio.opus").
 					File(bytes.NewReader(audio)).
 					Build()).
