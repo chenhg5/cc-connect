@@ -392,9 +392,9 @@ var imageExtensions = map[string]string{
 	".svg":  "image/svg+xml",
 }
 
-// detectNewImages scans the project working directory (shallow, 1 level) for
-// image files created or modified after c.startTime. Also scans .cc-connect/attachments/
-// where agents may save files. Returns at most 5 images to avoid overwhelming
+// detectNewImages walks the project working directory (up to 5 levels deep)
+// for image files created or modified after c.startTime. Also scans
+// .cc-connect/attachments/. Returns at most 5 images to avoid overwhelming
 // the chat. Each result is a map with mime_type, data, and file_name fields.
 func (c *silkStreamingCard) detectNewImages() []map[string]any {
 	dir := c.platform.cwd
@@ -404,59 +404,70 @@ func (c *silkStreamingCard) detectNewImages() []map[string]any {
 	}
 
 	const maxImages = 5
+	const maxDepth = 5
 	var results []map[string]any
+	startTs := c.startTime
 
-	// Scan directories: project root and .cc-connect/attachments/
-	searchDirs := []string{dir, filepath.Join(dir, ".cc-connect", "attachments")}
-	for _, searchDir := range searchDirs {
-		entries, err := os.ReadDir(searchDir)
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			slog.Debug("[silk] detectNewImages: ReadDir failed", "dir", searchDir, "error", err)
-			continue
+			return nil // skip inaccessible entries
+		}
+		// Depth guard: count separators beyond root
+		rel, _ := filepath.Rel(dir, path)
+		if rel == "." {
+			return nil
+		}
+		depth := len(strings.Split(rel, string(os.PathSeparator)))
+		if depth > maxDepth {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			// Skip hidden directories (except .cc-connect/attachments)
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, ".") && base != ".cc-connect" && base != "attachments" {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			ext := strings.ToLower(filepath.Ext(entry.Name()))
-			mime, ok := imageExtensions[ext]
-			if !ok {
-				continue
-			}
-
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().Before(c.startTime) {
-				continue
-			}
-
-			// Read and base64-encode the image. Skip files over 10 MB.
-			if info.Size() > 10*1024*1024 {
-				slog.Debug("[silk] detectNewImages: skipping large image", "file", entry.Name(), "size", info.Size())
-				continue
-			}
-
-			fullPath := filepath.Join(searchDir, entry.Name())
-			data, err := os.ReadFile(fullPath)
-			if err != nil {
-				slog.Warn("[silk] detectNewImages: read failed", "file", fullPath, "error", err)
-				continue
-			}
-
-			slog.Info("[silk] detectNewImages: found image", "file", fullPath, "mime", mime, "size", len(data), "scanDir", searchDir)
-			results = append(results, map[string]any{
-				"mime_type": mime,
-				"data":      base64.StdEncoding.EncodeToString(data),
-				"file_name": entry.Name(),
-			})
-
-			if len(results) >= maxImages {
-				return results
-			}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		mime, ok := imageExtensions[ext]
+		if !ok {
+			return nil
 		}
+
+		info, err := d.Info()
+		if err != nil || info.ModTime().Before(startTs) {
+			return nil
+		}
+		if info.Size() > 10*1024*1024 {
+			slog.Debug("[silk] detectNewImages: skipping large image", "file", path, "size", info.Size())
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("[silk] detectNewImages: read failed", "file", path, "error", err)
+			return nil
+		}
+
+		slog.Info("[silk] detectNewImages: found image", "file", path, "mime", mime, "size", len(data))
+		results = append(results, map[string]any{
+			"mime_type": mime,
+			"data":      base64.StdEncoding.EncodeToString(data),
+			"file_name": d.Name(),
+		})
+
+		if len(results) >= maxImages {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn("[silk] detectNewImages: WalkDir error", "error", err)
 	}
 
 	return results
