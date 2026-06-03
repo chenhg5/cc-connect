@@ -11,7 +11,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/go-telegram/bot v1.20.0
 	github.com/gorilla/websocket v1.5.0
-	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.4
 	github.com/line/line-bot-sdk-go/v8 v8.19.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
