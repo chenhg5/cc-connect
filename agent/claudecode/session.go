@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -516,8 +515,19 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	}
 }
 
+// comfyUIInputDir is the ComfyUI input directory where uploaded images
+// are accessible to ComfyUI workflows. Empty string disables auto-sync.
+var comfyUIInputDir = "/home/lilin/comfy/ComfyUI/input"
+
 // Send writes a user message (with optional images and files) to the Claude process stdin.
-// Images are sent as base64 in the multimodal content array.
+//
+// When images are present, they are:
+//  1. Saved to .cc-connect/attachments/ for local access
+//  2. Copied to ComfyUI's input/ directory (if comfyUIInputDir is set) so they
+//     can be used directly by ComfyUI workflows without manual upload.
+//  3. NOT sent as base64 vision — instead, the text prompt is augmented with
+//     instructions guiding Claude Code to use ComfyUI MCP tools for image tasks.
+//
 // Files are saved to local temp files and referenced in the text prompt
 // so Claude Code can read them with its built-in tools.
 func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
@@ -539,8 +549,9 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 
 	var parts []map[string]any
 	var savedPaths []string
+	var comfyPaths []string
 
-	// Save and encode images
+	// Save images to local disk + sync to ComfyUI input directory
 	for i, img := range images {
 		ext := extFromMime(img.MimeType)
 		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
@@ -552,36 +563,48 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 		savedPaths = append(savedPaths, fpath)
 		slog.Debug("claudeSession: image saved", "path", fpath, "size", len(img.Data))
 
-		mimeType := img.MimeType
-		if mimeType == "" {
-			mimeType = "image/png"
+		// Also copy to ComfyUI input directory so workflows can reference it
+		if comfyUIInputDir != "" {
+			comfyPath := filepath.Join(comfyUIInputDir, fname)
+			if err := os.WriteFile(comfyPath, img.Data, 0o644); err != nil {
+				slog.Warn("claudeSession: copy to ComfyUI failed", "error", err, "path", comfyPath)
+			} else {
+				comfyPaths = append(comfyPaths, fname)
+				slog.Debug("claudeSession: image synced to ComfyUI", "path", comfyPath)
+			}
 		}
-		parts = append(parts, map[string]any{
-			"type": "image",
-			"source": map[string]any{
-				"type":       "base64",
-				"media_type": mimeType,
-				"data":       base64.StdEncoding.EncodeToString(img.Data),
-			},
-		})
 	}
 
 	// Save files to disk so Claude Code can read them
 	filePaths := core.SaveFilesToDisk(cs.workDir, files)
 
-	// Build text part: user prompt + file path references
+	// Build text part: user prompt + ComfyUI instructions + file path references
 	textPart := prompt
 	if textPart == "" && len(filePaths) > 0 {
 		textPart = "Please analyze the attached file(s)."
 	} else if textPart == "" {
-		textPart = "Please analyze the attached image(s)."
+		textPart = "用户上传了图片，请根据上下文判断是否需要处理。"
 	}
+
+	// Add local paths info
 	if len(savedPaths) > 0 {
-		textPart += "\n\n(Images also saved locally: " + strings.Join(savedPaths, ", ") + ")"
+		textPart += "\n\n📁 图片已保存到本地: " + strings.Join(savedPaths, ", ")
 	}
 	if len(filePaths) > 0 {
-		textPart += "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+		textPart += "\n\n📁 文件已保存到本地: " + strings.Join(filePaths, ", ")
 	}
+
+	// Add ComfyUI sync info and guide Claude Code to use MCP tools
+	if len(comfyPaths) > 0 {
+		textPart += fmt.Sprintf(`
+🖼️ 图片已同步至 ComfyUI 的 input 目录，可供 ComfyUI workflow 直接使用。
+    ComfyUI 中的文件名: %s
+    如需对图片进行编辑/生成操作，请使用 ComfyUI MCP 工具:
+      1. upload_image_from_local_path（如未同步）或直接引用已同步的文件名
+      2. run_workflow — 传入 workflow JSON 并用 overrides 覆盖 LoadImage 节点的 inputs.image 为上述文件名
+    Workflow JSON 文件存放在 /home/lilin/comfy-mcp/workflows/ 目录下。`, strings.Join(comfyPaths, ", "))
+	}
+
 	parts = append(parts, map[string]any{"type": "text", "text": textPart})
 
 	return cs.writeJSON(map[string]any{
