@@ -849,7 +849,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #
 # # MiniMax — OpenAI-compatible provider with 1M context window
 # # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
-# # Models: MiniMax-M3 (latest), MiniMax-M2.7 (1M context), MiniMax-M2.7-highspeed
+# # Models: MiniMax-M3 (latest), MiniMax-M2.7 (512K context), MiniMax-M2.7-highspeed
 # # Docs: https://platform.minimaxi.com
 # [[projects.agent.providers]]
 # name = "minimax"
