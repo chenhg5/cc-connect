@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,11 +28,11 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook string
-	conversationId string
-	senderStaffId  string
-	isGroup        bool
-	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
+	sessionWebhook  string
+	conversationId  string
+	senderStaffId   string
+	isGroup         bool
+	proactive       bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
 
 // richTextContent mirrors the full structure of the DingTalk "text" JSON field,
@@ -52,8 +53,6 @@ type repliedTextContent struct {
 	Text string `json:"text"`
 }
 
-const maxQuotedMessageRunes = 4000
-
 type downloadResponse struct {
 	DownloadUrl string `json:"downloadUrl"`
 }
@@ -62,7 +61,7 @@ type Platform struct {
 	clientID              string
 	clientSecret          string
 	robotCode             string
-	agentID               int64 // Agent ID for work notifications API (numeric)
+	agentID               int64    // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
@@ -304,10 +303,10 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook: data.SessionWebhook,
-			conversationId: data.ConversationId,
-			senderStaffId:  data.SenderStaffId,
-			isGroup:        data.ConversationType == "2",
+			sessionWebhook:  data.SessionWebhook,
+			conversationId:  data.ConversationId,
+			senderStaffId:   data.SenderStaffId,
+			isGroup:         data.ConversationType == "2",
 		},
 	}
 
@@ -372,12 +371,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				MessageID:  data.MsgId,
 				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
-					sessionWebhook: data.SessionWebhook,
-					conversationId: data.ConversationId,
-					senderStaffId:  data.SenderStaffId,
-					isGroup:        data.ConversationType == "2",
+					sessionWebhook:  data.SessionWebhook,
+					conversationId:  data.ConversationId,
+					senderStaffId:   data.SenderStaffId,
+					isGroup:         data.ConversationType == "2",
 				},
-				FromVoice: true,
+				FromVoice:  true,
 			}
 			p.handler(p, msg)
 		}
@@ -396,12 +395,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook: data.SessionWebhook,
-			conversationId: data.ConversationId,
-			senderStaffId:  data.SenderStaffId,
-			isGroup:        data.ConversationType == "2",
+			sessionWebhook:  data.SessionWebhook,
+			conversationId:  data.ConversationId,
+			senderStaffId:   data.SenderStaffId,
+			isGroup:         data.ConversationType == "2",
 		},
-		FromVoice: true,
+		FromVoice:  true,
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -472,9 +471,9 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		MessageID:  data.MsgId,
 		ReplyCtx: replyContext{
-			sessionWebhook: data.SessionWebhook,
-			conversationId: data.ConversationId,
-			senderStaffId:  data.SenderStaffId,
+			sessionWebhook:  data.SessionWebhook,
+			conversationId:  data.ConversationId,
+			senderStaffId:   data.SenderStaffId,
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
@@ -650,13 +649,24 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return p.sendProactiveMessage(ctx, rc, content)
 	}
 
+	// Parse @mention markers before markdown preprocessing
+	content, atUserIds, isAtAll := parseAtMentions(content, rc.senderStaffId, rc.isGroup)
 	content = preprocessDingTalkMarkdown(content)
 
-	payload := map[string]any{
+	msgPayload := map[string]any{
 		"msgtype":  "markdown",
 		"markdown": map[string]string{"title": "reply", "text": content},
 	}
-	body, err := json.Marshal(payload)
+
+	if len(atUserIds) > 0 || isAtAll {
+		msgPayload["at"] = map[string]any{
+			"atMobiles": []string{},
+			"atUserIds": atUserIds,
+			"isAtAll":   isAtAll,
+		}
+	}
+
+	body, err := json.Marshal(msgPayload)
 	if err != nil {
 		return fmt.Errorf("dingtalk: marshal reply: %w", err)
 	}
@@ -996,8 +1006,8 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	args := []string{
 		"-i", "pipe:0",
 		"-ar", "16000", // 16kHz sample rate for voice
-		"-ac", "1", // mono
-		"-b:a", "64k", // 64 kbps bitrate (voice quality)
+		"-ac", "1",     // mono
+		"-b:a", "64k",  // 64 kbps bitrate (voice quality)
 		"-f", "mp3",
 		"-y",
 		"pipe:1",
@@ -1110,174 +1120,22 @@ func (p *Platform) formatReplyContent(richText *richTextContent, fallback string
 		return content
 	}
 
-	quotedText := p.extractQuotedMessageText(richText.RepliedMsg)
-	if quotedText == "" {
+	if richText.RepliedMsg.MsgType != "text" {
+		slog.Debug("dingtalk: quoted message type not supported", "type", richText.RepliedMsg.MsgType)
 		return content
 	}
 
-	return fmt.Sprintf("引用: \"%s\"\n\n%s", quotedText, content)
-}
-
-func (p *Platform) extractQuotedMessageText(msg *repliedMessage) string {
-	if msg == nil {
-		return ""
-	}
-
-	switch msg.MsgType {
-	case "text":
-		return p.extractQuotedTextMessageText(msg.Content)
-	case "interactiveCard":
-		return p.extractInteractiveCardQuotedText(msg.Content)
-	default:
-		slog.Debug("dingtalk: quoted message type not supported", "type", msg.MsgType)
-		return ""
-	}
-}
-
-func (p *Platform) extractQuotedTextMessageText(raw json.RawMessage) string {
 	var repliedContent repliedTextContent
-	if err := json.Unmarshal(raw, &repliedContent); err != nil {
+	if err := json.Unmarshal(richText.RepliedMsg.Content, &repliedContent); err != nil {
 		slog.Debug("dingtalk: failed to parse replied message content", "error", err)
-		return ""
-	}
-	return repliedContent.Text
-}
-
-func (p *Platform) extractInteractiveCardQuotedText(raw json.RawMessage) string {
-	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		slog.Debug("dingtalk: failed to parse quoted interactiveCard content", "error", err)
-		return ""
-	}
-	text := p.extractInteractiveCardTextValue(payload, 0)
-	if text == "" {
-		slog.Debug("dingtalk: quoted interactiveCard content has no extractable text")
-	}
-	return normalizeQuotedMessageText(text)
-}
-
-func (p *Platform) extractInteractiveCardTextValue(value any, depth int) string {
-	if depth > 4 {
-		return ""
+		return content
 	}
 
-	switch v := value.(type) {
-	case string:
-		decoded, ok := decodeJSONObjectOrArray(v)
-		if !ok {
-			return ""
-		}
-		return p.extractInteractiveCardTextValue(decoded, depth+1)
-	case map[string]any:
-		for _, key := range p.interactiveCardTemplateKeys() {
-			if text := p.extractInteractiveCardPath(v, depth, "cardData", "cardParamMap", key); text != "" {
-				return text
-			}
-		}
-		for _, key := range p.interactiveCardTemplateKeys() {
-			if text := p.extractInteractiveCardPath(v, depth, "cardParamMap", key); text != "" {
-				return text
-			}
-		}
-		for _, key := range p.interactiveCardTopLevelKeys() {
-			if text := p.extractInteractiveCardPath(v, depth, key); text != "" {
-				return text
-			}
-		}
-	case []any:
-		for _, item := range v {
-			if text := p.extractInteractiveCardTextValue(item, depth+1); text != "" {
-				return text
-			}
-		}
-	}
-	return ""
-}
-
-func (p *Platform) extractInteractiveCardPath(root map[string]any, depth int, path ...string) string {
-	var current any = root
-	for _, part := range path {
-		m, ok := mapFromJSONValue(current)
-		if !ok {
-			return ""
-		}
-		next, ok := m[part]
-		if !ok {
-			return ""
-		}
-		current = next
-	}
-	return p.extractInteractiveCardLeafText(current, depth+1)
-}
-
-func (p *Platform) extractInteractiveCardLeafText(value any, depth int) string {
-	if depth > 4 {
-		return ""
+	if repliedContent.Text == "" {
+		return content
 	}
 
-	switch v := value.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case map[string]any, []any:
-		return p.extractInteractiveCardTextValue(value, depth+1)
-	default:
-		return ""
-	}
-}
-
-func (p *Platform) interactiveCardTemplateKeys() []string {
-	key := strings.TrimSpace(p.cardTemplateKey)
-	if key == "" {
-		key = "content"
-	}
-	if key == "content" {
-		return []string{"content"}
-	}
-	return []string{key, "content"}
-}
-
-func (p *Platform) interactiveCardTopLevelKeys() []string {
-	return []string{"content", "text", "markdown", "title"}
-}
-
-func mapFromJSONValue(value any) (map[string]any, bool) {
-	switch v := value.(type) {
-	case map[string]any:
-		return v, true
-	case string:
-		decoded, ok := decodeJSONObjectOrArray(v)
-		if !ok {
-			return nil, false
-		}
-		m, ok := decoded.(map[string]any)
-		return m, ok
-	default:
-		return nil, false
-	}
-}
-
-func decodeJSONObjectOrArray(s string) (any, bool) {
-	text := strings.TrimSpace(s)
-	if text == "" || (!strings.HasPrefix(text, "{") && !strings.HasPrefix(text, "[")) {
-		return nil, false
-	}
-	var decoded any
-	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
-		return nil, false
-	}
-	return decoded, true
-}
-
-func normalizeQuotedMessageText(s string) string {
-	text := strings.TrimSpace(s)
-	if text == "" {
-		return ""
-	}
-	runes := []rune(text)
-	if len(runes) <= maxQuotedMessageRunes {
-		return text
-	}
-	return string(runes[:maxQuotedMessageRunes]) + "..."
+	return fmt.Sprintf("引用: \"%s\"\n\n%s", repliedContent.Text, content)
 }
 
 // ReconstructReplyCtx implements core.ReplyContextReconstructor.
@@ -1327,6 +1185,8 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 		return fmt.Errorf("dingtalk: get access token for proactive send: %w", err)
 	}
 
+	// Parse @mention markers before markdown preprocessing
+	content, _, _ = parseAtMentions(content, rc.senderStaffId, rc.isGroup)
 	content = preprocessDingTalkMarkdown(content)
 
 	var apiURL string
@@ -1334,6 +1194,8 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 
 	if rc.isGroup && rc.conversationId != "" {
 		// Group message via /v1.0/robot/groupMessages/send
+		// Note: this API doesn't support a separate "at" field;
+		// @userId placeholders are already embedded in content by parseAtMentions.
 		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
 		msgParam, _ := json.Marshal(map[string]string{"text": content})
 		requestBody = map[string]any{
@@ -1418,3 +1280,101 @@ func preprocessDingTalkMarkdown(s string) string {
 	}
 	return sb.String()
 }
+
+// atMentionRe matches <<at:xxx>> markers in agent output.
+var atMentionRe = regexp.MustCompile(`<<at:([^>]+)>>`)
+
+// parseAtMentions extracts <<at:...>> markers from content, resolves "sender"
+// to the actual senderStaffId, and returns:
+//   - cleaned content with markers removed and @userId placeholders appended
+//   - list of atUserIds for the payload "at" field
+//   - isAtAll flag
+//
+// In non-group context, markers are silently stripped with no @ effect.
+func parseAtMentions(content string, senderStaffId string, isGroup bool) (string, []string, bool) {
+	matches := atMentionRe.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return content, nil, false
+	}
+
+	// Remove all markers from content
+	cleaned := atMentionRe.ReplaceAllString(content, "")
+	cleaned = strings.TrimRight(cleaned, " \n")
+
+	if !isGroup {
+		return cleaned, nil, false
+	}
+
+	var userIds []string
+	isAtAll := false
+	seen := make(map[string]bool)
+
+	for _, match := range matches {
+		value := strings.TrimSpace(match[1])
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			switch strings.ToLower(part) {
+			case "sender":
+				if senderStaffId != "" && !seen[senderStaffId] {
+					userIds = append(userIds, senderStaffId)
+					seen[senderStaffId] = true
+				}
+			case "all":
+				isAtAll = true
+			default:
+				if !seen[part] {
+					userIds = append(userIds, part)
+					seen[part] = true
+				}
+			}
+		}
+	}
+
+	// Append @userId placeholders to text (DingTalk requirement: text body must
+	// contain @userId for the at field to take effect)
+	if len(userIds) > 0 || isAtAll {
+		var mentions []string
+		for _, id := range userIds {
+			mentions = append(mentions, "@"+id)
+		}
+		if isAtAll {
+			mentions = append(mentions, "@all")
+		}
+		cleaned += "\n\n" + strings.Join(mentions, " ")
+	}
+
+	return cleaned, userIds, isAtAll
+}
+
+// StripAtMentions removes <<at:...>> markers from content without adding
+// @placeholders or at payload fields. This is only needed for delivery channels
+// that don't support DingTalk's "at" mechanism (e.g. AI Card streaming).
+// Normal text replies use parseAtMentions() instead, which converts markers into
+// proper @userId placeholders + at payload fields for the sessionWebhook API.
+func StripAtMentions(content string) string {
+	return atMentionRe.ReplaceAllString(content, "")
+}
+
+// FormattingInstructions implements core.FormattingInstructionProvider.
+// Injects DingTalk-specific formatting and @mention syntax into the agent's system prompt.
+func (p *Platform) FormattingInstructions() string {
+	return `You are responding in DingTalk (钉钉). Use standard Markdown formatting.
+
+## @Mention in Group Chat
+
+When replying in a group chat, if you need to notify someone, add an @mention tag at the END of your response:
+- <<at:sender>> — @mention the person who sent the message
+- <<at:userId1,userId2>> — @mention specific users by their userId
+- <<at:all>> — @mention everyone (use sparingly)
+
+Rules:
+- Only use in group chats; ignore for direct messages
+- Only use when notification is warranted (answering a question, task complete, need confirmation)
+- Do NOT @mention on every message — avoid spamming
+- Place the tag on its own line at the very end of your response`
+}
+
+var _ core.FormattingInstructionProvider = (*Platform)(nil)

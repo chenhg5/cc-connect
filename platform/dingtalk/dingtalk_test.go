@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/chenhg5/cc-connect/core"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -60,7 +58,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:     "test_client",
+		clientID:    "test_client",
 		clientSecret: "test_secret",
 	}
 
@@ -276,24 +274,6 @@ func TestFormatReplyContent_EmptyContent_UsesFallback(t *testing.T) {
 	}
 }
 
-func TestFormatReplyContent_TextQuotePreservesWhitespace(t *testing.T) {
-	p := &Platform{}
-	repliedContent, _ := json.Marshal(repliedTextContent{Text: "  original message  "})
-	richText := &richTextContent{
-		Content:    "user reply",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "text",
-			Content: repliedContent,
-		},
-	}
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"  original message  \"\n\nuser reply"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
 func TestFormatReplyContent_NilRepliedMsg(t *testing.T) {
 	p := &Platform{}
 	richText := &richTextContent{
@@ -320,215 +300,6 @@ func TestFormatReplyContent_NonTextMsgType(t *testing.T) {
 	result := p.formatReplyContent(richText, "fallback")
 	if result != "user reply" {
 		t.Errorf("formatReplyContent() = %q, want %q", result, "user reply")
-	}
-}
-
-func TestFormatReplyContent_WithQuotedInteractiveCardContent(t *testing.T) {
-	p := &Platform{cardTemplateKey: "content"}
-	richText := &richTextContent{
-		Content:    "user reply",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: json.RawMessage(`{
-				"cardData": {
-					"cardParamMap": {
-						"config": "{\"autoLayout\":true}",
-						"content": "bot card answer"
-					}
-				}
-			}`),
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"bot card answer\"\n\nuser reply"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
-func TestFormatReplyContent_WithQuotedInteractiveCardCustomTemplateKey(t *testing.T) {
-	p := &Platform{cardTemplateKey: "body"}
-	richText := &richTextContent{
-		Content:    "next question",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: json.RawMessage(`{
-				"cardData": {
-					"cardParamMap": {
-						"content": "default content",
-						"body": "custom body content"
-					}
-				}
-			}`),
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"custom body content\"\n\nnext question"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
-func TestFormatReplyContent_WithQuotedInteractiveCardNestedJSONEnvelope(t *testing.T) {
-	p := &Platform{cardTemplateKey: "content"}
-	richText := &richTextContent{
-		Content:    "continue",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: json.RawMessage(`{
-				"cardData": "{\"cardParamMap\":{\"content\":\"nested card answer\"}}"
-			}`),
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"nested card answer\"\n\ncontinue"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
-func TestFormatReplyContent_WithQuotedInteractiveCardTopLevelFallback(t *testing.T) {
-	p := &Platform{}
-	richText := &richTextContent{
-		Content:    "what next?",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: json.RawMessage(`{
-				"title": "Run Summary",
-				"markdown": "all checks passed"
-			}`),
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"all checks passed\"\n\nwhat next?"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
-func TestFormatReplyContent_InteractiveCardPreservesVisibleJSONContent(t *testing.T) {
-	p := &Platform{cardTemplateKey: "content"}
-	richText := &richTextContent{
-		Content:    "follow up",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: json.RawMessage(`{
-				"cardData": {
-					"cardParamMap": {
-						"config": "{\"autoLayout\":true}",
-						"content": "{\"status\":\"ok\"}"
-					}
-				}
-			}`),
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"{\"status\":\"ok\"}\"\n\nfollow up"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
-func TestFormatReplyContent_InteractiveCardTopLevelFallbackIgnoresCustomKey(t *testing.T) {
-	p := &Platform{cardTemplateKey: "body"}
-	richText := &richTextContent{
-		Content:    "follow up",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: json.RawMessage(`{
-				"body": "custom top-level body",
-				"content": "top-level content"
-			}`),
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expected := "引用: \"top-level content\"\n\nfollow up"
-	if result != expected {
-		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
-	}
-}
-
-func TestFormatReplyContent_TruncatesLongQuotedInteractiveCardContent(t *testing.T) {
-	p := &Platform{cardTemplateKey: "content"}
-	longText := strings.Repeat("x", maxQuotedMessageRunes+1)
-	cardContent, err := json.Marshal(map[string]any{
-		"cardData": map[string]any{
-			"cardParamMap": map[string]string{
-				"content": longText,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal card content: %v", err)
-	}
-	richText := &richTextContent{
-		Content:    "short reply",
-		IsReplyMsg: true,
-		RepliedMsg: &repliedMessage{
-			MsgType: "interactiveCard",
-			Content: cardContent,
-		},
-	}
-
-	result := p.formatReplyContent(richText, "fallback")
-	expectedPrefix := "引用: \"" + strings.Repeat("x", maxQuotedMessageRunes) + "...\"\n\nshort reply"
-	if result != expectedPrefix {
-		t.Errorf("formatReplyContent() length = %d, want truncated output length %d", len([]rune(result)), len([]rune(expectedPrefix)))
-	}
-}
-
-func TestOnRawMessage_QuotedInteractiveCardEnrichesMessageContent(t *testing.T) {
-	var got *core.Message
-	p := &Platform{
-		cardTemplateKey: "content",
-		handler: func(_ core.Platform, msg *core.Message) {
-			got = msg
-		},
-	}
-
-	p.onRawMessage(`{
-		"msgtype": "text",
-		"msgId": "msg-1",
-		"conversationType": "2",
-		"conversationId": "conv-1",
-		"conversationTitle": "team chat",
-		"senderStaffId": "user-1",
-		"senderNick": "Alice",
-		"sessionWebhook": "https://example.invalid/webhook",
-		"text": {
-			"content": "please continue",
-			"isReplyMsg": true,
-			"repliedMsg": {
-				"msgType": "interactiveCard",
-				"content": {
-					"cardData": {
-						"cardParamMap": {
-							"content": "previous card answer"
-						}
-					}
-				}
-			}
-		}
-	}`)
-
-	if got == nil {
-		t.Fatal("handler was not called")
-	}
-	expected := "引用: \"previous card answer\"\n\nplease continue"
-	if got.Content != expected {
-		t.Errorf("message content = %q, want %q", got.Content, expected)
 	}
 }
 
@@ -690,46 +461,6 @@ func (f *fakeAccessTokenRT) RoundTrip(req *http.Request) (*http.Response, error)
 	}, nil
 }
 
-func TestOnRawMessage_PictureMsgTypeNotDroppedAsEmptyText(t *testing.T) {
-	// Regression test for #1128: DingTalk sometimes sends msgtype="picture"
-	// for image messages. Before the fix, this fell through to the text handler,
-	// which produced an empty-content message that was silently dropped by the engine.
-	// After the fix, the message is routed to handleImageMessage instead.
-	//
-	// We cannot easily mock the full HTTP download path here. The test verifies the
-	// negative: for msgtype="picture" the handler must NOT be called with empty content.
-	// handleImageMessage may panic on the nil httpClient; we recover from that.
-	var handlerCalledWithEmptyContent bool
-
-	func() {
-		defer func() { recover() }() // handleImageMessage panics on nil httpClient — that's OK
-		p := &Platform{
-			handler: func(_ core.Platform, msg *core.Message) {
-				if msg.Content == "" && len(msg.Images) == 0 {
-					handlerCalledWithEmptyContent = true
-				}
-			},
-		}
-		p.onRawMessage(`{
-			"msgtype": "picture",
-			"msgId": "msg-pic-1",
-			"conversationType": "1",
-			"conversationId": "conv-1",
-			"conversationTitle": "test",
-			"senderStaffId": "user-1",
-			"senderNick": "Alice",
-			"sessionWebhook": "https://example.invalid/webhook",
-			"content": {"downloadCode": "some-code"}
-		}`)
-	}()
-
-	// The message is routed to handleImageMessage (which fails at download — no mock),
-	// not to the text handler. The handler must NOT be invoked with empty content.
-	if handlerCalledWithEmptyContent {
-		t.Error("msgtype=picture: handler called with empty content (image was silently dropped as text)")
-	}
-}
-
 func TestGetAccessToken_ZeroExpireIn_FallsBackToDefault(t *testing.T) {
 	p := &Platform{
 		clientID:     "test_client",
@@ -792,5 +523,125 @@ func TestGetAccessToken_NormalExpireIn_AppliesBuffer(t *testing.T) {
 	gotWindow := p.tokenExpiry.Sub(before)
 	if gotWindow < 100*time.Minute || gotWindow > 116*time.Minute {
 		t.Errorf("tokenExpiry window for expireIn=7200 = %v, want ~6900s (100-116min)", gotWindow)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// @Mention parsing tests
+// ──────────────────────────────────────────────────────────────
+
+func TestParseAtMentions_SenderResolution(t *testing.T) {
+	content := "代码已完成\n<<at:sender>>"
+	cleaned, userIds, isAtAll := parseAtMentions(content, "staff123", true)
+
+	if isAtAll {
+		t.Error("expected isAtAll=false")
+	}
+	if len(userIds) != 1 || userIds[0] != "staff123" {
+		t.Errorf("userIds = %v, want [staff123]", userIds)
+	}
+	if !strings.Contains(cleaned, "@staff123") {
+		t.Errorf("cleaned text should contain @staff123 placeholder, got: %s", cleaned)
+	}
+	if strings.Contains(cleaned, "<<at:") {
+		t.Errorf("cleaned text should not contain raw markers, got: %s", cleaned)
+	}
+}
+
+func TestParseAtMentions_MultipleUserIds(t *testing.T) {
+	content := "请注意\n<<at:user1,user2>>"
+	cleaned, userIds, isAtAll := parseAtMentions(content, "sender1", true)
+
+	if isAtAll {
+		t.Error("expected isAtAll=false")
+	}
+	if len(userIds) != 2 || userIds[0] != "user1" || userIds[1] != "user2" {
+		t.Errorf("userIds = %v, want [user1 user2]", userIds)
+	}
+	if !strings.Contains(cleaned, "@user1") || !strings.Contains(cleaned, "@user2") {
+		t.Errorf("cleaned text should contain @user1 and @user2, got: %s", cleaned)
+	}
+}
+
+func TestParseAtMentions_AtAll(t *testing.T) {
+	content := "全员通知\n<<at:all>>"
+	cleaned, userIds, isAtAll := parseAtMentions(content, "sender1", true)
+
+	if !isAtAll {
+		t.Error("expected isAtAll=true")
+	}
+	if len(userIds) != 0 {
+		t.Errorf("userIds = %v, want empty", userIds)
+	}
+	if !strings.Contains(cleaned, "@all") {
+		t.Errorf("cleaned text should contain @all placeholder, got: %s", cleaned)
+	}
+}
+
+func TestParseAtMentions_NonGroupStrips(t *testing.T) {
+	content := "回复内容\n<<at:sender>>"
+	cleaned, userIds, isAtAll := parseAtMentions(content, "staff123", false)
+
+	if isAtAll {
+		t.Error("expected isAtAll=false in non-group")
+	}
+	if len(userIds) != 0 {
+		t.Errorf("userIds should be empty in non-group, got %v", userIds)
+	}
+	if strings.Contains(cleaned, "@staff123") {
+		t.Errorf("non-group should not have @placeholders, got: %s", cleaned)
+	}
+	if strings.Contains(cleaned, "<<at:") {
+		t.Errorf("markers should be stripped, got: %s", cleaned)
+	}
+}
+
+func TestParseAtMentions_NoMarkers(t *testing.T) {
+	content := "普通消息没有@标记"
+	cleaned, userIds, isAtAll := parseAtMentions(content, "staff123", true)
+
+	if cleaned != content {
+		t.Errorf("content should be unchanged, got: %s", cleaned)
+	}
+	if len(userIds) != 0 {
+		t.Errorf("userIds should be empty, got %v", userIds)
+	}
+	if isAtAll {
+		t.Error("expected isAtAll=false")
+	}
+}
+
+func TestParseAtMentions_SenderAndOthers(t *testing.T) {
+	content := "完成了\n<<at:sender,user456>>"
+	cleaned, userIds, isAtAll := parseAtMentions(content, "staff123", true)
+
+	if isAtAll {
+		t.Error("expected isAtAll=false")
+	}
+	if len(userIds) != 2 || userIds[0] != "staff123" || userIds[1] != "user456" {
+		t.Errorf("userIds = %v, want [staff123 user456]", userIds)
+	}
+	if !strings.Contains(cleaned, "@staff123") || !strings.Contains(cleaned, "@user456") {
+		t.Errorf("cleaned text should contain both @placeholders, got: %s", cleaned)
+	}
+}
+
+func TestParseAtMentions_DeduplicatesSender(t *testing.T) {
+	content := "test\n<<at:sender>>\n<<at:sender>>"
+	_, userIds, _ := parseAtMentions(content, "staff123", true)
+
+	if len(userIds) != 1 {
+		t.Errorf("should deduplicate sender, got userIds = %v", userIds)
+	}
+}
+
+func TestStripAtMentions(t *testing.T) {
+	content := "消息内容 <<at:sender>> 结尾"
+	result := StripAtMentions(content)
+	if strings.Contains(result, "<<at:") {
+		t.Errorf("StripAtMentions should remove markers, got: %s", result)
+	}
+	if !strings.Contains(result, "消息内容") || !strings.Contains(result, "结尾") {
+		t.Errorf("StripAtMentions should preserve other content, got: %s", result)
 	}
 }
