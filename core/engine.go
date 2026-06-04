@@ -11938,7 +11938,7 @@ func (e *Engine) renderTimerCard(sessionKey string, userID string) *Card {
 		remaining := FormatTimerRemaining(j.ScheduledAt)
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("⏰ %s\n", desc))
+		fmt.Fprintf(&sb, "⏰ %s\n", desc)
 		sb.WriteString(e.i18n.Tf(MsgTimerIDLabel, j.ID))
 		sb.WriteString(e.i18n.Tf(MsgTimerScheduledLabel, j.ScheduledAt.Format("2006-01-02 15:04"), remaining))
 		if j.LastError != "" {
@@ -12626,7 +12626,7 @@ func (e *Engine) cmdTimerList(p Platform, msg *Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgTimerListTitle), len(filtered)))
+	fmt.Fprintf(&sb, e.i18n.T(MsgTimerListTitle), len(filtered))
 	sb.WriteString("\n")
 
 	for i, j := range filtered {
@@ -12645,7 +12645,7 @@ func (e *Engine) cmdTimerList(p Platform, msg *Message) {
 			desc += " [mute]"
 		}
 		remaining := FormatTimerRemaining(j.ScheduledAt)
-		sb.WriteString(fmt.Sprintf("⏰ %s (%s)\n", desc, remaining))
+		fmt.Fprintf(&sb, "⏰ %s (%s)\n", desc, remaining)
 		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
 	}
 
