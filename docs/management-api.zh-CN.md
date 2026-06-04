@@ -928,6 +928,23 @@ GET /api/v1/status?token=mgmt-secret
 }
 ```
 
+#### POST /api/v1/cron/{id}/exec
+
+立即触发一个已存在的 cron 任务。即使任务已禁用，仍然允许手动触发。
+`/api/v1/cron/{id}/run` 作为兼容别名仍可使用。
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "cron_xyz789",
+    "status": "triggered"
+  }
+}
+```
+
 ---
 
 ### 5.6 心跳

@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// UnauthorizedAccessMessage is safe to show to an inbound sender when the
+// platform boundary rejects their identity. Keep it user-facing: do not mention
+// allow_from, user IDs, or chat IDs.
+const UnauthorizedAccessMessage = "角色未授权，请联系管理员添加权限。"
+
 // MergeEnv returns base env with entries from extra overriding same-key entries.
 // This prevents duplicate keys (e.g. two PATH entries) which cause the override
 // to be silently ignored on Linux (getenv returns the first match).
@@ -120,8 +125,9 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 // Returns "" when the input cannot produce a safe basename, so callers can
 // fall back to a generated name.
 func sanitizeAttachmentFileName(name string) string {
-	// Normalize backslashes to forward slashes so filepath.Base on Linux
+	// Normalize backslashes to forward slashes so filepath.Base on any OS
 	// strips Windows-style separators in attacker-supplied paths too.
+	name = filepath.ToSlash(name)
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = filepath.Base(name)
 	if name == "" || name == "." || name == ".." {
@@ -224,10 +230,12 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	InputTokens  int // token usage from agent result events
-	OutputTokens int
-	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
-	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
+	InputTokens              int // token usage from agent result events
+	OutputTokens             int
+	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
+	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
+	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.

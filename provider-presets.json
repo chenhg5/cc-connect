@@ -1,32 +1,32 @@
 {
   "version": 2,
-  "updated_at": "2026-05-19",
+  "updated_at": "2026-06-03",
   "providers": [
     {
       "name": "minimax",
       "display_name": "MiniMax",
       "invite_url": "https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link",
-      "description": "Next-gen LLM with 1M context window, strong SWE performance (56.2% SWE-Pro). Exclusive 12% off Token Plan for cc-connect users!",
-      "description_zh": "新一代大模型，支持 1M 超长上下文，软件工程能力突出（SWE-Pro 56.2%）。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "Extended Thinking", "SWE-Pro 56.2%"],
+      "description": "MiniMax M3 — frontier coding & agentic LLM with 1M context via MiniMax Sparse Attention, natively multimodal. Exclusive 12% off Token Plan for cc-connect users!",
+      "description_zh": "MiniMax M3 — 前沿 Coding 与 Agentic 大模型，1M 上下文（MiniMax Sparse Attention），原生多模态。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "M3 Frontier", "Multimodal", "SWE-Bench Pro 59.0"],
       "tier": 1,
       "website": "https://platform.minimax.io",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },
@@ -34,27 +34,27 @@
       "name": "minimax-cn",
       "display_name": "MiniMax (中国站)",
       "invite_url": "https://platform.minimaxi.com/subscribe/token-plan?code=lqYrKBvjke&source=link",
-      "description": "MiniMax China endpoint — lower latency for users in mainland China.",
-      "description_zh": "MiniMax 国内站 — 大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "低延迟 (CN)", "Extended Thinking"],
+      "description": "MiniMax M3 China endpoint — frontier coding & agentic LLM, lower latency for users in mainland China.",
+      "description_zh": "MiniMax M3 国内站 — 前沿 Coding 与 Agentic 大模型，大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "M3 Frontier", "Multimodal", "低延迟 (CN)"],
       "tier": 1,
       "website": "https://platform.minimaxi.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },
@@ -182,6 +182,52 @@
           "base_url": "https://www.dmxapi.cn/v1",
           "model": "claude-sonnet-4-20250514",
           "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        }
+      }
+    },
+    {
+      "name": "camel",
+      "display_name": "CaMeL",
+      "invite_url": "https://camel.kr777.top/register?aff=V2z8",
+      "description": "In-depth cooperation with major research institutes and supercomputing centers, self-developed high-stability high-efficiency cache scheduling solution. Exclusive cc-connect benefit: New users get $10 credit upon registration!",
+      "description_zh": "携手各大科研院所、超算中心深度合作，自研高稳高效缓存调度方案。CC-Connect专享新人注册认证即送$10！",
+      "features": ["Research Institutes", "Cache Scheduling", "$10 New User Credit"],
+      "tier": 2,
+      "website": "https://camel.kr777.top",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.camel.kr777.top",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.camel.kr777.top/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "apikeyfun",
+      "display_name": "APIKEY.FUN",
+      "invite_url": "https://apikey.fun/register?aff=cc_connect",
+      "description": "Enterprise-grade AI relay service. Claude, OpenAI, Gemini models from 7% of official price. Exclusive 5% permanent discount for cc-connect users!",
+      "description_zh": "企业级 AI 中转站，Claude/OpenAI/Gemini 模型低至官方 7% 折，cc-connect 用户专属 95 折永久优惠！",
+      "features": ["Enterprise", "Claude/OpenAI/Gemini", "7% Price", "95折"],
+      "tier": 2,
+      "website": "https://apikey.fun",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.apikey.fun",
+          "model": "claude-sonnet-4-20250514",
+          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+        },
+        "codex": {
+          "base_url": "https://api.apikey.fun/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4"],
+          "codex_config": { "wire_api": "responses" }
         }
       }
     },

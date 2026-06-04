@@ -114,6 +114,8 @@
     "lastRun": "Last run",
     "lastError": "Last error",
     "add": "Add job",
+    "trigger": "Run now",
+    "triggerPending": "Triggered. Results will update shortly.",
     "delete": "Delete",
     "noJobs": "No scheduled jobs",
     "workDir": "Working directory",
