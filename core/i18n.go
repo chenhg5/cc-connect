@@ -218,6 +218,14 @@ const (
 	MsgListPageHint              MsgKey = "list_page_hint"
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
+	MsgWorkdirsTitle             MsgKey = "workdirs_title"
+	MsgWorkdirsTitlePaged        MsgKey = "workdirs_title_paged"
+	MsgWorkdirsEmpty             MsgKey = "workdirs_empty"
+	MsgWorkdirsNotSupported      MsgKey = "workdirs_not_supported"
+	MsgWorkdirsError             MsgKey = "workdirs_error"
+	MsgWorkdirsItem              MsgKey = "workdirs_item"
+	MsgWorkdirsPageHint          MsgKey = "workdirs_page_hint"
+	MsgWorkdirsHint              MsgKey = "workdirs_hint"
 	MsgHistoryEmpty              MsgKey = "history_empty"
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
@@ -521,6 +529,7 @@ const (
 
 	MsgBuiltinCmdNew       MsgKey = "new"
 	MsgBuiltinCmdList      MsgKey = "list"
+	MsgBuiltinCmdWorkdirs  MsgKey = "workdirs"
 	MsgBuiltinCmdSearch    MsgKey = "search"
 	MsgBuiltinCmdSwitch    MsgKey = "switch"
 	MsgBuiltinCmdDelete    MsgKey = "delete"
@@ -943,6 +952,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
+			"/workdirs\n  List switchable project directories\n\n" +
 			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
@@ -986,6 +996,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
+			"/workdirs\n  列出可切换的项目目录\n\n" +
 			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
@@ -1029,6 +1040,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
+			"/workdirs\n  列出可切換的專案目錄\n\n" +
 			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
@@ -1071,6 +1083,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
+			"/workdirs\n  切り替え可能なプロジェクトディレクトリ一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
@@ -1112,6 +1125,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "📖 Comandos disponibles\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
+			"/workdirs\n  Listar directorios de proyecto conmutables\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
@@ -1162,6 +1176,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "**Session Management**\n" +
 			"/new [name] — Start a new session\n" +
 			"/list — List agent sessions\n" +
+			"/workdirs — List switchable project directories\n" +
 			"/search <keyword> — Search sessions\n" +
 			"/switch <number> — Resume a session\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
@@ -1171,6 +1186,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "**会话管理**\n" +
 			"/new [名称] — 创建新会话\n" +
 			"/list — 列出会话列表\n" +
+			"/workdirs — 列出可切换的项目目录\n" +
 			"/search <关键词> — 搜索会话\n" +
 			"/switch <序号> — 切换会话\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
@@ -1180,6 +1196,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "**會話管理**\n" +
 			"/new [名稱] — 建立新會話\n" +
 			"/list — 列出會話列表\n" +
+			"/workdirs — 列出可切換的專案目錄\n" +
 			"/search <關鍵詞> — 搜尋會話\n" +
 			"/switch <序號> — 切換會話\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
@@ -1189,6 +1206,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "**セッション管理**\n" +
 			"/new [名前] — 新しいセッションを開始\n" +
 			"/list — セッション一覧\n" +
+			"/workdirs — 切り替え可能なプロジェクトディレクトリ一覧\n" +
 			"/search <キーワード> — セッション検索\n" +
 			"/switch <番号> — セッション切り替え\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
@@ -1198,6 +1216,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "**Gestión de sesiones**\n" +
 			"/new [nombre] — Iniciar nueva sesión\n" +
 			"/list — Listar sesiones\n" +
+			"/workdirs — Listar directorios de proyecto conmutables\n" +
 			"/search <keyword> — Buscar sesiones\n" +
 			"/switch <número> — Reanudar sesión\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
@@ -1396,6 +1415,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 取得會話列表失敗: %v",
 		LangJapanese:           "❌ セッション一覧の取得に失敗しました: %v",
 		LangSpanish:            "❌ Error al listar sesiones: %v",
+	},
+	MsgWorkdirsTitle: {
+		LangEnglish:            "**Agent Workdirs** (%d)\n\n",
+		LangChinese:            "**Agent 项目目录** (%d)\n\n",
+		LangTraditionalChinese: "**Agent 專案目錄** (%d)\n\n",
+		LangJapanese:           "**エージェント作業ディレクトリ** (%d)\n\n",
+		LangSpanish:            "**Directorios del agente** (%d)\n\n",
+	},
+	MsgWorkdirsTitlePaged: {
+		LangEnglish:            "**Agent Workdirs** (%d) · Page %d/%d\n\n",
+		LangChinese:            "**Agent 项目目录** (%d) · 第 %d/%d 页\n\n",
+		LangTraditionalChinese: "**Agent 專案目錄** (%d) · 第 %d/%d 頁\n\n",
+		LangJapanese:           "**エージェント作業ディレクトリ** (%d) · %d/%d ページ\n\n",
+		LangSpanish:            "**Directorios del agente** (%d) · Página %d/%d\n\n",
+	},
+	MsgWorkdirsEmpty: {
+		LangEnglish:            "No agent workdirs found.",
+		LangChinese:            "未找到 Agent 项目目录。",
+		LangTraditionalChinese: "未找到 Agent 專案目錄。",
+		LangJapanese:           "エージェント作業ディレクトリが見つかりません。",
+		LangSpanish:            "No se encontraron directorios del agente.",
+	},
+	MsgWorkdirsNotSupported: {
+		LangEnglish:            "Current agent does not support global workdir listing.",
+		LangChinese:            "当前 Agent 不支持全局项目目录列表。",
+		LangTraditionalChinese: "目前 Agent 不支援全域專案目錄列表。",
+		LangJapanese:           "現在のエージェントは全体の作業ディレクトリ一覧に対応していません。",
+		LangSpanish:            "El agente actual no admite listar directorios globales.",
+	},
+	MsgWorkdirsError: {
+		LangEnglish:            "❌ Failed to list workdirs: %v",
+		LangChinese:            "❌ 获取项目目录列表失败: %v",
+		LangTraditionalChinese: "❌ 取得專案目錄列表失敗: %v",
+		LangJapanese:           "❌ 作業ディレクトリ一覧の取得に失敗しました: %v",
+		LangSpanish:            "❌ Error al listar directorios: %v",
+	},
+	MsgWorkdirsItem: {
+		LangEnglish:            "%s **%d.** `%s` · **%d** sessions · **%d** msgs · %s\n",
+		LangChinese:            "%s **%d.** `%s` · **%d** 会话 · **%d** 消息 · %s\n",
+		LangTraditionalChinese: "%s **%d.** `%s` · **%d** 會話 · **%d** 訊息 · %s\n",
+		LangJapanese:           "%s **%d.** `%s` · **%d** セッション · **%d** メッセージ · %s\n",
+		LangSpanish:            "%s **%d.** `%s` · **%d** sesiones · **%d** mensajes · %s\n",
+	},
+	MsgWorkdirsPageHint: {
+		LangEnglish:            "\n\nPage %d/%d \n\n`/workdirs <page>` for more\n",
+		LangChinese:            "\n\n第 %d/%d 页 \n\n`/workdirs <页码>` 翻页\n",
+		LangTraditionalChinese: "\n\n第 %d/%d 頁 \n\n`/workdirs <頁碼>` 翻頁\n",
+		LangJapanese:           "\n\n%d/%d ページ \n\n`/workdirs <ページ>` で移動\n",
+		LangSpanish:            "\n\nPágina %d/%d \n\n`/workdirs <página>` para más\n",
+	},
+	MsgWorkdirsHint: {
+		LangEnglish:            "\n`/workdirs <page>` to browse; tap a button or run `/dir <path>` to switch.",
+		LangChinese:            "\n`/workdirs <页码>` 翻页；点按钮切换目录，也可手动发 `/dir <路径>`。",
+		LangTraditionalChinese: "\n`/workdirs <頁碼>` 翻頁；點按鈕切換目錄，也可手動發 `/dir <路徑>`。",
+		LangJapanese:           "\n`/workdirs <ページ>` で移動。ボタンを押すか `/dir <path>` を送信してください。",
+		LangSpanish:            "\n`/workdirs <página>` para navegar; toca un botón o usa `/dir <ruta>`.",
 	},
 	MsgHistoryEmpty: {
 		LangEnglish:            "No history in current session.",
@@ -3319,6 +3394,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "列出 Agent 會話列表",
 		LangJapanese:           "エージェントセッション一覧",
 		LangSpanish:            "Listar sesiones del agente",
+	},
+	MsgBuiltinCmdWorkdirs: {
+		LangEnglish:            "List switchable project directories",
+		LangChinese:            "列出可切换的项目目录",
+		LangTraditionalChinese: "列出可切換的專案目錄",
+		LangJapanese:           "切り替え可能なプロジェクトディレクトリ一覧",
+		LangSpanish:            "Listar directorios de proyecto conmutables",
 	},
 	MsgBuiltinCmdSearch: {
 		LangEnglish:            "Search sessions by name or ID, arg: <keyword>",

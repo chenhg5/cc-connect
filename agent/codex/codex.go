@@ -38,7 +38,7 @@ type Agent struct {
 	cliBin          string   // CLI binary name, default "codex"
 	cliExtraArgs    []string // extra args parsed from cli_path after the binary
 	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
+	activeIdx       int      // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	mu              sync.RWMutex
@@ -407,6 +407,13 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	workDir := a.workDir
 	a.mu.RUnlock()
 	return listCodexSessions(workDir, codexHome)
+}
+
+func (a *Agent) ListWorkdirs(_ context.Context) ([]core.AgentWorkdirInfo, error) {
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return listCodexWorkdirs(codexHome)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
