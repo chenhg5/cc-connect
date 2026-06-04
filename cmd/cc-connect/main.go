@@ -234,14 +234,17 @@ func main() {
 
 		providerWiring := wireAgentProviders(agent, proj.Agent)
 
+		workDir, _ := proj.Agent.Options["work_dir"].(string)
+
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
-			opts := make(map[string]any, len(pc.Options)+2)
+			opts := make(map[string]any, len(pc.Options)+3)
 			for k, v := range pc.Options {
 				opts[k] = v
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
+			opts["work_dir"] = workDir
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
@@ -250,7 +253,6 @@ func main() {
 			platforms = append(platforms, p)
 		}
 
-		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
 		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
 		startInitialRefreshIfReady(agent, providerWiring)
