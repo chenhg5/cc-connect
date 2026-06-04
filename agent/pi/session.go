@@ -329,7 +329,7 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 				}
 			}
 		}
-		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncStr(output, 500)}
+		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncStr(output, core.DefaultToolResultMaxLen)}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():

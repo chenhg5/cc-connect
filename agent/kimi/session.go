@@ -393,7 +393,7 @@ func (ks *kimiSession) handleTool(raw map[string]any) {
 		evt := core.Event{
 			Type:       core.EventToolResult,
 			ToolName:   toolCallID,
-			ToolResult: truncate(strings.TrimSpace(output), 500),
+			ToolResult: truncate(strings.TrimSpace(output), core.DefaultToolResultMaxLen),
 		}
 		select {
 		case ks.events <- evt:

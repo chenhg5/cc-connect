@@ -1222,7 +1222,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			Type:         core.EventToolResult,
 			ToolName:     "Bash",
 			ToolInput:    command,
-			ToolResult:   truncate(strings.TrimSpace(output), 500),
+			ToolResult:   truncate(strings.TrimSpace(output), core.DefaultToolResultMaxLen),
 			ToolStatus:   strings.TrimSpace(status),
 			ToolExitCode: exitCodePtr,
 			ToolSuccess:  &success,
@@ -1239,7 +1239,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  truncate(strings.TrimSpace(result), core.DefaultToolResultMaxLen),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})
@@ -1249,7 +1249,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
 			ToolName:   "WebSearch",
-			ToolResult: truncate(strings.TrimSpace(query), 500),
+			ToolResult: truncate(strings.TrimSpace(query), core.DefaultToolResultMaxLen),
 		})
 
 	case "dynamicToolCall":
@@ -1260,7 +1260,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  truncate(strings.TrimSpace(result), core.DefaultToolResultMaxLen),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})

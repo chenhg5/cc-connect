@@ -367,7 +367,7 @@ func (gs *geminiSession) handleToolResult(raw map[string]any) {
 	}
 
 	if output != "" {
-		evt := core.Event{Type: core.EventToolResult, ToolName: toolID, Content: truncate(output, 500)}
+		evt := core.Event{Type: core.EventToolResult, ToolName: toolID, Content: truncate(output, core.DefaultToolResultMaxLen)}
 		select {
 		case gs.events <- evt:
 		case <-gs.ctx.Done():

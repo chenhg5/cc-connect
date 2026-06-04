@@ -30,8 +30,9 @@ const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
 const (
-	defaultThinkingMaxLen = 300
-	defaultToolMaxLen     = 500
+	defaultThinkingMaxLen     = 300
+	defaultToolMaxLen         = 500
+	DefaultToolResultMaxLen   = 500
 )
 
 // Slow-operation thresholds. Operations exceeding these durations produce a
@@ -147,6 +148,7 @@ type DisplayCfg struct {
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
+	ShowEditResults  bool // show Edit tool results even in quiet/compact mode
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -426,7 +428,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy", ShowEditResults: true},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -3960,7 +3962,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if e.display.ToolMessages {
+			showResult := e.display.ToolMessages
+			forcedEditResult := false
+			if !showResult && e.display.ShowEditResults && isEditTool(event.ToolName) {
+				showResult = true
+				forcedEditResult = true
+			}
+			if showResult {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -3969,6 +3977,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					result = truncateIf(result, e.display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
+					if forcedEditResult {
+						if result != "" {
+							editMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
+							e.sendRaw(p, replyCtx, editMsg)
+						}
+						break
+					}
 					if hasRichCard {
 						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
 						if cardMessageID == nil {
@@ -12709,6 +12724,26 @@ func (e *Engine) configItems() []configItem {
 				return nil
 			},
 		},
+
+		{
+			key:    "show_edit_results",
+			desc:   "Show edit tool results even in quiet mode (true/false)",
+			descZh: "安静模式下仍显示编辑结果 (true/false)",
+			getFunc: func() string {
+				return fmt.Sprintf("%t", e.display.ShowEditResults)
+			},
+			setFunc: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid boolean: %s", v)
+				}
+				e.display.ShowEditResults = b
+				if e.displaySaveFunc != nil {
+					return e.displaySaveFunc(nil, nil, nil, nil, nil)
+				}
+				return nil
+			},
+		},
 		{
 			key:    "tool_max_len",
 			desc:   "Max chars for tool use messages (0=no truncation)",
@@ -13299,6 +13334,19 @@ func toolCodeLang(toolName, input string) string {
 		return "diff"
 	}
 	return ""
+}
+
+// isEditTool reports whether toolName is known to edit file content.
+func isEditTool(toolName string) bool {
+	switch toolName {
+	case "Edit", "Write", "NotebookEdit", "MultiEdit",
+		"edit", "write", "replace", "ReplaceInFile",
+		"create_file", "CreateFile", "add_file", "AddFile",
+		"write_file", "WriteFile", "Patch":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Engine) formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool) string {

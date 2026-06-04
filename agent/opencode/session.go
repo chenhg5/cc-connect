@@ -336,7 +336,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 		}
 
 		output, _ := state["output"].(string)
-		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
+		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, core.DefaultToolResultMaxLen)}
 		select {
 		case s.events <- resultEvt:
 		case <-s.ctx.Done():
