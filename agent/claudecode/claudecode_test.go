@@ -662,3 +662,91 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 		t.Errorf("routerAPIKey = %q, want secret", child.routerAPIKey)
 	}
 }
+
+func TestScanSessionMeta_ArrayContent(t *testing.T) {
+	// Regression test for: scanSessionMeta skips entries where content is a JSON array
+	// (e.g., assistant messages with thinking blocks, or user messages with tool results).
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "queue-operation", "operation": "start"}`,
+		`{"type": "user", "message": {"content": "Hello world"}}`,
+		`{"type": "assistant", "message": {"content": [{"type": "thinking", "text": ""}, {"type": "text", "text": "Hi there"}]}}`,
+		`{"type": "user", "message": {"content": [{"tool_use_id": "call_abc", "type": "tool_result", "content": "result data"}]}}`,
+		`{"type": "assistant", "message": {"content": "Plain text reply"}}`,
+		`{"type": "last-prompt", "lastPrompt": "test"}`,
+	}
+
+	data := ""
+	for _, line := range lines {
+		data += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+
+	// Expected: 2 user + 2 assistant = 4 messages
+	if count != 4 {
+		t.Errorf("scanSessionMeta count = %d, want 4 (2 user + 2 assistant, array content should not be skipped)", count)
+	}
+
+	// Summary should come from the last user message with string content (line 2)
+	if summary != "Hello world" {
+		t.Errorf("scanSessionMeta summary = %q, want %q", summary, "Hello world")
+	}
+}
+
+func TestScanSessionMeta_AllArrayContent(t *testing.T) {
+	// When all user messages have array content, summary should remain empty
+	// and count should still be correct.
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": [{"type": "tool_result", "content": "data"}]}}`,
+		`{"type": "assistant", "message": {"content": [{"type": "text", "text": "reply"}]}}`,
+	}
+
+	data := ""
+	for _, line := range lines {
+		data += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "" {
+		t.Errorf("scanSessionMeta summary = %q, want empty string when no string user content exists", summary)
+	}
+}
+
+func TestExtractStringContent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"string", `"hello"`, "hello"},
+		{"empty", `""`, ""},
+		{"array", `[{"type": "text"}]`, ""},
+		{"object", `{"key": "val"}`, ""},
+		{"null", `null`, ""},
+		{"number", `42`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractStringContent([]byte(tt.raw))
+			if got != tt.want {
+				t.Errorf("extractStringContent(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}

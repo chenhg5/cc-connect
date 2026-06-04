@@ -103,6 +103,18 @@ func daemonInstall(args []string) {
 	fmt.Println("  cc-connect daemon restart   - Restart")
 	fmt.Println("  cc-connect daemon stop      - Stop")
 	fmt.Println("  cc-connect daemon uninstall - Remove")
+
+	// Check linger for user-mode systemd
+	if strings.Contains(mgr.Platform(), "user") {
+		enabled, user := daemon.CheckLinger()
+		if !enabled {
+			fmt.Println()
+			fmt.Println("⚠️  Warning: Linger is not enabled for this user.")
+			fmt.Println("   cc-connect will stop when your last login session ends (e.g., SSH disconnect).")
+			fmt.Println("   To keep it running persistently, run:")
+			fmt.Printf("     sudo loginctl enable-linger %s\n", user)
+		}
+	}
 }
 
 func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {

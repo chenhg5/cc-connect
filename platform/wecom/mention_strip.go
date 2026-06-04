@@ -17,7 +17,7 @@ func stripWeComAtMentions(s string, botIDs ...string) string {
 	for strings.Contains(s, "  ") {
 		s = strings.ReplaceAll(s, "  ", " ")
 	}
-	return strings.TrimSpace(s)
+	return stripLeadingDisplayMentionCommand(strings.TrimSpace(s))
 }
 
 func stripOneWeComAtMention(s, botID string) string {
@@ -58,4 +58,22 @@ func removeAllEqualFold(s, sub string) string {
 		}
 		s = s[:idx] + s[idx+len(sub):]
 	}
+}
+
+func stripLeadingDisplayMentionCommand(s string) string {
+	if s == "" {
+		return s
+	}
+	if !strings.HasPrefix(s, "@") && !strings.HasPrefix(s, "＠") {
+		return s
+	}
+	fields := strings.Fields(s)
+	if len(fields) < 2 {
+		return s
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(s, fields[0]))
+	if strings.HasPrefix(rest, "/") || strings.HasPrefix(rest, "!") {
+		return rest
+	}
+	return s
 }

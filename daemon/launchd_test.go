@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,17 @@ func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
 	// Boolean KeepAlive causes launchd to restart after every exit, including SIGTERM shutdown.
 	if strings.Contains(xml, "<key>KeepAlive</key>\n\t<true/>") {
 		t.Fatal("plist must not use boolean KeepAlive true")
+	}
+	// launchd.plist(5): SuccessfulExit=true means restart ONLY after a successful
+	// (exit 0) exit; false means restart ONLY after an unsuccessful exit. cc-connect
+	// returns 0 on graceful SIGTERM shutdown but a non-zero status on crash, so the
+	// daemon's "restart on failure but not on graceful stop" intent maps to
+	// SuccessfulExit=false. The previous wiring used <true/>, which was the inverse:
+	// it respawned after every clean SIGTERM shutdown and did NOT recover from
+	// crashes. Pin the correct value here so a future edit can't silently re-invert
+	// it.
+	if !strings.Contains(xml, "<key>SuccessfulExit</key>\n\t\t<false/>") {
+		t.Fatalf("plist must set SuccessfulExit=false so crashes restart and clean SIGTERM does not respawn; got:\n%s", xml)
 	}
 	if !strings.Contains(xml, "<key>LimitLoadToSessionType</key>") ||
 		!strings.Contains(xml, "<string>Aqua</string>") ||
@@ -232,6 +244,31 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	}
 }
 
+// collectXMLText walks the XML stream and returns every chardata text node.
+// Used by the plist-escape test to verify path values round-trip through
+// xml.Decoder regardless of how deeply they are nested.
+func collectXMLText(t *testing.T, data []byte) []string {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(string(data)))
+	var out []string
+	for {
+		tok, err := dec.Token()
+		if tok == nil {
+			break
+		}
+		if err != nil {
+			t.Fatalf("xml decode token: %v", err)
+		}
+		if cd, ok := tok.(xml.CharData); ok {
+			s := strings.TrimSpace(string(cd))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 func containsCall(calls []string, want string) bool {
 	for _, call := range calls {
 		if call == want {
@@ -239,4 +276,61 @@ func containsCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestBuildPlist_EscapesXMLSpecialCharsInPaths pins the bug where unescaped
+// '&', '<', '>', '"', and '\'' in cfg paths produced malformed XML that
+// `launchctl bootstrap` rejected.
+func TestBuildPlist_EscapesXMLSpecialCharsInPaths(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/opt/cc-connect/bin & <tools>/cc-connect",
+		WorkDir:    "/Users/jane/Projects/dev & test/cc-connect",
+		LogFile:    "/Users/jane/Library/Logs/cc \"connect\".log",
+		LogMaxSize: 10485760,
+		EnvPATH:    "/usr/bin:/path/with'apostrophe/bin",
+	}
+	out := buildPlist(cfg)
+
+	// 1) Result must parse as well-formed XML — without escaping, bare '&'
+	//    or unbalanced '<' inside <string> elements break the parser.
+	if err := xml.Unmarshal([]byte(out), new(struct{ XMLName xml.Name })); err != nil {
+		t.Fatalf("buildPlist output is not valid XML: %v\n%s", err, out)
+	}
+
+	// 2) Round-trip the values through the XML parser and make sure the
+	//    original characters survive the encode/decode cycle. Walk every
+	//    text node rather than relying on a positional path, since the
+	//    plist nests <array>/<dict>/<string> at multiple depths.
+	values := collectXMLText(t, []byte(out))
+	mustContain := []string{cfg.BinaryPath, cfg.WorkDir, cfg.LogFile, cfg.EnvPATH}
+	for _, want := range mustContain {
+		found := false
+		for _, got := range values {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("decoded plist does not contain expected value %q\nvalues = %#v", want, values)
+		}
+	}
+
+	// 3) The raw XML output must not contain a bare '&' followed by anything
+	//    other than a recognized entity reference — that's what would crash
+	//    launchctl.
+	for i := 0; i < len(out); i++ {
+		if out[i] != '&' {
+			continue
+		}
+		rest := out[i:]
+		if !(strings.HasPrefix(rest, "&amp;") ||
+			strings.HasPrefix(rest, "&lt;") ||
+			strings.HasPrefix(rest, "&gt;") ||
+			strings.HasPrefix(rest, "&quot;") ||
+			strings.HasPrefix(rest, "&apos;") ||
+			strings.HasPrefix(rest, "&#")) {
+			t.Fatalf("bare '&' at offset %d (not a valid entity ref): %q", i, rest[:min(len(rest), 30)])
+		}
+	}
 }

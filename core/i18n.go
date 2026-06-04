@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Language represents a supported language
 type Language string
@@ -14,8 +17,15 @@ const (
 	LangSpanish            Language = "es"
 )
 
-// I18n provides internationalized messages
+// I18n provides internationalized messages.
+//
+// All exported methods are safe to call from multiple goroutines: cc-connect
+// fans out platform message handlers concurrently, all of which can call
+// DetectAndSet (writes `detected`) and T / CurrentLang (read `lang`/`detected`)
+// at the same time. Without the mutex `go test -race` flags real data races
+// on the language fields.
 type I18n struct {
+	mu       sync.RWMutex
 	lang     Language
 	detected Language
 	saveFunc func(Language) error
@@ -26,6 +36,8 @@ func NewI18n(lang Language) *I18n {
 }
 
 func (i *I18n) SetSaveFunc(fn func(Language) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.saveFunc = fn
 }
 
@@ -76,21 +88,41 @@ func isSpanishHint(text string) bool {
 }
 
 func (i *I18n) DetectAndSet(text string) {
+	i.mu.RLock()
 	if i.lang != LangAuto {
+		i.mu.RUnlock()
 		return
 	}
+	currentDetected := i.detected
+	i.mu.RUnlock()
+
 	detected := DetectLanguage(text)
-	if i.detected != detected {
-		i.detected = detected
-		if i.saveFunc != nil {
-			if err := i.saveFunc(detected); err != nil {
-				fmt.Printf("failed to save language: %v\n", err)
-			}
+	if currentDetected == detected {
+		return
+	}
+
+	i.mu.Lock()
+	// Re-check under the write lock — another goroutine may have updated
+	// i.detected between our RUnlock above and the Lock here.
+	if i.lang != LangAuto || i.detected == detected {
+		i.mu.Unlock()
+		return
+	}
+	i.detected = detected
+	saveFunc := i.saveFunc
+	i.mu.Unlock()
+
+	if saveFunc != nil {
+		if err := saveFunc(detected); err != nil {
+			fmt.Printf("failed to save language: %v\n", err)
 		}
 	}
 }
 
 func (i *I18n) currentLang() Language {
+	// Caller holds either no lock (most public methods take RLock and call
+	// this) or RLock; this helper just reads the protected fields. All
+	// public methods that call currentLang() acquire i.mu.RLock first.
 	if i.lang == LangAuto {
 		if i.detected != "" {
 			return i.detected
@@ -101,16 +133,24 @@ func (i *I18n) currentLang() Language {
 }
 
 // CurrentLang returns the resolved language (exported for mode display).
-func (i *I18n) CurrentLang() Language { return i.currentLang() }
+func (i *I18n) CurrentLang() Language {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.currentLang()
+}
 
 // IsZhLike returns true for Simplified and Traditional Chinese.
 func (i *I18n) IsZhLike() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	l := i.currentLang()
 	return l == LangChinese || l == LangTraditionalChinese
 }
 
 // SetLang overrides the language (disabling auto-detect).
 func (i *I18n) SetLang(lang Language) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.lang = lang
 	i.detected = ""
 }
@@ -158,6 +198,7 @@ const (
 	MsgModeNotSupported          MsgKey = "mode_not_supported"
 	MsgSessionRestarting         MsgKey = "session_restarting"
 	MsgSessionNotStarted         MsgKey = "session_not_started"
+	MsgUntitled                  MsgKey = "untitled"
 	MsgLangChanged               MsgKey = "lang_changed"
 	MsgLangInvalid               MsgKey = "lang_invalid"
 	MsgLangCurrent               MsgKey = "lang_current"
@@ -225,33 +266,36 @@ const (
 	MsgHeartbeatUsage        MsgKey = "heartbeat_usage"
 	MsgHeartbeatInvalidMins  MsgKey = "heartbeat_invalid_mins"
 
-	MsgCronNotAvailable MsgKey = "cron_not_available"
-	MsgCronUsage        MsgKey = "cron_usage"
-	MsgCronAddUsage     MsgKey = "cron_add_usage"
-	MsgCronAdded        MsgKey = "cron_added"
-	MsgCronAddedExec    MsgKey = "cron_added_exec"
-	MsgCronAddExecUsage MsgKey = "cron_addexec_usage"
-	MsgCronEmpty        MsgKey = "cron_empty"
-	MsgCronListTitle    MsgKey = "cron_list_title"
-	MsgCronListFooter   MsgKey = "cron_list_footer"
-	MsgCronDelUsage     MsgKey = "cron_del_usage"
-	MsgCronDeleted      MsgKey = "cron_deleted"
-	MsgCronNotFound     MsgKey = "cron_not_found"
-	MsgCronEnabled      MsgKey = "cron_enabled"
-	MsgCronDisabled     MsgKey = "cron_disabled"
-	MsgCronMuted        MsgKey = "cron_muted"
-	MsgCronUnmuted      MsgKey = "cron_unmuted"
-	MsgCronCardHint     MsgKey = "cron_card_hint"
-	MsgCronNextShort    MsgKey = "cron_next_short"
-	MsgCronLastShort    MsgKey = "cron_last_short"
-	MsgCronBtnEnable    MsgKey = "cron_btn_enable"
-	MsgCronBtnDisable   MsgKey = "cron_btn_disable"
-	MsgCronBtnMute      MsgKey = "cron_btn_mute"
-	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
-	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
+	MsgCronNotAvailable       MsgKey = "cron_not_available"
+	MsgCronUsage              MsgKey = "cron_usage"
+	MsgCronAddUsage           MsgKey = "cron_add_usage"
+	MsgCronAdded              MsgKey = "cron_added"
+	MsgCronAddedExec          MsgKey = "cron_added_exec"
+	MsgCronAddExecUsage       MsgKey = "cron_addexec_usage"
+	MsgCronEmpty              MsgKey = "cron_empty"
+	MsgCronListTitle          MsgKey = "cron_list_title"
+	MsgCronListFooter         MsgKey = "cron_list_footer"
+	MsgCronExecUsage          MsgKey = "cron_exec_usage"
+	MsgCronTriggered          MsgKey = "cron_triggered"
+	MsgCronProjectUnavailable MsgKey = "cron_project_unavailable"
+	MsgCronDelUsage           MsgKey = "cron_del_usage"
+	MsgCronDeleted            MsgKey = "cron_deleted"
+	MsgCronNotFound           MsgKey = "cron_not_found"
+	MsgCronEnabled            MsgKey = "cron_enabled"
+	MsgCronDisabled           MsgKey = "cron_disabled"
+	MsgCronMuted              MsgKey = "cron_muted"
+	MsgCronUnmuted            MsgKey = "cron_unmuted"
+	MsgCronCardHint           MsgKey = "cron_card_hint"
+	MsgCronNextShort          MsgKey = "cron_next_short"
+	MsgCronLastShort          MsgKey = "cron_last_short"
+	MsgCronBtnEnable          MsgKey = "cron_btn_enable"
+	MsgCronBtnDisable         MsgKey = "cron_btn_disable"
+	MsgCronBtnMute            MsgKey = "cron_btn_mute"
+	MsgCronBtnUnmute          MsgKey = "cron_btn_unmute"
+	MsgCronBtnDelete          MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgStatusTitle           MsgKey = "status_title"
+	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -443,10 +487,10 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent       MsgKey = "ps_sent"
-	MsgPsSendFailed MsgKey = "ps_send_failed"
-	MsgPsEmpty      MsgKey = "ps_empty"
-	MsgPsNoSession  MsgKey = "ps_no_session"
+	MsgPsSent            MsgKey = "ps_sent"
+	MsgPsSendFailed      MsgKey = "ps_send_failed"
+	MsgPsEmpty           MsgKey = "ps_empty"
+	MsgPsNoSession       MsgKey = "ps_no_session"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -541,39 +585,41 @@ const (
 	MsgShowReadFailed      MsgKey = "show_read_failed"
 
 	// Multi-workspace messages
-	MsgWsNotEnabled            MsgKey = "ws_not_enabled"
-	MsgWsNoBinding             MsgKey = "ws_no_binding"
-	MsgWsInfo                  MsgKey = "ws_info"
-	MsgWsInfoShared            MsgKey = "ws_info_shared"
-	MsgWsUsage                 MsgKey = "ws_usage"
-	MsgWsInitUsage             MsgKey = "ws_init_usage"
-	MsgWsBindUsage             MsgKey = "ws_bind_usage"
-	MsgWsBindSuccess           MsgKey = "ws_bind_success"
-	MsgWsBindNotFound          MsgKey = "ws_bind_not_found"
-	MsgWsRouteUsage            MsgKey = "ws_route_usage"
-	MsgWsRouteSuccess          MsgKey = "ws_route_success"
-	MsgWsRouteAbsoluteRequired MsgKey = "ws_route_absolute_required"
-	MsgWsRouteNotFound         MsgKey = "ws_route_not_found"
-	MsgWsRouteNotDirectory     MsgKey = "ws_route_not_directory"
-	MsgWsUnbindSuccess         MsgKey = "ws_unbind_success"
-	MsgWsListEmpty             MsgKey = "ws_list_empty"
-	MsgWsListTitle             MsgKey = "ws_list_title"
-	MsgWsSharedNoBinding       MsgKey = "ws_shared_no_binding"
-	MsgWsSharedUsage           MsgKey = "ws_shared_usage"
-	MsgWsSharedBindSuccess     MsgKey = "ws_shared_bind_success"
-	MsgWsSharedRouteSuccess    MsgKey = "ws_shared_route_success"
-	MsgWsSharedUnbindSuccess   MsgKey = "ws_shared_unbind_success"
-	MsgWsSharedListEmpty       MsgKey = "ws_shared_list_empty"
-	MsgWsSharedListTitle       MsgKey = "ws_shared_list_title"
-	MsgWsSharedOnlyHint        MsgKey = "ws_shared_only_hint"
-	MsgWsNotFoundHint          MsgKey = "ws_not_found_hint"
-	MsgWsResolutionError       MsgKey = "ws_resolution_error"
-	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
-	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
-	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
-	MsgWsInitDirNotFound       MsgKey = "ws_init_dir_not_found"
-	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
-	MsgBackgroundAutoDenied    MsgKey = "background_auto_denied"
+	MsgWsNotEnabled             MsgKey = "ws_not_enabled"
+	MsgWsNoBinding              MsgKey = "ws_no_binding"
+	MsgWsInfo                   MsgKey = "ws_info"
+	MsgWsInfoShared             MsgKey = "ws_info_shared"
+	MsgWsUsage                  MsgKey = "ws_usage"
+	MsgWsInitUsage              MsgKey = "ws_init_usage"
+	MsgWsBindUsage              MsgKey = "ws_bind_usage"
+	MsgWsBindSuccess            MsgKey = "ws_bind_success"
+	MsgWsBindNotFound           MsgKey = "ws_bind_not_found"
+	MsgWsRouteUsage             MsgKey = "ws_route_usage"
+	MsgWsRouteSuccess           MsgKey = "ws_route_success"
+	MsgWsRouteAbsoluteRequired  MsgKey = "ws_route_absolute_required"
+	MsgWsRouteNotFound          MsgKey = "ws_route_not_found"
+	MsgWsRouteNotDirectory      MsgKey = "ws_route_not_directory"
+	MsgWsUnbindSuccess          MsgKey = "ws_unbind_success"
+	MsgWsListEmpty              MsgKey = "ws_list_empty"
+	MsgWsListTitle              MsgKey = "ws_list_title"
+	MsgWsSharedNoBinding        MsgKey = "ws_shared_no_binding"
+	MsgWsSharedUsage            MsgKey = "ws_shared_usage"
+	MsgWsSharedBindSuccess      MsgKey = "ws_shared_bind_success"
+	MsgWsSharedRouteSuccess     MsgKey = "ws_shared_route_success"
+	MsgWsSharedUnbindSuccess    MsgKey = "ws_shared_unbind_success"
+	MsgWsSharedListEmpty        MsgKey = "ws_shared_list_empty"
+	MsgWsSharedListTitle        MsgKey = "ws_shared_list_title"
+	MsgWsSharedOnlyHint         MsgKey = "ws_shared_only_hint"
+	MsgWsNotFoundHint           MsgKey = "ws_not_found_hint"
+	MsgWsNotFoundHintGitOnly    MsgKey = "ws_not_found_hint_git_only"
+	MsgWsResolutionError        MsgKey = "ws_resolution_error"
+	MsgWsCloneProgress          MsgKey = "ws_clone_progress"
+	MsgWsCloneSuccess           MsgKey = "ws_clone_success"
+	MsgWsCloneFailed            MsgKey = "ws_clone_failed"
+	MsgWsInitDirNotFound        MsgKey = "ws_init_dir_not_found"
+	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
+	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
+	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -854,6 +900,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "(新規 — まだ開始されていません)",
 		LangSpanish:            "(nuevo — aún no iniciado)",
 	},
+	MsgUntitled: {
+		LangEnglish:            "(untitled)",
+		LangChinese:            "(未命名)",
+		LangTraditionalChinese: "(未命名)",
+		LangJapanese:           "(無題)",
+		LangSpanish:            "(sin título)",
+	},
 	MsgLangChanged: {
 		LangEnglish:            "🌐 Language switched to **%s**.",
 		LangChinese:            "🌐 语言已切换为 **%s**。",
@@ -912,7 +965,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Manage heartbeat\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
@@ -955,7 +1008,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  管理定时任务\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
@@ -997,7 +1050,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  管理定時任務\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
@@ -1038,7 +1091,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
-			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  スケジュールタスク管理\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
@@ -1079,7 +1132,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
@@ -1197,7 +1250,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <command> — Run a shell command (! shortcut)\n" +
 			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
-			"/cron [add|list|del|...] — Scheduled tasks\n" +
+			"/cron [add|list|exec|del|...] — Scheduled tasks\n" +
 			"/commands [add|del] — Custom commands\n" +
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
@@ -1207,7 +1260,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <命令> — 执行 Shell 命令（!快捷方式）\n" +
 			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
-			"/cron [add|list|del|...] — 定时任务\n" +
+			"/cron [add|list|exec|del|...] — 定时任务\n" +
 			"/commands [add|del] — 自定义命令\n" +
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1217,7 +1270,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
 			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
-			"/cron [add|list|del|...] — 定時任務\n" +
+			"/cron [add|list|exec|del|...] — 定時任務\n" +
 			"/commands [add|del] — 自訂命令\n" +
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1227,7 +1280,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
 			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
-			"/cron [add|list|del|...] — スケジュールタスク\n" +
+			"/cron [add|list|exec|del|...] — スケジュールタスク\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
@@ -1237,7 +1290,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
 			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
-			"/cron [add|list|del|...] — Tareas programadas\n" +
+			"/cron [add|list|exec|del|...] — Tareas programadas\n" +
 			"/commands [add|del] — Comandos personalizados\n" +
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
@@ -1709,11 +1762,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El programador de tareas no está disponible.",
 	},
 	MsgCronUsage: {
-		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
-		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
-		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
-		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
-		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
+		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron exec <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
+		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron exec <id> 立即执行\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
+		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron exec <id> 立即執行\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
+		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron exec <id> 今すぐ実行\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
+		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron exec <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
 	},
 	MsgCronAddUsage: {
 		LangEnglish:            "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
@@ -1758,11 +1811,32 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⏰ Tareas programadas (%d)",
 	},
 	MsgCronListFooter: {
-		LangEnglish:            "`/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
-		LangChinese:            "`/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "`/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "`/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "`/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+		LangEnglish:            "`/cron exec <id>` trigger now · `/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
+		LangChinese:            "`/cron exec <id>` 立即触发 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
+		LangTraditionalChinese: "`/cron exec <id>` 立即觸發 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
+		LangJapanese:           "`/cron exec <id>` 今すぐ実行 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
+		LangSpanish:            "`/cron exec <id>` ejecutar ahora · `/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+	},
+	MsgCronExecUsage: {
+		LangEnglish:            "Usage: /cron exec <id>",
+		LangChinese:            "用法：/cron exec <id>",
+		LangTraditionalChinese: "用法：/cron exec <id>",
+		LangJapanese:           "使い方: /cron exec <id>",
+		LangSpanish:            "Uso: /cron exec <id>",
+	},
+	MsgCronTriggered: {
+		LangEnglish:            "▶️ Cron job `%s` triggered.",
+		LangChinese:            "▶️ 定时任务 `%s` 已触发。",
+		LangTraditionalChinese: "▶️ 定時任務 `%s` 已觸發。",
+		LangJapanese:           "▶️ スケジュールタスク `%s` を実行しました。",
+		LangSpanish:            "▶️ Tarea programada `%s` ejecutada.",
+	},
+	MsgCronProjectUnavailable: {
+		LangEnglish:            "❌ This cron job cannot be triggered because its project is no longer available.",
+		LangChinese:            "❌ 该定时任务关联的项目已不可用，无法触发。",
+		LangTraditionalChinese: "❌ 該定時任務關聯的專案已不可用，無法觸發。",
+		LangJapanese:           "❌ このスケジュールタスクは、関連するプロジェクトが利用できないため実行できません。",
+		LangSpanish:            "❌ Esta tarea programada no puede ejecutarse porque su proyecto ya no está disponible.",
 	},
 	MsgCronDelUsage: {
 		LangEnglish:            "Usage: /cron del <id>",
@@ -1814,11 +1888,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🔔 Tarea programada `%s` reactivada.",
 	},
 	MsgCronCardHint: {
-		LangEnglish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
-		LangChinese:            "💡 `/cron add` 添加 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "💡 `/cron add` 追加 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangEnglish:            "💡 `/cron add` · `/cron exec <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangChinese:            "💡 `/cron add` 添加 · `/cron exec <id>` 触发 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
+		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron exec <id>` 觸發 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
+		LangJapanese:           "💡 `/cron add` 追加 · `/cron exec <id>` 実行 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
+		LangSpanish:            "💡 `/cron add` · `/cron exec <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
 	},
 	MsgCronBtnEnable: {
 		LangEnglish:            "Enable",
@@ -3383,11 +3457,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Detener ejecución actual",
 	},
 	MsgBuiltinCmdCron: {
-		LangEnglish:            "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
-		LangChinese:            "管理定时任务，参数: [add|list|del|enable|disable]",
-		LangTraditionalChinese: "管理定時任務，參數: [add|list|del|enable|disable]",
-		LangJapanese:           "スケジュールタスク管理、引数: [add|list|del|enable|disable]",
-		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|del|enable|disable]",
+		LangEnglish:            "Manage scheduled tasks, arg: [add|list|exec|del|enable|disable]",
+		LangChinese:            "管理定时任务，参数: [add|list|exec|del|enable|disable]",
+		LangTraditionalChinese: "管理定時任務，參數: [add|list|exec|del|enable|disable]",
+		LangJapanese:           "スケジュールタスク管理、引数: [add|list|exec|del|enable|disable]",
+		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|exec|del|enable|disable]",
 	},
 	MsgBuiltinCmdCommands: {
 		LangEnglish:            "Manage custom slash commands, arg: [add|del]",
@@ -3853,6 +3927,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL またはローカルディレクトリパスを送信するか、`/workspace init <urlまたはパス>` を使用してください。",
 		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git, una ruta de directorio local, o usa `/workspace init <url-o-ruta>`.",
 	},
+	MsgWsNotFoundHintGitOnly: {
+		LangEnglish:            "No workspace found for this channel. Send a git repo URL or use `/workspace init <git-url>`.",
+		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址，或使用 `/workspace init <git仓库地址>`。",
+		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址，或使用 `/workspace init <git倉庫地址>`。",
+		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL を送信するか、`/workspace init <git-url>` を使用してください。",
+		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git o usa `/workspace init <git-url>`.",
+	},
 	MsgWsResolutionError: {
 		LangEnglish:            "Workspace resolution error: %v",
 		LangChinese:            "工作区解析错误: %v",
@@ -3895,10 +3976,19 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "git URL（例: `https://github.com/org/repo`）またはローカルディレクトリパスを指定してください。",
 		LangSpanish:            "Proporcione una URL de git (ej. `https://github.com/org/repo`) o una ruta de directorio local.",
 	},
+	MsgWsInitLocalPathsDisabled: {
+		LangEnglish:            "Local directory targets are disabled for `/workspace init`. Use a git URL, or enable `workspace_init_allow_local_paths = true` for this project.",
+		LangChinese:            "`/workspace init` 未启用本地目录目标。请使用 git 仓库地址，或在此项目配置 `workspace_init_allow_local_paths = true`。",
+		LangTraditionalChinese: "`/workspace init` 未啟用本機目錄目標。請使用 git 倉庫地址，或在此專案配置 `workspace_init_allow_local_paths = true`。",
+		LangJapanese:           "`/workspace init` ではローカルディレクトリ対象が無効です。git URL を使うか、このプロジェクトで `workspace_init_allow_local_paths = true` を有効にしてください。",
+		LangSpanish:            "Los destinos de directorio local están deshabilitados para `/workspace init`. Use una URL de git o habilite `workspace_init_allow_local_paths = true` para este proyecto.",
+	},
 }
 
 func (i *I18n) T(key MsgKey) string {
+	i.mu.RLock()
 	lang := i.currentLang()
+	i.mu.RUnlock()
 	if msg, ok := messages[key]; ok {
 		if translated, ok := msg[lang]; ok {
 			return translated

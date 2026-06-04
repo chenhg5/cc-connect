@@ -507,8 +507,62 @@ func TestSplitMessageCodeFenceAware_ChunkDoesNotExceedMaxLen(t *testing.T) {
 		t.Fatalf("expected multiple chunks, got %d", len(chunks))
 	}
 	for i, chunk := range chunks {
-		if len(chunk) > maxLen {
-			t.Errorf("chunk %d exceeds maxLen (%d): len=%d, content=%q", i, maxLen, len(chunk), chunk)
+		if len([]rune(chunk)) > maxLen {
+			t.Errorf("chunk %d exceeds maxLen (%d): runes=%d, content=%q", i, maxLen, len([]rune(chunk)), chunk)
+		}
+	}
+}
+
+func TestSplitMessageCodeFenceAware_LongSingleLine(t *testing.T) {
+	// A single line that exceeds maxLen must be split within the line.
+	line := strings.Repeat("x", 250)
+	chunks := SplitMessageCodeFenceAware(line, 100)
+	if len(chunks) < 3 {
+		t.Fatalf("expected at least 3 chunks for 250-char line with maxLen=100, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if len([]rune(chunk)) > 100 {
+			t.Errorf("chunk %d exceeds maxLen: runes=%d", i, len([]rune(chunk)))
+		}
+	}
+	// Content must be fully preserved.
+	joined := strings.Join(chunks, "")
+	if joined != line {
+		t.Errorf("content not preserved after split: got len=%d", len(joined))
+	}
+}
+
+func TestSplitMessageCodeFenceAware_LongSingleLineInCodeBlock(t *testing.T) {
+	// A very long line inside a code block must be split and fences re-opened.
+	longLine := strings.Repeat("a", 200)
+	text := "```go\n" + longLine + "\n```"
+	maxLen := 80
+	chunks := SplitMessageCodeFenceAware(text, maxLen)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if len([]rune(chunk)) > maxLen {
+			t.Errorf("chunk %d exceeds maxLen (%d): runes=%d", i, maxLen, len([]rune(chunk)))
+		}
+	}
+	// Every chunk except the last must end with ``` (closing fence).
+	for i, chunk := range chunks[:len(chunks)-1] {
+		if !strings.HasSuffix(chunk, "```") {
+			t.Errorf("chunk %d missing closing fence: %q", i, chunk)
+		}
+	}
+}
+
+func TestSplitMessageCodeFenceAware_UnicodeLines(t *testing.T) {
+	// Unicode content: rune count != byte count.
+	// Each Chinese character is 3 bytes but 1 rune.
+	line := strings.Repeat("中", 50) // 50 runes, 150 bytes
+	text := line + "\n" + line
+	chunks := SplitMessageCodeFenceAware(text, 60)
+	for i, chunk := range chunks {
+		if len([]rune(chunk)) > 60 {
+			t.Errorf("chunk %d exceeds maxLen in runes: %d", i, len([]rune(chunk)))
 		}
 	}
 }
@@ -576,5 +630,34 @@ func TestMarkdownToSimpleHTML_Callout(t *testing.T) {
 				t.Errorf("expected %q in output, got %q", tt.want, out)
 			}
 		})
+	}
+}
+
+// TestMarkdownToSimpleHTML_ManyInlineCodePlaceholders is a regression test for
+// a placeholder-collision bug in convertInlineHTML: the placeholder key used
+// to encode the index as `string(rune('0'+phIdx))`, which rolled past '9' once
+// phIdx hit 10. phIdx == 12 produced a key containing '<' and phIdx == 14 one
+// containing '>'. The whole-string escapeHTML pass then rewrote those chars
+// inside the keys to "&lt;" / "&gt;", so the restore pass at the end could no
+// longer find the keys and the final HTML leaked literal "\x00PH<\x00" /
+// "\x00PH>\x00" fragments while losing the original code/link content.
+func TestMarkdownToSimpleHTML_ManyInlineCodePlaceholders(t *testing.T) {
+	// 15 inline-code segments forces phIdx through 12 ('<') and 14 ('>').
+	in := "Functions are " +
+		"`f0`, `f1`, `f2`, `f3`, `f4`, `f5`, `f6`, `f7`, " +
+		"`f8`, `f9`, `fA`, `fB`, `fC`, `fD`, `fE` here."
+	out := MarkdownToSimpleHTML(in)
+
+	if strings.ContainsRune(out, 0) {
+		t.Fatalf("output leaked NUL placeholder: %q", out)
+	}
+	if strings.Contains(out, "PH&lt;") || strings.Contains(out, "PH&gt;") {
+		t.Fatalf("output leaked escaped placeholder fragment: %q", out)
+	}
+	for _, name := range []string{"f0", "f1", "f9", "fA", "fB", "fC", "fD", "fE"} {
+		want := "<code>" + name + "</code>"
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s, got %q", want, out)
+		}
 	}
 }

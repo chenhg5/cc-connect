@@ -114,6 +114,8 @@
     "lastRun": "上次运行",
     "lastError": "上次错误",
     "add": "添加任务",
+    "trigger": "立即执行",
+    "triggerPending": "已触发，结果稍后更新。",
     "delete": "删除",
     "noJobs": "暂无定时任务",
     "workDir": "工作目录",

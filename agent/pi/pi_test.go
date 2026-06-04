@@ -42,6 +42,17 @@ func TestNormalizeMode(t *testing.T) {
 // ── Agent constructor ────────────────────────────────────────
 
 func TestNew_DefaultValues(t *testing.T) {
+	// Isolate from real settings.json so we test pure defaults.
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	t.Cleanup(func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	})
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+
 	// Use a command that exists on all systems.
 	ag, err := New(map[string]any{"cmd": "echo"})
 	if err != nil {
@@ -154,8 +165,172 @@ func TestAgent_ModeGetSet(t *testing.T) {
 
 func TestAgent_AvailableModels(t *testing.T) {
 	a := &Agent{}
-	if models := a.AvailableModels(context.Background()); models != nil {
-		t.Errorf("AvailableModels() = %v, want nil", models)
+	// Without settings.json, should return nil (no error logged — just empty).
+	models := a.AvailableModels(context.Background())
+	if models == nil {
+		// No settings file — acceptable in test environments.
+		return
+	}
+	// If settings.json exists with enabledModels, should return them.
+	for _, m := range models {
+		if m.Name == "" {
+			t.Errorf("model with empty Name: %+v", m)
+		}
+	}
+}
+
+func TestReadSettingsModels(t *testing.T) {
+	// Save and restore settings path.
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	t.Cleanup(func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	})
+
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	// No settings.json -> error.
+	_, err := readSettingsModels()
+	if err == nil {
+		t.Error("expected error for missing settings.json")
+	}
+
+	// Write settings.json with enabledModels.
+	settings := map[string]any{
+		"enabledModels": []string{
+			"provider-a/family-a/model-alpha",
+			"provider-a/family-a/model-beta",
+			"provider-b/family-b/model-gamma",
+		},
+		"defaultModel":  "family-a/model-beta",
+		"defaultProvider": "provider-a",
+	}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	models, err := readSettingsModels()
+	if err != nil {
+		t.Fatalf("readSettingsModels() error = %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("got %d models, want 3", len(models))
+	}
+
+	tests := []struct {
+		name  string
+		alias string
+	}{
+		{"provider-a/family-a/model-alpha", "model-alpha"},
+		{"provider-a/family-a/model-beta", "model-beta"},
+		{"provider-b/family-b/model-gamma", "model-gamma"},
+	}
+	for i, tt := range tests {
+		if models[i].Name != tt.name {
+			t.Errorf("models[%d].Name = %q, want %q", i, models[i].Name, tt.name)
+		}
+		if models[i].Alias != tt.alias {
+			t.Errorf("models[%d].Alias = %q, want %q", i, models[i].Alias, tt.alias)
+		}
+	}
+}
+
+func TestReadDefaultModel(t *testing.T) {
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	t.Cleanup(func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	})
+
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	// No file -> error.
+	_, err := readDefaultModel()
+	if err == nil {
+		t.Error("expected error for missing settings.json")
+	}
+
+	// Write with both defaultProvider and defaultModel.
+	settings := map[string]any{
+		"defaultModel":    "family-a/model-beta",
+		"defaultProvider": "provider-a",
+	}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	model, err := readDefaultModel()
+	if err != nil {
+		t.Fatalf("readDefaultModel() error = %v", err)
+	}
+	if model != "family-a/model-beta" {
+		t.Errorf("defaultModel = %q, want %q", model, "family-a/model-beta")
+	}
+
+	// With model without provider prefix and defaultProvider set.
+	settings2 := map[string]any{
+		"defaultModel":    "gpt-4o",
+		"defaultProvider": "provider-b",
+	}
+	data2, _ := json.Marshal(settings2)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data2, 0o644); err != nil {
+		t.Fatalf("write settings2: %v", err)
+	}
+
+	model2, _ := readDefaultModel()
+	if model2 != "provider-b/gpt-4o" {
+		t.Errorf("qualified defaultModel = %q, want %q", model2, "provider-b/gpt-4o")
+	}
+}
+
+func TestPiSettingsDir(t *testing.T) {
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	defer func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	}()
+
+	// With env var set.
+	t.Setenv("PI_CODING_AGENT_DIR", "/custom/pi/path")
+	if d := piSettingsDir(); d != "/custom/pi/path" {
+		t.Errorf("piSettingsDir() = %q, want /custom/pi/path", d)
+	}
+
+	// Unset env var -> default.
+	_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+	home, _ := os.UserHomeDir()
+	want := filepath.Join(home, ".pi", "agent")
+	if d := piSettingsDir(); d != want {
+		t.Errorf("piSettingsDir() = %q, want %q", d, want)
+	}
+}
+
+func TestSettingsPath(t *testing.T) {
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	defer func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	}()
+
+	t.Setenv("PI_CODING_AGENT_DIR", "/custom")
+	if p := settingsPath(); p != "/custom/settings.json" {
+		t.Errorf("settingsPath() = %q, want /custom/settings.json", p)
 	}
 }
 
@@ -212,7 +387,7 @@ func TestAgent_MemoryFiles(t *testing.T) {
 	}
 
 	global := a.GlobalMemoryFile()
-	if !strings.HasSuffix(global, filepath.Join(".pi", "AGENTS.md")) {
+	if !strings.HasSuffix(global, filepath.Join(".pi", "agent", "AGENTS.md")) {
 		t.Errorf("GlobalMemoryFile() = %q", global)
 	}
 }
@@ -313,7 +488,7 @@ func TestTruncStr(t *testing.T) {
 // ── saveImagesToDisk ─────────────────────────────────────────
 
 func TestSaveImagesToDisk(t *testing.T) {
-	tmpDir := t.TempDir()
+	attachDir := filepath.Join(t.TempDir(), ".cc-connect", "attachments", "pi-test")
 	images := []core.ImageAttachment{
 		{MimeType: "image/png", Data: []byte("png-data"), FileName: "test.png"},
 		{MimeType: "image/jpeg", Data: []byte("jpg-data")},
@@ -322,7 +497,7 @@ func TestSaveImagesToDisk(t *testing.T) {
 		{MimeType: "image/bmp", Data: []byte("bmp-data")}, // unknown mime → .png default
 	}
 
-	paths := saveImagesToDisk(tmpDir, images)
+	paths := saveImagesToDisk(attachDir, images)
 	if len(paths) != 5 {
 		t.Fatalf("got %d paths, want 5", len(paths))
 	}
@@ -363,6 +538,81 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 	}
 }
 
+// TestSaveImagesToDisk_RejectsPathTraversal is a regression test for a path
+// traversal vulnerability in saveImagesToDisk: the user-supplied
+// ImageAttachment.FileName (sourced from IM upload metadata) was passed
+// directly to filepath.Join, so a malicious uploader could escape the
+// attachments directory by using `../` segments. This mirrors the same
+// issue and fix in core.SaveFilesToDisk.
+func TestSaveImagesToDisk_RejectsPathTraversal(t *testing.T) {
+	workDir := t.TempDir()
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+
+	images := []core.ImageAttachment{
+		// Two levels up — escapes attachments/ and .cc-connect/.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "../../escape.png"},
+		// Three levels up — would land outside workDir entirely.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "../../../way-up.png"},
+		// Windows-style separators must also be stripped on Linux.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: `..\..\winescape.png`},
+		// Plain name still works.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "ok.png"},
+		// "." sanitizes to empty so the generated-name fallback kicks in,
+		// not a write to the attachments directory itself.
+		{MimeType: "image/png", Data: []byte("payload"), FileName: "."},
+	}
+
+	paths := saveImagesToDisk(attachDir, images)
+
+	// Every returned path must live inside attachDir.
+	for _, p := range paths {
+		if !strings.HasPrefix(p, attachDir+string(filepath.Separator)) {
+			t.Errorf("saveImagesToDisk wrote outside attachments dir: %q (attachDir=%q)", p, attachDir)
+		}
+	}
+
+	// Walk workDir and assert no file exists outside attachDir.
+	if err := filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasPrefix(path, attachDir+string(filepath.Separator)) {
+			t.Errorf("found stray attachment outside attachments dir: %q", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	// Sanity: legitimate "ok.png" must still have been saved.
+	if _, err := os.Stat(filepath.Join(attachDir, "ok.png")); err != nil {
+		t.Errorf("legitimate ok.png not saved: %v", err)
+	}
+}
+
+func TestSanitizePiAttachmentName(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"image.png", "image.png"},
+		{"subdir/file.png", "file.png"},
+		{"../../escape.png", "escape.png"},
+		{`..\..\winescape.png`, "winescape.png"},
+		{"/etc/passwd", "passwd"},
+		{"..", ""},
+		{".", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got := sanitizePiAttachmentName(tt.in)
+			if got != tt.want {
+				t.Errorf("sanitizePiAttachmentName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // ── cleanAttachments ─────────────────────────────────────────
 
 func TestCleanAttachments(t *testing.T) {
@@ -380,18 +630,51 @@ func TestCleanAttachments(t *testing.T) {
 		t.Fatalf("expected 2 files, got %d", len(entries))
 	}
 
-	cleanAttachments(tmpDir)
+	cleanAttachments(attachDir)
 
-	// Files should be removed.
-	entries, _ = os.ReadDir(attachDir)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 files after clean, got %d", len(entries))
+	// Directory should be removed.
+	if _, err := os.Stat(attachDir); !os.IsNotExist(err) {
+		t.Errorf("expected attachments dir removed after clean, got err=%v", err)
 	}
 }
 
 func TestCleanAttachments_NonexistentDir(t *testing.T) {
 	// Should not panic or error on non-existent directory.
 	cleanAttachments("/nonexistent/path/xyz")
+}
+
+func TestPiSessionAttachmentDirsAreIsolated(t *testing.T) {
+	workDir := t.TempDir()
+	s1, err := newPiSession(context.Background(), "pi", workDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := newPiSession(context.Background(), "pi", workDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1.attachDir == s2.attachDir {
+		t.Fatalf("expected distinct attachment dirs, got %q", s1.attachDir)
+	}
+
+	if err := os.MkdirAll(s1.attachDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(s2.attachDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s1.attachDir, "one.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s2.attachDir, "two.txt"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanAttachments(s1.attachDir)
+
+	if _, err := os.Stat(filepath.Join(s2.attachDir, "two.txt")); err != nil {
+		t.Fatalf("cleaning one session removed another session's attachment: %v", err)
+	}
 }
 
 // ── handleEvent ──────────────────────────────────────────────
@@ -522,15 +805,15 @@ func TestHandleMessageUpdate_ThinkingAccumulation(t *testing.T) {
 
 	// Multiple thinking deltas should be accumulated.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "Let me "},
 	})
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "think about "},
 	})
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "this."},
 	})
 
@@ -542,7 +825,7 @@ func TestHandleMessageUpdate_ThinkingAccumulation(t *testing.T) {
 
 	// thinking_end triggers the accumulated event.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_end"},
 	})
 
@@ -564,7 +847,7 @@ func TestHandleMessageUpdate_ThinkingEndEmpty(t *testing.T) {
 
 	// thinking_end with no prior deltas should not emit.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_end"},
 	})
 
@@ -580,7 +863,7 @@ func TestHandleMessageUpdate_ThinkingDeltaEmpty(t *testing.T) {
 
 	// Empty deltas should not grow the buffer.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": ""},
 	})
 

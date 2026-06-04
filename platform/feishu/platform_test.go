@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +115,84 @@ func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid progress_style") {
 		t.Fatalf("error = %q, want invalid progress_style", err.Error())
+	}
+}
+
+func TestDetectFeishuFileMessageType(t *testing.T) {
+	tests := []struct {
+		name     string
+		mimeType string
+		fileName string
+		fileType string
+		msgType  string
+	}{
+		{
+			name:     "mp4 video",
+			mimeType: "video/mp4",
+			fileName: "demo.mp4",
+			fileType: larkim.FileTypeMp4,
+			msgType:  larkim.MsgTypeMedia,
+		},
+		{
+			name:     "opus audio",
+			mimeType: "audio/ogg",
+			fileName: "voice.ogg",
+			fileType: larkim.FileTypeOpus,
+			msgType:  larkim.MsgTypeAudio,
+		},
+		{
+			name:     "pdf file",
+			mimeType: "application/pdf",
+			fileName: "report.pdf",
+			fileType: larkim.FileTypePdf,
+			msgType:  larkim.MsgTypeFile,
+		},
+		{
+			name:     "unknown file",
+			mimeType: "application/octet-stream",
+			fileName: "payload.bin",
+			fileType: larkim.FileTypeStream,
+			msgType:  larkim.MsgTypeFile,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fileType := detectFeishuFileType(tt.mimeType, tt.fileName)
+			if fileType != tt.fileType {
+				t.Fatalf("detectFeishuFileType() = %q, want %q", fileType, tt.fileType)
+			}
+			if msgType := detectFeishuFileMessageType(fileType); msgType != tt.msgType {
+				t.Fatalf("detectFeishuFileMessageType() = %q, want %q", msgType, tt.msgType)
+			}
+		})
+	}
+}
+
+func TestBuildFeishuFileMessageContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		msgType string
+	}{
+		{name: "file", msgType: larkim.MsgTypeFile},
+		{name: "audio", msgType: larkim.MsgTypeAudio},
+		{name: "media", msgType: larkim.MsgTypeMedia},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content, err := buildFeishuFileMessageContent(tt.msgType, "file_v2_test")
+			if err != nil {
+				t.Fatalf("buildFeishuFileMessageContent() error = %v", err)
+			}
+			var got map[string]string
+			if err := json.Unmarshal([]byte(content), &got); err != nil {
+				t.Fatalf("content is not JSON: %v", err)
+			}
+			if got["file_key"] != "file_v2_test" {
+				t.Fatalf("file_key = %q, want file_v2_test", got["file_key"])
+			}
+		})
 	}
 }
 
@@ -828,6 +909,22 @@ func TestLark_ReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestUserIDFromEventFallsBackToUserID(t *testing.T) {
+	userID := "uid_user123"
+	if got := userIDFromEvent(&larkim.UserId{UserId: &userID}); got != userID {
+		t.Fatalf("userIDFromEvent() = %q, want %q", got, userID)
+	}
+}
+
+func TestResolveUserNameSkipsInvalidLookupID(t *testing.T) {
+	p := &Platform{}
+	for _, id := range []string{"", "feishu:oc_chat:ou_user", "ou user"} {
+		if got := p.resolveUserName(id); got != id {
+			t.Fatalf("resolveUserName(%q) = %q, want unchanged", id, got)
+		}
+	}
+}
+
 func stringPtr(s string) *string { return &s }
 
 func TestSanitizeMarkdownURLs(t *testing.T) {
@@ -928,6 +1025,97 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	}
 }
 
+func TestBuildPreviewCardJSON_ProgressPayloadSeparatesReasoningAndTools(t *testing.T) {
+	exitCode := 0
+	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryThinking, Text: "Inspecting event routing"},
+		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
+		{Kind: core.ProgressEntryToolResult, Tool: "Bash", Text: "/tmp/project", ExitCode: &exitCode},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+
+	panels := collectCardPanels(t, buildPreviewCardJSON(payload))
+	if len(panels) != 2 {
+		t.Fatalf("panel count = %d, want 2 panels: %#v", len(panels), panels)
+	}
+	if got := cardPanelTitle(panels[0]); got != "Reasoning (1)" {
+		t.Fatalf("first panel title = %q, want Reasoning (1)", got)
+	}
+	if got := cardPanelTitle(panels[1]); got != "Tools (2)" {
+		t.Fatalf("second panel title = %q, want Tools (2)", got)
+	}
+	if panelContains(t, panels[0], "pwd") {
+		t.Fatalf("reasoning panel should not include tool content: %#v", panels[0])
+	}
+	if panelContains(t, panels[1], "Inspecting event routing") {
+		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
+	}
+	if !panelContains(t, panels[0], "mindmap_outlined") {
+		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
+	}
+}
+
+func TestBuildPreviewCardJSON_ProgressPayloadUsesToolDescriptors(t *testing.T) {
+	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
+		{Kind: core.ProgressEntryToolUse, Tool: "web_fetch", Text: "https://example.com/docs?token=secret"},
+	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+
+	panels := collectCardPanels(t, buildPreviewCardJSON(payload))
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
+	}
+	if !panelContains(t, panels[0], "language_outlined") {
+		t.Fatalf("tools panel should use web fetch icon: %#v", panels[0])
+	}
+	if !panelContains(t, panels[0], "Fetch web page") {
+		t.Fatalf("tools panel should use descriptor title: %#v", panels[0])
+	}
+	if panelContains(t, panels[0], "token=secret") {
+		t.Fatalf("tools panel should redact sensitive URL query params: %#v", panels[0])
+	}
+}
+
+func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"pwd"}`},
+		{Kind: core.ToolStepKindTool, Name: "functions.write_stdin", Summary: `{"chars":"q"}`},
+		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"git status --short"}`},
+		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"ps aux | grep cc-connect"}`},
+		{Kind: core.ToolStepKindTool, Name: "apply_patch", Summary: "/tmp/file.go"},
+		{Kind: core.ToolStepKindTool, Name: "multi_tool_use.parallel", Summary: "3 tool calls"},
+		{Kind: core.ToolStepKindTool, Name: "tool_search_tool", Summary: "search available tools"},
+		{Kind: core.ToolStepKindTool, Name: "update_plan", Summary: "revise checklist"},
+		{Kind: core.ToolStepKindTool, Name: "request_user_input", Summary: "ask for confirmation"},
+	}, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
+	}
+	for _, want := range []string{
+		"Inspect files",
+		"Command I/O",
+		"Git",
+		"Inspect process",
+		"Edit",
+		"Run tools",
+		"Search tools",
+		"Update plan",
+		"Ask user",
+		"file-link-text_outlined",
+		"keyboard_outlined",
+		"code_outlined",
+		"computer_outlined",
+		"edit_outlined",
+		"list-check_outlined",
+		"search_outlined",
+		"robot_outlined",
+	} {
+		if !panelContains(t, panels[0], want) {
+			t.Fatalf("tools panel should contain %q: %#v", want, panels[0])
+		}
+	}
+}
+
 func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	code := 0
 	success := true
@@ -943,7 +1131,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 			Success:  &success,
 			Done:     true,
 		},
-	}, "done", true, time.Second)
+	}, "done", true, "")
 
 	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
 		if !strings.Contains(cardJSON, want) {
@@ -955,6 +1143,380 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_OversizePanelsKeepVisibleContent(t *testing.T) {
+	var steps []core.ToolStep
+	for i := 0; i < 40; i++ {
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindThinking,
+			Name:    "Thinking",
+			Summary: "visible reasoning " + strconv.Itoa(i) + " " + strings.Repeat("r", 700),
+		})
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindTool,
+			Name:    "Bash",
+			Summary: "visible command " + strconv.Itoa(i) + " " + strings.Repeat("c", 700),
+			Result:  "visible result " + strconv.Itoa(i) + " " + strings.Repeat("o", 700),
+			Done:    true,
+		})
+	}
+
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) == 0 {
+		t.Fatalf("oversize rich card should preserve compact reasoning/tool panels instead of blank fallback: %q", cardJSON)
+	}
+	rendered := strings.Join(collectCardMarkdownContents(t, cardJSON), "\n") + "\n" + cardJSON
+	if !strings.Contains(rendered, "visible reasoning") && !strings.Contains(rendered, "visible command") {
+		t.Fatalf("oversize rich card should keep visible step content, got %q", cardJSON)
+	}
+}
+
+func TestBuildRichCard_PanelsShowLatestTenSteps(t *testing.T) {
+	var steps []core.ToolStep
+	for i := 0; i < 15; i++ {
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindThinking,
+			Name:    "Thinking",
+			Summary: "reasoning-index-" + strconv.Itoa(i),
+		})
+		steps = append(steps, core.ToolStep{
+			Kind:    core.ToolStepKindTool,
+			Name:    "Bash",
+			Summary: "tool-command-" + strconv.Itoa(i),
+			Result:  "tool-result-" + strconv.Itoa(i),
+			Done:    true,
+		})
+	}
+
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 2 {
+		t.Fatalf("panel count = %d, want reasoning and tools panels: %#v", len(panels), panels)
+	}
+	for _, tt := range []struct {
+		name          string
+		panel         map[string]any
+		oldestHidden  string
+		windowStart   string
+		latestVisible string
+		resultVisible string
+		hiddenSummary string
+	}{
+		{
+			name:          "reasoning",
+			panel:         panels[0],
+			oldestHidden:  "reasoning-index-0",
+			windowStart:   "reasoning-index-5",
+			latestVisible: "reasoning-index-14",
+			hiddenSummary: "5 earlier steps hidden",
+		},
+		{
+			name:          "tools",
+			panel:         panels[1],
+			oldestHidden:  "tool-command-0",
+			windowStart:   "tool-command-5",
+			latestVisible: "tool-command-14",
+			resultVisible: "tool-result-14",
+			hiddenSummary: "5 earlier steps hidden",
+		},
+	} {
+		if panelContains(t, tt.panel, tt.oldestHidden) {
+			t.Fatalf("%s panel should hide oldest step %q: %#v", tt.name, tt.oldestHidden, tt.panel)
+		}
+		for _, want := range []string{tt.windowStart, tt.latestVisible, tt.resultVisible, tt.hiddenSummary} {
+			if want == "" {
+				continue
+			}
+			if !panelContains(t, tt.panel, want) {
+				t.Fatalf("%s panel should contain %q: %#v", tt.name, want, tt.panel)
+			}
+		}
+	}
+}
+
+func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
+	}, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 2 {
+		t.Fatalf("panel count = %d, want 2 panels: %#v", len(panels), panels)
+	}
+	if got := cardPanelTitle(panels[0]); got != "Reasoning (1)" {
+		t.Fatalf("first panel title = %q, want Reasoning (1)", got)
+	}
+	if got := cardPanelTitle(panels[1]); got != "Tools (1)" {
+		t.Fatalf("second panel title = %q, want Tools (1)", got)
+	}
+	if panelContains(t, panels[0], "pwd") {
+		t.Fatalf("reasoning panel should not include tool content: %#v", panels[0])
+	}
+	if panelContains(t, panels[1], "Inspecting event routing") {
+		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
+	}
+	if !panelContains(t, panels[0], "mindmap_outlined") {
+		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
+	}
+}
+
+func TestBuildRichCard_UsesToolDescriptorsForAliases(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
+		{Kind: core.ToolStepKindTool, Name: "web_fetch", Summary: "https://example.com/docs?token=secret"},
+	}, "answer", true, "")
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
+	}
+	if !panelContains(t, panels[0], "language_outlined") {
+		t.Fatalf("tools panel should use web fetch icon: %#v", panels[0])
+	}
+	if !panelContains(t, panels[0], "Fetch web page") {
+		t.Fatalf("tools panel should use descriptor title: %#v", panels[0])
+	}
+	if panelContains(t, panels[0], "token=secret") {
+		t.Fatalf("tools panel should redact sensitive URL query params: %#v", panels[0])
+	}
+}
+
+func TestBuildRichCard_SanitizesMarkdownForCardLimits(t *testing.T) {
+	markdown := strings.Join([]string{
+		"```",
+		"| code |",
+		"|---|",
+		"| example |",
+		"```",
+		"",
+		"# Big Result",
+		"| A |",
+		"|---|",
+		"| 1 |",
+		"",
+		"| B |",
+		"|---|",
+		"| 2 |",
+		"",
+		"| C |",
+		"|---|",
+		"| 3 |",
+		"",
+		"| D |",
+		"|---|",
+		"| 4 |",
+		"",
+		"![remote](https://example.com/image.png)",
+		"![ok](img_v3_abc)",
+	}, "\n")
+
+	content := strings.Join(collectCardMarkdownContents(t, buildRichCard(core.CardStatusDone, "", nil, markdown, false, "")), "\n")
+	if containsMarkdownLine(content, "# Big Result") {
+		t.Fatalf("card markdown should downgrade h1 headings, got %q", content)
+	}
+	if !strings.Contains(content, "#### Big Result") {
+		t.Fatalf("card markdown should render h1 as h4, got %q", content)
+	}
+	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
+		t.Fatalf("fourth table should be downgraded to a code block, got %q", content)
+	}
+	if !strings.Contains(content, "```\n| code |\n|---|\n| example |\n```") {
+		t.Fatalf("existing code block tables should stay intact, got %q", content)
+	}
+	if strings.Contains(content, "![remote]") || strings.Contains(content, "https://example.com/image.png") {
+		t.Fatalf("card markdown should strip unresolved non-img_ images, got %q", content)
+	}
+	if !strings.Contains(content, "![ok](img_v3_abc)") {
+		t.Fatalf("card markdown should preserve Feishu image keys, got %q", content)
+	}
+}
+
+func TestResolveRichCardMarkdownUploadsRemoteImages(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var (
+		mu   sync.Mutex
+		urls []string
+	)
+	p.richCardImageUploadFunc = func(_ context.Context, rawURL string) (string, error) {
+		mu.Lock()
+		urls = append(urls, rawURL)
+		mu.Unlock()
+		return "img_v3_uploaded", nil
+	}
+
+	input := strings.Join([]string{
+		"before",
+		"![chart](https://example.com/chart.png)",
+		"![existing](img_v3_existing)",
+		"![local](/tmp/chart.png)",
+		"![inline](data:image/png;base64,abc)",
+	}, "\n")
+
+	got := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	if !strings.Contains(got, "![chart](img_v3_uploaded)") {
+		t.Fatalf("remote image should be replaced with uploaded image key, got %q", got)
+	}
+	if !strings.Contains(got, "![existing](img_v3_existing)") {
+		t.Fatalf("existing Feishu image key should be preserved, got %q", got)
+	}
+	for _, blocked := range []string{"https://example.com/chart.png", "/tmp/chart.png", "data:image"} {
+		if strings.Contains(got, blocked) {
+			t.Fatalf("unsupported or unresolved image reference %q should be stripped, got %q", blocked, got)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(urls) != 1 || urls[0] != "https://example.com/chart.png" {
+		t.Fatalf("uploaded URLs = %v, want only remote chart URL", urls)
+	}
+}
+
+func TestResolveRichCardMarkdownStreamingStartsUploadWithoutWaiting(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	seenURL := make(chan string, 1)
+	var once sync.Once
+	p.richCardImageUploadFunc = func(_ context.Context, rawURL string) (string, error) {
+		once.Do(func() {
+			seenURL <- rawURL
+			close(started)
+		})
+		<-release
+		return "img_v3_chart", nil
+	}
+
+	input := "before ![chart](https://example.com/chart.png) after"
+	start := time.Now()
+	streaming := p.ResolveRichCardMarkdown(context.Background(), input, false)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("streaming resolve waited %s, want quick unresolved strip", elapsed)
+	}
+	if strings.Contains(streaming, "https://example.com/chart.png") || strings.Contains(streaming, "![chart]") {
+		t.Fatalf("streaming resolve should strip unresolved remote image, got %q", streaming)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("streaming resolve should start background upload")
+	}
+	if rawURL := <-seenURL; rawURL != "https://example.com/chart.png" {
+		t.Fatalf("upload URL = %q, want chart URL", rawURL)
+	}
+	close(release)
+
+	final := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	if !strings.Contains(final, "![chart](img_v3_chart)") {
+		t.Fatalf("final resolve should wait for uploaded image key, got %q", final)
+	}
+}
+
+func TestResolveRichCardMarkdownFailedImageIsNotRetried(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	p.richCardImageUploadFunc = func(_ context.Context, _ string) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return "", errors.New("upload failed")
+	}
+
+	input := "before ![chart](https://example.com/chart.png) after"
+	first := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	second := p.ResolveRichCardMarkdown(context.Background(), input, true)
+
+	for _, got := range []string{first, second} {
+		if strings.Contains(got, "https://example.com/chart.png") || strings.Contains(got, "![chart]") {
+			t.Fatalf("failed remote image should be stripped, got %q", got)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("upload calls = %d, want failed URL cached after first attempt", calls)
+	}
+}
+
+func TestRichCardImageBlocksPrivateAndReservedIPs(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"169.254.169.254",
+		"100.64.0.1",
+		"192.0.2.1",
+		"2001:db8::1",
+	}
+	for _, ip := range blocked {
+		if !isBlockedRichCardImageIP(net.ParseIP(ip)) {
+			t.Fatalf("IP %s should be blocked for rich-card image fetch", ip)
+		}
+	}
+	if isBlockedRichCardImageIP(net.ParseIP("8.8.8.8")) {
+		t.Fatal("public IP 8.8.8.8 should not be blocked")
+	}
+}
+
+func containsMarkdownLine(content string, want string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
+	body := strings.Join([]string{
+		"| A |",
+		"|---|",
+		"| 1 |",
+		"",
+		"| B |",
+		"|---|",
+		"| 2 |",
+	}, "\n")
+	footer := strings.Join([]string{
+		"| C |",
+		"|---|",
+		"| 3 |",
+		"",
+		"| D |",
+		"|---|",
+		"| 4 |",
+	}, "\n")
+
+	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer)), "\n")
+	if !strings.Contains(content, "| C |\n|---|\n| 3 |") {
+		t.Fatalf("third table should remain renderable, got %q", content)
+	}
+	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
+		t.Fatalf("fourth table across card elements should be downgraded, got %q", content)
+	}
+}
+
+func TestFeishuCardAPIErrorClassification(t *testing.T) {
+	rateLimitErr := classifyFeishuCardAPIError("stream", 230020, "rate limited")
+	if !errors.Is(rateLimitErr, errFeishuCardRateLimited) {
+		t.Fatalf("230020 should be rate limit, got %v", rateLimitErr)
+	}
+
+	tableErr := classifyFeishuCardAPIError("update", 230099, "Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit; ErrorValue: table;")
+	if !errors.Is(tableErr, errFeishuCardTableLimit) {
+		t.Fatalf("230099/11310 table error should be table limit, got %v", tableErr)
+	}
+
+	otherElementErr := classifyFeishuCardAPIError("update", 230099, "Failed to create card content, ext=ErrCode: 11310; ErrMsg: element exceeds the limit;")
+	if errors.Is(otherElementErr, errFeishuCardTableLimit) {
+		t.Fatalf("generic 11310 element errors should not be treated as table limit: %v", otherElementErr)
+	}
+}
+
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
@@ -963,6 +1525,78 @@ func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
 		t.Fatalf("default preview card should contain markdown element, got %q", cardJSON)
 	}
+}
+
+func collectCardPanels(t *testing.T, cardJSON string) []map[string]any {
+	t.Helper()
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v\n%s", err, cardJSON)
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok || body == nil {
+		t.Fatalf("card JSON missing body: %#v", card)
+	}
+	rawElements, ok := body["elements"].([]any)
+	if !ok {
+		t.Fatalf("card body elements have unexpected type: %#v", body["elements"])
+	}
+	var panels []map[string]any
+	for _, raw := range rawElements {
+		elem, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if elem["tag"] == "collapsible_panel" {
+			panels = append(panels, elem)
+		}
+	}
+	return panels
+}
+
+func collectCardMarkdownContents(t *testing.T, cardJSON string) []string {
+	t.Helper()
+	var card any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("card JSON is invalid: %v\n%s", err, cardJSON)
+	}
+	var contents []string
+	var walk func(any)
+	walk = func(v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			if node["tag"] == "markdown" {
+				if content, ok := node["content"].(string); ok {
+					contents = append(contents, content)
+				}
+			}
+			for _, child := range node {
+				walk(child)
+			}
+		case []any:
+			for _, child := range node {
+				walk(child)
+			}
+		}
+	}
+	walk(card)
+	return contents
+}
+
+func cardPanelTitle(panel map[string]any) string {
+	header, _ := panel["header"].(map[string]any)
+	title, _ := header["title"].(map[string]any)
+	content, _ := title["content"].(string)
+	return content
+}
+
+func panelContains(t *testing.T, panel map[string]any, want string) bool {
+	t.Helper()
+	b, err := json.Marshal(panel)
+	if err != nil {
+		t.Fatalf("panel marshal failed: %v", err)
+	}
+	return strings.Contains(string(b), want)
 }
 
 func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
@@ -1215,5 +1849,148 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 	}
 	if !strings.Contains(result, "A&lt;") {
 		t.Fatalf("expected HTML-escaped name, got %q", result)
+	}
+}
+
+type mockRefreshPlatform struct {
+	*Platform
+	refreshCalled atomic.Int32
+	refreshDone   chan struct{}
+	refreshCard   func(ctx context.Context, sessionKey string, card *core.Card) error
+}
+
+func newMockRefreshPlatform(p *Platform) *mockRefreshPlatform {
+	return &mockRefreshPlatform{Platform: p, refreshDone: make(chan struct{})}
+}
+
+func (m *mockRefreshPlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
+	m.refreshCalled.Add(1)
+	close(m.refreshDone)
+	if m.refreshCard != nil {
+		return m.refreshCard(ctx, sessionKey, card)
+	}
+	return nil
+}
+
+func TestCardAction_NavFast_ReturnsCard(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		return core.NewCard().Markdown("list content").Build()
+	}
+
+	start := time.Now()
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
+	}
+	if elapsed >= cardNavTimeout {
+		t.Fatalf("fast nav should return within cardNavTimeout, took %v", elapsed)
+	}
+	if resp.Toast != nil {
+		t.Fatalf("expected no toast for fast response, got %q", resp.Toast.Content)
+	}
+}
+
+func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	mock := newMockRefreshPlatform(ip.Platform)
+	ip.Platform.self = mock
+
+	handlerDone := make(chan struct{})
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 200*time.Millisecond)
+		close(handlerDone)
+		return core.NewCard().Markdown("async list content").Build()
+	}
+
+	start := time.Now()
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("should return within feishu timeout, took %v", elapsed)
+	}
+	if resp.Card != nil {
+		t.Fatalf("expected no card for timeout response, got non-nil card")
+	}
+
+	select {
+	case <-mock.refreshDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RefreshCard should have been called")
+	}
+
+	if got := mock.refreshCalled.Load(); got != 1 {
+		t.Fatalf("RefreshCard called %d times, want 1", got)
+	}
+}
+
+func TestCardAction_NavSlow_NilCard_NoRefresh(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	mock := newMockRefreshPlatform(ip.Platform)
+	ip.Platform.self = mock
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 200*time.Millisecond)
+		return nil
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "nav:/list"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	time.Sleep(cardNavTimeout + 500*time.Millisecond)
+
+	if got := mock.refreshCalled.Load(); got != 0 {
+		t.Fatalf("RefreshCard should not be called for nil card, called %d times", got)
 	}
 }

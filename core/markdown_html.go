@@ -2,6 +2,7 @@ package core
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -295,8 +296,17 @@ func convertInlineHTML(s string) string {
 	var phs []placeholder
 	phIdx := 0
 
+	// The placeholder key embeds phIdx as decimal digits. The previous
+	// `string(rune('0'+phIdx))` form rolled past '9' once phIdx hit 10, so
+	// phIdx == 12 produced a key containing '<' and phIdx == 14 produced one
+	// containing '>'. Step 3 (escapeHTML on the entire string) then rewrote
+	// '<'/'>' inside those keys to "&lt;"/"&gt;" before step 8 could restore
+	// them, leaking literal "\x00PH<\x00" / "\x00PH>\x00" fragments into the
+	// rendered Telegram message and dropping the original code/link content.
+	// Decimal digits stay in the safe ASCII range regardless of phIdx, and
+	// no two indices collide.
 	nextPH := func(html string) string {
-		key := "\x00PH" + string(rune('0'+phIdx)) + "\x00"
+		key := "\x00PH" + strconv.Itoa(phIdx) + "\x00"
 		phs = append(phs, placeholder{key: key, html: html})
 		phIdx++
 		return key
@@ -429,50 +439,106 @@ func tableCellVisualWidth(cell string) int {
 // boundary-aware italic regex.
 var reTableCellItalic = regexp.MustCompile(`\*([^*]+)\*`)
 
-// SplitMessageCodeFenceAware splits text into chunks respecting code fence boundaries.
-// When a chunk boundary falls inside a code block, the fence is closed at the end of
-// the chunk and re-opened at the start of the next chunk.
+// SplitMessageCodeFenceAware splits text into chunks no larger than maxLen runes,
+// preferring line boundaries. When a chunk boundary falls inside a code block,
+// the fence is closed at the end of the chunk and re-opened at the start of the
+// next chunk. If a single line exceeds maxLen, it is split within the line at
+// rune boundaries.
 func SplitMessageCodeFenceAware(text string, maxLen int) []string {
-	if len(text) <= maxLen {
+	if utf8.RuneCountInString(text) <= maxLen {
 		return []string{text}
 	}
 
-	const closingFence = "\n```" // 4 bytes appended when splitting inside a code block
+	// closingFence is appended when flushing a chunk that is inside a code block.
+	const closingFence = "\n```"
+	const closingFenceLen = 4 // rune count of "\n```"
 
 	lines := strings.Split(text, "\n")
 	var chunks []string
 	var current []string
+	// currentLen tracks rune count of strings.Join(current, "\n") + 1.
+	// The invariant is: actual_chunk_runes = currentLen - 1.
+	// This +1 accounting lets the fit check use a single expression.
 	currentLen := 0
-	openFence := "" // the ``` opening line, or "" if outside code block
+	openFence := "" // opening ``` line when inside a code block, else ""
+
+	// effectiveLimit returns the number of "currentLen units" available before
+	// the chunk (plus closingFence if needed) would exceed maxLen.
+	effectiveLimit := func() int {
+		if openFence != "" {
+			return maxLen - closingFenceLen
+		}
+		return maxLen
+	}
+
+	// flush emits the current chunk and resets state, re-seeding with the open
+	// fence header so the next chunk is a valid continuation of the code block.
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		chunk := strings.Join(current, "\n")
+		if openFence != "" {
+			chunk += closingFence
+		}
+		chunks = append(chunks, chunk)
+		current = nil
+		currentLen = 0
+		if openFence != "" {
+			current = append(current, openFence)
+			currentLen = utf8.RuneCountInString(openFence) + 1
+		}
+	}
 
 	for _, line := range lines {
-		lineLen := len(line) + 1 // +1 for newline
+		lineRunes := []rune(line)
+		limit := effectiveLimit()
 
-		// Reserve space for the closing fence when inside a code block,
-		// so the final chunk length stays within maxLen.
-		limit := maxLen
-		if openFence != "" {
-			limit -= len(closingFence)
+		// Fast path: line fits in the current chunk.
+		if currentLen+len(lineRunes)+1 <= limit {
+			current = append(current, line)
+			currentLen += len(lineRunes) + 1
+		} else {
+			// Line doesn't fit; flush and try again with a fresh chunk.
+			flush()
+			limit = effectiveLimit()
+
+			if currentLen+len(lineRunes)+1 <= limit {
+				// Fits after flush.
+				current = append(current, line)
+				currentLen += len(lineRunes) + 1
+			} else {
+				// The line itself exceeds the limit; split within the line at
+				// rune boundaries, flushing between parts as needed.
+				remaining := lineRunes
+				for len(remaining) > 0 {
+					limit = effectiveLimit()
+					// avail = how many runes we can add to current.
+					// Since currentLen = actual_runes + 1, actual_runes = currentLen - 1,
+					// and a new part adds 1 joining \n plus its own runes:
+					//   new_actual = (currentLen-1) + 1 + avail = currentLen + avail
+					// We need new_actual <= limit, so avail <= limit - currentLen.
+					avail := limit - currentLen
+					if avail <= 0 {
+						// Shouldn't happen after flush, but guard against it.
+						flush()
+						limit = effectiveLimit()
+						avail = limit - currentLen
+					}
+					if avail > len(remaining) {
+						avail = len(remaining)
+					}
+					current = append(current, string(remaining[:avail]))
+					currentLen += avail + 1
+					remaining = remaining[avail:]
+					if len(remaining) > 0 {
+						flush()
+					}
+				}
+			}
 		}
 
-		if currentLen+lineLen > limit && len(current) > 0 {
-			chunk := strings.Join(current, "\n")
-			if openFence != "" {
-				chunk += closingFence
-			}
-			chunks = append(chunks, chunk)
-
-			current = nil
-			currentLen = 0
-			if openFence != "" {
-				current = append(current, openFence)
-				currentLen = len(openFence) + 1
-			}
-		}
-
-		current = append(current, line)
-		currentLen += lineLen
-
+		// Track code fence state after processing the line.
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			if openFence != "" {

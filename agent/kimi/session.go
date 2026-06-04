@@ -461,10 +461,10 @@ func (ks *kimiSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(ks.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("kimiSession: close timed out, abandoning wg.Wait")
 	}
-	close(ks.events)
 	return nil
 }
 

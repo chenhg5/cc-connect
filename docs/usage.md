@@ -805,6 +805,7 @@ Example:
 cc-connect cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
 cc-connect cron list
 cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
+cc-connect cron exec <job-id>
 cc-connect cron del <job-id>
 ```
 
@@ -1046,7 +1047,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
+type = "feishu"  # or wps-xiezuo, dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # platform-specific options

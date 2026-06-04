@@ -163,7 +163,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listIFlowSessions(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listIFlowSessions(workDir)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
@@ -176,7 +179,10 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		return fmt.Errorf("iflow: cannot determine home dir: %w", err)
 	}
 
-	absDir := iflowResolvedWorkDir(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir := iflowResolvedWorkDir(workDir)
 
 	candidates := []string{
 		filepath.Join(homeDir, ".iflow", "projects", iflowProjectKey(absDir), sessionID+".jsonl"),
@@ -227,9 +233,12 @@ func (a *Agent) CompressCommand() string { return "/compress" }
 // -- MemoryFileProvider --
 
 func (a *Agent) ProjectMemoryFile() string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return filepath.Join(absDir, "IFLOW.md")
 }
