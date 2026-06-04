@@ -72,9 +72,15 @@ func newTmuxSession(ctx context.Context, target, sessionID, promptPattern string
 	return s, nil
 }
 
-func (s *tmuxSession) Send(prompt string, _ []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *tmuxSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("tmux: session closed")
+	}
+
+	// Promote images to files so they are saved to disk and referenced by path.
+	// The CLI running in the pane (e.g. Claude Code) can then read them directly.
+	for _, img := range images {
+		files = append(files, core.FileAttachment(img))
 	}
 
 	// Save attached files and append their paths to the prompt
@@ -327,28 +333,33 @@ func shellQuote(s string) string {
 // trailing characters on the prompt line.
 var tuiInputBlockRe = regexp.MustCompile("(?m)^─+\n❯[^\n]*\n─+")
 
+// consecutiveBlankRe matches three or more consecutive newlines (two or more
+// blank lines) so they can be collapsed to a single blank line.
+var consecutiveBlankRe = regexp.MustCompile(`\n{3,}`)
+
 func (s *tmuxSession) cleanTUIContent(text string) string {
 	if s.stripInputBlock {
 		text = tuiInputBlockRe.ReplaceAllString(text, "")
 	}
-	if len(s.stripPatterns) == 0 {
-		return strings.TrimRight(text, "\n")
-	}
-	lines := strings.Split(text, "\n")
-	out := lines[:0]
-	for _, line := range lines {
-		drop := false
-		for _, re := range s.stripPatterns {
-			if re.MatchString(line) {
-				drop = true
-				break
+	if len(s.stripPatterns) > 0 {
+		lines := strings.Split(text, "\n")
+		out := lines[:0]
+		for _, line := range lines {
+			drop := false
+			for _, re := range s.stripPatterns {
+				if re.MatchString(line) {
+					drop = true
+					break
+				}
+			}
+			if !drop {
+				out = append(out, line)
 			}
 		}
-		if !drop {
-			out = append(out, line)
-		}
+		text = strings.Join(out, "\n")
 	}
-	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+	text = consecutiveBlankRe.ReplaceAllString(text, "\n\n")
+	return strings.TrimRight(text, "\n")
 }
 
 // normalizeCapture trims trailing whitespace per line and strips ANSI codes.
@@ -370,12 +381,10 @@ var ansiRe = regexp.MustCompile(
 )
 
 // extractNew returns the response text that appeared in current after the baseline.
-// It handles three cases:
 //  1. Linear shell output — current is baseline + new lines (HasPrefix fast path).
-//  2. TUI redraws (e.g. Claude Code) — terminal overwrites lines in place; find the
-//     longest common line prefix shared by both snapshots, then return the new lines
-//     that follow it in current, stripping the repeated trailing prompt lines.
-//  3. Terminal scrolled — baseline has partially scrolled off; use a shrinking anchor.
+//  2. Otherwise (TUI redraw and/or scrolled-off history) — align the top of current
+//     into baseline, then return the lines that follow the shared history run, with
+//     the redrawn trailing prompt / input box trimmed off.
 func extractNew(baseline, current string) string {
 	if current == baseline {
 		return ""
@@ -392,44 +401,58 @@ func extractNew(baseline, current string) string {
 	baseLines := strings.Split(baseline, "\n")
 	curLines := strings.Split(current, "\n")
 
-	// TUI path: find how many leading lines the two snapshots share (the static
-	// frame/header), then return the new lines that follow in current.
-	commonLen := 0
-	for i := 0; i < len(baseLines) && i < len(curLines); i++ {
-		if baseLines[i] != curLines[i] {
-			break
+	// The agent's new output is sandwiched between two stable regions: old history
+	// above it and a redrawn input box / prompt below it. Anchoring on the bottom is
+	// unreliable — the input-box borders are byte-identical every turn, so a bottom
+	// search lands *below* the response and yields only the trailing status line.
+	//
+	// Instead anchor on the TOP. curLines[0] is the oldest line still in the buffer
+	// (frozen history). Find the offset in baseLines where current begins and the
+	// longest run of history that follows it; everything in current after that run
+	// is the new output. This also covers the no-scroll case (offset 0 == the old
+	// common-prefix path) and the scrolled-off case (offset > 0) with one mechanism.
+	bestRun := 0
+	for d := 0; d < len(baseLines); d++ {
+		if baseLines[d] != curLines[0] {
+			continue
 		}
-		commonLen = i + 1
-	}
-	if commonLen > 0 && commonLen < len(curLines) {
-		newLines := curLines[commonLen:]
-		// Strip trailing lines that duplicate the baseline's suffix (e.g. the prompt ">").
-		bl := baseLines
-		for len(newLines) > 0 && len(bl) > 0 && newLines[len(newLines)-1] == bl[len(bl)-1] {
-			newLines = newLines[:len(newLines)-1]
-			bl = bl[:len(bl)-1]
+		run := 0
+		for d+run < len(baseLines) && run < len(curLines) && baseLines[d+run] == curLines[run] {
+			run++
 		}
-		result := strings.TrimRight(strings.Join(newLines, "\n"), "\n")
-		if result != "" {
-			return result
-		}
-	}
-
-	// Scroll path: baseline has partially scrolled off the top; try progressively
-	// shorter anchors from the end of baseline to find where new content begins.
-	maxAnchor := 5
-	if len(baseLines) < maxAnchor {
-		maxAnchor = len(baseLines)
-	}
-	for n := maxAnchor; n >= 1; n-- {
-		anchor := strings.Join(baseLines[len(baseLines)-n:], "\n")
-		if idx := strings.Index(current, anchor); idx >= 0 {
-			rest := strings.TrimLeft(current[idx+len(anchor):], "\n")
-			if rest != "" {
-				return rest
-			}
+		if run > bestRun {
+			bestRun = run
 		}
 	}
 
-	return current
+	if bestRun > 0 {
+		// curLines[:bestRun] is the shared history; the rest is new output, with the
+		// redrawn input box / prompt trimmed off its tail.
+		newLines := trimCommonTail(curLines[bestRun:], baseLines)
+		if res := strings.TrimRight(strings.Join(newLines, "\n"), "\n"); res != "" {
+			return res
+		}
+	}
+
+	// No shared history: baseline and current barely overlap, so current is
+	// effectively all-new (e.g. the buffer fully scrolled). Emit at most the last
+	// visibleFallbackLines lines so a stale multi-thousand-line scrollback can
+	// never be returned as "the response".
+	const visibleFallbackLines = 60
+	if len(curLines) > visibleFallbackLines {
+		curLines = curLines[len(curLines)-visibleFallbackLines:]
+	}
+	return strings.TrimRight(strings.Join(curLines, "\n"), "\n")
+}
+
+// trimCommonTail drops trailing lines of newLines that duplicate the tail of
+// baseLines — the unchanged remnants of a redrawn input box / prompt, which are
+// not part of the agent's response.
+func trimCommonTail(newLines, baseLines []string) []string {
+	b := len(baseLines)
+	for len(newLines) > 0 && b > 0 && newLines[len(newLines)-1] == baseLines[b-1] {
+		newLines = newLines[:len(newLines)-1]
+		b--
+	}
+	return newLines
 }

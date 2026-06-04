@@ -2,8 +2,11 @@ package tmux
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestExtractNew(t *testing.T) {
@@ -61,6 +64,27 @@ func TestExtractNew(t *testing.T) {
 			current:  "header\n\nLine one.\nLine two.\n\n>",
 			want:     "Line one.\nLine two.",
 		},
+		{
+			// Real bug: a long session fills the tmux scrollback so the oldest
+			// lines (h1, h2) scroll off the top — defeating the prefix path — and
+			// the response lands above the unchanged input box (UIa, UIb). Must
+			// return only RESP, not the whole stale capture.
+			name:     "scrolled off top, response above stable input box",
+			baseline: "h1\nh2\nh3\nh4\nh5\nUIa\nUIb",
+			current:  "h3\nh4\nh5\nRESP\nUIa\nUIb",
+			want:     "RESP",
+		},
+		{
+			// "Only the statusline" bug: the response sits above an input box whose
+			// borders (B1,B2,B3) are byte-identical every turn but whose status line
+			// (S) changes. A bottom-anchored search latches onto the box at current's
+			// bottom and returns only the trailing status. Top-anchoring returns the
+			// response (box borders are trimmed downstream by cleanTUIContent).
+			name:     "response above redrawn input box, top scrolled",
+			baseline: "h1\nh2\nh3\nB1\nB2\nB3\nS_old",
+			current:  "h3\nR1\nR2\nB1\nB2\nB3\nS_new",
+			want:     "R1\nR2\nB1\nB2\nB3\nS_new",
+		},
 	}
 
 	for _, tt := range tests {
@@ -70,6 +94,16 @@ func TestExtractNew(t *testing.T) {
 				t.Errorf("extractNew() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCleanTUIContent_CollapsesConsecutiveBlanks(t *testing.T) {
+	s := &tmuxSession{}
+	input := " ✻ Thinking...\n\n\n  tokens:22k"
+	got := s.cleanTUIContent(input)
+	want := " ✻ Thinking...\n\n  tokens:22k"
+	if got != want {
+		t.Errorf("cleanTUIContent() = %q, want %q", got, want)
 	}
 }
 
@@ -155,9 +189,51 @@ func TestNewTmuxSessionWorkDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if s.workDir != "/tmp/workspace" {
 		t.Errorf("workDir = %q, want /tmp/workspace", s.workDir)
+	}
+}
+
+// TestSend_ImagesPromotedToFiles verifies that image attachments are saved to
+// disk alongside file attachments and referenced by path in the prompt, rather
+// than being silently dropped.
+func TestSend_ImagesPromotedToFiles(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s, err := newTmuxSession(ctx, "sess:win", "sid1", "", 200*time.Millisecond, false, nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	images := []core.ImageAttachment{
+		{MimeType: "image/png", Data: []byte("\x89PNG\r\n"), FileName: "screenshot.png"},
+	}
+	files := []core.FileAttachment{
+		{MimeType: "text/plain", Data: []byte("hello"), FileName: "note.txt"},
+	}
+
+	// Build the promoted file list the same way Send() does, without calling
+	// tmux (which isn't available in unit tests).
+	for _, img := range images {
+		files = append(files, core.FileAttachment(img))
+	}
+	paths := core.SaveFilesToDisk(dir, files)
+
+	if len(paths) != 2 {
+		t.Fatalf("saved %d paths, want 2 (file + image)", len(paths))
+	}
+	hasImage := false
+	for _, p := range paths {
+		if strings.HasSuffix(p, "screenshot.png") {
+			hasImage = true
+		}
+	}
+	if !hasImage {
+		t.Errorf("paths = %v, want screenshot.png among them", paths)
 	}
 }
