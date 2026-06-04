@@ -121,7 +121,7 @@ func TestReadSettingsFile(t *testing.T) {
 	t.Run("no hooks section", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "settings.json")
-		os.WriteFile(path, []byte(`{"other": "value"}`), 0644)
+		_ = os.WriteFile(path, []byte(`{"other": "value"}`), 0644)
 		s, err := readSettingsFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -238,7 +238,7 @@ func TestTryHook(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
 		_ = os.MkdirAll(claudeDir, 0755)
-		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		_ = os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
 					"matcher": "Bash",
@@ -262,7 +262,7 @@ func TestTryHook(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
 		_ = os.MkdirAll(claudeDir, 0755)
-		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		_ = os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
 					"matcher": "Read",
@@ -283,7 +283,7 @@ func TestTryHook(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
 		_ = os.MkdirAll(claudeDir, 0755)
-		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		_ = os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
 					"matcher": "*",
@@ -303,8 +303,8 @@ func TestTryHook(t *testing.T) {
 	t.Run("wildcard matcher", func(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
-		os.MkdirAll(claudeDir, 0755)
-		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		_ = os.MkdirAll(claudeDir, 0755)
+		_ = os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
 					"matcher": "*",
@@ -336,8 +336,8 @@ func TestTryHook(t *testing.T) {
 	t.Run("multi-entry fallthrough", func(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
-		os.MkdirAll(claudeDir, 0755)
-		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		_ = os.MkdirAll(claudeDir, 0755)
+		_ = os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [
 					{"matcher": "*", "hooks": [{"type": "command", "command": "echo ask"}]},
@@ -360,7 +360,7 @@ func TestTryHook(t *testing.T) {
 	t.Run("settings merging across files", func(t *testing.T) {
 		configDir := t.TempDir()
 		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-		os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{
+		_ = os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [
 					{"matcher": "*", "hooks": [{"type": "command", "command": "echo ask"}]}
@@ -370,8 +370,8 @@ func TestTryHook(t *testing.T) {
 
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
-		os.MkdirAll(claudeDir, 0755)
-		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		_ = os.MkdirAll(claudeDir, 0755)
+		_ = os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [
 					{"matcher": "*", "hooks": [{"type": "command", "command": "echo allow"}]}
