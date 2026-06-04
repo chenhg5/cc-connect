@@ -1432,10 +1432,10 @@ func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testin
 func TestReplyFooterGitBranch(t *testing.T) {
 	gitInit := func(t *testing.T, dir string) {
 		t.Helper()
-		exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", dir).Run()
-		exec.Command("git", "-C", dir, "config", "user.email", "test@test.com").Run()
-		exec.Command("git", "-C", dir, "config", "user.name", "test").Run()
-		exec.Command("git", "-C", dir, "commit", "-q", "--allow-empty", "-m", "init").Run()
+		_ = exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", dir).Run()
+		_ = exec.Command("git", "-C", dir, "config", "user.email", "test@test.com").Run()
+		_ = exec.Command("git", "-C", dir, "config", "user.name", "test").Run()
+		_ = exec.Command("git", "-C", dir, "commit", "-q", "--allow-empty", "-m", "init").Run()
 	}
 
 	t.Run("git repo returns branch", func(t *testing.T) {
@@ -1464,7 +1464,7 @@ func TestReplyFooterGitBranch(t *testing.T) {
 	t.Run("custom branch name", func(t *testing.T) {
 		dir := t.TempDir()
 		gitInit(t, dir)
-		exec.Command("git", "-C", dir, "checkout", "-b", "feature/test-branch").Run()
+		_ = exec.Command("git", "-C", dir, "checkout", "-b", "feature/test-branch").Run()
 
 		branch := replyFooterGitBranch(dir)
 		if branch != "feature/test-branch" {
@@ -1475,7 +1475,7 @@ func TestReplyFooterGitBranch(t *testing.T) {
 	t.Run("detached head returns HEAD", func(t *testing.T) {
 		dir := t.TempDir()
 		gitInit(t, dir)
-		exec.Command("git", "-C", dir, "checkout", "--detach", "HEAD").Run()
+		_ = exec.Command("git", "-C", dir, "checkout", "--detach", "HEAD").Run()
 
 		branch := replyFooterGitBranch(dir)
 		if branch != "HEAD" {
@@ -1489,12 +1489,12 @@ func TestBuildReplyFooter_GitBranchTruncation(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	repoDir := filepath.Join(homeDir, "repo")
-	exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", repoDir).Run()
-	exec.Command("git", "-C", repoDir, "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "-C", repoDir, "config", "user.name", "test").Run()
-	exec.Command("git", "-C", repoDir, "commit", "-q", "--allow-empty", "-m", "init").Run()
+	_ = exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", repoDir).Run()
+	_ = exec.Command("git", "-C", repoDir, "config", "user.email", "test@test.com").Run()
+	_ = exec.Command("git", "-C", repoDir, "config", "user.name", "test").Run()
+	_ = exec.Command("git", "-C", repoDir, "commit", "-q", "--allow-empty", "-m", "init").Run()
 	longBranch := "feature/JIRA-1234-implement-very-long-name"
-	exec.Command("git", "-C", repoDir, "checkout", "-b", longBranch).Run()
+	_ = exec.Command("git", "-C", repoDir, "checkout", "-b", longBranch).Run()
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "test-model"},
