@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -1035,5 +1037,49 @@ func TestGetAccessToken_NormalExpireIn_AppliesBuffer(t *testing.T) {
 	gotWindow := p.tokenExpiry.Sub(before)
 	if gotWindow < 100*time.Minute || gotWindow > 116*time.Minute {
 		t.Errorf("tokenExpiry window for expireIn=7200 = %v, want ~6900s (100-116min)", gotWindow)
+	}
+}
+
+func TestOnMessageRepliesToUnauthorizedSender(t *testing.T) {
+	gotReply := make(chan string, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Markdown struct {
+				Text string `json:"text"`
+			} `json:"markdown"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotReply <- payload.Markdown.Text
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{
+		allowFrom: "allowed-user",
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	p.onMessage(&chatbot.BotCallbackDataModel{
+		MsgId:            "msg_unauthorized",
+		Msgtype:          "text",
+		SenderStaffId:    "blocked-user",
+		SenderNick:       "Blocked User",
+		ConversationId:   "cid_direct",
+		ConversationType: "1",
+		SessionWebhook:   sessionWebhook.URL,
+		Text:             chatbot.BotCallbackDataTextModel{Content: "hello"},
+	}, nil)
+
+	select {
+	case got := <-gotReply:
+		if got != core.UnauthorizedAccessMessage {
+			t.Fatalf("reply = %q, want %q", got, core.UnauthorizedAccessMessage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized reply")
 	}
 }

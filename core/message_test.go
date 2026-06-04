@@ -39,6 +39,15 @@ func TestSanitizeAttachmentFileName(t *testing.T) {
 	}
 }
 
+func TestUnauthorizedAccessMessage(t *testing.T) {
+	if !strings.Contains(UnauthorizedAccessMessage, "角色未授权") {
+		t.Fatalf("UnauthorizedAccessMessage = %q, want user-facing authorization hint", UnauthorizedAccessMessage)
+	}
+	if strings.Contains(UnauthorizedAccessMessage, "allow_from") {
+		t.Fatalf("UnauthorizedAccessMessage leaks implementation details: %q", UnauthorizedAccessMessage)
+	}
+}
+
 // TestSaveFilesToDisk_RejectsPathTraversal is a regression test for a real
 // path-traversal vulnerability in SaveFilesToDisk: the attachment FileName
 // (which comes from user-controlled IM/HTTP upload metadata) was passed
