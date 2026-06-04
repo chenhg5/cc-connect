@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,12 @@ var runLaunchctl = func(args ...string) (string, error) {
 }
 
 type launchdManager struct{}
+
+// CheckLinger always returns true on macOS: launchd user agents persist
+// independently of login sessions, so no "linger" warning is needed.
+func CheckLinger() (enabled bool, user string) {
+	return true, ""
+}
 
 func newPlatformManager() (Manager, error) {
 	return &launchdManager{}, nil
@@ -238,6 +245,11 @@ func buildPlist(cfg Config) string {
 	if envPATH == "" {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
+	// User-supplied paths can legitimately contain XML-special characters
+	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
+	// rejects the plist with a parse error and daemon install fails. The
+	// label is a hard-coded constant so it does not need escaping; LogMaxSize
+	// is an int.
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -260,7 +272,7 @@ func buildPlist(cfg Config) string {
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>
-		<true/>
+		<false/>
 	</dict>
 	<key>EnvironmentVariables</key>
 	<dict>
@@ -277,5 +289,19 @@ func buildPlist(cfg Config) string {
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, cfg.BinaryPath, cfg.WorkDir, cfg.LogFile, cfg.LogMaxSize, envPATH)
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, xmlEscape(envPATH))
 }
+
+// xmlEscape escapes the five XML-reserved characters in a string so it can
+// be safely embedded inside a plist <string> element.
+func xmlEscape(s string) string {
+	var b strings.Builder
+	if err := xml.EscapeText(&b, []byte(s)); err != nil {
+		// xml.EscapeText only fails when the underlying writer fails; a
+		// strings.Builder never returns a write error. Fall back to the
+		// raw value defensively rather than panicking.
+		return s
+	}
+	return b.String()
+}
+

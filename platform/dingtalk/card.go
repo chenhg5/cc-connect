@@ -67,16 +67,17 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 	isGroup := rc.isGroup
 
 	// Build openSpaceId based on conversation type
+	// See: https://open.dingtalk.com/document/development/create-and-deliver-cards
 	var openSpaceId string
 	if isGroup {
 		openSpaceId = fmt.Sprintf("dtv1.card//IM_GROUP.%s", rc.conversationId)
 	} else {
-		openSpaceId = fmt.Sprintf("dtv1.card//IM_ROBOT.%s", p.robotCode)
+		openSpaceId = fmt.Sprintf("dtv1.card//IM_ROBOT.%s", rc.senderStaffId)
 	}
 
 	// Build card data
 	cardParamMap := map[string]string{
-		"config":         `{"autoLayout":true,"enableForward":true}`,
+		"config":          `{"autoLayout":true,"enableForward":true}`,
 		p.cardTemplateKey: "",
 	}
 
@@ -86,11 +87,11 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 		"cardData": map[string]any{
 			"cardParamMap": cardParamMap,
 		},
-		"callbackType":            "STREAM",
-		"imGroupOpenSpaceModel":   map[string]any{"supportForward": true},
-		"imRobotOpenSpaceModel":   map[string]any{"supportForward": true},
-		"openSpaceId":             openSpaceId,
-		"userIdType":              1,
+		"callbackType":          "STREAM",
+		"imGroupOpenSpaceModel": map[string]any{"supportForward": true},
+		"imRobotOpenSpaceModel": map[string]any{"supportForward": true},
+		"openSpaceId":           openSpaceId,
+		"userIdType":            1,
 	}
 
 	// Set delivery model based on conversation type

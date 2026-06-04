@@ -292,6 +292,7 @@ func TestBasicUserTurnContractAcrossInputModalities(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			engine, agent, platform := newTurnEngine(t)
+			engine.SetReplyFooterEnabled(true)
 			agent.session.setResult(core.Event{Type: core.EventResult, Content: "final answer", InputTokens: 52000, Done: true})
 
 			msg := turnMessage(tt.content)
@@ -348,7 +349,7 @@ func TestSideChannelEchoContractAcrossOutboundModalities(t *testing.T) {
 			agent.session.waitRecords(t, 1)
 
 			sideText := "delivery ready"
-			if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, tt.images, tt.files); err != nil {
+			if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, tt.images, tt.files, nil, false); err != nil {
 				t.Fatalf("SendToSessionWithAttachments() error = %v", err)
 			}
 			agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: sideText, InputTokens: 52000, Done: true})
@@ -366,7 +367,7 @@ func TestSideChannelDifferentFinalContract(t *testing.T) {
 	agent.session.waitRecords(t, 1)
 
 	sideText := "delivery ready"
-	if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, nil, nil); err != nil {
+	if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, nil, nil, nil, false); err != nil {
 		t.Fatalf("SendToSessionWithAttachments() error = %v", err)
 	}
 
@@ -599,6 +600,7 @@ func TestStreamingPreviewConfigurationMatrix(t *testing.T) {
 			agent := newTurnAgent()
 			platform := &previewLifecyclePlatform{}
 			engine := core.NewEngine("release-preview-matrix", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+			engine.SetReplyFooterEnabled(true)
 			engine.SetStreamPreviewCfg(tt.cfg)
 			t.Cleanup(func() {
 				engine.Stop()
@@ -688,21 +690,21 @@ func TestReplyMetadataConfigurationMatrix(t *testing.T) {
 			name:       "context_and_footer_on_share_one_line",
 			showCtx:    true,
 			showFooter: true,
-			want:       []string{"answer", "*[ctx: ~14%] · glm-5.1 · …/tmp/release-agent*"},
+			want:       []string{"answer", "[ctx: ~14%] · glm-5.1 · /tmp/release-agent"},
 		},
 		{
-			name:       "context_off_footer_on_keeps_model_footer",
+			name:       "context_off_footer_on_hides_legacy_footer",
 			showCtx:    false,
 			showFooter: true,
-			want:       []string{"answer", "*glm-5.1 · …/tmp/release-agent*"},
-			forbid:     []string{"[ctx:"},
+			want:       []string{"answer"},
+			forbid:     []string{"[ctx:", "glm-5.1", "/tmp/release-agent"},
 		},
 		{
-			name:       "context_on_footer_off_uses_legacy_context_suffix",
+			name:       "context_on_footer_off_plain_answer",
 			showCtx:    true,
 			showFooter: false,
-			want:       []string{"answer\n[ctx: ~14%]"},
-			forbid:     []string{"glm-5.1", "/tmp/release-agent"},
+			want:       []string{"answer"},
+			forbid:     []string{"[ctx:", "glm-5.1", "/tmp/release-agent"},
 		},
 		{
 			name:       "context_and_footer_off_plain_answer",
@@ -961,7 +963,7 @@ type richPreviewPlatform struct {
 	previewLifecyclePlatform
 }
 
-func (p *richPreviewPlatform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+func (p *richPreviewPlatform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
 	var b strings.Builder
 	b.WriteString("status=")
 	b.WriteString(string(status))
@@ -983,6 +985,10 @@ func (p *richPreviewPlatform) BuildRichCard(status core.CardStatus, title string
 	if markdown != "" {
 		b.WriteString("markdown=")
 		b.WriteString(markdown)
+		b.WriteString("\n")
+	}
+	if statusFooter != "" {
+		b.WriteString(statusFooter)
 		b.WriteString("\n")
 	}
 	return b.String()

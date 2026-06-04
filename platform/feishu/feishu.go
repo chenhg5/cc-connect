@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -112,6 +113,7 @@ type replyContext struct {
 }
 
 type Platform struct {
+	mu                         sync.RWMutex
 	platformName               string
 	domain                     string
 	appID                      string
@@ -158,10 +160,27 @@ type Platform struct {
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
 	cardActionMsgIDs map[string]string // sessionKey → messageID
+	// activeThreadSessions tracks thread sessionKeys that have already been
+	// accepted by the bot. In group chats with thread_isolation, once a thread
+	// has been engaged (the first @bot message), subsequent attachment-only
+	// messages (image/file/audio) inside the same thread are passed through
+	// without requiring another @bot mention. Value is the last-seen time so
+	// stale entries can be expired by a future TTL sweep if needed.
+	activeThreadSessions sync.Map // sessionKey -> time.Time
+
+	richCardImageMu         sync.Mutex
+	richCardImageResolved   map[string]string
+	richCardImagePending    map[string]*richCardImageUpload
+	richCardImageFailed     map[string]struct{}
+	richCardImageUploadFunc func(context.Context, string) (string, error)
 }
 
 type interactivePlatform struct {
 	*Platform
+}
+
+type richCardImageUpload struct {
+	done chan struct{}
 }
 
 type feishuRequestFunc func(client *lark.Client, options ...larkcore.RequestOptionFunc) error
@@ -205,6 +224,11 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowChat, _ := opts["allow_chat"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	// require_mention = false is equivalent to group_reply_all = true:
+	// both mean "respond to all group messages without needing an @mention".
+	if v, ok := opts["require_mention"].(bool); ok && !v {
+		groupReplyAll = true
+	}
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
@@ -305,12 +329,38 @@ func (p *Platform) dispatchPlatform() core.Platform {
 	return p
 }
 
+func (p *Platform) getHandler() core.MessageHandler {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.handler
+}
+
+func (p *Platform) getCancel() context.CancelFunc {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cancel
+}
+
+func (p *Platform) getServer() *http.Server {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.server
+}
+
+func (p *Platform) getBotOpenID() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.botOpenID
+}
+
 func (p *Platform) KeepPreviewOnFinish() bool {
 	return p.useInteractiveCard
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
+	p.mu.Lock()
 	p.handler = handler
+	p.mu.Unlock()
 
 	// In webhook mode (private/self-hosted Feishu/Lark), startup must not depend
 	// on a successful bot-info API call. Older private deployments may not support
@@ -321,7 +371,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		if openID, err := p.fetchBotOpenID(); err != nil {
 			slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled", "error", err)
 		} else {
+			p.mu.Lock()
 			p.botOpenID = openID
+			p.mu.Unlock()
 			slog.Info(p.platformName+": bot identified", "open_id", openID)
 		}
 	}
@@ -426,7 +478,9 @@ func (p *Platform) startWebSocketMode() error {
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret, wsOpts...)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.mu.Lock()
 	p.cancel = cancel
+	p.mu.Unlock()
 
 	go func() {
 		if err := p.wsClient.Start(ctx); err != nil {
@@ -442,6 +496,7 @@ func (p *Platform) startWebhookMode() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(p.callbackPath, p.webhookHandler)
 
+	p.mu.Lock()
 	p.server = &http.Server{
 		Addr:    ":" + p.port,
 		Handler: mux,
@@ -449,6 +504,7 @@ func (p *Platform) startWebhookMode() error {
 
 	_, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
+	p.mu.Unlock()
 
 	go func() {
 		slog.Info(p.tag()+": webhook server listening", "port", p.port, "path", p.callbackPath)
@@ -561,12 +617,37 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			}, nil
 		}
 		if p.cardNavHandler != nil {
-			card := p.cardNavHandler(actionVal, sessionKey)
-			if card != nil {
+			done := make(chan *core.Card, 1)
+			go func() {
+				done <- p.cardNavHandler(actionVal, sessionKey)
+			}()
+
+			select {
+			case card := <-done:
+				if card != nil {
+					return &callback.CardActionTriggerResponse{
+						Card: &callback.Card{
+							Type: "raw",
+							Data: renderCardMap(card, sessionKey),
+						},
+					}, nil
+				}
+			case <-time.After(cardNavTimeout):
+				go func() {
+					card := <-done
+					if card == nil {
+						return
+					}
+					if refresher, ok := p.self.(core.CardRefresher); ok {
+						if err := refresher.RefreshCard(context.Background(), sessionKey, card); err != nil {
+							slog.Warn(p.tag()+": async card refresh failed", "action", actionVal, "err", err)
+						}
+					}
+				}()
 				return &callback.CardActionTriggerResponse{
-					Card: &callback.Card{
-						Type: "raw",
-						Data: renderCardMap(card, sessionKey),
+					Toast: &callback.Toast{
+						Type:    "info",
+						Content: "⏳ Loading... / 加载中...",
 					},
 				}, nil
 			}
@@ -594,7 +675,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		go p.handler(p.dispatchPlatform(), &core.Message{
+		h := p.getHandler()
+		go h(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
@@ -625,7 +707,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		go p.handler(p.dispatchPlatform(), &core.Message{
+		h := p.getHandler()
+		go h(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
@@ -660,7 +743,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		go p.handler(p.dispatchPlatform(), &core.Message{
+		h := p.getHandler()
+		go h(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
@@ -748,6 +832,8 @@ func (p *Platform) AddDoneReaction(rctx any) {
 }
 
 const recalledMessageTTL = 10 * time.Minute
+
+const cardNavTimeout = 2500 * time.Millisecond
 
 func (p *Platform) markMessageRecalled(messageID string) {
 	messageID = strings.TrimSpace(messageID)
@@ -868,14 +954,15 @@ func isMessageWithdrawnError(err error) bool {
 }
 
 func (p *Platform) dispatchCoreMessage(msg *core.Message) {
-	if msg == nil || p.handler == nil {
+	h := p.getHandler()
+	if msg == nil || h == nil {
 		return
 	}
 	if p.isMessageRecalled(msg.MessageID) {
 		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
 		return
 	}
-	p.handler(p.dispatchPlatform(), msg)
+	h(p.dispatchPlatform(), msg)
 }
 
 func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageRecalledV1) error {
@@ -901,10 +988,11 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 		"recall_type", stringValue(event.Event.RecallType),
 	)
 
-	if p.handler == nil {
+	h := p.getHandler()
+	if h == nil {
 		return nil
 	}
-	p.handler(p.dispatchPlatform(), &core.Message{
+	h(p.dispatchPlatform(), &core.Message{
 		Platform:  p.platformName,
 		MessageID: messageID,
 		Recalled:  true,
@@ -972,12 +1060,25 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"thread_isolation", p.threadIsolation,
 	)
 
-	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
-		if !isBotMentioned(msg.Mentions, p.botOpenID) {
+	// Pre-compute sessionKey so the @bot filter below can consult the active
+	// thread set; sessionKey is also used downstream for dispatch.
+	sessionKey := p.makeSessionKey(msg, chatID, userID)
+
+	if chatType == "group" && !p.groupReplyAll && p.getBotOpenID() != "" {
+		if !isBotMentioned(msg.Mentions, p.getBotOpenID()) {
+			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
-			if p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all") {
+			case p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all"):
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
-			} else {
+			// Once a thread has been engaged via @bot, allow follow-up
+			// attachment-only messages (image/file/audio) in the same thread
+			// through without re-mentioning the bot. Plain text and rich-text
+			// posts still require an explicit @bot to avoid pulling in
+			// unrelated chatter.
+			case p.threadIsolation && isAttachmentMsgType(msgType) && p.isActiveThreadSession(sessionKey):
+				slog.Debug(p.tag()+": passing attachment through active thread without mention",
+					"chat_id", chatID, "session_key", sessionKey, "msg_type", msgType, "message_id", messageID)
+			default:
 				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
 				return nil
 			}
@@ -986,6 +1087,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		p.replyUnauthorizedAccess(ctx, replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey})
 		return nil
 	}
 
@@ -1011,13 +1113,16 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	sessionKey := p.makeSessionKey(msg, chatID, userID)
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
 		"reply_in_thread", p.shouldReplyInThread(rctx),
 	)
+
+	// Mark this thread as bot-engaged so subsequent attachment-only messages
+	// in the same thread can pass through without re-mentioning the bot.
+	p.markThreadSessionActive(sessionKey)
 
 	// Dispatch message handling asynchronously so the SDK event loop is not
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
@@ -1026,6 +1131,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
 
 	return nil
+}
+
+func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContext) {
+	if rctx.messageID == "" && rctx.chatID == "" {
+		return
+	}
+	if err := p.Reply(ctx, rctx, core.UnauthorizedAccessMessage); err != nil {
+		slog.Warn(p.tag()+": unauthorized reply failed", "error", err)
+	}
 }
 
 // dispatchMessage handles the message content parsing, media download, and
@@ -1049,9 +1163,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// Skip quote injection when thread_isolation is enabled and the message is
 	// inside a thread — the thread already provides conversational context, and
 	// long quoted prefixes can drown out the user's actual text (issue #764).
-	quotedPrefix := ""
+	var quoted quotedMessage
 	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
-		quotedPrefix = p.fetchQuotedMessage(ctx, parentID)
+		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
 	switch msgType {
@@ -1063,8 +1177,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Error(p.tag()+": failed to parse text content", "error", err)
 			return
 		}
-		text := stripMentions(textBody.Text, mentions, p.botOpenID)
-		if text == "" {
+		text := stripMentions(textBody.Text, mentions, p.getBotOpenID())
+		if text == "" && quoted.text == "" && len(quoted.images) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -1076,7 +1190,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quotedPrefix, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -1136,15 +1250,15 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
-		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.botOpenID)
-		if text == "" && len(images) == 0 {
+		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
+		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quotedPrefix, Images: images,
+			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
 			ReplyCtx: rctx,
 		})
 
@@ -1213,7 +1327,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
-				Content: "[sticker]", ExtraContent: quotedPrefix, ReplyCtx: rctx,
+				Content: "[sticker]", ExtraContent: quoted.text, ReplyCtx: rctx,
 			})
 			return
 		}
@@ -1257,7 +1371,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quotedPrefix, Images: images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
 		})
 
 	default:
@@ -1477,7 +1591,13 @@ type chainMessage struct {
 	senderName string
 	senderType string // "user" or "app"
 	text       string
+	images     []core.ImageAttachment
 	parentID   string
+}
+
+type quotedMessage struct {
+	text   string
+	images []core.ImageAttachment
 }
 
 // maxReplyChainDepth is the maximum number of parent messages to traverse
@@ -1485,17 +1605,17 @@ type chainMessage struct {
 const maxReplyChainDepth = 5
 
 // fetchQuotedMessage retrieves the content of a parent message that the user
-// is replying to, and returns a formatted prefix string for context injection.
+// is replying to, and returns formatted context plus downloaded attachments.
 // For multi-level reply chains, it traces parent_id links up to maxReplyChainDepth
 // levels and returns the full conversation chain.
-// Returns empty string on any failure (graceful degradation — the user's own
+// Returns empty content on any failure (graceful degradation — the user's own
 // message is still delivered without the quote).
-func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) string {
+func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) quotedMessage {
 	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
 	if len(chain) == 0 {
-		return ""
+		return quotedMessage{}
 	}
-	return formatReplyChain(chain)
+	return quotedMessage{text: formatReplyChain(chain), images: collectReplyChainImages(chain)}
 }
 
 // resolveBotSenderName returns a display name for a bot sender in a quoted
@@ -1552,6 +1672,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 
 	// Extract plain text based on message type.
 	var text string
+	var images []core.ImageAttachment
 	switch item.MsgType {
 	case "text":
 		var textBody struct {
@@ -1561,7 +1682,25 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			text = replaceMentions(textBody.Text, item.Mentions)
 		}
 	case "post":
-		text = extractPostPlainText(content)
+		textParts, postImages := p.parsePostContent(messageID, content)
+		text = replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
+		images = postImages
+		if text == "" && len(images) > 0 {
+			text = "[image]"
+		}
+	case "image":
+		text = "[image]"
+		var imgBody struct {
+			ImageKey string `json:"image_key"`
+		}
+		if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
+			imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
+			if err != nil {
+				slog.Error(p.tag()+": download quoted image failed", "error", err, "message_id", messageID, "key", imgBody.ImageKey)
+			} else {
+				images = append(images, core.ImageAttachment{MimeType: mimeType, Data: imgData})
+			}
+		}
 	case "interactive":
 		text = extractInteractiveCardText(content)
 	default:
@@ -1591,8 +1730,17 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		senderName: senderName,
 		senderType: item.Sender.SenderType,
 		text:       text,
+		images:     images,
 		parentID:   item.ParentID,
 	}
+}
+
+func collectReplyChainImages(chain []chainMessage) []core.ImageAttachment {
+	var images []core.ImageAttachment
+	for _, msg := range chain {
+		images = append(images, msg.images...)
+	}
+	return images
 }
 
 // fetchReplyChain iteratively traverses parent_id links to build a reply chain.
@@ -1658,6 +1806,7 @@ func extractPostPlainText(content string) string {
 		Content [][]struct {
 			Tag      string `json:"tag"`
 			Text     string `json:"text"`
+			Href     string `json:"href,omitempty"`
 			Language string `json:"language,omitempty"`
 			UserId   string `json:"user_id,omitempty"`
 			UserName string `json:"user_name,omitempty"`
@@ -1692,7 +1841,9 @@ func extractPostPlainText(content string) string {
 					line = append(line, elem.Text)
 				}
 			case "a":
-				if elem.Text != "" {
+				if elem.Text != "" && elem.Href != "" {
+					line = append(line, fmt.Sprintf("[%s](%s)", elem.Text, elem.Href))
+				} else if elem.Text != "" {
 					line = append(line, elem.Text)
 				}
 			case "markdown":
@@ -1813,27 +1964,62 @@ func extractInteractiveCardText(content string) string {
 
 // extractCardElements recursively extracts text from schema 2.0 card elements.
 // Handles: property.content, property.text (nested element), property.elements (recursive),
-// code_span, code_block (with tokenized contents), text_tag, hr, etc.
+// code_span, code_block (with tokenized contents), text_tag, hr, button (with open_url), etc.
 func extractCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
 			Tag      string `json:"tag"`
 			Content  string `json:"content"`
 			Property struct {
-				Content  string            `json:"content"`
-				Contents json.RawMessage   `json:"contents"`
-				Language string            `json:"language"`
-				Elements []json.RawMessage `json:"elements"`
-				Text     json.RawMessage   `json:"text"`
-				Items    json.RawMessage   `json:"items"`
-				Columns  json.RawMessage   `json:"columns"`
-				Rows     json.RawMessage   `json:"rows"`
+				Content   string            `json:"content"`
+				Contents  json.RawMessage   `json:"contents"`
+				Language  string            `json:"language"`
+				Elements  []json.RawMessage `json:"elements"`
+				Text      json.RawMessage   `json:"text"`
+				Items     json.RawMessage   `json:"items"`
+				Columns   json.RawMessage   `json:"columns"`
+				Rows      json.RawMessage   `json:"rows"`
+				Behaviors json.RawMessage   `json:"behaviors"`
 			} `json:"property"`
 		}
 		if json.Unmarshal(raw, &elem) != nil {
 			continue
 		}
 		switch elem.Tag {
+		case "button":
+			// Extract button label text and open_url from behaviors.
+			label := elem.Property.Content
+			if label == "" {
+				// label may be in property.text.property.content
+				var textElem struct {
+					Property struct {
+						Content string `json:"content"`
+					} `json:"property"`
+				}
+				if json.Unmarshal(elem.Property.Text, &textElem) == nil {
+					label = textElem.Property.Content
+				}
+			}
+			var openURL string
+			if len(elem.Property.Behaviors) > 0 {
+				var behaviors []struct {
+					Type string `json:"type"`
+					URL  string `json:"url"`
+				}
+				if json.Unmarshal(elem.Property.Behaviors, &behaviors) == nil {
+					for _, b := range behaviors {
+						if b.Type == "open_url" && b.URL != "" {
+							openURL = b.URL
+							break
+						}
+					}
+				}
+			}
+			if label != "" && openURL != "" {
+				*parts = append(*parts, fmt.Sprintf("[%s](%s)", label, openURL))
+			} else if label != "" {
+				*parts = append(*parts, label)
+			}
 		case "code_block":
 			var lines []struct {
 				Contents []struct {
@@ -2165,19 +2351,54 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
+// SendWithStatusFooter implements core.StatusFooterSender: send a reply with
+// the body content followed by a small/dim status-footer block. Always uses
+// the interactive card path so the footer can render with text_size:
+// "notation". Falls back to plain Send when the footer is empty.
+func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
+	if strings.TrimSpace(footer) == "" {
+		return p.Send(ctx, rctx, content)
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
+	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	}
+	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+}
+
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: SendImage: invalid reply context type %T", p.tag(), rctx)
 	}
 
+	imageKey, err := p.uploadImageKey(ctx, img.Data)
+	if err != nil {
+		return err
+	}
+	imageContent, err := (&larkim.MessageImage{ImageKey: imageKey}).String()
+	if err != nil {
+		return fmt.Errorf("%s: build image message: %w", p.tag(), err)
+	}
+
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeImage, imageContent)
+}
+
+func (p *Platform) uploadImageKey(ctx context.Context, data []byte) (string, error) {
 	var uploadResp *larkim.CreateImageResp
 	if err := p.withTransientRetry(ctx, "upload image", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload image", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateImageReqBuilder().
 				Body(larkim.NewCreateImageReqBodyBuilder().
 					ImageType("message").
-					Image(bytes.NewReader(img.Data)).
+					Image(bytes.NewReader(data)).
 					Build()).
 				Build()
 			var err error
@@ -2191,18 +2412,13 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 			return nil
 		})
 	}); err != nil {
-		return err
+		return "", err
 	}
 	if uploadResp.Data == nil || uploadResp.Data.ImageKey == nil {
-		return fmt.Errorf("%s: upload image: no image_key returned", p.tag())
+		return "", fmt.Errorf("%s: upload image: no image_key returned", p.tag())
 	}
 
-	imageContent, err := (&larkim.MessageImage{ImageKey: *uploadResp.Data.ImageKey}).String()
-	if err != nil {
-		return fmt.Errorf("%s: build image message: %w", p.tag(), err)
-	}
-
-	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeImage, imageContent)
+	return *uploadResp.Data.ImageKey, nil
 }
 
 func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
@@ -2243,12 +2459,13 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		return fmt.Errorf("%s: upload file: no file_key returned", p.tag())
 	}
 
-	fileContent, err := (&larkim.MessageFile{FileKey: *uploadResp.Data.FileKey}).String()
+	msgType := detectFeishuFileMessageType(fileType)
+	fileContent, err := buildFeishuFileMessageContent(msgType, *uploadResp.Data.FileKey)
 	if err != nil {
 		return fmt.Errorf("%s: build file message: %w", p.tag(), err)
 	}
 
-	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeFile, fileContent)
+	return p.sendMediaMessage(ctx, rc, msgType, fileContent)
 }
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
@@ -2271,10 +2488,32 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		return larkim.FileTypePpt
 	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
 		return larkim.FileTypeMp4
-	case mimeType == "audio/ogg" || mimeType == "audio/opus" || strings.HasSuffix(name, ".opus"):
+	case mimeType == "audio/ogg" || mimeType == "audio/opus" || mimeType == "application/ogg" || strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".opus"):
 		return larkim.FileTypeOpus
 	default:
 		return larkim.FileTypeStream
+	}
+}
+
+func detectFeishuFileMessageType(fileType string) string {
+	switch fileType {
+	case larkim.FileTypeOpus:
+		return larkim.MsgTypeAudio
+	case larkim.FileTypeMp4:
+		return larkim.MsgTypeMedia
+	default:
+		return larkim.MsgTypeFile
+	}
+}
+
+func buildFeishuFileMessageContent(msgType, fileKey string) (string, error) {
+	switch msgType {
+	case larkim.MsgTypeAudio:
+		return (&larkim.MessageAudio{FileKey: fileKey}).String()
+	case larkim.MsgTypeMedia:
+		return (&larkim.MessageMedia{FileKey: fileKey}).String()
+	default:
+		return (&larkim.MessageFile{FileKey: fileKey}).String()
 	}
 }
 
@@ -2536,17 +2775,36 @@ var mdLinkRe = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
 // sanitizeMarkdownURLs rewrites markdown links with non-HTTP(S) schemes
 // to plain text, preventing Feishu API rejection (code 230001).
 func sanitizeMarkdownURLs(md string) string {
-	return mdLinkRe.ReplaceAllStringFunc(md, func(match string) string {
-		parts := mdLinkRe.FindStringSubmatch(match)
-		if len(parts) < 3 {
-			return match
+	var b strings.Builder
+	last := 0
+	for _, loc := range mdLinkRe.FindAllStringSubmatchIndex(md, -1) {
+		if len(loc) < 6 {
+			continue
 		}
-		if isValidFeishuHref(parts[2]) {
-			return match
+		start, end := loc[0], loc[1]
+		// `![alt](img_xxx)` is Feishu's native card-image syntax. The link
+		// regex also matches the `[alt](...)` suffix, so image references must
+		// be left alone for the card markdown sanitizer to handle.
+		if start > 0 && md[start-1] == '!' {
+			continue
 		}
-		// Convert invalid-scheme link to "text (url)" plain text
-		return parts[1] + " (" + parts[2] + ")"
-	})
+		b.WriteString(md[last:start])
+		text := md[loc[2]:loc[3]]
+		href := md[loc[4]:loc[5]]
+		match := md[start:end]
+		if isValidFeishuHref(href) {
+			b.WriteString(match)
+		} else {
+			// Convert invalid-scheme link to "text (url)" plain text.
+			b.WriteString(text + " (" + href + ")")
+		}
+		last = end
+	}
+	if last == 0 {
+		return md
+	}
+	b.WriteString(md[last:])
+	return b.String()
 }
 
 // parseInlineMarkdown parses a single line of markdown into Feishu post elements.
@@ -2709,6 +2967,38 @@ func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
 		}
 	}
 	return false
+}
+
+// isAttachmentMsgType reports whether a Feishu message type carries only an
+// attachment payload (no free-form text the user could use to address another
+// human). These are the message types we are willing to admit into an
+// already-engaged thread without an explicit @bot mention.
+func isAttachmentMsgType(msgType string) bool {
+	switch msgType {
+	case "image", "file", "audio", "media":
+		return true
+	}
+	return false
+}
+
+// markThreadSessionActive records that a thread sessionKey has been engaged
+// by an @bot message, enabling attachment-only follow-ups inside the thread.
+// No-op when thread isolation is disabled or sessionKey is not a thread key.
+func (p *Platform) markThreadSessionActive(sessionKey string) {
+	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+		return
+	}
+	p.activeThreadSessions.Store(sessionKey, time.Now())
+}
+
+// isActiveThreadSession reports whether the given sessionKey corresponds to a
+// thread that has previously been engaged by an @bot message.
+func (p *Platform) isActiveThreadSession(sessionKey string) bool {
+	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+		return false
+	}
+	_, ok := p.activeThreadSessions.Load(sessionKey)
+	return ok
 }
 
 // stripMentions processes @mention placeholders (e.g. @_user_1) in text.
@@ -3029,10 +3319,18 @@ func isThreadSessionKey(sessionKey string) bool {
 // feishuPreviewHandle stores the message ID for an editable preview message.
 // Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
 // the header color without re-rendering the whole card.
+//
+// Card 2.0 + cardkit-v1 streaming text path additionally needs cardID and a
+// monotonically increasing sequence counter. cardID is empty when the
+// preview was created via the legacy inline-card-JSON path (Create Card
+// Entity failed → fallback), in which case streamRichCardText must NOT be
+// called and the engine falls back to full-card Patch via UpdateMessage.
 type feishuPreviewHandle struct {
 	mu          sync.Mutex
 	messageID   string
 	chatID      string
+	cardID      string // cardkit-v1 entity id (empty = no streaming text path)
+	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
 }
@@ -3041,6 +3339,7 @@ type feishuPreviewHandle struct {
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
+	content = sanitizeCardMarkdownForCard(content)
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
@@ -3053,6 +3352,43 @@ func buildCardJSON(content string) string {
 					"content": content,
 				},
 			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+// buildCardJSONWithStatusFooter builds an interactive card with a body
+// markdown element followed by a small/dim status-footer markdown element
+// (Lark `text_size: "notation"`). Empty footer falls through to buildCardJSON.
+func buildCardJSONWithStatusFooter(content, footer string) string {
+	if strings.TrimSpace(footer) == "" {
+		return buildCardJSON(content)
+	}
+	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
+	content = segments[0]
+	footer = segments[1]
+	elements := []map[string]any{
+		{
+			"tag":     "markdown",
+			"content": content,
+		},
+		{
+			"tag": "hr",
+		},
+		{
+			"tag":       "markdown",
+			"content":   footer,
+			"text_size": "notation",
+		},
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"body": map[string]any{
+			"elements": elements,
 		},
 	}
 	b, _ := json.Marshal(card)
@@ -3303,6 +3639,20 @@ func progressResultDot(item core.ProgressCardEntry) string {
 	return "⚪"
 }
 
+func progressToolElement(iconToken string, content string) map[string]any {
+	elem := map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":     "lark_md",
+			"content": content,
+		},
+	}
+	if iconToken != "" {
+		elem["icon"] = map[string]any{"tag": "standard_icon", "token": iconToken}
+	}
+	return elem
+}
+
 func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
 	text := strings.TrimSpace(item.Text)
 	if text == "" {
@@ -3311,7 +3661,8 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	switch item.Kind {
 	case core.ProgressEntryThinking:
 		return map[string]any{
-			"tag": "div",
+			"tag":  "div",
+			"icon": map[string]any{"tag": "standard_icon", "token": reasoningToolIcon},
 			"text": map[string]any{
 				"tag":        "plain_text",
 				"content":    "💭 " + inlineCodeText(text),
@@ -3324,37 +3675,30 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 		if toolName == "" {
 			toolName = "Tool"
 		}
-		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> `%s`", progressKindLabel(item.Kind, lang), inlineCodeText(toolName))
-		if body := formatProgressToolInput(toolName, text); body != "" {
+		display := buildToolDisplay(toolName, text)
+		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
+		if body := formatProgressToolInput(toolName, display.Detail); body != "" {
 			content += "\n" + body
 		}
-		return map[string]any{
-			"tag":     "markdown",
-			"content": content,
-		}
+		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryToolResult:
 		toolName := strings.TrimSpace(item.Tool)
-		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag>", progressKindLabel(item.Kind, lang))
-		if toolName != "" {
-			content += " `" + inlineCodeText(toolName) + "`"
-		}
+		display := buildToolDisplay(toolName, "")
+		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
 		dot := progressResultDot(item)
 		meta := dot
 		if item.ExitCode != nil {
 			meta += fmt.Sprintf(" exit code: `%d`", *item.ExitCode)
 		}
 		content += "\n" + meta
-		if body := formatProgressToolResult(item.Text); body != "" {
+		if body := formatProgressToolResult(sanitizeToolDetail(toolSanitizerGeneric, item.Text)); body != "" {
 			content += "\n" + body
 		} else {
 			content += "\n_" + progressNoOutputText(lang) + "_"
 		}
-		return map[string]any{
-			"tag":     "markdown",
-			"content": content,
-		}
+		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryError:
-		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)))
+		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), sanitizeCardMarkdownForCard(text))
 		return map[string]any{
 			"tag":     "markdown",
 			"content": content,
@@ -3362,9 +3706,89 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	default:
 		return map[string]any{
 			"tag":     "markdown",
-			"content": preprocessFeishuMarkdown(sanitizeMarkdownURLs(text)),
+			"content": sanitizeCardMarkdownForCard(text),
 		}
 	}
+}
+
+func splitProgressItemsByLane(items []core.ProgressCardEntry) (reasoning []core.ProgressCardEntry, tools []core.ProgressCardEntry, others []core.ProgressCardEntry) {
+	for _, item := range items {
+		switch item.Kind {
+		case core.ProgressEntryThinking:
+			reasoning = append(reasoning, item)
+		case core.ProgressEntryToolUse, core.ProgressEntryToolResult:
+			tools = append(tools, item)
+		default:
+			others = append(others, item)
+		}
+	}
+	return reasoning, tools, others
+}
+
+func progressPanelTitle(label string, count int, lang string) string {
+	if isZhLikeProgressLang(lang) {
+		switch label {
+		case "Reasoning":
+			label = "思考"
+		case "Tools":
+			label = "工具"
+		case "Updates":
+			label = "更新"
+		}
+	}
+	if count > 0 {
+		return fmt.Sprintf("%s (%d)", label, count)
+	}
+	return label
+}
+
+func buildProgressPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+	return map[string]any{
+		"tag":              "collapsible_panel",
+		"expanded":         expanded,
+		"background_color": "grey",
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": title},
+		},
+		"border":           map[string]any{"color": "grey"},
+		"vertical_spacing": "8px",
+		"padding":          "4px 8px",
+		"elements":         elements,
+	}
+}
+
+func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []map[string]any {
+	elements := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		elements = append(elements, renderProgressEntryElement(item, lang))
+	}
+	return elements
+}
+
+func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string, running bool) []map[string]any {
+	reasoning, tools, others := splitProgressItemsByLane(items)
+	if len(reasoning) > 0 {
+		elements = append(elements, buildProgressPanel(
+			progressPanelTitle("Reasoning", len(reasoning), lang),
+			running,
+			buildProgressPanelElements(reasoning, lang),
+		))
+	}
+	if len(tools) > 0 {
+		elements = append(elements, buildProgressPanel(
+			progressPanelTitle("Tools", len(tools), lang),
+			running,
+			buildProgressPanelElements(tools, lang),
+		))
+	}
+	if len(others) > 0 {
+		elements = append(elements, buildProgressPanel(
+			progressPanelTitle("Updates", len(others), lang),
+			running,
+			buildProgressPanelElements(others, lang),
+		))
+	}
+	return elements
 }
 
 func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
@@ -3375,6 +3799,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 
 	agent := progressAgentLabel(payload.Agent)
 	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
+	running := payload.State == core.ProgressCardStateRunning
 
 	elements := make([]map[string]any, 0, len(items)+3)
 	if payload.Truncated {
@@ -3394,12 +3819,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 		elements = append(elements, map[string]any{"tag": "hr"})
 	}
 
-	for i, item := range items {
-		elements = append(elements, renderProgressEntryElement(item, payload.Lang))
-		if i < len(items)-1 {
-			elements = append(elements, map[string]any{"tag": "hr"})
-		}
-	}
+	elements = appendProgressGroupedElements(elements, items, payload.Lang, running)
 	if footer != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		elements = append(elements, map[string]any{
@@ -3443,6 +3863,20 @@ func buildPreviewCardJSON(content string) string {
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
+//
+// Card 2.0 + cardkit-v1 path (when content is a rich card JSON and we're NOT
+// in thread/reply mode): runs a two-step flow that captures a card_id usable
+// for streaming text updates:
+//
+//  1. POST /open-apis/cardkit/v1/cards with {type:"card_json", data:<cardJSON>}
+//     → returns card_id (numeric string, 14-day TTL).
+//  2. Im.Message.Create with content {"type":"card","data":{"card_id":"..."}}
+//     → returns message_id; both ids are stored on feishuPreviewHandle.
+//
+// If step (1) fails OR we're in thread/reply mode (Reply API doesn't accept
+// card_id reference), we fall back to the inline-card-JSON path. The handle's
+// cardID stays empty in that case and the engine routes EventText through the
+// full-card Patch path (= original #657 behavior, no typewriter).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	if !p.useInteractiveCard {
 		return nil, core.ErrNotSupported
@@ -3460,17 +3894,32 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
 	var cardJSON string
+	var sendContent string // what goes into the Im.Message.Create / Reply content field
+	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
 	if isCardJSON(content) {
 		cardJSON = content
+		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
+		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
+		// content schema (verified by direct API call); skipping Reply mode would
+		// disable cardkit-v1 streaming on every @-mention turn (the dominant case).
+		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+			cardID = id
+			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
+		} else {
+			slog.Info(p.tag()+": create card entity failed, falling back to inline card JSON",
+				"error", err)
+			sendContent = cardJSON
+		}
 	} else {
 		cardJSON = buildPreviewCardJSON(content)
+		sendContent = cardJSON
 	}
 
 	var msgID string
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, cardJSON)).
+			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, sendContent)).
 			Build()
 		var resp *larkim.ReplyMessageResp
 		if err := p.withTransientRetry(ctx, "send preview", func() error {
@@ -3497,7 +3946,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
+				Content(sendContent).
 				Build()).
 			Build()
 		var resp *larkim.CreateMessageResp
@@ -3525,7 +3974,111 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID}, nil
+}
+
+// createCardEntity calls the cardkit-v1 Create Card Entity API
+// (POST /open-apis/cardkit/v1/cards) and returns the card_id.
+//
+// The card_id is required to drive the streaming text update path
+// (PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content).
+// If this call fails the caller should fall back to inline card JSON via the
+// regular Im.Message.Create path; the rich card will still render but without
+// native typewriter streaming.
+func (p *Platform) createCardEntity(ctx context.Context, cardJSON string) (string, error) {
+	body := map[string]any{
+		"type": "card_json",
+		"data": cardJSON,
+	}
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "create card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Post(ctx, "/open-apis/cardkit/v1/cards", body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return "", fmt.Errorf("%s: create card entity: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: create card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			CardID string `json:"card_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return "", fmt.Errorf("%s: create card entity: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return "", fmt.Errorf("%s: %w", p.tag(), classifyFeishuCardAPIError("create card entity", resp.Code, resp.Msg))
+	}
+	if resp.Data.CardID == "" {
+		return "", fmt.Errorf("%s: create card entity: empty card_id in response", p.tag())
+	}
+	return resp.Data.CardID, nil
+}
+
+// StreamRichCardText implements core.RichCardTextStreamer. Pushes the latest
+// fullText to the rich card's main_text element via cardkit-v1 streaming text
+// update API. The Lark client renders the increment between consecutive PUTs
+// with a typewriter animation (controlled by the card's streaming_config).
+//
+// Returns ErrNotSupported when the handle has no cardID (preview was created
+// via the inline-card-JSON fallback path; engine should fall back to full-card
+// Patch).
+func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: StreamRichCardText: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+
+	// Serialize all PUTs for one card so the monotonic sequence counter is
+	// preserved across concurrent EventText calls; rate-limit headroom is
+	// huge (Lark allows 50 QPS per element).
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.cardID == "" {
+		return core.ErrNotSupported
+	}
+
+	h.sequence++
+	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s/elements/%s/content",
+		h.cardID, richCardMainTextElementID)
+	body := map[string]any{
+		"content":  fullText,
+		"sequence": h.sequence,
+	}
+
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "stream rich card text", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Put(ctx, apiPath, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: stream rich card text: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: stream rich card text: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: stream rich card text: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		err := classifyFeishuCardAPIError("stream rich card text", resp.Code, resp.Msg)
+		if errors.Is(err, errFeishuCardRateLimited) {
+			slog.Debug(p.tag()+": stream rich card text rate limited; skipping frame", "code", resp.Code)
+			return nil
+		}
+		return fmt.Errorf("%s: %w", p.tag(), err)
+	}
+	return nil
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.
@@ -3556,8 +4109,52 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		}
 		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
 	}
+	// Route card-entity-bound messages to cardkit-v1 full-card update API.
+	// Im.Message.Patch on entity-referenced messages is silently no-op for the
+	// card body / header — only inline card JSON messages can be patched that way.
+	h.mu.Lock()
+	cardID := h.cardID
+	h.mu.Unlock()
+	if cardID != "" {
+		return p.updateCardEntity(ctx, h, cardJSON)
+	}
+	return p.patchCardMessage(ctx, h.messageID, cardJSON)
+}
+
+// UpdateMessageWithStatusFooter implements core.StatusFooterUpdater: edit an
+// existing card to render the body markdown plus a small/dim status-footer
+// block (Lark `text_size: "notation"`). Falls through to UpdateMessage when
+// the footer is empty.
+func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHandle any, content, footer string) error {
+	if !p.useInteractiveCard {
+		return core.ErrNotSupported
+	}
+	if strings.TrimSpace(footer) == "" {
+		return p.UpdateMessage(ctx, previewHandle, content)
+	}
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
+	}
+	// Mirror UpdateMessage's existing behavior: it does not resolve
+	// @mentions on the card-edit path either. SendWithStatusFooter does
+	// resolve since the matching Send path resolves on the chat-thread API.
+	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
+	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	// Same card-entity routing as UpdateMessage above.
+	h.mu.Lock()
+	cardID := h.cardID
+	h.mu.Unlock()
+	if cardID != "" {
+		return p.updateCardEntity(ctx, h, cardJSON)
+	}
+	return p.patchCardMessage(ctx, h.messageID, cardJSON)
+}
+
+func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON string) error {
 	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(h.messageID).
+		MessageId(messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
 			Build()).
@@ -3576,6 +4173,56 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	})
 }
 
+// updateCardEntity performs a full-card replacement on a cardkit-v1 entity via
+// PUT /open-apis/cardkit/v1/cards/{card_id}. Required for messages that were
+// sent as card_id references (rich-mode path) — Im.Message.Patch does not
+// affect the rendered content of such messages.
+//
+// Reuses h.sequence as the monotonic ordering counter (shared with
+// streamRichCardText so any sequence on any element/card is monotonic).
+func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
+	h.mu.Lock()
+	if h.cardID == "" {
+		h.mu.Unlock()
+		return fmt.Errorf("%s: updateCardEntity: cardID not set", p.tag())
+	}
+	h.sequence++
+	cardID := h.cardID
+	seq := h.sequence
+	h.mu.Unlock()
+
+	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s", cardID)
+	body := map[string]any{
+		"card": map[string]any{
+			"type": "card_json",
+			"data": cardJSON,
+		},
+		"sequence": seq,
+	}
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "update card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Put(ctx, apiPath, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: update card entity: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: update card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: update card entity: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("%s: %w", p.tag(), classifyFeishuCardAPIError("update card entity", resp.Code, resp.Msg))
+	}
+	return nil
+}
+
 func (p *Platform) Stop() error {
 	if p.isWSPrimary {
 		remaining := unregisterSharedWS(p)
@@ -3583,17 +4230,17 @@ func (p *Platform) Stop() error {
 			slog.Warn(p.tag()+": primary shutting down, secondary platforms will lose event source",
 				"remaining", remaining)
 		}
-		if p.cancel != nil {
-			p.cancel()
+		if cancel := p.getCancel(); cancel != nil {
+			cancel()
 		}
 	} else {
 		unregisterSharedWS(p)
 	}
 	// Stop webhook server if running (Lark international version)
-	if p.server != nil {
+	if svr := p.getServer(); svr != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := p.server.Shutdown(ctx); err != nil {
+		if err := svr.Shutdown(ctx); err != nil {
 			slog.Error(p.tag()+": webhook server shutdown error", "error", err)
 		}
 	}
@@ -3735,7 +4382,9 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 					textParts = append(textParts, elem.Text)
 				}
 			case "a":
-				if elem.Text != "" {
+				if elem.Text != "" && elem.Href != "" {
+					textParts = append(textParts, fmt.Sprintf("[%s](%s)", elem.Text, elem.Href))
+				} else if elem.Text != "" {
 					textParts = append(textParts, elem.Text)
 				}
 			case "code_block":
@@ -3748,7 +4397,7 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 					textParts = append(textParts, elem.Text)
 				}
 			case "at":
-				if p.botOpenID != "" && elem.UserId == p.botOpenID {
+				if p.getBotOpenID() != "" && elem.UserId == p.getBotOpenID() {
 					continue
 				}
 				switch {
@@ -3812,7 +4461,7 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 	userName := p.resolveUserName(userID)
 	sessionKey := p.platformName + ":" + userID + ":" + userID
 
-	p.handler(p.dispatchPlatform(), &core.Message{
+	p.getHandler()(p.dispatchPlatform(), &core.Message{
 		SessionKey: sessionKey,
 		Platform:   p.platformName,
 		Content:    content,
@@ -3828,20 +4477,624 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 // extended with "agent reply elapsed time" in the footer).
 // ═══════════════════════════════════════════════════════════════
 
-const defaultToolIcon = "setting-inter_outlined"
+const (
+	defaultToolIcon      = "app-default_outlined"
+	reasoningToolIcon    = "mindmap_outlined"
+	feishuCardTableLimit = 3
+)
 
-var toolIconMap = map[string]string{
-	"Bash":      "terminal-two_outlined",
-	"Edit":      "edit_outlined",
-	"Read":      "file-open_outlined",
-	"Write":     "notes_outlined",
-	"Glob":      "folder-open_outlined",
-	"Grep":      "search_outlined",
-	"WebFetch":  "internet_outlined",
-	"WebSearch": "internet_outlined",
-	"Agent":     "robot_outlined",
-	"Skill":     "code_outlined",
-	"LSP":       "code_outlined",
+var (
+	errFeishuCardRateLimited = errors.New("feishu card rate limited")
+	errFeishuCardTableLimit  = errors.New("feishu card table limit")
+)
+
+type feishuCardAPIError struct {
+	API     string
+	Code    int
+	Msg     string
+	SubCode int
+}
+
+func (e *feishuCardAPIError) Error() string {
+	if e == nil {
+		return "feishu card api error"
+	}
+	if e.SubCode != 0 {
+		return fmt.Sprintf("feishu card %s failed: code=%d sub_code=%d msg=%s", e.API, e.Code, e.SubCode, e.Msg)
+	}
+	return fmt.Sprintf("feishu card %s failed: code=%d msg=%s", e.API, e.Code, e.Msg)
+}
+
+func (e *feishuCardAPIError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
+	switch target {
+	case errFeishuCardRateLimited:
+		return e.Code == 230020
+	case errFeishuCardTableLimit:
+		return e.Code == 230099 && e.SubCode == 11310 && strings.Contains(strings.ToLower(e.Msg), "table number over limit")
+	default:
+		return false
+	}
+}
+
+var feishuCardSubCodePattern = regexp.MustCompile(`ErrCode:\s*(\d+)`)
+
+func classifyFeishuCardAPIError(api string, code int, msg string) error {
+	subCode := 0
+	if m := feishuCardSubCodePattern.FindStringSubmatch(msg); len(m) == 2 {
+		if parsed, err := strconv.Atoi(m[1]); err == nil {
+			subCode = parsed
+		}
+	}
+	return &feishuCardAPIError{API: api, Code: code, Msg: msg, SubCode: subCode}
+}
+
+// richCardMainTextElementID is the fixed element_id assigned to the markdown
+// body block of every rich card. The cardkit-v1 streaming text update API
+// targets card elements by this id (PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content).
+// Hardcoded because each rich card has exactly one streaming-text element.
+const richCardMainTextElementID = "main_text"
+
+type toolSanitizer string
+
+const (
+	toolSanitizerGeneric toolSanitizer = "generic"
+	toolSanitizerSkill   toolSanitizer = "skill"
+	toolSanitizerPath    toolSanitizer = "path"
+	toolSanitizerSearch  toolSanitizer = "search"
+	toolSanitizerURL     toolSanitizer = "url"
+	toolSanitizerCommand toolSanitizer = "command"
+)
+
+type toolDescriptor struct {
+	Aliases         []string
+	IconToken       string
+	Title           string
+	Sanitizer       toolSanitizer
+	ParamKeys       []string
+	SummaryPatterns []*regexp.Regexp
+}
+
+type toolDisplay struct {
+	Title     string
+	IconToken string
+	Detail    string
+}
+
+var toolDescriptors = []toolDescriptor{
+	{
+		Aliases:         []string{"skill"},
+		IconToken:       "app-default_outlined",
+		Title:           "Load skill",
+		Sanitizer:       toolSanitizerSkill,
+		ParamKeys:       []string{"skill", "name"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:load|use)\s+skill\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"read", "open"},
+		IconToken:       "file-link-text_outlined",
+		Title:           "Read",
+		Sanitizer:       toolSanitizerPath,
+		ParamKeys:       []string{"file_path", "path", "file"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:read|open)\s+(?:file\s+)?(.+)$`)},
+	},
+	{
+		Aliases:         []string{"write", "edit", "patch", "apply_patch", "file_change", "filechange"},
+		IconToken:       "edit_outlined",
+		Title:           "Edit",
+		Sanitizer:       toolSanitizerPath,
+		ParamKeys:       []string{"file_path", "path", "file"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:edit|write|patch)\s+(?:file\s+)?(.+)$`)},
+	},
+	{
+		Aliases:   []string{"tool_search", "tool_search_tool", "find_tools", "search_tools"},
+		IconToken: "search_outlined",
+		Title:     "Search tools",
+		Sanitizer: toolSanitizerSearch,
+		ParamKeys: []string{"query", "q"},
+	},
+	{
+		Aliases:         []string{"web_search", "websearch", "web-search", "web.run", "web_run", "search"},
+		IconToken:       "search_outlined",
+		Title:           "Search web",
+		Sanitizer:       toolSanitizerSearch,
+		ParamKeys:       []string{"query", "q"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+(?:web\s+)?(?:for|about)|query)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"web_fetch", "webfetch", "web-fetch", "fetch"},
+		IconToken:       "language_outlined",
+		Title:           "Fetch web page",
+		Sanitizer:       toolSanitizerURL,
+		ParamKeys:       []string{"url"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:fetch|open)\s+(?:web\s+page\s+)?(?:from\s+)?(.+)$`)},
+	},
+	{
+		Aliases:         []string{"grep"},
+		IconToken:       "doc-search_outlined",
+		Title:           "Search text",
+		Sanitizer:       toolSanitizerGeneric,
+		ParamKeys:       []string{"pattern"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+text(?:\s+by\s+pattern)?|grep)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"glob", "file_search", "filesearch"},
+		IconToken:       "folder_outlined",
+		Title:           "Search files",
+		Sanitizer:       toolSanitizerGeneric,
+		ParamKeys:       []string{"pattern", "query"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+files(?:\s+by\s+pattern)?|glob)\s+(.+)$`)},
+	},
+	{
+		Aliases:   []string{"write_stdin", "stdin", "command_input"},
+		IconToken: "keyboard_outlined",
+		Title:     "Command I/O",
+		Sanitizer: toolSanitizerCommand,
+		ParamKeys: []string{"chars"},
+	},
+	{
+		Aliases:         []string{"exec", "exec_command", "bash", "shell", "run_shell_command", "command", "run"},
+		IconToken:       "command_outlined",
+		Title:           "Run command",
+		Sanitizer:       toolSanitizerCommand,
+		ParamKeys:       []string{"cmd", "command", "script", "description"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run|execute)\s+(?:command|script)?\s*(.+)$`)},
+	},
+	{
+		Aliases:         []string{"browser", "playwright", "navigate"},
+		IconToken:       "browser-mac_outlined",
+		Title:           "Browser",
+		Sanitizer:       toolSanitizerURL,
+		ParamKeys:       []string{"url"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:open|browse|visit|navigate\s+to)\s+(.+)$`)},
+	},
+	{
+		Aliases:         []string{"agent", "task", "spawn", "spawn_agent", "wait_agent", "close_agent", "send_input", "resume_agent"},
+		IconToken:       "robot_outlined",
+		Title:           "Run sub-agent",
+		Sanitizer:       toolSanitizerGeneric,
+		ParamKeys:       []string{"task", "description", "prompt"},
+		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run\s+sub-?agent|spawn\s+agent)\s+(.+)$`)},
+	},
+	{
+		Aliases:   []string{"multi_tool_use", "multi_tool_use.parallel", "parallel"},
+		IconToken: "list-check_outlined",
+		Title:     "Run tools",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"description", "prompt"},
+	},
+	{
+		Aliases:   []string{"update_plan", "plan_update"},
+		IconToken: "list-check_outlined",
+		Title:     "Update plan",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"target", "subject", "description"},
+	},
+	{
+		Aliases:   []string{"check", "determine", "verify", "todowrite", "todo_write"},
+		IconToken: "list-check_outlined",
+		Title:     "Check",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"target", "subject", "description"},
+	},
+	{
+		Aliases:   []string{"summarize", "analyze", "prepare"},
+		IconToken: "report_outlined",
+		Title:     "Analyze",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"target", "subject", "description"},
+	},
+	{
+		Aliases:   []string{"mcp", "mcp_tool", "mcptool"},
+		IconToken: "code_outlined",
+		Title:     "MCP tool",
+		Sanitizer: toolSanitizerGeneric,
+		ParamKeys: []string{"tool", "name", "server"},
+	},
+	{
+		Aliases:   []string{"permissions", "permission"},
+		IconToken: "safe-settings_outlined",
+		Title:     "Permissions",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"computer_use", "computeruse"},
+		IconToken: "robot_outlined",
+		Title:     "Computer use",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"code_interpreter", "codeinterpreter"},
+		IconToken: "code_outlined",
+		Title:     "Code interpreter",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"ask_user_question", "askuserquestion", "request_user_input"},
+		IconToken: "robot_outlined",
+		Title:     "Ask user",
+		Sanitizer: toolSanitizerGeneric,
+	},
+	{
+		Aliases:   []string{"lsp"},
+		IconToken: "code_outlined",
+		Title:     "LSP",
+		Sanitizer: toolSanitizerGeneric,
+	},
+}
+
+func normalizeToolNameForDisplay(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func compactToolNameForDisplay(name string) string {
+	name = normalizeToolNameForDisplay(name)
+	replacer := strings.NewReplacer("_", "", "-", "", " ", "", ".", "")
+	return replacer.Replace(name)
+}
+
+func toolNameDisplayVariants(name string) []string {
+	normalized := normalizeToolNameForDisplay(name)
+	if normalized == "" {
+		return nil
+	}
+	variants := []string{normalized}
+	for _, sep := range []string{".", ":", "/"} {
+		if idx := strings.LastIndex(normalized, sep); idx >= 0 && idx+1 < len(normalized) {
+			variants = append(variants, strings.TrimSpace(normalized[idx+1:]))
+		}
+	}
+	seen := make(map[string]struct{}, len(variants))
+	out := variants[:0]
+	for _, variant := range variants {
+		if variant == "" {
+			continue
+		}
+		if _, ok := seen[variant]; ok {
+			continue
+		}
+		seen[variant] = struct{}{}
+		out = append(out, variant)
+	}
+	return out
+}
+
+func toolDescriptorMatches(desc toolDescriptor, toolName string, allowPrefix bool) bool {
+	variants := toolNameDisplayVariants(toolName)
+	for _, alias := range desc.Aliases {
+		alias = normalizeToolNameForDisplay(alias)
+		aliasCompact := compactToolNameForDisplay(alias)
+		for _, variant := range variants {
+			if variant == alias {
+				return true
+			}
+			compact := compactToolNameForDisplay(variant)
+			if compact == aliasCompact {
+				return true
+			}
+			if allowPrefix && (strings.HasPrefix(variant, alias+"_") || strings.HasPrefix(variant, alias+"-") || strings.HasPrefix(compact, aliasCompact)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func resolveToolDescriptor(toolName string) *toolDescriptor {
+	for i := range toolDescriptors {
+		if toolDescriptorMatches(toolDescriptors[i], toolName, false) {
+			return &toolDescriptors[i]
+		}
+	}
+	for i := range toolDescriptors {
+		if toolDescriptorMatches(toolDescriptors[i], toolName, true) {
+			return &toolDescriptors[i]
+		}
+	}
+	return nil
+}
+
+func humanizeToolName(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		return "Tool"
+	}
+	name = strings.NewReplacer("_", " ", "-", " ").Replace(name)
+	words := strings.Fields(name)
+	if len(words) == 0 {
+		return "Tool"
+	}
+	for i, word := range words {
+		if word == strings.ToUpper(word) {
+			continue
+		}
+		lower := strings.ToLower(word)
+		words[i] = strings.ToUpper(lower[:1]) + lower[1:]
+	}
+	return strings.Join(words, " ")
+}
+
+func buildToolDisplay(toolName, detail string) toolDisplay {
+	desc := resolveToolDescriptor(toolName)
+	title := humanizeToolName(toolName)
+	icon := defaultToolIcon
+	sanitizer := toolSanitizerGeneric
+	if desc != nil {
+		title = desc.Title
+		icon = desc.IconToken
+		sanitizer = desc.Sanitizer
+	}
+
+	rawDetail := strings.TrimSpace(detail)
+	if desc != nil {
+		if extracted := extractToolDetailFromJSON(rawDetail, *desc); extracted != "" {
+			rawDetail = extracted
+		} else if extracted := extractToolDetailFromSummary(rawDetail, *desc); extracted != "" {
+			rawDetail = extracted
+		}
+	}
+	cleanDetail := sanitizeToolDetail(sanitizer, rawDetail)
+	if desc != nil && desc.Title == "Read" && isSkillPathValue(cleanDetail) {
+		title = "Skill Read"
+	}
+	if desc != nil && desc.Title == "Run command" {
+		if commandTitle, commandIcon, ok := classifyCommandToolDetail(cleanDetail); ok {
+			title = commandTitle
+			icon = commandIcon
+		}
+	}
+	return toolDisplay{Title: title, IconToken: icon, Detail: cleanDetail}
+}
+
+func classifyCommandToolDetail(detail string) (title, icon string, ok bool) {
+	command := strings.ToLower(strings.TrimSpace(stripToolDisplayQuotes(detail)))
+	if command == "" {
+		return "", "", false
+	}
+	if strings.HasPrefix(command, "git ") || command == "git" {
+		return "Git", "code_outlined", true
+	}
+	if strings.HasPrefix(command, "gh ") || command == "gh" {
+		return "GitHub", "cloud_outlined", true
+	}
+	if strings.HasPrefix(command, "cc-connect ") || command == "cc-connect" {
+		return "cc-connect", "robot_outlined", true
+	}
+	if commandHasAnyPrefix(command, "go test", "npm test", "npm run test", "pnpm test", "yarn test", "pytest", "cargo test", "swift test", "xcodebuild test") {
+		return "Run tests", "list-check_outlined", true
+	}
+	if commandHasAnyPrefix(command, "make test", "go build", "make build", "npm run build", "pnpm build", "yarn build", "cargo build", "swift build", "xcodebuild build") {
+		return "Build", "codeblock_outlined", true
+	}
+	if commandHasAnyPrefix(command, "ps ", "kill ", "pkill ", "launchctl ", "lsof ") {
+		return "Inspect process", "computer_outlined", true
+	}
+	if commandHasAnyPrefix(command, "rg ", "grep ", "ag ", "ack ") || strings.Contains(command, " | grep ") || strings.Contains(command, " | rg ") {
+		return "Search text", "doc-search_outlined", true
+	}
+	if commandHasAnyPrefix(command, "ls ", "ls\n", "ls\t", "ls;", "ls &&", "stat ", "pwd", "cat ", "sed ", "awk ", "head ", "tail ", "wc ", "strings ", "find ") {
+		return "Inspect files", "file-link-text_outlined", true
+	}
+	if commandHasAnyPrefix(command, "curl ", "wget ", "ssh ", "scp ", "rsync ") {
+		return "Network", "cloud_outlined", true
+	}
+	if commandHasAnyPrefix(command, "cp ", "mv ", "rm ", "mkdir ", "rmdir ", "chmod ", "chown ", "touch ") {
+		return "File operation", "folder_outlined", true
+	}
+	if commandHasAnyPrefix(command, "sleep ", "osascript -e 'delay ", "osascript -e \"delay ") {
+		return "Wait", "alarm-clock_outlined", true
+	}
+	return "", "", false
+}
+
+func commandHasAnyPrefix(command string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(command, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
+	text = strings.TrimSpace(text)
+	if text == "" || len(desc.ParamKeys) == 0 {
+		return ""
+	}
+	candidates := []string{text}
+	if idx := strings.Index(text, "{"); idx > 0 {
+		candidates = append(candidates, text[idx:])
+	}
+	for _, candidate := range candidates {
+		var params map[string]any
+		if err := json.Unmarshal([]byte(candidate), &params); err != nil {
+			continue
+		}
+		if desc.Title == "Search text" {
+			if pattern := extractScalarText(params["pattern"]); pattern != "" {
+				if target := extractScalarText(params["glob"]); target != "" {
+					return pattern + " in " + target
+				}
+				if target := extractScalarText(params["path"]); target != "" {
+					return pattern + " in " + target
+				}
+				if target := extractScalarText(params["file_path"]); target != "" {
+					return pattern + " in " + target
+				}
+				return pattern
+			}
+		}
+		for _, key := range desc.ParamKeys {
+			if value := extractScalarText(params[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func extractScalarText(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(v)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return ""
+	}
+}
+
+func extractToolDetailFromSummary(text string, desc toolDescriptor) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(stripToolDisplayMarkdown(line))
+		if line == "" {
+			continue
+		}
+		if desc.Sanitizer == toolSanitizerURL {
+			if urlText := extractFirstURL(line); urlText != "" {
+				return urlText
+			}
+		}
+		for _, pattern := range desc.SummaryPatterns {
+			if match := pattern.FindStringSubmatch(line); len(match) > 1 {
+				return strings.TrimSpace(match[1])
+			}
+		}
+		if code := extractFirstCodeSpan(line); code != "" {
+			return code
+		}
+		if quoted := extractFirstQuotedText(line); quoted != "" {
+			return quoted
+		}
+		return line
+	}
+	return ""
+}
+
+func stripToolDisplayMarkdown(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "- ")
+	text = strings.TrimPrefix(text, "* ")
+	text = strings.Trim(text, "`")
+	text = strings.Trim(text, "_")
+	return strings.TrimSpace(text)
+}
+
+var (
+	firstURLRe        = regexp.MustCompile(`https?://[^\s'"` + "`" + `<>]+`)
+	firstCodeSpanRe   = regexp.MustCompile("`([^`]+)`")
+	firstQuotedTextRe = regexp.MustCompile(`"([^"]+)"|'([^']+)'`)
+	secretAssignRe    = regexp.MustCompile(`(?i)\b([A-Za-z_][A-Za-z0-9_]*(?:token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s"'` + "`" + `]+)`)
+	authHeaderRe      = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)([^\s'"` + "`" + `]+)`)
+	sensitiveNameRe   = regexp.MustCompile(`(?i)(token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)`)
+)
+
+func extractFirstURL(text string) string {
+	return firstURLRe.FindString(text)
+}
+
+func extractFirstCodeSpan(text string) string {
+	if match := firstCodeSpanRe.FindStringSubmatch(text); len(match) > 1 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+func extractFirstQuotedText(text string) string {
+	if match := firstQuotedTextRe.FindStringSubmatch(text); len(match) > 2 {
+		if strings.TrimSpace(match[1]) != "" {
+			return strings.TrimSpace(match[1])
+		}
+		return strings.TrimSpace(match[2])
+	}
+	return ""
+}
+
+func sanitizeToolDetail(kind toolSanitizer, value string) string {
+	cleaned := sanitizeGenericToolText(value)
+	if cleaned == "" {
+		return ""
+	}
+	switch kind {
+	case toolSanitizerSkill:
+		cleaned = regexp.MustCompile(`(?i)^skill\s+`).ReplaceAllString(cleaned, "")
+		cleaned = strings.NewReplacer("-", " ", "_", " ").Replace(cleaned)
+		return strings.TrimSpace(cleaned)
+	case toolSanitizerSearch:
+		return stripToolDisplayQuotes(cleaned)
+	case toolSanitizerURL:
+		return sanitizeURLText(stripToolDisplayQuotes(cleaned))
+	case toolSanitizerCommand:
+		return sanitizeCommandLike(cleaned)
+	case toolSanitizerPath:
+		return redactInlineSecrets(strings.TrimSpace(cleaned))
+	default:
+		return redactInlineSecrets(cleaned)
+	}
+}
+
+func sanitizeGenericToolText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return redactInlineSecrets(value)
+}
+
+func stripToolDisplayQuotes(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			return strings.TrimSpace(value[1 : len(value)-1])
+		}
+	}
+	return value
+}
+
+func sanitizeURLText(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "from "))
+	if value == "" {
+		return ""
+	}
+	if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
+		u.User = nil
+		q := u.Query()
+		for key := range q {
+			if sensitiveNameRe.MatchString(key) {
+				q.Set(key, "[redacted]")
+			}
+		}
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	return redactInlineSecrets(value)
+}
+
+func sanitizeCommandLike(value string) string {
+	value = strings.TrimSpace(stripToolDisplayQuotes(value))
+	value = regexp.MustCompile(`(?i)^(?:command|script|description)\s+`).ReplaceAllString(value, "")
+	return redactInlineSecrets(value)
+}
+
+func redactInlineSecrets(value string) string {
+	value = secretAssignRe.ReplaceAllString(value, "$1=[redacted]")
+	value = authHeaderRe.ReplaceAllString(value, "$1[redacted]")
+	return value
+}
+
+func isSkillPathValue(value string) bool {
+	return strings.Contains(strings.ToLower(value), "/skills/")
 }
 
 var thinkingVerbs = []string{
@@ -3866,27 +5119,518 @@ func pickThinkingVerb() string {
 
 var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
 
-func getToolIcon(toolName string) string {
-	if icon, ok := toolIconMap[toolName]; ok {
-		return icon
+type markdownTextMatch struct {
+	start int
+	end   int
+	raw   string
+}
+
+type markdownLine struct {
+	text       string
+	start, end int
+}
+
+var feishuCardImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)\)`)
+
+const (
+	richCardImageFinalWait = 4 * time.Second
+	richCardImageMaxBytes  = 10 * 1024 * 1024
+	richCardImageMaxCount  = 4
+)
+
+var blockedRichCardImagePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+// ResolveRichCardMarkdown implements core.RichCardMarkdownResolver. It turns
+// remote markdown image URLs into Feishu image keys so Card 2.0 can render them.
+// Streaming frames start uploads and strip unresolved images; final frames wait
+// briefly so resolved images can be embedded before the Done update.
+func (p *Platform) ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string {
+	if !strings.Contains(markdown, "![") {
+		return markdown
 	}
-	return defaultToolIcon
+	pending := map[*richCardImageUpload]struct{}{}
+	resolved := p.replaceRichCardMarkdownImages(ctx, markdown, pending)
+	if final && len(pending) > 0 {
+		waitCtx, cancel := context.WithTimeout(ctx, richCardImageFinalWait)
+		defer cancel()
+		for upload := range pending {
+			select {
+			case <-upload.done:
+			case <-waitCtx.Done():
+				return p.replaceRichCardMarkdownImages(ctx, markdown, nil)
+			}
+		}
+		resolved = p.replaceRichCardMarkdownImages(ctx, markdown, nil)
+	}
+	return resolved
+}
+
+func (p *Platform) replaceRichCardMarkdownImages(ctx context.Context, markdown string, pending map[*richCardImageUpload]struct{}) string {
+	seen := map[string]struct{}{}
+	return feishuCardImagePattern.ReplaceAllStringFunc(markdown, func(match string) string {
+		parts := feishuCardImagePattern.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return ""
+		}
+		alt, value := parts[1], parts[2]
+		if strings.HasPrefix(value, "img_") {
+			return match
+		}
+		if !isRemoteRichCardImageURL(value) {
+			return ""
+		}
+		if _, ok := seen[value]; !ok {
+			if len(seen) >= richCardImageMaxCount {
+				return ""
+			}
+			seen[value] = struct{}{}
+		}
+		if imageKey, ok := p.richCardImageKey(value); ok {
+			return fmt.Sprintf("![%s](%s)", alt, imageKey)
+		}
+		if p.richCardImageFailedURL(value) {
+			return ""
+		}
+		upload := p.ensureRichCardImageUpload(ctx, value)
+		if upload != nil && pending != nil {
+			pending[upload] = struct{}{}
+		}
+		return ""
+	})
+}
+
+func (p *Platform) richCardImageKey(rawURL string) (string, bool) {
+	p.richCardImageMu.Lock()
+	defer p.richCardImageMu.Unlock()
+	imageKey, ok := p.richCardImageResolved[rawURL]
+	return imageKey, ok && imageKey != ""
+}
+
+func (p *Platform) richCardImageFailedURL(rawURL string) bool {
+	p.richCardImageMu.Lock()
+	defer p.richCardImageMu.Unlock()
+	_, failed := p.richCardImageFailed[rawURL]
+	return failed
+}
+
+func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string) *richCardImageUpload {
+	p.richCardImageMu.Lock()
+	if p.richCardImageResolved == nil {
+		p.richCardImageResolved = map[string]string{}
+	}
+	if p.richCardImagePending == nil {
+		p.richCardImagePending = map[string]*richCardImageUpload{}
+	}
+	if p.richCardImageFailed == nil {
+		p.richCardImageFailed = map[string]struct{}{}
+	}
+	if imageKey := p.richCardImageResolved[rawURL]; imageKey != "" {
+		upload := &richCardImageUpload{done: make(chan struct{})}
+		close(upload.done)
+		p.richCardImageMu.Unlock()
+		return upload
+	}
+	if _, failed := p.richCardImageFailed[rawURL]; failed {
+		p.richCardImageMu.Unlock()
+		return nil
+	}
+	if upload := p.richCardImagePending[rawURL]; upload != nil {
+		p.richCardImageMu.Unlock()
+		return upload
+	}
+	upload := &richCardImageUpload{done: make(chan struct{})}
+	p.richCardImagePending[rawURL] = upload
+	p.richCardImageMu.Unlock()
+
+	go p.finishRichCardImageUpload(ctx, rawURL, upload)
+	return upload
+}
+
+func (p *Platform) finishRichCardImageUpload(ctx context.Context, rawURL string, upload *richCardImageUpload) {
+	imageKey, err := p.uploadRichCardImageURL(ctx, rawURL)
+
+	p.richCardImageMu.Lock()
+	defer p.richCardImageMu.Unlock()
+	delete(p.richCardImagePending, rawURL)
+	if err != nil {
+		if p.richCardImageFailed == nil {
+			p.richCardImageFailed = map[string]struct{}{}
+		}
+		p.richCardImageFailed[rawURL] = struct{}{}
+		slog.Debug(p.tag()+": rich card image upload failed", "host", richCardImageURLHost(rawURL), "error", err)
+	} else {
+		if p.richCardImageResolved == nil {
+			p.richCardImageResolved = map[string]string{}
+		}
+		p.richCardImageResolved[rawURL] = imageKey
+		slog.Debug(p.tag()+": rich card image uploaded", "host", richCardImageURLHost(rawURL), "image_key", imageKey)
+	}
+	close(upload.done)
+}
+
+func (p *Platform) uploadRichCardImageURL(ctx context.Context, rawURL string) (string, error) {
+	if p.richCardImageUploadFunc != nil {
+		return p.richCardImageUploadFunc(ctx, rawURL)
+	}
+	data, mimeType, err := fetchRichCardRemoteImage(ctx, rawURL)
+	if err != nil {
+		return "", err
+	}
+	imageKey, err := p.uploadImageKey(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	slog.Debug(p.tag()+": rich card image ready", "host", richCardImageURLHost(rawURL), "mime", mimeType, "bytes", len(data))
+	return imageKey, nil
+}
+
+func isRemoteRichCardImageURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+func richCardImageURLHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func fetchRichCardRemoteImage(ctx context.Context, rawURL string) ([]byte, string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, "", errors.New("invalid remote image URL")
+	}
+
+	client := &http.Client{
+		Timeout: richCardImageFinalWait,
+		Transport: &http.Transport{
+			DialContext:           dialPublicRichCardImageContext,
+			ResponseHeaderTimeout: richCardImageFinalWait,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return errors.New("too many redirects")
+			}
+			if !isRemoteRichCardImageURL(req.URL.String()) {
+				return errors.New("redirected to unsupported image URL")
+			}
+			return nil
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("User-Agent", "cc-connect-feishu-rich-card-image-resolver/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("feishu: close rich card image response body", "error", err)
+		}
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("remote image HTTP status %d", resp.StatusCode)
+	}
+	if resp.ContentLength > richCardImageMaxBytes {
+		return nil, "", fmt.Errorf("remote image too large: %d bytes", resp.ContentLength)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, richCardImageMaxBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > richCardImageMaxBytes {
+		return nil, "", fmt.Errorf("remote image exceeds %d bytes", richCardImageMaxBytes)
+	}
+	mimeType := http.DetectContentType(data)
+	if !isSupportedRichCardImageMIME(mimeType) {
+		return nil, "", fmt.Errorf("unsupported remote image MIME %q", mimeType)
+	}
+	return data, mimeType, nil
+}
+
+func dialPublicRichCardImageContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+
+	var ips []net.IP
+	if parsed := net.ParseIP(host); parsed != nil {
+		ips = []net.IP{parsed}
+	} else {
+		resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, addr := range resolved {
+			ips = append(ips, addr.IP)
+		}
+	}
+
+	var firstBlocked net.IP
+	for _, ip := range ips {
+		if isBlockedRichCardImageIP(ip) {
+			if firstBlocked == nil {
+				firstBlocked = ip
+			}
+			continue
+		}
+		dialer := &net.Dialer{Timeout: richCardImageFinalWait}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	if firstBlocked != nil {
+		return nil, fmt.Errorf("remote image host resolved to blocked IP %s", firstBlocked.String())
+	}
+	return nil, errors.New("remote image host resolved to no usable IPs")
+}
+
+func isBlockedRichCardImageIP(ip net.IP) bool {
+	addr, err := netip.ParseAddr(ip.String())
+	if err != nil {
+		return true
+	}
+	addr = addr.Unmap()
+	return !addr.IsGlobalUnicast() ||
+		addr.IsLoopback() ||
+		addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() ||
+		addr.IsMulticast() ||
+		addr.IsUnspecified() ||
+		richCardImageIPInBlockedPrefix(addr)
+}
+
+func richCardImageIPInBlockedPrefix(addr netip.Addr) bool {
+	for _, prefix := range blockedRichCardImagePrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSupportedRichCardImageMIME(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func markdownLinesWithOffsets(text string) []markdownLine {
+	if text == "" {
+		return nil
+	}
+	parts := strings.SplitAfter(text, "\n")
+	lines := make([]markdownLine, 0, len(parts))
+	offset := 0
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := offset + len(part)
+		lines = append(lines, markdownLine{text: part, start: offset, end: next})
+		offset = next
+	}
+	return lines
+}
+
+func isMarkdownTableRow(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return len(trimmed) >= 2 && strings.HasPrefix(trimmed, "|") && strings.HasSuffix(trimmed, "|")
+}
+
+func isMarkdownTableSeparator(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !isMarkdownTableRow(trimmed) {
+		return false
+	}
+	hasDash := false
+	for _, r := range trimmed {
+		switch r {
+		case '|', '-', ':', ' ':
+			if r == '-' {
+				hasDash = true
+			}
+		default:
+			return false
+		}
+	}
+	return hasDash
+}
+
+func findMarkdownTablesOutsideCodeBlocks(text string) []markdownTextMatch {
+	lines := markdownLinesWithOffsets(text)
+	var matches []markdownTextMatch
+	inCodeBlock := false
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i].text)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock || i+1 >= len(lines) || !isMarkdownTableRow(lines[i].text) || !isMarkdownTableSeparator(lines[i+1].text) {
+			continue
+		}
+		start := lines[i].start
+		end := lines[i+1].end
+		j := i + 2
+		for j < len(lines) && isMarkdownTableRow(lines[j].text) {
+			end = lines[j].end
+			j++
+		}
+		matches = append(matches, markdownTextMatch{
+			start: start,
+			end:   end,
+			raw:   strings.TrimSpace(text[start:end]),
+		})
+		i = j - 1
+	}
+	return matches
+}
+
+func wrapTablesBeyondLimit(text string, matches []markdownTextMatch, keepCount int) string {
+	if len(matches) <= keepCount {
+		return text
+	}
+	if keepCount < 0 {
+		keepCount = 0
+	}
+	result := text
+	for i := len(matches) - 1; i >= keepCount; i-- {
+		match := matches[i]
+		replacement := "```\n" + match.raw + "\n```"
+		result = result[:match.start] + replacement + result[match.end:]
+	}
+	return result
+}
+
+func sanitizeCardMarkdownTables(text string, remainingBudget int) (string, int) {
+	matches := findMarkdownTablesOutsideCodeBlocks(text)
+	if len(matches) <= remainingBudget {
+		return text, remainingBudget - len(matches)
+	}
+	return wrapTablesBeyondLimit(text, matches, remainingBudget), 0
+}
+
+func stripInvalidFeishuCardImages(text string) string {
+	if !strings.Contains(text, "![") {
+		return text
+	}
+	return feishuCardImagePattern.ReplaceAllStringFunc(text, func(match string) string {
+		parts := feishuCardImagePattern.FindStringSubmatch(match)
+		if len(parts) == 3 && strings.HasPrefix(parts[2], "img_") {
+			return match
+		}
+		return ""
+	})
+}
+
+func protectFencedCodeBlocks(text string) (string, []string) {
+	var blocks []string
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		start := strings.Index(text[i:], "```")
+		if start < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		start += i
+		end := strings.Index(text[start+3:], "```")
+		if end < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		end += start + 6
+		b.WriteString(text[i:start])
+		placeholder := fmt.Sprintf("\x00CC_FEISHU_CODE_BLOCK_%d\x00", len(blocks))
+		blocks = append(blocks, text[start:end])
+		b.WriteString(placeholder)
+		i = end
+	}
+	return b.String(), blocks
+}
+
+func restoreFencedCodeBlocks(text string, blocks []string) string {
+	for i, block := range blocks {
+		placeholder := fmt.Sprintf("\x00CC_FEISHU_CODE_BLOCK_%d\x00", i)
+		text = strings.ReplaceAll(text, placeholder, block)
+	}
+	return text
+}
+
+func optimizeFeishuCardMarkdown(text string) string {
+	protected, blocks := protectFencedCodeBlocks(text)
+	if regexp.MustCompile(`(?m)^#{1,3} `).MatchString(protected) {
+		protected = regexp.MustCompile(`(?m)^#{2,6} (.+)$`).ReplaceAllString(protected, "##### $1")
+		protected = regexp.MustCompile(`(?m)^# (.+)$`).ReplaceAllString(protected, "#### $1")
+	}
+	protected = regexp.MustCompile(`\n{3,}`).ReplaceAllString(protected, "\n\n")
+	return restoreFencedCodeBlocks(protected, blocks)
+}
+
+func sanitizeCardMarkdownSegmentsForCard(texts []string) []string {
+	out := make([]string, len(texts))
+	remainingBudget := feishuCardTableLimit
+	for i, text := range texts {
+		prepared := sanitizeMarkdownURLs(preprocessFeishuMarkdown(text))
+		prepared = stripInvalidFeishuCardImages(prepared)
+		prepared = optimizeFeishuCardMarkdown(prepared)
+		prepared, remainingBudget = sanitizeCardMarkdownTables(prepared, remainingBudget)
+		out[i] = prepared
+	}
+	return out
+}
+
+func sanitizeCardMarkdownForCard(text string) string {
+	return sanitizeCardMarkdownSegmentsForCard([]string{text})[0]
 }
 
 func richStepDisplayName(step core.ToolStep) string {
 	if step.Kind == core.ToolStepKindThinking {
 		return "Thinking"
 	}
-	name := strings.TrimSpace(step.Name)
-	if name == "" {
-		return "Tool"
-	}
-	return name
+	return buildToolDisplay(step.Name, step.Summary).Title
 }
 
 func richStepBody(step core.ToolStep) string {
 	name := richStepDisplayName(step)
-	summary := strings.TrimSpace(step.Summary)
+	summary := buildToolDisplay(step.Name, step.Summary).Detail
 	if summary == "" {
 		summary = name
 	}
@@ -3930,6 +5674,7 @@ func isCardJSON(content string) bool {
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
 // reflecting the given status. Used as a fallback when rich-card assembly fails.
 func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+	content = sanitizeCardMarkdownForCard(content)
 	template := "grey"
 	switch status {
 	case core.CardStatusWorking, core.CardStatusThinking:
@@ -3942,7 +5687,7 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "default", // schema 2.0 field; was wide_screen_mode (schema 1.0)
 		},
 		"header": map[string]any{
 			"template": template,
@@ -3961,158 +5706,209 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	return string(b)
 }
 
-// formatElapsedCN renders a human-readable duration in Chinese.
-// Examples: "3.2 秒", "1 分 23 秒", "1 小时 05 分"。
-func formatElapsedCN(d time.Duration) string {
-	if d < 0 {
-		d = 0
+func splitRichStepsByLane(steps []core.ToolStep) (reasoning []core.ToolStep, tools []core.ToolStep) {
+	for _, step := range steps {
+		if step.Kind == core.ToolStepKindThinking {
+			reasoning = append(reasoning, step)
+			continue
+		}
+		tools = append(tools, step)
 	}
-	totalSec := int64(d / time.Second)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%.1f 秒", d.Seconds())
-	case d < time.Hour:
-		m := totalSec / 60
-		s := totalSec % 60
-		return fmt.Sprintf("%d 分 %02d 秒", m, s)
-	default:
-		h := totalSec / 3600
-		m := (totalSec % 3600) / 60
-		return fmt.Sprintf("%d 小时 %02d 分", h, m)
+	return reasoning, tools
+}
+
+func richLaneTitle(label string, count int) string {
+	if count > 0 {
+		return fmt.Sprintf("%s (%d)", label, count)
+	}
+	return label
+}
+
+func richStepRowContent(step core.ToolStep) string {
+	body := richStepBody(step)
+	if step.Kind == core.ToolStepKindThinking {
+		return body
+	}
+	name := richStepDisplayName(step)
+	if body == name || strings.HasPrefix(body, name+"\n") {
+		return body
+	}
+	return name + "\n" + body
+}
+
+func richStepElement(step core.ToolStep) map[string]any {
+	text := map[string]any{
+		"tag":       "plain_text",
+		"content":   richStepRowContent(step),
+		"text_size": "notation",
+	}
+	elem := map[string]any{
+		"tag":  "div",
+		"text": text,
+	}
+	if step.Kind == core.ToolStepKindThinking {
+		text["text_color"] = "grey"
+		elem["icon"] = map[string]any{"tag": "standard_icon", "token": reasoningToolIcon}
+		return elem
+	}
+	elem["icon"] = map[string]any{"tag": "standard_icon", "token": buildToolDisplay(step.Name, step.Summary).IconToken}
+	return elem
+}
+
+func richPlaceholderElement(text string) map[string]any {
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":        "plain_text",
+			"content":    text,
+			"text_size":  "notation",
+			"text_color": "grey",
+		},
 	}
 }
 
-// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
-// tool-step panel, streaming markdown body, status-colored header, and
-// an elapsed-time footer.
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
-	panelTitle := "Thinking..."
-	if len(steps) > 0 {
-		if streaming {
-			toolCount := 0
-			for _, step := range steps {
-				if step.Kind != core.ToolStepKindThinking {
-					toolCount++
-				}
-			}
-			if toolCount > 0 {
-				panelTitle = fmt.Sprintf("Working on it (%d steps)", len(steps))
-			}
-		} else {
-			toolCounts := make(map[string]int)
-			var toolOrder []string
-			for _, s := range steps {
-				name := richStepDisplayName(s)
-				if toolCounts[name] == 0 {
-					toolOrder = append(toolOrder, name)
-				}
-				toolCounts[name]++
-			}
-			var toolParts []string
-			for _, name := range toolOrder {
-				if toolCounts[name] > 1 {
-					toolParts = append(toolParts, fmt.Sprintf("%s×%d", name, toolCounts[name]))
-				} else {
-					toolParts = append(toolParts, name)
-				}
-			}
-			toolSummary := strings.Join(toolParts, ", ")
-			preview := strings.TrimSpace(markdown)
-			if idx := strings.IndexByte(preview, '\n'); idx > 0 {
-				preview = preview[:idx]
-			}
-			if runes := []rune(preview); len(runes) > 20 {
-				preview = string(runes[:20]) + "..."
-			}
-			if preview != "" {
-				panelTitle = fmt.Sprintf("%s · %s", toolSummary, preview)
-			} else {
-				panelTitle = toolSummary
-			}
-		}
-	}
-
-	panelCap := len(steps)
-	if panelCap < 1 {
-		panelCap = 1
-	}
-	panelElements := make([]map[string]any, 0, panelCap)
+func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any {
 	if len(steps) == 0 {
-		panelElements = append(panelElements, map[string]any{
-			"tag":  "div",
-			"text": map[string]any{"tag": "plain_text", "content": "Thinking..."},
-		})
-	} else {
-		// Cap the number of step rows so the collapsible panel doesn't
-		// balloon into hundreds of elements (lark client renders that
-		// poorly and the whole card can hit the ~30KB API limit).
-		const maxPanelSteps = 30
-		visible := steps
-		overflow := 0
-		if len(steps) > maxPanelSteps {
-			visible = steps[:maxPanelSteps]
-			overflow = len(steps) - maxPanelSteps
-		}
-		for _, step := range visible {
-			summary := richStepBody(step)
-			panelElements = append(panelElements, map[string]any{
-				"tag":  "div",
-				"icon": map[string]any{"tag": "standard_icon", "token": getToolIcon(step.Name)},
-				"text": map[string]any{"tag": "plain_text", "content": summary},
-			})
-		}
-		if overflow > 0 {
-			panelElements = append(panelElements, map[string]any{
-				"tag":  "div",
-				"text": map[string]any{"tag": "plain_text", "content": fmt.Sprintf("… and %d more steps", overflow)},
-			})
-		}
+		return []map[string]any{richPlaceholderElement(emptyText)}
 	}
+	const maxPanelSteps = 10
+	visible := steps
+	hidden := 0
+	if len(steps) > maxPanelSteps {
+		hidden = len(steps) - maxPanelSteps
+		visible = steps[hidden:]
+	}
+	elements := make([]map[string]any, 0, len(visible)+1)
+	if hidden > 0 {
+		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... %d earlier steps hidden", hidden)))
+	}
+	for _, step := range visible {
+		elements = append(elements, richStepElement(step))
+	}
+	return elements
+}
 
-	panelMap := map[string]any{
+func buildRichPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+	return map[string]any{
 		"tag":              "collapsible_panel",
-		"expanded":         streaming,
+		"expanded":         expanded,
 		"background_color": "grey",
 		"header": map[string]any{
-			"title": map[string]any{"tag": "plain_text", "content": panelTitle},
+			"title": map[string]any{"tag": "plain_text", "content": title},
 		},
 		"border":           map[string]any{"color": "grey"},
 		"vertical_spacing": "8px",
 		"padding":          "4px 8px",
-		"elements":         panelElements,
+		"elements":         elements,
 	}
-	markdownMap := map[string]any{
-		"tag":     "markdown",
-		"content": preprocessFeishuMarkdown(markdown),
+}
+
+const maxRichCardJSONBytes = 28000
+
+// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
+// reasoning/tool panels, streaming markdown body, status-colored header, and a
+// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+	if err != nil {
+		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSONWithStatus(markdown, status)
+	}
+	if len(b) <= maxRichCardJSONBytes {
+		return string(b)
 	}
 
-	// Footer shows elapsed time: "⏱ 运行中 12.3 秒..." during streaming,
-	// "⏱ 用时 1 分 23 秒" on completion. Skip when elapsed == 0 to avoid noise.
-	var footerMap map[string]any
-	if elapsed > 0 {
-		var footerText string
-		if streaming {
-			footerText = fmt.Sprintf("⏱ 运行中 %s...", formatElapsedCN(elapsed))
-		} else {
-			footerText = fmt.Sprintf("⏱ 用时 %s", formatElapsedCN(elapsed))
+	// Keep Card 2.0 visible when long tool/reasoning history would exceed the
+	// Feishu payload limit. Dropping to a body-only fallback is unsafe because
+	// Codex intermediate messages often live only in panels, leaving markdown
+	// empty and producing a blank white card on update.
+	for _, limit := range []struct {
+		perLane int
+		textLen int
+	}{
+		{perLane: 10, textLen: 180},
+		{perLane: 6, textLen: 120},
+		{perLane: 3, textLen: 80},
+	} {
+		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		if err == nil && len(compact) <= maxRichCardJSONBytes {
+			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
+				"original_size", len(b),
+				"compacted_size", len(compact),
+				"steps", len(steps),
+				"compacted_steps", len(compactSteps),
+			)
+			return string(compact)
 		}
-		footerMap = map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":     "plain_text",
-				"content": footerText,
-			},
+	}
+
+	fallbackMarkdown := markdown
+	if strings.TrimSpace(fallbackMarkdown) == "" {
+		fallbackMarkdown = compactRichFallbackMarkdown(steps)
+	}
+	slog.Debug("feishu: rich card exceeds size limit, fallback to compact markdown card", "size", len(b))
+	return buildCardJSONWithStatus(fallbackMarkdown, status)
+}
+
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
+	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
+	panelMaps := make([]map[string]any, 0, 2)
+	if len(reasoningSteps) > 0 {
+		panelMaps = append(panelMaps, buildRichPanel(
+			richLaneTitle("Reasoning", len(reasoningSteps)),
+			streaming,
+			richPanelElements(reasoningSteps, "Thinking..."),
+		))
+	}
+	if len(toolSteps) > 0 {
+		panelMaps = append(panelMaps, buildRichPanel(
+			richLaneTitle("Tools", len(toolSteps)),
+			streaming,
+			richPanelElements(toolSteps, "No tool steps"),
+		))
+	}
+	if len(panelMaps) == 0 && streaming {
+		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+	}
+
+	markdownMap := map[string]any{
+		"tag":        "markdown",
+		"element_id": richCardMainTextElementID, // required for cardkit-v1 streaming text update
+		"content":    sanitizeCardMarkdownForCard(markdown),
+	}
+
+	// Footer: engine pre-composes a multi-line statusFooter (lines separated by \n).
+	// Each line renders as its own dim "notation"-sized markdown block so they
+	// visually sit below the body without being mistaken for content. Skip
+	// rendering when statusFooter is empty (footer disabled / nothing to show).
+	var footerElements []map[string]any
+	if statusFooter != "" {
+		for _, line := range strings.Split(statusFooter, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			footerElements = append(footerElements, map[string]any{
+				"tag":        "markdown",
+				"content":    sanitizeCardMarkdownForCard(line),
+				"text_size":  "notation",
+				"text_color": "grey",
+			})
 		}
 	}
 
 	var elements []map[string]any
-	if len(steps) > 0 || streaming {
-		elements = append(elements, panelMap, markdownMap)
+	if len(panelMaps) > 0 {
+		elements = append(elements, panelMaps...)
+		elements = append(elements, markdownMap)
 	} else {
 		elements = append(elements, markdownMap)
 	}
-	if footerMap != nil {
-		elements = append(elements, footerMap)
+	if len(footerElements) > 0 {
+		// Insert a horizontal separator between body and footer so the boundary is clear.
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, footerElements...)
 	}
 
 	// Header template color follows status.
@@ -4144,20 +5940,69 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		"body": map[string]any{"elements": elements},
 	}
 
-	b, err := json.Marshal(card)
-	if err != nil {
-		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
-		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+	return json.Marshal(card)
+}
+
+func compactRichStepsForCardSize(steps []core.ToolStep, perLaneLimit, textLimit int) []core.ToolStep {
+	if len(steps) == 0 || perLaneLimit <= 0 {
+		return nil
 	}
-	// Feishu interactive card payload limit is ~30KB; over that the API
-	// rejects the whole card and the lark client may render it as a
-	// mangled JSON dump. Drop the panel and keep just the markdown body.
-	const maxCardJSONBytes = 28000
-	if len(b) > maxCardJSONBytes {
-		slog.Debug("feishu: rich card exceeds size limit, fallback to basic card", "size", len(b))
-		return buildCardJSONWithStatus(preprocessFeishuMarkdown(markdown), status)
+	kept := make([]core.ToolStep, 0, min(len(steps), perLaneLimit*2))
+	reasoning := 0
+	tools := 0
+	for i := len(steps) - 1; i >= 0; i-- {
+		step := steps[i]
+		if step.Kind == core.ToolStepKindThinking {
+			if reasoning >= perLaneLimit {
+				continue
+			}
+			reasoning++
+		} else {
+			if tools >= perLaneLimit {
+				continue
+			}
+			tools++
+		}
+		kept = append(kept, compactRichStepText(step, textLimit))
 	}
-	return string(b)
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	return kept
+}
+
+func compactRichStepText(step core.ToolStep, textLimit int) core.ToolStep {
+	step.Summary = compactRichText(step.Summary, textLimit)
+	step.Result = compactRichText(step.Result, textLimit)
+	return step
+}
+
+func compactRichText(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	rs := []rune(strings.TrimSpace(s))
+	if len(rs) <= maxRunes {
+		return string(rs)
+	}
+	return string(rs[:maxRunes]) + "..."
+}
+
+func compactRichFallbackMarkdown(steps []core.ToolStep) string {
+	compactSteps := compactRichStepsForCardSize(steps, 3, 120)
+	if len(compactSteps) == 0 {
+		return ""
+	}
+	lines := []string{"Card content is large; showing recent activity:"}
+	for _, step := range compactSteps {
+		line := strings.TrimSpace(richStepRowContent(step))
+		if line == "" {
+			continue
+		}
+		line = strings.ReplaceAll(line, "\n", " - ")
+		lines = append(lines, "- "+line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func splitMarkdownByTables(md string, maxTables int) []string {
@@ -4186,11 +6031,11 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	return parts
 }
 
-// BuildRichCard implements core.RichCardSupporter. Feishu engine passes an
-// elapsed duration via the preview handle; buildRichCard itself is the
-// renderer and must be called with the duration from engine state.
-func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
-	return buildRichCard(status, title, steps, markdown, streaming, elapsed)
+// BuildRichCard implements core.RichCardSupporter. The engine pre-composes
+// statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
+// splits it back into one dim notation block per line.
+func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

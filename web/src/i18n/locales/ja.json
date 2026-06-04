@@ -114,6 +114,8 @@
     "lastRun": "最終実行",
     "lastError": "最後のエラー",
     "add": "ジョブを追加",
+    "trigger": "今すぐ実行",
+    "triggerPending": "実行を開始しました。結果はまもなく更新されます。",
     "delete": "削除",
     "noJobs": "スケジュールジョブがありません",
     "workDir": "作業ディレクトリ",

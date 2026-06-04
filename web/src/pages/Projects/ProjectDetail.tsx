@@ -50,6 +50,7 @@ export default function ProjectDetail() {
   const [workDir, setWorkDir] = useState('');
   const [agentMode, setAgentMode] = useState('');
   const [showCtxIndicator, setShowCtxIndicator] = useState(true);
+  const [showWorkdirIndicator, setShowWorkdirIndicator] = useState(true);
   const [replyFooter, setReplyFooter] = useState(true);
   const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
@@ -136,6 +137,7 @@ export default function ProjectDetail() {
         setAgentMode(proj.value.agent_mode || 'default');
         setSelectedAgentType(proj.value.agent_type || '');
         setShowCtxIndicator(proj.value.show_context_indicator !== false);
+        setShowWorkdirIndicator(proj.value.show_workdir_indicator !== false);
         setReplyFooter(proj.value.reply_footer !== false);
         setInjectSender(proj.value.inject_sender === true);
         setProviderRefs(proj.value.provider_refs || []);
@@ -184,6 +186,7 @@ export default function ProjectDetail() {
         mode: agentMode,
         ...(agentTypeChanged ? { agent_type: selectedAgentType } : {}),
         show_context_indicator: showCtxIndicator,
+        show_workdir_indicator: showWorkdirIndicator,
         reply_footer: replyFooter,
         inject_sender: injectSender,
         platform_allow_from: platformAllowFrom,
@@ -532,8 +535,20 @@ export default function ProjectDetail() {
           <div className="space-y-4 max-w-lg">
             <div className="flex items-center justify-between">
               <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Context indicator')}</label>
-                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showCtxIndicatorHint', 'Show [ctx: ~N%] suffix on replies')}</p>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.replyFooter', 'Reply footer')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.replyFooterHint', 'Master toggle for the per-turn reply footer')}</p>
+              </div>
+              <button
+                onClick={() => setReplyFooter(!replyFooter)}
+                className={cn('w-10 h-6 rounded-full transition-colors', replyFooter ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+              >
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', replyFooter ? 'translate-x-4' : 'translate-x-0')} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showCtxIndicator', 'Footer line 1: context')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showCtxIndicatorHint', 'Show model · effort · token usage · context % line in the reply footer')}</p>
               </div>
               <button
                 onClick={() => setShowCtxIndicator(!showCtxIndicator)}
@@ -544,14 +559,14 @@ export default function ProjectDetail() {
             </div>
             <div className="flex items-center justify-between">
               <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.replyFooter', 'Reply footer')}</label>
-                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.replyFooterHint', 'Append model/usage metadata to replies')}</p>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.showWorkdirIndicator', 'Footer line 2: workdir')}</label>
+                <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.showWorkdirIndicatorHint', 'Show workspace directory line in the reply footer')}</p>
               </div>
               <button
-                onClick={() => setReplyFooter(!replyFooter)}
-                className={cn('w-10 h-6 rounded-full transition-colors', replyFooter ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+                onClick={() => setShowWorkdirIndicator(!showWorkdirIndicator)}
+                className={cn('w-10 h-6 rounded-full transition-colors', showWorkdirIndicator ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
               >
-                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', replyFooter ? 'translate-x-4' : 'translate-x-0')} />
+                <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', showWorkdirIndicator ? 'translate-x-4' : 'translate-x-0')} />
               </button>
             </div>
             <div className="flex items-center justify-between">

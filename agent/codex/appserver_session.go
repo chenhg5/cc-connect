@@ -111,6 +111,35 @@ type appServerCreditsSnapshot struct {
 	Unlimited  bool    `json:"unlimited"`
 }
 
+type appServerRequestUserInputParams struct {
+	ThreadID  string                              `json:"threadId"`
+	TurnID    string                              `json:"turnId"`
+	ItemID    string                              `json:"itemId"`
+	Questions []appServerRequestUserInputQuestion `json:"questions"`
+}
+
+type appServerRequestUserInputQuestion struct {
+	ID       string                            `json:"id"`
+	Header   string                            `json:"header"`
+	Question string                            `json:"question"`
+	IsOther  bool                              `json:"isOther"`
+	IsSecret bool                              `json:"isSecret"`
+	Options  []appServerRequestUserInputOption `json:"options"`
+}
+
+type appServerRequestUserInputOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type appServerRequestUserInputResponse struct {
+	Answers map[string]appServerRequestUserInputAnswer `json:"answers"`
+}
+
+type appServerRequestUserInputAnswer struct {
+	Answers []string `json:"answers"`
+}
+
 type appServerSession struct {
 	url           string
 	workDir       string
@@ -526,6 +555,8 @@ func (s *appServerSession) handleServerRequest(probe map[string]json.RawMessage)
 		s.handleApprovalRequest(rawID, method, params)
 	case "item/permissions/requestApproval":
 		s.handlePermissionsApproval(rawID, params)
+	case "item/tool/requestUserInput":
+		s.handleRequestUserInput(rawID, params)
 	case "item/tool/call":
 		s.handleDynamicToolCall(rawID, params)
 	default:
@@ -654,6 +685,65 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 	}()
 }
 
+func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsRaw json.RawMessage) {
+	requestID := string(rawID)
+	var params appServerRequestUserInputParams
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"error": map[string]any{"code": -32602, "message": "invalid params"},
+		})
+		return
+	}
+
+	questions := appServerRequestUserInputQuestions(params.Questions)
+	if len(questions) == 0 {
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"result": appServerRequestUserInputResponse{Answers: map[string]appServerRequestUserInputAnswer{}},
+		})
+		return
+	}
+
+	rawInput := appServerRequestUserInputRawInput(params)
+	ch := make(chan core.PermissionResult, 1)
+	s.approvalsMu.Lock()
+	s.pendingApprovals[requestID] = ch
+	s.approvalsMu.Unlock()
+
+	s.flushPendingAsThinking()
+	s.emit(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    requestID,
+		ToolName:     "AskUserQuestion",
+		ToolInput:    appServerJSON(rawInput),
+		ToolInputRaw: rawInput,
+		Questions:    questions,
+	})
+
+	go func() {
+		timer := time.NewTimer(5 * time.Minute)
+		defer timer.Stop()
+		var result core.PermissionResult
+		select {
+		case result = <-ch:
+		case <-s.ctx.Done():
+			result = core.PermissionResult{Behavior: "deny"}
+		case <-timer.C:
+			result = core.PermissionResult{Behavior: "deny"}
+		}
+		s.approvalsMu.Lock()
+		delete(s.pendingApprovals, requestID)
+		s.approvalsMu.Unlock()
+
+		response := appServerRequestUserInputResponseFromResult(params.Questions, result)
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"result": response,
+		})
+	}()
+}
+
 func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRaw json.RawMessage) {
 	_ = s.writeJSON(map[string]any{
 		"jsonrpc": "2.0", "id": rawID,
@@ -662,6 +752,118 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 			"contentItems": []map[string]any{{"type": "inputText", "text": "tool not available on this client"}},
 		},
 	})
+}
+
+func appServerRequestUserInputQuestions(input []appServerRequestUserInputQuestion) []core.UserQuestion {
+	questions := make([]core.UserQuestion, 0, len(input))
+	for _, in := range input {
+		questionText := strings.TrimSpace(in.Question)
+		if questionText == "" {
+			continue
+		}
+		q := core.UserQuestion{
+			Question: questionText,
+			Header:   strings.TrimSpace(in.Header),
+		}
+		for _, opt := range in.Options {
+			q.Options = append(q.Options, core.UserQuestionOption{
+				Label:       strings.TrimSpace(opt.Label),
+				Description: strings.TrimSpace(opt.Description),
+			})
+		}
+		questions = append(questions, q)
+	}
+	return questions
+}
+
+func appServerRequestUserInputRawInput(params appServerRequestUserInputParams) map[string]any {
+	questions := make([]any, 0, len(params.Questions))
+	for _, in := range params.Questions {
+		q := map[string]any{
+			"id":       in.ID,
+			"header":   in.Header,
+			"question": in.Question,
+			"isOther":  in.IsOther,
+			"isSecret": in.IsSecret,
+			"options":  appServerRequestUserInputRawOptions(in.Options),
+		}
+		questions = append(questions, q)
+	}
+	return map[string]any{
+		"threadId":  params.ThreadID,
+		"turnId":    params.TurnID,
+		"itemId":    params.ItemID,
+		"questions": questions,
+	}
+}
+
+func appServerRequestUserInputRawOptions(options []appServerRequestUserInputOption) []any {
+	out := make([]any, 0, len(options))
+	for _, opt := range options {
+		out = append(out, map[string]any{
+			"label":       opt.Label,
+			"description": opt.Description,
+		})
+	}
+	return out
+}
+
+func appServerRequestUserInputResponseFromResult(questions []appServerRequestUserInputQuestion, result core.PermissionResult) appServerRequestUserInputResponse {
+	response := appServerRequestUserInputResponse{Answers: map[string]appServerRequestUserInputAnswer{}}
+	if !strings.EqualFold(result.Behavior, "allow") {
+		return response
+	}
+
+	answersRaw, _ := result.UpdatedInput["answers"].(map[string]any)
+	if len(answersRaw) == 0 {
+		return response
+	}
+
+	for _, q := range questions {
+		id := strings.TrimSpace(q.ID)
+		text := strings.TrimSpace(q.Question)
+		if id == "" || text == "" {
+			continue
+		}
+		values := appServerRequestUserInputAnswerValues(answersRaw[text])
+		if len(values) == 0 {
+			continue
+		}
+		response.Answers[id] = appServerRequestUserInputAnswer{Answers: values}
+	}
+	return response
+}
+
+func appServerRequestUserInputAnswerValues(raw any) []string {
+	switch v := raw.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []string{v}
+	case []string:
+		values := make([]string, 0, len(v))
+		for _, s := range v {
+			if strings.TrimSpace(s) != "" {
+				values = append(values, s)
+			}
+		}
+		return values
+	case []any:
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				values = append(values, s)
+			}
+		}
+		return values
+	case map[string]any:
+		return appServerRequestUserInputAnswerValues(v["answers"])
+	case appServerRequestUserInputAnswer:
+		return appServerRequestUserInputAnswerValues(v.Answers)
+	default:
+		return nil
+	}
 }
 
 func (s *appServerSession) rejectPendingApprovals(err error) {
