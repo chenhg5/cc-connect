@@ -98,12 +98,16 @@ Examples:
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
   cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
 
-You can also list, edit, or delete cron jobs:
+You can also list, inspect, run, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron info <job-id> [field]
+  cc-connect cron exec <job-id>
   cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
 
-Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes.
+When changing an existing job, first run ` + "`cc-connect cron info <job-id>`" + ` to inspect the current values, then use ` + "`cron edit`" + ` for only the field(s) the user asked to change.
+Use ` + "`cron exec <job-id>`" + ` to run an existing scheduled task immediately; this is different from the ` + "`--exec <command>`" + ` flag used when creating a shell-command cron job.
+Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes. Do not delete and recreate a job unless the user explicitly asks to replace it.
 Common editable fields:
   cron_expr     new schedule, e.g. "0 9 * * *"
   prompt        new task prompt (or ` + "`exec`" + ` for shell command)
@@ -114,6 +118,7 @@ Common editable fields:
 Run ` + "`cc-connect cron edit --help`" + ` for the full field list.
 
 Examples:
+  cc-connect cron exec abc123
   cc-connect cron edit abc123 cron_expr "0 9 * * *"
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 prompt "Updated daily summary task"
@@ -198,6 +203,13 @@ type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
 }
 
+// AtMentionSender is an optional interface for platforms that support @mention in
+// reply messages (e.g. DingTalk). Platforms that implement this interface can
+// include @user notifications when replying in group chats.
+type AtMentionSender interface {
+	ReplyWithAt(ctx context.Context, replyCtx any, content string, atUsers []string, atAll bool) error
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error
@@ -211,6 +223,22 @@ type FileSender interface {
 // MessageUpdater is an optional interface for platforms that support updating messages.
 type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
+}
+
+// StatusFooterSender is an optional Platform extension for sending a reply
+// with a structured per-turn status footer rendered using platform-specific
+// dim/small styling (e.g. Lark `text_size: "notation"`). Platforms that do
+// not implement it fall back to receiving the footer appended inline to the
+// content via Send/SendWithButtons/...
+type StatusFooterSender interface {
+	SendWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
+}
+
+// StatusFooterUpdater is the streaming-preview counterpart of
+// StatusFooterSender: it patches an existing preview message with a final
+// content + structured status footer block.
+type StatusFooterUpdater interface {
+	UpdateMessageWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
 }
 
 // ProgressStyleProvider is an optional interface for platforms that expose
@@ -454,13 +482,14 @@ type ContextUsage struct {
 	// BaselineTokens is the portion of the context window always occupied by
 	// fixed runtime/system instructions and therefore excluded from user-visible
 	// "left" calculations when the agent provides it.
-	BaselineTokens        int
-	TotalTokens           int
-	InputTokens           int
-	CachedInputTokens     int
-	OutputTokens          int
-	ReasoningOutputTokens int
-	ContextWindow         int
+	BaselineTokens           int
+	TotalTokens              int
+	InputTokens              int
+	CachedInputTokens        int // cache-read tokens (prior context retrieved from cache)
+	CacheCreationInputTokens int // cache-write tokens (new content written to cache)
+	OutputTokens             int
+	ReasoningOutputTokens    int
+	ContextWindow            int
 }
 
 // ContextCompressor is an optional interface for agents that support
@@ -491,12 +520,27 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+type SessionTitleProvider interface {
+	GetSessionTitle(sessionID string) string
+}
+
 // WorkDirSwitcher is an optional interface for agents that support runtime
 // work directory switching. The change takes effect on the next session start;
 // the current running session is terminated automatically by the engine.
 type WorkDirSwitcher interface {
 	SetWorkDir(dir string)
 	GetWorkDir() string
+}
+
+// AgentOptsProvider is an optional interface for agents that need to carry
+// their full configuration options when the engine clones a per-workspace
+// agent instance in multi-workspace mode. The engine merges the returned map
+// into the workspace opts before calling the agent factory, giving workspace
+// agents access to agent-specific options (e.g. "session" for the tmux agent)
+// that are not covered by the standard GetModel / GetMode accessors.
+// work_dir is always overridden by the engine and must not be returned here.
+type AgentOptsProvider interface {
+	BaseOpts() map[string]any
 }
 
 // ModeSwitcher is an optional interface for agents that support runtime permission mode switching.

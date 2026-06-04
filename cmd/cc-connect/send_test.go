@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -72,6 +73,51 @@ func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
 	}
 	if req.SessionKey != "telegram:123:456" {
 		t.Fatalf("session = %q, want telegram:123:456", req.SessionKey)
+	}
+}
+
+func TestParseSendArgs_AudioAndVideoAttachments(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "voice.opus")
+	videoPath := filepath.Join(dir, "demo.mp4")
+	if err := os.WriteFile(audioPath, []byte("opus"), 0o644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(videoPath, []byte("mp4"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+
+	req, _, err := parseSendArgs([]string{"--audio", audioPath, "--video", videoPath})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if len(req.Images) != 0 {
+		t.Fatalf("images len = %d, want 0", len(req.Images))
+	}
+	if len(req.Files) != 2 {
+		t.Fatalf("files len = %d, want 2", len(req.Files))
+	}
+	if req.Files[0].FileName != "voice.opus" {
+		t.Fatalf("audio filename = %q, want voice.opus", req.Files[0].FileName)
+	}
+	if req.Files[1].FileName != "demo.mp4" {
+		t.Fatalf("video filename = %q, want demo.mp4", req.Files[1].FileName)
+	}
+}
+
+func TestParseSendArgs_AudioRejectsNonAudio(t *testing.T) {
+	dir := t.TempDir()
+	docPath := filepath.Join(dir, "report.txt")
+	if err := os.WriteFile(docPath, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write doc: %v", err)
+	}
+
+	_, _, err := parseSendArgs([]string{"--audio", docPath})
+	if err == nil {
+		t.Fatal("expected non-audio attachment to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not audio media") {
+		t.Fatalf("error = %q, want not audio media", err.Error())
 	}
 }
 

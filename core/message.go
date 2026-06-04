@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// UnauthorizedAccessMessage is safe to show to an inbound sender when the
+// platform boundary rejects their identity. Keep it user-facing: do not mention
+// allow_from, user IDs, or chat IDs.
+const UnauthorizedAccessMessage = "角色未授权，请联系管理员添加权限。"
+
 // MergeEnv returns base env with entries from extra overriding same-key entries.
 // This prevents duplicate keys (e.g. two PATH entries) which cause the override
 // to be silently ignored on Linux (getenv returns the first match).
@@ -81,6 +86,12 @@ type FileAttachment struct {
 // SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
 // and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.
+//
+// The attachment FileName is treated as untrusted user input (it comes from
+// the IM/HTTP upload metadata) and is sanitized to a basename before being
+// joined into attachDir. Without this, FileName="../../escape.txt" was
+// written to workDir/escape.txt — outside the intended attachments
+// directory.
 func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
@@ -92,7 +103,7 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 
 	var paths []string
 	for i, f := range files {
-		fname := f.FileName
+		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
 			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
 		}
@@ -105,6 +116,24 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
 	return paths
+}
+
+// sanitizeAttachmentFileName reduces a user-supplied attachment filename to a
+// safe basename suitable for joining into an attachment directory. It strips
+// any directory components (both `/` and `\`, the latter so Linux strips
+// Windows-style paths too) and rejects parent / current-directory references.
+// Returns "" when the input cannot produce a safe basename, so callers can
+// fall back to a generated name.
+func sanitizeAttachmentFileName(name string) string {
+	// Normalize backslashes to forward slashes so filepath.Base on any OS
+	// strips Windows-style separators in attacker-supplied paths too.
+	name = filepath.ToSlash(name)
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
 }
 
 // AppendFileRefs appends file path references to a prompt string.
@@ -142,6 +171,7 @@ type Message struct {
 	Platform     string
 	MessageID    string // platform message ID for tracing
 	Recalled     bool   // true for platform message recall/delete events targeting MessageID
+	ChannelID    string
 	UserID       string
 	UserName     string
 	ChatName     string // human-readable chat/group name (optional)
@@ -200,10 +230,12 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	InputTokens  int // token usage from agent result events
-	OutputTokens int
-	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
-	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
+	InputTokens              int // token usage from agent result events
+	OutputTokens             int
+	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
+	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
+	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.

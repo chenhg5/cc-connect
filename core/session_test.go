@@ -931,3 +931,49 @@ func TestLegacyData_ClearsAfterFirstNewCommand(t *testing.T) {
 		t.Fatal("thread-new should be in known as current ID")
 	}
 }
+
+// TestSession_SetName_RaceFree pins the bug where management.go used to
+// write s.Name = body.Name without holding s.mu. Readers (GetName, the
+// /sessions listing handler) lock s.mu, so concurrent reads + writes
+// were a data race. With SetName acquiring s.mu the race detector stays
+// quiet; without the production fix it reports DATA RACE.
+func TestSession_HistoryLen(t *testing.T) {
+	s := &Session{}
+	if got := s.HistoryLen(); got != 0 {
+		t.Fatalf("empty session: expected HistoryLen=0, got %d", got)
+	}
+	s.AddHistory("user", "hello")
+	if got := s.HistoryLen(); got != 1 {
+		t.Fatalf("after user entry: expected HistoryLen=1, got %d", got)
+	}
+	s.AddHistory("assistant", "world")
+	if got := s.HistoryLen(); got != 2 {
+		t.Fatalf("after assistant entry: expected HistoryLen=2, got %d", got)
+	}
+}
+
+func TestSession_SetName_RaceFree(t *testing.T) {
+	sm := NewSessionManager("")
+	s := sm.GetOrCreateActive("user1")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				s.SetName("primary")
+			} else {
+				s.SetName("secondary")
+			}
+		}(i)
+	}
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.GetName()
+		}()
+	}
+	wg.Wait()
+}

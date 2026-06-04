@@ -687,6 +687,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 cc-connect cron add --cron "0 6 * * *" --prompt "总结 GitHub trending" --desc "每日趋势"
 cc-connect cron list
 cc-connect cron edit <job-id> <field> <value>   # 可改 cron_expr / prompt / enabled / mute / timeout_mins 等
+cc-connect cron exec <job-id>
 cc-connect cron del <job-id>
 ```
 
@@ -928,7 +929,7 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # 或 dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
+type = "feishu"  # 或 wps-xiezuo, dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # 平台特定配置

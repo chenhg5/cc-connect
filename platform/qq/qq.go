@@ -77,6 +77,15 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	slog.Info("qq: connected to OneBot", "url", p.wsURL)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+
+	// Start readLoop BEFORE callAPI: callAPI's response is routed by readLoop,
+	// so calling it first would always time out after 15s and leave selfID=0,
+	// which disables the self-message filter in handleMessage and lets the bot
+	// respond to its own messages.
+	go p.readLoop(ctx)
+
 	// Get bot self info
 	if info, err := p.callAPI("get_login_info", nil); err == nil {
 		if uid, ok := info["user_id"].(float64); ok {
@@ -84,12 +93,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}
 		nick, _ := info["nickname"].(string)
 		slog.Info("qq: logged in", "qq", p.selfID, "nickname", nick)
+	} else {
+		slog.Warn("qq: get_login_info failed; self-message filter disabled until next reconnect", "error", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-
-	go p.readLoop(ctx)
 
 	return nil
 }

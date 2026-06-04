@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -346,6 +347,45 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 }
 
+// TestMgmt_SessionsConcurrentNameWriteAndList pins the bug where the
+// POST /sessions handler wrote s.Name = body.Name directly without
+// holding s.mu, while the GET handler reads s.Name through s.mu.Lock().
+// Run with -race to detect the data race; with the production fix
+// the test stays clean.
+func TestMgmt_SessionsConcurrentNameWriteAndList(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	// Pre-create the session so both handlers operate on the same instance.
+	e.sessions.GetOrCreateActive("user1")
+
+	listURL := ts.URL + "/api/v1/projects/test-project/sessions"
+	postURL := listURL
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := "a"
+			if i%2 == 0 {
+				name = "b"
+			}
+			_ = mgmtPost(t, postURL, "tok", map[string]string{
+				"session_key": "user1",
+				"name":        name,
+			})
+		}(i)
+	}
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = mgmtGet(t, listURL, "tok")
+		}()
+	}
+	wg.Wait()
+}
+
 func TestMgmt_SessionDelete(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 
@@ -510,6 +550,162 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	r = mgmtDelete(t, ts.URL+"/api/v1/cron/nonexistent", "tok")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent cron job")
+	}
+}
+
+func TestMgmt_CronExecByID(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("triggered from management")
+	e.platforms = []Platform{platform}
+	e.agent = &resultAgent{session: agentSession}
+	e.cronScheduler = cs
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:          "cron-run-1",
+		Project:     "test-project",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "hello",
+		Description: "Run me now",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
+	if !r.OK {
+		t.Fatalf("cron exec failed: %s", r.Error)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal run response: %v", err)
+	}
+	if data["status"] != "triggered" {
+		t.Fatalf("status = %v, want triggered", data["status"])
+	}
+	if data["id"] != job.ID {
+		t.Fatalf("id = %v, want %s", data["id"], job.ID)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(platform.getSent()) < 2 {
+		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
+	}
+
+	aliasJob := &CronJob{
+		ID:          "cron-run-alias-1",
+		Project:     "test-project",
+		SessionKey:  "discord:channel-2:user-2",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "hello alias",
+		Description: "Run alias now",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(aliasJob); err != nil {
+		t.Fatal(err)
+	}
+
+	e.agent = &resultAgent{session: newResultAgentSession("triggered from management alias")}
+	alias := mgmtPost(t, ts.URL+"/api/v1/cron/"+aliasJob.ID+"/run", "tok", map[string]any{})
+	if !alias.OK {
+		t.Fatalf("cron run compatibility alias failed: %s", alias.Error)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 4 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for triggered cron run alias, sent=%v", platform.getSent())
+}
+
+func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:         "cron-run-extra",
+		Project:    "test-project",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec/extra", "tok", map[string]any{})
+	if r.OK {
+		t.Fatal("expected extra cron path segment to be rejected")
+	}
+	if !strings.Contains(r.Error, "unknown cron route") {
+		t.Fatalf("error = %q, want unknown cron route", r.Error)
+	}
+}
+
+func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:         "cron-run-missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
+	if r.OK {
+		t.Fatal("expected exec to fail when project is missing")
+	}
+	if !strings.Contains(r.Error, "project") {
+		t.Fatalf("error = %q, want project error", r.Error)
+	}
+	if !strings.Contains(r.Error, "not found") {
+		t.Fatalf("error = %q, want missing project details", r.Error)
 	}
 }
 
@@ -1520,9 +1716,10 @@ func TestMgmt_CronPatch(t *testing.T) {
 
 	// Add a job
 	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
-		"project":   "test-project",
-		"cron_expr": "0 9 * * *",
-		"prompt":    "hello",
+		"project":     "test-project",
+		"session_key": "test:chan:user",
+		"cron_expr":   "0 9 * * *",
+		"prompt":      "hello",
 	})
 	if !r.OK {
 		t.Fatalf("cron add failed: %s", r.Error)
@@ -2613,5 +2810,47 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 	r := mgmtDelete(t, ts.URL+"/api/v1/providers/cc-switch", "tok")
 	if r.OK {
 		t.Fatal("expected DELETE on cc-switch to fail")
+	}
+}
+
+// TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL is a regression test for a
+// nil-pointer panic in handleSetupWeixinPoll. The handler did
+// `u, _ := url.Parse(apiBase + "/")` and then immediately called
+// `u.JoinPath(...)`. For inputs like "://" or "%zz", url.Parse returns a nil
+// URL plus an error; the discarded error meant the next line crashed the
+// management server with `runtime error: invalid memory address or nil
+// pointer dereference`. handleSetupWeixinBegin already validated this same
+// field; this test pins the symmetric handling here.
+func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
+	mgmt := NewManagementServer(0, "", nil)
+
+	for _, bad := range []string{"://", "://malformed", "%zz"} {
+		body := map[string]any{
+			"qr_key":  "abc",
+			"api_url": bad,
+		}
+		buf := new(bytes.Buffer)
+		if err := json.NewEncoder(buf).Encode(body); err != nil {
+			t.Fatalf("encode body: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/weixin/poll", buf)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		// Recover any panic so the test reports a meaningful failure rather
+		// than crashing the test binary, then assert the handler returned a
+		// 4xx (not 5xx and not a panic) for the bad input.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("handleSetupWeixinPoll panicked on api_url=%q: %v", bad, r)
+				}
+			}()
+			mgmt.handleSetupWeixinPoll(w, req)
+		}()
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("api_url=%q: status=%d, want %d (body=%s)", bad, w.Code, http.StatusBadRequest, w.Body.String())
+		}
 	}
 }

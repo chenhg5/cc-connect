@@ -715,10 +715,10 @@ func (s *acpSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(s.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("acp: close timed out waiting for I/O loop")
 	}
-	close(s.events)
 	return nil
 }
 

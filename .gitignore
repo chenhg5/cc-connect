@@ -65,6 +65,8 @@ release/
 # Keep web/dist directory (for embedded admin UI) but ignore build artifacts
 web/dist/*
 !web/dist/.keep
+# TypeScript incremental build cache — generated locally, should not be committed
+web/tsconfig.tsbuildinfo
 
 # ============================================================================
 # Testing & temporary files
@@ -141,3 +143,4 @@ secrets/
 credentials/
 
 .codex
+cc-connect-new

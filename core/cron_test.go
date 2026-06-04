@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,6 +113,7 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 		t.Errorf("mutePlatform should delegate Name(), got %q", mp.Name())
 	}
 }
+
 
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
@@ -366,6 +368,194 @@ func TestCronStore_JobsPath(t *testing.T) {
 	}
 }
 
+func TestCronScheduler_RunJobNow_DisabledJobStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("manual run complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "manual1",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "summarize activity",
+		Description: "Disabled daily summary",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scheduler.RunJobNow("manual1"); err != nil {
+		t.Fatalf("RunJobNow() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := platform.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != "⏰ Disabled daily summary" {
+				t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
+			}
+			if sent[1] != "manual run complete" {
+				t.Fatalf("sent[1] = %q, want final result", sent[1])
+			}
+			found, lastRunSet, lastErr := cronJobRunStatus(store, "manual1")
+			if !found {
+				t.Fatal("expected stored job")
+			}
+			if !lastRunSet {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			if lastErr != "" {
+				t.Fatalf("LastError = %q, want empty", lastErr)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for manual run messages, sent=%v", platform.getSent())
+}
+
+func TestCronScheduler_RunJobNow_NotFound(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	err = scheduler.RunJobNow("missing")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("RunJobNow() error = %v, want not found", err)
+	}
+}
+
+func TestCronScheduler_RunJobNow_ProjectMissingFailsSynchronously(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID:         "missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	err = scheduler.RunJobNow("missing-project")
+	if err == nil || !errors.Is(err, ErrCronProjectNotFound) || !strings.Contains(err.Error(), `"ghost"`) {
+		t.Fatalf("RunJobNow() error = %v, want missing project", err)
+	}
+}
+
+func TestCronScheduler_RunJobNow_UsesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("snapshot complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "snapshot1",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "original prompt",
+		Description: "Original description",
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scheduler.RunJobNow("snapshot1"); err != nil {
+		t.Fatalf("RunJobNow() error = %v", err)
+	}
+	if !store.Update("snapshot1", "prompt", "mutated prompt") {
+		t.Fatal("Update(prompt) returned false")
+	}
+	if !store.Update("snapshot1", "description", "Mutated description") {
+		t.Fatal("Update(description) returned false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := platform.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != "⏰ Original description" {
+				t.Fatalf("sent[0] = %q, want original description", sent[0])
+			}
+			if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "original prompt") {
+				t.Fatalf("agent prompts = %#v, want original prompt", agentSession.sentPrompts)
+			}
+			if strings.Contains(agentSession.sentPrompts[0], "mutated prompt") {
+				t.Fatalf("agent prompt used mutated value: %#v", agentSession.sentPrompts)
+			}
+			found, lastRunSet, _ := cronJobRunStatus(store, "snapshot1")
+			if !found {
+				t.Fatal("expected stored job")
+			}
+			if !lastRunSet {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for snapshot run, sent=%v", platform.getSent())
+}
+
+func cronJobRunStatus(store *CronStore, id string) (found bool, lastRunSet bool, lastErr string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, job := range store.jobs {
+		if job.ID == id {
+			return true, !job.LastRun.IsZero(), job.LastError
+		}
+	}
+	return false, false, ""
+}
+
 func TestCronJob_ExecutionTimeout(t *testing.T) {
 	j := &CronJob{}
 	if got := j.ExecutionTimeout(); got != defaultCronJobTimeout {
@@ -440,6 +630,42 @@ func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for negative timeout_mins")
+	}
+}
+
+// TestCronScheduler_AddJob_EmptySessionKey verifies that AddJob refuses to
+// persist a job without a session_key. Without this guard, ExecuteCronJob
+// later fails at fire-time with `platform "" not found for session ""`,
+// leaving an unrunnable job lingering in the store.
+func TestCronScheduler_AddJob_EmptySessionKey(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		sessionKey string
+	}{
+		{"empty", ""},
+		{"whitespace", "   "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs := NewCronScheduler(store)
+			err = cs.AddJob(&CronJob{
+				ID: "j1", Project: "p", SessionKey: tt.sessionKey,
+				CronExpr: "0 6 * * *", Prompt: "hi",
+			})
+			if err == nil {
+				t.Fatalf("expected error for empty session_key, got nil")
+			}
+			if !strings.Contains(err.Error(), "session_key") {
+				t.Errorf("error %q should mention session_key", err.Error())
+			}
+			if jobs := store.List(); len(jobs) != 0 {
+				t.Errorf("store should be empty after rejected AddJob, got %d job(s)", len(jobs))
+			}
+		})
 	}
 }
 
@@ -563,5 +789,53 @@ func TestCronStore_ListByProject(t *testing.T) {
 	list3 := store.ListByProject("nonexistent")
 	if len(list3) != 0 {
 		t.Errorf("ListByProject(nonexistent) = %d jobs, want 0", len(list3))
+	}
+}
+
+// TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule verifies that
+// passing a non-bool value for the "enabled" field is rejected up-front and
+// does NOT silently leave the scheduled cron entry removed. Before this fix,
+// UpdateJob removed the entry before delegating to store.Update, so a type
+// mismatch left the job marked Enabled but with no scheduled tick — the only
+// recovery was a daemon restart.
+func TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID: "e1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", Enabled: true,
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.mu.RLock()
+	_, scheduledBefore := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if !scheduledBefore {
+		t.Fatal("precondition: enabled job should be scheduled after AddJob")
+	}
+
+	// String "true" instead of bool true — what a misbehaving HTTP/management
+	// API client could send.
+	if err := cs.UpdateJob(job.ID, "enabled", "true"); err == nil {
+		t.Fatal("UpdateJob with non-bool enabled value should return an error")
+	}
+
+	cs.mu.RLock()
+	_, scheduledAfter := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if !scheduledAfter {
+		t.Fatal("schedule was removed even though update failed; job will never fire again")
+	}
+
+	stored := store.Get(job.ID)
+	if stored == nil || !stored.Enabled {
+		t.Fatalf("stored job state should be unchanged on validation error, got %+v", stored)
 	}
 }

@@ -3,6 +3,7 @@ package wecom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -35,10 +36,15 @@ type WSPlatform struct {
 	dedup       core.MessageDedup
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
-	pendingAcks sync.Map     // req_id -> chan error, for sequential send with ack waiting
+	pendingAcks sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
 }
 
-const wsAckTimeout = 5 * time.Second
+const (
+	wsAckTimeout      = 5 * time.Second
+	wsMediaAckTimeout = 30 * time.Second
+)
+
+var errWSAckTimeout = errors.New("wecom-ws: ack timeout")
 
 // wsReplyContext holds the context needed to reply to a specific message.
 type wsReplyContext struct {
@@ -63,6 +69,11 @@ type wsFrame struct {
 
 type wsFrameHeaders struct {
 	ReqID string `json:"req_id"`
+}
+
+type wsAckResult struct {
+	frame wsFrame
+	err   error
 }
 
 // wsMsgCallbackBody is the body of an aibot_msg_callback frame.
@@ -198,9 +209,9 @@ func (p *WSPlatform) runConnection() error {
 		// not guaranteed safe by the sync.Map contract.
 		var staleKeys []any
 		p.pendingAcks.Range(func(key, value any) bool {
-			if ch, ok := value.(chan error); ok {
+			if ch, ok := value.(chan wsAckResult); ok {
 				select {
-				case ch <- fmt.Errorf("wecom-ws: connection closed"):
+				case ch <- wsAckResult{err: fmt.Errorf("wecom-ws: connection closed")}:
 				default:
 				}
 			}
@@ -295,13 +306,24 @@ func (p *WSPlatform) handleFrame(frame wsFrame) {
 			} else {
 				slog.Debug("wecom-ws: reply/send ack ok", "req_id", reqID)
 			}
-			if ch, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-				ch.(chan error) <- ackErr
-			}
+			p.dispatchAck(reqID, wsAckResult{frame: frame, err: ackErr})
 		}
 	default:
 		slog.Debug("wecom-ws: unhandled cmd", "cmd", frame.Cmd)
 	}
+}
+
+func (p *WSPlatform) dispatchAck(reqID string, result wsAckResult) {
+	ch, ok := p.pendingAcks.LoadAndDelete(reqID)
+	if !ok {
+		return
+	}
+	resultCh, ok := ch.(chan wsAckResult)
+	if !ok {
+		slog.Warn("wecom-ws: unexpected ack channel type", "req_id", reqID)
+		return
+	}
+	resultCh <- result
 }
 
 func (p *WSPlatform) heartbeat(ctx context.Context, conn *websocket.Conn) {
@@ -356,23 +378,26 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		}
 	}
 
-	if !core.AllowList(p.allowFrom, body.From.UserID) {
-		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
-		return
-	}
-
 	chatID := body.ChatID
 	if chatID == "" {
 		chatID = body.From.UserID
 	}
-
-	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 	rctx := wsReplyContext{
 		reqID:    reqID,
 		chatID:   chatID,
 		chatType: body.ChatType,
 		userID:   body.From.UserID,
 	}
+
+	if !core.AllowList(p.allowFrom, body.From.UserID) {
+		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
+		if err := p.Reply(context.Background(), rctx, core.UnauthorizedAccessMessage); err != nil {
+			slog.Warn("wecom-ws: unauthorized reply failed", "error", err)
+		}
+		return
+	}
+
+	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 
 	// WS mode does not provide display names; the protocol only carries userID.
 	// Name resolution would require a separate HTTP API call with corpSecret,
@@ -547,23 +572,63 @@ func (p *WSPlatform) writeJSON(v any) error {
 // writeAndWaitAck sends a frame and waits for the server ack before returning.
 // Falls back to non-blocking on timeout to avoid deadlocks.
 func (p *WSPlatform) writeAndWaitAck(ctx context.Context, frame map[string]any, reqID string) error {
-	ch := make(chan error, 1)
+	return p.writeAndWaitAckWithTimeout(ctx, frame, reqID, wsAckTimeout)
+}
+
+func (p *WSPlatform) writeAndWaitAckWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) error {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+	if errors.Is(err, errWSAckTimeout) {
+		slog.Debug("wecom-ws: ack timeout, proceeding", "req_id", reqID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return result.err
+}
+
+func (p *WSPlatform) writeAndWaitAckStrict(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) error {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+	if errors.Is(err, errWSAckTimeout) {
+		return fmt.Errorf("wecom-ws: ack timeout waiting for %s", reqID)
+	}
+	if err != nil {
+		return err
+	}
+	return result.err
+}
+
+func (p *WSPlatform) writeAndWaitFrameWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) (wsFrame, error) {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+	if errors.Is(err, errWSAckTimeout) {
+		return wsFrame{}, fmt.Errorf("wecom-ws: ack timeout waiting for %s", reqID)
+	}
+	if err != nil {
+		return wsFrame{}, err
+	}
+	if result.err != nil {
+		return wsFrame{}, result.err
+	}
+	return result.frame, nil
+}
+
+func (p *WSPlatform) writeAndWaitResult(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) (wsAckResult, error) {
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	if err := p.writeJSON(frame); err != nil {
 		p.pendingAcks.Delete(reqID)
-		return err
+		return wsAckResult{}, err
 	}
 
 	select {
-	case err := <-ch:
-		return err
+	case result := <-ch:
+		return result, nil
 	case <-ctx.Done():
 		p.pendingAcks.Delete(reqID)
-		return ctx.Err()
-	case <-time.After(wsAckTimeout):
+		return wsAckResult{}, ctx.Err()
+	case <-time.After(timeout):
 		p.pendingAcks.Delete(reqID)
-		slog.Debug("wecom-ws: ack timeout, proceeding", "req_id", reqID)
-		return nil
+		return wsAckResult{}, errWSAckTimeout
 	}
 }

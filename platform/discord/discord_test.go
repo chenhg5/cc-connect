@@ -1370,3 +1370,196 @@ func TestClassifyAttachments_SkipsFailedDownloadsButKeepsSiblings(t *testing.T) 
 		t.Fatalf("files = %+v, want only good.pdf", files)
 	}
 }
+
+// ── isGroupReplyAllGuild tests ────────────────────────────────
+
+func TestIsGroupReplyAllGuild_EmptyListReturnsFalse(t *testing.T) {
+	p := &Platform{}
+	if p.isGroupReplyAllGuild("G123") {
+		t.Fatal("empty groupReplyAllGuilds should return false")
+	}
+}
+
+func TestIsGroupReplyAllGuild_WildcardMatchesAnyGuild(t *testing.T) {
+	p := &Platform{groupReplyAllGuilds: []string{"*"}}
+	if !p.isGroupReplyAllGuild("any-guild-id") {
+		t.Fatal("wildcard '*' should match any guild ID")
+	}
+}
+
+func TestIsGroupReplyAllGuild_SpecificGuildMatches(t *testing.T) {
+	p := &Platform{groupReplyAllGuilds: []string{"G-A", "G-B"}}
+	if !p.isGroupReplyAllGuild("G-A") {
+		t.Fatal("G-A should match")
+	}
+	if !p.isGroupReplyAllGuild("G-B") {
+		t.Fatal("G-B should match")
+	}
+}
+
+func TestIsGroupReplyAllGuild_UnknownGuildReturnsFalse(t *testing.T) {
+	p := &Platform{groupReplyAllGuilds: []string{"G-A", "G-B"}}
+	if p.isGroupReplyAllGuild("G-OTHER") {
+		t.Fatal("unlisted guild G-OTHER should not match")
+	}
+}
+
+// ── applyReferencedMessage tests ─────────────────────────────
+
+func TestApplyReferencedMessage_PrependsAuthorAndContent(t *testing.T) {
+	ref := &discordgo.Message{
+		Author:  &discordgo.User{Username: "alice"},
+		Content: "hello world",
+	}
+	content, images := applyReferencedMessage(ref, "my reply", nil, nil)
+
+	wantContent := "[replying to alice: hello world]\nmy reply"
+	if content != wantContent {
+		t.Fatalf("content = %q, want %q", content, wantContent)
+	}
+	if len(images) != 0 {
+		t.Fatalf("images = %v, want empty", images)
+	}
+}
+
+func TestApplyReferencedMessage_NoAuthorUsesEmptyString(t *testing.T) {
+	ref := &discordgo.Message{Content: "anon msg"}
+	content, _ := applyReferencedMessage(ref, "reply", nil, nil)
+
+	if !strings.Contains(content, "[replying to : anon msg]") {
+		t.Fatalf("content = %q, want empty author placeholder", content)
+	}
+}
+
+func TestApplyReferencedMessage_DownloadsAndPrependsImages(t *testing.T) {
+	imgData := []byte("fake-png")
+	download := func(u string) ([]byte, error) {
+		return imgData, nil
+	}
+	ref := &discordgo.Message{
+		Author:  &discordgo.User{Username: "bob"},
+		Content: "see this",
+		Attachments: []*discordgo.MessageAttachment{
+			{URL: "https://cdn/img.png", ContentType: "image/png", Filename: "img.png", Width: 100, Height: 100},
+		},
+	}
+	existing := []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("existing"), FileName: "old.jpg"}}
+
+	_, images := applyReferencedMessage(ref, "reply", existing, download)
+
+	if len(images) != 2 {
+		t.Fatalf("images len = %d, want 2", len(images))
+	}
+	// Referenced image is prepended — it comes first.
+	if images[0].FileName != "img.png" {
+		t.Fatalf("images[0].FileName = %q, want img.png (referenced image should be prepended)", images[0].FileName)
+	}
+	if images[1].FileName != "old.jpg" {
+		t.Fatalf("images[1].FileName = %q, want old.jpg", images[1].FileName)
+	}
+}
+
+func TestApplyReferencedMessage_SkipsNonImageAttachments(t *testing.T) {
+	ref := &discordgo.Message{
+		Content: "has doc",
+		Attachments: []*discordgo.MessageAttachment{
+			// Width/Height == 0 means it's not an image — must be skipped.
+			{URL: "https://cdn/doc.pdf", ContentType: "application/pdf", Filename: "doc.pdf"},
+		},
+	}
+	download := func(u string) ([]byte, error) {
+		t.Fatal("download should not be called for non-image attachments")
+		return nil, nil
+	}
+
+	_, images := applyReferencedMessage(ref, "reply", nil, download)
+	if len(images) != 0 {
+		t.Fatalf("images = %v, want empty — PDF should not be forwarded as image", images)
+	}
+}
+
+func TestApplyReferencedMessage_SkipsFailedImageDownloads(t *testing.T) {
+	download := func(u string) ([]byte, error) {
+		return nil, fmt.Errorf("network error")
+	}
+	ref := &discordgo.Message{
+		Content: "broken image",
+		Attachments: []*discordgo.MessageAttachment{
+			{URL: "https://cdn/img.png", ContentType: "image/png", Filename: "img.png", Width: 100, Height: 100},
+		},
+	}
+
+	_, images := applyReferencedMessage(ref, "reply", nil, download)
+	if len(images) != 0 {
+		t.Fatalf("images = %v, want empty — failed download should be skipped", images)
+	}
+}
+
+// ── workspace-aware command routing (ChannelKey) test ─────────
+
+// TestDispatchMessage_SetsChannelKeyForThreadIsolation verifies that when
+// thread_isolation is enabled the dispatched message carries a ChannelKey equal
+// to the parent channel ID so that multi-workspace binding resolution uses the
+// parent channel rather than the ephemeral thread ID.
+func TestDispatchMessage_SetsChannelKeyForThreadIsolation(t *testing.T) {
+	parentChannelID := "parent-ch-999"
+	threadID := "thread-999"
+
+	var got *core.Message
+	p := newTestPlatform(func(_ core.Platform, msg *core.Message) {
+		got = msg
+	})
+	p.threadIsolation = true
+	p.botID = "BOT_ID"
+
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			// The message is in a guild text channel (not a thread), so we return
+			// a non-thread type to trigger the "create thread" path.
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+		startThread: func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+			return &discordgo.Channel{
+				ID:       threadID,
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+				ParentID: parentChannelID,
+			}, nil
+		},
+		joinThread: func(threadID string) error { return nil },
+	}
+
+	m := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID:        "msg-ws-key",
+		ChannelID: parentChannelID,
+		GuildID:   "G-ws",
+		Content:   "hello",
+		Author:    &discordgo.User{ID: "U1", Username: "user1"},
+	}}
+
+	threadSessionKey, rctx, _, err := resolveThreadReplyContext(m, "BOT_ID", ops)
+	if err != nil {
+		t.Fatalf("resolveThreadReplyContext error: %v", err)
+	}
+
+	msg := &core.Message{
+		SessionKey: threadSessionKey,
+		ChannelKey: parentChannelID,
+		Platform:   "discord",
+		ChannelID:  m.ChannelID,
+		MessageID:  m.Message.ID,
+		UserID:     m.Author.ID,
+		Content:    m.Message.Content,
+		ReplyCtx:   rctx,
+	}
+	p.dispatchMessage(msg)
+
+	if got == nil {
+		t.Fatal("message was not dispatched")
+	}
+	if got.ChannelKey != parentChannelID {
+		t.Fatalf("ChannelKey = %q, want %q", got.ChannelKey, parentChannelID)
+	}
+	if got.SessionKey == got.ChannelKey {
+		t.Fatal("SessionKey should differ from ChannelKey (thread ID vs parent channel)")
+	}
+}

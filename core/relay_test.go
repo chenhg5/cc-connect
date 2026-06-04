@@ -48,6 +48,114 @@ func TestRelayManager_RelayContextDisablesTimeoutAtZero(t *testing.T) {
 	}
 }
 
+type relayVisibilityPlatform struct {
+	stubPlatformEngine
+	reconstructed []string
+}
+
+func (p *relayVisibilityPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	p.mu.Lock()
+	p.reconstructed = append(p.reconstructed, sessionKey)
+	p.mu.Unlock()
+	return sessionKey, nil
+}
+
+func runRelayVisibilityScenario(t *testing.T, visibility string) (resp string, sourceSent []string, targetSent []string) {
+	t.Helper()
+
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{sourcePlatform}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{
+		"source": "source-bot",
+		"target": "target-bot",
+	})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+	if visibility != "" {
+		rm.SetVisibility(visibility)
+	}
+
+	type relayResult struct {
+		resp string
+		err  error
+	}
+	done := make(chan relayResult, 1)
+	go func() {
+		result, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:user-1",
+			Message:    "please ask target",
+		})
+		if result != nil {
+			done <- relayResult{resp: result.Response, err: err}
+			return
+		}
+		done <- relayResult{err: err}
+	}()
+
+	targetSession.events <- Event{Type: EventResult, Content: "target says long answer"}
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("RelayManager.Send() error = %v", got.err)
+		}
+		resp = got.resp
+	case <-time.After(2 * time.Second):
+		t.Fatal("RelayManager.Send() did not return")
+	}
+
+	return resp, sourcePlatform.getSent(), targetPlatform.getSent()
+}
+
+func TestRelayManager_DefaultVisibilityEchoesFullMessages(t *testing.T) {
+	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, "")
+
+	if resp != "target says long answer" {
+		t.Fatalf("response = %q, want target response", resp)
+	}
+	if len(sourceSent) != 1 || sourceSent[0] != "[source-bot → target-bot] please ask target" {
+		t.Fatalf("source sent = %#v, want full relay request", sourceSent)
+	}
+	if len(targetSent) != 1 || targetSent[0] != "[target-bot] target says long answer" {
+		t.Fatalf("target sent = %#v, want full relay response", targetSent)
+	}
+}
+
+func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
+	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, RelayVisibilitySummary)
+
+	if resp != "target says long answer" {
+		t.Fatalf("response = %q, want target response", resp)
+	}
+	if len(sourceSent) != 1 || sourceSent[0] != "[source-bot → target-bot] relay request sent" {
+		t.Fatalf("source sent = %#v, want summary relay request", sourceSent)
+	}
+	if len(targetSent) != 1 || targetSent[0] != "[target-bot] relay response ready (23 chars)" {
+		t.Fatalf("target sent = %#v, want summary relay response", targetSent)
+	}
+}
+
+func TestRelayManager_VisibilityNoneSuppressesGroupEcho(t *testing.T) {
+	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, RelayVisibilityNone)
+
+	if resp != "target says long answer" {
+		t.Fatalf("response = %q, want target response", resp)
+	}
+	if len(sourceSent) != 0 {
+		t.Fatalf("source sent = %#v, want no relay request echo", sourceSent)
+	}
+	if len(targetSent) != 0 {
+		t.Fatalf("target sent = %#v, want no relay response echo", targetSent)
+	}
+}
+
 func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	e := newTestEngine()
 	session := newControllableSession("relay-session")
