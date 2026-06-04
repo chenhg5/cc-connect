@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -702,5 +703,623 @@ func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
 	}
 	if interactiveKey != msg.SessionKey {
 		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
+	}
+}
+
+func TestParentWorkspaceChannelKey(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"feishu", ""},
+		{"feishu:chatA", ""},
+		{"feishu:chatA:rootX", "feishu:chatA"},
+		{"telegram:123:456", "telegram:123"},
+		{"feishu:chatA:rootX:extra", "feishu:chatA:rootX"},
+		// Legacy bare key without platform prefix has no parent (lookups
+		// don't pass these in — included for safety).
+		{"chatA", ""},
+	}
+	for _, tt := range tests {
+		if got := parentWorkspaceChannelKey(tt.in); got != tt.want {
+			t.Errorf("parentWorkspaceChannelKey(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestParentChannelID(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"chatA", ""},
+		{"chatA:rootX", "chatA"},
+		{"chatA:rootX:nested", "chatA:rootX"},
+	}
+	for _, tt := range tests {
+		if got := parentChannelID(tt.in); got != tt.want {
+			t.Errorf("parentChannelID(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestResolveWorkspace_ThreadInheritsChatBinding verifies that a thread-scoped
+// channel ID (e.g. "chatID:rootID") resolves to the chat-level binding when no
+// thread-specific binding exists. This preserves the pre-existing UX where a
+// new thread inside a bound chat works immediately without requiring re-bind.
+func TestResolveWorkspace_ThreadInheritsChatBinding(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "chat-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{names: map[string]string{"chatA": "chat-workspace"}}
+
+	// Bind the chat-level scope.
+	chatKey := workspaceChannelKey(p.Name(), "chatA")
+	e.workspaceBindings.Bind("project:test", chatKey, "chat-workspace", normalizeWorkspacePath(wsDir))
+
+	// Resolve from a thread inside that chat. Fallback should pick up the
+	// chat binding.
+	ws, name, err := e.resolveWorkspace(p, "chatA:rootX")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(wsDir); ws != want {
+		t.Errorf("ws = %q, want %q", ws, want)
+	}
+	if name != "chat-workspace" {
+		t.Errorf("name = %q, want %q", name, "chat-workspace")
+	}
+}
+
+// TestResolveWorkspace_ThreadOverridesChat verifies that a thread-specific
+// binding shadows the chat-level binding when both exist.
+func TestResolveWorkspace_ThreadOverridesChat(t *testing.T) {
+	baseDir := t.TempDir()
+	chatWS := filepath.Join(baseDir, "chat-ws")
+	threadWS := filepath.Join(baseDir, "thread-ws")
+	for _, d := range []string{chatWS, threadWS} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{}
+
+	chatKey := workspaceChannelKey(p.Name(), "chatA")
+	threadKey := workspaceChannelKey(p.Name(), "chatA:rootX")
+	e.workspaceBindings.Bind("project:test", chatKey, "chat-ws", normalizeWorkspacePath(chatWS))
+	e.workspaceBindings.Bind("project:test", threadKey, "thread-ws", normalizeWorkspacePath(threadWS))
+
+	// Thread message uses thread-specific binding.
+	ws, _, err := e.resolveWorkspace(p, "chatA:rootX")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(threadWS); ws != want {
+		t.Errorf("thread ws = %q, want %q", ws, want)
+	}
+
+	// A different thread (no specific binding) still inherits from chat.
+	ws, _, err = e.resolveWorkspace(p, "chatA:rootY")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(chatWS); ws != want {
+		t.Errorf("sibling thread ws = %q, want %q", ws, want)
+	}
+
+	// And a non-thread message in the same chat also uses chat binding.
+	ws, _, err = e.resolveWorkspace(p, "chatA")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := normalizeWorkspacePath(chatWS); ws != want {
+		t.Errorf("chat ws = %q, want %q", ws, want)
+	}
+}
+
+// TestResolveWorkspace_ConventionAutoBindsToParent verifies that when a thread
+// message hits the convention path (no binding at any scope), the name
+// resolver ascends to the chat, and the auto-bind is created at chat scope so
+// sibling threads share the workspace.
+func TestResolveWorkspace_ConventionAutoBindsToParent(t *testing.T) {
+	baseDir := t.TempDir()
+	channelName := "team-proj"
+	if err := os.MkdirAll(filepath.Join(baseDir, channelName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	// Resolver only knows the chat ID, not the thread suffix.
+	p := &mockChannelResolver{names: map[string]string{"chatB": channelName}}
+
+	ws, name, err := e.resolveWorkspace(p, "chatB:rootZ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != channelName {
+		t.Errorf("name = %q, want %q", name, channelName)
+	}
+	want := normalizeWorkspacePath(filepath.Join(baseDir, channelName))
+	if ws != want {
+		t.Errorf("ws = %q, want %q", ws, want)
+	}
+
+	// Auto-bind must have been recorded under the chat key, not the thread key.
+	chatKey := workspaceChannelKey(p.Name(), "chatB")
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b == nil || b.Workspace != want {
+		t.Errorf("expected chat-level binding at %q, got %+v", chatKey, b)
+	}
+	threadKey := workspaceChannelKey(p.Name(), "chatB:rootZ")
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b != nil {
+		t.Errorf("did not expect thread-level binding at %q, got %+v", threadKey, b)
+	}
+
+	// A sibling thread now resolves via the chat binding without re-running
+	// the convention match.
+	ws2, _, err := e.resolveWorkspace(p, "chatB:rootOther")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ws2 != want {
+		t.Errorf("sibling thread ws = %q, want %q", ws2, want)
+	}
+}
+
+// makeThreadMsg builds a Message that handleWorkspaceCommand would see for a
+// platform message inside a thread (Feishu topic mode, Slack thread, etc.).
+// ChannelKey embeds the thread root so effectiveWorkspaceChannelKey yields the
+// thread-scoped binding key.
+func makeThreadMsg(platform, chatID, threadID string) *Message {
+	return &Message{
+		Platform:   platform,
+		SessionKey: platform + ":" + chatID + ":root:" + threadID,
+		ChannelKey: chatID + ":" + threadID,
+		ReplyCtx:   "rctx",
+	}
+}
+
+// makeDMMsg builds a Message that handleWorkspaceCommand would see for a
+// platform message outside any thread (Feishu DM, Telegram private chat, etc.).
+func makeDMMsg(platform, chatID, userID string) *Message {
+	return &Message{
+		Platform:   platform,
+		SessionKey: platform + ":" + chatID + ":" + userID,
+		ChannelKey: chatID,
+		ReplyCtx:   "rctx",
+	}
+}
+
+// TestHandleWorkspaceCommand_BindDefaultsToChatScope verifies that /workspace
+// bind without -t writes the binding at chat scope, restoring pre-PR semantics
+// so that all topics in the same chat inherit by default.
+func TestHandleWorkspaceCommand_BindDefaultsToChatScope(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "myproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	e.handleWorkspaceCommand(p, msg, []string{"bind", "myproj"})
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b == nil {
+		t.Fatalf("expected chat-scope binding at %q, got nil", chatKey)
+	}
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b != nil {
+		t.Fatalf("did not expect thread-scope binding at %q, got %+v", threadKey, b)
+	}
+}
+
+// TestHandleWorkspaceCommand_BindWithTopicFlag verifies that /workspace bind -t
+// writes the binding at thread scope, allowing power users to override the
+// chat default for a single topic.
+func TestHandleWorkspaceCommand_BindWithTopicFlag(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "myproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, flag := range []string{"-t", "--topic"} {
+		t.Run(flag, func(t *testing.T) {
+			e := newTestEngineWithMultiWorkspace(t, baseDir)
+			p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+			msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+			e.handleWorkspaceCommand(p, msg, []string{"bind", flag, "myproj"})
+
+			chatKey := workspaceChannelKey("feishu", "oc_AAA")
+			threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+			if b := e.workspaceBindings.Lookup("project:test", threadKey); b == nil {
+				t.Fatalf("expected thread-scope binding at %q, got nil", threadKey)
+			}
+			if b := e.workspaceBindings.Lookup("project:test", chatKey); b != nil {
+				t.Fatalf("did not expect chat-scope binding at %q, got %+v", chatKey, b)
+			}
+		})
+	}
+}
+
+// TestHandleWorkspaceCommand_BindTopicFlagOrderInvariant verifies that the
+// flag can appear before or after the positional arg.
+func TestHandleWorkspaceCommand_BindTopicFlagOrderInvariant(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "myproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"bind", "-t", "myproj"},
+		{"bind", "myproj", "-t"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			e := newTestEngineWithMultiWorkspace(t, baseDir)
+			p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+			msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+			e.handleWorkspaceCommand(p, msg, args)
+
+			threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+			if b := e.workspaceBindings.Lookup("project:test", threadKey); b == nil {
+				t.Fatalf("expected thread-scope binding for args=%v", args)
+			}
+		})
+	}
+}
+
+// TestHandleWorkspaceCommand_BindTopicRejectedInDM verifies that asking for
+// thread-scope (-t) on a session without a thread (DM, non-isolated group)
+// returns an error and writes no binding.
+func TestHandleWorkspaceCommand_BindTopicRejectedInDM(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "myproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeDMMsg("feishu", "oc_DM", "ou_USER")
+
+	e.handleWorkspaceCommand(p, msg, []string{"bind", "-t", "myproj"})
+
+	chatKey := workspaceChannelKey("feishu", "oc_DM")
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b != nil {
+		t.Fatalf("expected no binding written when -t is invalid on DM, got %+v", b)
+	}
+}
+
+// TestHandleWorkspaceCommand_UnbindDefaultsToChatScope verifies symmetry with
+// bind: /workspace unbind (no flag) removes the chat-scope binding and leaves
+// any thread-scope override intact.
+func TestHandleWorkspaceCommand_UnbindDefaultsToChatScope(t *testing.T) {
+	baseDir := t.TempDir()
+	wsChat := filepath.Join(baseDir, "chat-ws")
+	wsThread := filepath.Join(baseDir, "thread-ws")
+	for _, d := range []string{wsChat, wsThread} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	e.workspaceBindings.Bind("project:test", chatKey, "", normalizeWorkspacePath(wsChat))
+	e.workspaceBindings.Bind("project:test", threadKey, "", normalizeWorkspacePath(wsThread))
+
+	e.handleWorkspaceCommand(p, msg, []string{"unbind"})
+
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b != nil {
+		t.Fatalf("expected chat-scope binding to be removed, got %+v", b)
+	}
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b == nil {
+		t.Fatalf("expected thread-scope binding to remain after unbind without -t")
+	}
+}
+
+// TestHandleWorkspaceCommand_UnbindWithTopicFlag verifies that /workspace
+// unbind -t removes only the thread-scope override.
+func TestHandleWorkspaceCommand_UnbindWithTopicFlag(t *testing.T) {
+	baseDir := t.TempDir()
+	wsChat := filepath.Join(baseDir, "chat-ws")
+	wsThread := filepath.Join(baseDir, "thread-ws")
+	for _, d := range []string{wsChat, wsThread} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	e.workspaceBindings.Bind("project:test", chatKey, "", normalizeWorkspacePath(wsChat))
+	e.workspaceBindings.Bind("project:test", threadKey, "", normalizeWorkspacePath(wsThread))
+
+	e.handleWorkspaceCommand(p, msg, []string{"unbind", "-t"})
+
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b != nil {
+		t.Fatalf("expected thread-scope binding to be removed, got %+v", b)
+	}
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b == nil {
+		t.Fatalf("expected chat-scope binding to remain after unbind -t")
+	}
+}
+
+// TestHandleWorkspaceCommand_RouteDefaultsToChatScope verifies that the
+// scope-flag refactor applies uniformly to /workspace route (absolute path
+// binding) just like /workspace bind.
+func TestHandleWorkspaceCommand_RouteDefaultsToChatScope(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "absolute-target")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	e.handleWorkspaceCommand(p, msg, []string{"route", wsDir})
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b == nil {
+		t.Fatalf("expected chat-scope route binding at %q, got nil", chatKey)
+	}
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b != nil {
+		t.Fatalf("did not expect thread-scope route binding, got %+v", b)
+	}
+}
+
+// TestHandleWorkspaceCommand_RouteWithTopicFlag verifies the -t flag on
+// /workspace route.
+func TestHandleWorkspaceCommand_RouteWithTopicFlag(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "absolute-target")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	e.handleWorkspaceCommand(p, msg, []string{"route", "-t", wsDir})
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b == nil {
+		t.Fatalf("expected thread-scope route binding at %q, got nil", threadKey)
+	}
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b != nil {
+		t.Fatalf("did not expect chat-scope route binding, got %+v", b)
+	}
+}
+
+// TestHandleWorkspaceCommand_InitDefaultsToChatScope verifies that /workspace
+// init (local-dir target form) follows the same chat-scope default.
+func TestHandleWorkspaceCommand_InitDefaultsToChatScope(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "initproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	// `/workspace init <local-dir>` requires this opt-in (added in main after
+	// this PR branched). Enable it so the test exercises the local-dir path
+	// rather than failing the gate.
+	e.SetWorkspaceInitAllowLocalPaths(true)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	e.handleWorkspaceCommand(p, msg, []string{"init", "initproj"})
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	if b := e.workspaceBindings.Lookup("project:test", chatKey); b == nil {
+		t.Fatalf("expected chat-scope init binding at %q, got nil", chatKey)
+	}
+	if b := e.workspaceBindings.Lookup("project:test", threadKey); b != nil {
+		t.Fatalf("did not expect thread-scope init binding, got %+v", b)
+	}
+}
+
+// threadKeyMock is a stub platform that implements the new
+// SessionChannelKeyResolver interface so we can verify the engine asks the
+// platform for a thread-aware channel key (instead of falling back to the
+// thread-blind extractChannelID derivation) — both for cron and for any other
+// code path that resolves bindings from a sessionKey.
+type threadKeyMock struct {
+	stubPlatformEngine
+	threadKey      string
+	resolverCalled bool
+}
+
+func (p *threadKeyMock) ReconstructReplyCtx(_ string) (any, error) {
+	return "rctx", nil
+}
+
+func (p *threadKeyMock) ChannelKeyForSession(_ string) string {
+	p.resolverCalled = true
+	return p.threadKey
+}
+
+// namedResultAgent is a resultAgent variant whose Name() can be configured.
+// We need this so the same name can be used as the global agent's identity
+// AND as a registered factory name (workspace-pool agent creation calls
+// CreateAgent(e.agent.Name(), opts) to spawn per-workspace agents).
+type namedResultAgent struct {
+	name    string
+	session AgentSession
+}
+
+func (a *namedResultAgent) Name() string { return a.name }
+func (a *namedResultAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	return a.session, nil
+}
+func (a *namedResultAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *namedResultAgent) Stop() error { return nil }
+
+// TestExecuteCronJob_UsesPlatformThreadAwareChannelKey verifies that when a
+// platform implements SessionChannelKeyResolver, ExecuteCronJob uses the
+// platform-supplied (thread-aware) channel key for workspace lookup. Without
+// this, a thread-scoped binding (created by `/workspace bind -t`) is invisible
+// to the cron path because extractChannelID drops the thread suffix from the
+// session key.
+func TestExecuteCronJob_UsesPlatformThreadAwareChannelKey(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "tradingagents")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register an agent factory whose session emits an immediate result so
+	// processInteractiveMessageWith returns instead of hanging. Both the global
+	// agent and the workspace-pool agent must terminate so the test fails (not
+	// hangs) regardless of which branch ExecuteCronJob takes.
+	agentName := "cron-thread-test-agent"
+	RegisterAgent(agentName, func(_ map[string]any) (Agent, error) {
+		return &namedResultAgent{name: agentName, session: newResultAgentSession("ws-done")}, nil
+	})
+
+	tmpDir := t.TempDir()
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	globalAgent := &namedResultAgent{name: agentName, session: newResultAgentSession("global-done")}
+	e := NewEngine("test", globalAgent, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	defer e.cancel()
+
+	store, err := NewCronStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	e.cronScheduler = NewCronScheduler(store)
+
+	chatID := "oc_AAA"
+	threadID := "om_BBB"
+	threadOnlyKey := chatID + ":" + threadID
+	bindingKey := workspaceChannelKey("feishu", threadOnlyKey)
+	e.workspaceBindings.Bind("project:test", bindingKey, "tradingagents",
+		normalizeWorkspacePath(wsDir))
+
+	p := &threadKeyMock{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		threadKey:          threadOnlyKey,
+	}
+	e.AddPlatform(p)
+
+	job := &CronJob{
+		ID:         "job-thread",
+		SessionKey: "feishu:" + chatID + ":root:" + threadID,
+		Prompt:     "hello",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+
+	if !p.resolverCalled {
+		t.Fatal("expected platform.ChannelKeyForSession to be called")
+	}
+	if ws := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); ws == nil {
+		t.Fatalf("expected workspace pool entry for %q after cron resolved its thread-scoped binding", wsDir)
+	}
+}
+
+// TestSessionContextForKey_UsesPlatformThreadAwareChannelKey verifies that
+// when a platform implements SessionChannelKeyResolver, sessionContextForKey
+// (used by /list cards, /switch, /current, and many other lookups) honors the
+// platform-supplied thread-aware channel key. Without this, the engine falls
+// back to extractChannelID — which drops the thread suffix — and would route
+// to the chat-scope binding instead of the thread-scope one.
+func TestSessionContextForKey_UsesPlatformThreadAwareChannelKey(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "thread-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentName := "session-context-test-agent"
+	RegisterAgent(agentName, func(_ map[string]any) (Agent, error) {
+		return &namedResultAgent{name: agentName, session: newResultAgentSession("done")}, nil
+	})
+
+	tmpDir := t.TempDir()
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	e := NewEngine("test", &namedResultAgent{name: agentName}, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	defer e.cancel()
+
+	chatID := "oc_AAA"
+	threadID := "om_BBB"
+	threadOnlyKey := chatID + ":" + threadID
+	// Bind workspace at thread scope only.
+	bindingKey := workspaceChannelKey("feishu", threadOnlyKey)
+	e.workspaceBindings.Bind("project:test", bindingKey, "thread-ws",
+		normalizeWorkspacePath(wsDir))
+
+	p := &threadKeyMock{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		threadKey:          threadOnlyKey,
+	}
+	e.AddPlatform(p)
+
+	sessionKey := "feishu:" + chatID + ":root:" + threadID
+	agent, _ := e.sessionContextForKey(sessionKey)
+
+	if !p.resolverCalled {
+		t.Fatal("expected platform.ChannelKeyForSession to be called by sessionContextForKey")
+	}
+	if agent == e.agent {
+		t.Fatal("expected workspace-bound agent, got global agent — thread-scope binding was missed")
+	}
+	if ws := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); ws == nil {
+		t.Fatalf("expected workspace pool entry for %q, got nil", wsDir)
+	}
+}
+
+// TestHandleWorkspaceCommand_SharedBindDefaultsToChatScope verifies the same
+// chat-default semantics for the shared-binding namespace.
+func TestHandleWorkspaceCommand_SharedBindDefaultsToChatScope(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "myproj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	p := &mockChannelResolver{name: "feishu", names: map[string]string{}}
+	msg := makeThreadMsg("feishu", "oc_AAA", "om_BBB")
+
+	e.handleWorkspaceCommand(p, msg, []string{"shared", "bind", "myproj"})
+
+	chatKey := workspaceChannelKey("feishu", "oc_AAA")
+	threadKey := workspaceChannelKey("feishu", "oc_AAA:om_BBB")
+	if b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, chatKey); b == nil {
+		t.Fatalf("expected shared chat-scope binding at %q, got nil", chatKey)
+	}
+	if b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, threadKey); b != nil {
+		t.Fatalf("did not expect shared thread-scope binding, got %+v", b)
 	}
 }

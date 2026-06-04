@@ -1153,6 +1153,8 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
+	// Expand `/skill ...` prompts to the registered skill's invocation
+	// template (added upstream as the cron skill-expand feature).
 	content := job.Prompt
 	if strings.HasPrefix(content, "/") {
 		parts := strings.Fields(content)
@@ -1164,9 +1166,19 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
+	// Set ChannelKey to the platform-supplied thread-aware key so downstream
+	// code (e.g. buildSenderPrompt's [cc-connect chat_id=...] prompt tag)
+	// preserves thread/topic information instead of falling back to
+	// extractChannelID, which would only show the chat ID.
+	var msgChannelKey string
+	if resolver, ok := targetPlatform.(SessionChannelKeyResolver); ok {
+		msgChannelKey = resolver.ChannelKeyForSession(sessionKey)
+	}
+
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
+		ChannelKey:   msgChannelKey,
 		UserID:       "cron",
 		UserName:     "cron",
 		Content:      content,
@@ -1181,7 +1193,16 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	workspaceDir := ""
 
 	if e.multiWorkspace {
-		channelID := extractChannelID(sessionKey)
+		// Prefer the platform-supplied thread-aware channel key so cron jobs
+		// scheduled inside a topic can find a thread-scoped binding. Fall back
+		// to extractChannelID (chat-only) for platforms with no thread concept.
+		channelID := ""
+		if resolver, ok := targetPlatform.(SessionChannelKeyResolver); ok {
+			channelID = resolver.ChannelKeyForSession(sessionKey)
+		}
+		if channelID == "" {
+			channelID = extractChannelID(sessionKey)
+		}
 		if channelID != "" {
 			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
 			if err == nil && workspace != "" {
@@ -5223,8 +5244,46 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
 	channelID := effectiveChannelID(msg)
-	channelKey := effectiveWorkspaceChannelKey(msg)
+	// threadKey is the most specific channel key (chat:thread for platforms in
+	// thread/topic mode). chatKey is always the chat-level key (thread stripped).
+	// Write operations default to chatKey so a single bind covers the whole
+	// group; the -t / --topic flag opts in to threadKey for per-topic overrides.
+	// Read operations (status, list) continue to use threadKey so the existing
+	// thread→chat hierarchical fallback in lookupEffectiveWorkspaceBinding
+	// still produces the correct effective binding for any message.
+	threadKey := effectiveWorkspaceChannelKey(msg)
+	chatKey := workspaceChannelKey(p.Name(), extractChannelID(msg.SessionKey))
 	projectKey := "project:" + e.name
+
+	// parseScopeFlag scans args for -t / --topic (any position), returns the
+	// flag value and the remaining positional args in order.
+	parseScopeFlag := func(in []string) (bool, []string) {
+		threadScope := false
+		rest := make([]string, 0, len(in))
+		for _, a := range in {
+			if a == "-t" || a == "--topic" {
+				threadScope = true
+				continue
+			}
+			rest = append(rest, a)
+		}
+		return threadScope, rest
+	}
+
+	// pickBindingKey returns the channel key to use for a write op based on
+	// the -t flag. Without -t: chat scope. With -t: thread scope, unless the
+	// current message has no thread context (DM / non-isolated group), in
+	// which case it sends an error reply and returns ok=false.
+	pickBindingKey := func(threadScope bool) (string, bool) {
+		if !threadScope {
+			return chatKey, true
+		}
+		if threadKey == "" || threadKey == chatKey {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsTopicFlagInvalid))
+			return "", false
+		}
+		return threadKey, true
+	}
 	resolveChannelName := func() func() string {
 		resolved := false
 		channelName := ""
@@ -5246,7 +5305,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsInfo, b.Workspace, b.BoundAt.Format(time.RFC3339)))
 	}
-	routeWorkspace := func(bindingKey string, pathParts []string, usageKey, successKey MsgKey) bool {
+	routeWorkspace := func(bindingKey, channelKey string, pathParts []string, usageKey, successKey MsgKey) bool {
 		routePath := strings.TrimSpace(strings.Join(pathParts, " "))
 		if routePath == "" {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(usageKey))
@@ -5276,7 +5335,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, normalizedPath))
 		return true
 	}
-	bindWorkspace := func(bindingKey, wsName string, successKey MsgKey) bool {
+	bindWorkspace := func(bindingKey, channelKey, wsName string, successKey MsgKey) bool {
 		wsPath := filepath.Join(e.baseDir, wsName)
 
 		// Check if workspace directory exists
@@ -5289,7 +5348,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, wsName))
 		return true
 	}
-	initWorkspace := func(bindingKey, target string, successKey MsgKey) bool {
+	initWorkspace := func(bindingKey, channelKey, target string, localKey, existingKey, cloneKey MsgKey) bool {
 		// Support local directory paths (absolute or relative to baseDir).
 		if e.workspaceInitAllowLocalPaths && looksLikeLocalDir(target) {
 			dirPath, err := resolveLocalDirPath(target, e.baseDir)
@@ -5303,7 +5362,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				return false
 			}
 			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(dirPath))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsBindSuccess, dirPath))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(localKey, dirPath))
 			return true
 		}
 		if !e.workspaceInitAllowLocalPaths && looksLikeLocalDir(target) && !looksLikeGitURL(target) {
@@ -5321,7 +5380,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 		if _, err := os.Stat(cloneTo); err == nil {
 			e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(cloneTo))
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, cloneTo))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(existingKey, cloneTo))
 			return true
 		}
 
@@ -5333,7 +5392,7 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 
 		e.workspaceBindings.Bind(bindingKey, channelKey, resolveChannelName(), normalizeWorkspacePath(cloneTo))
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(successKey, cloneTo))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(cloneKey, cloneTo))
 		return true
 	}
 	listBindings := func(bindingKey string, emptyKey, titleKey MsgKey) {
@@ -5361,7 +5420,9 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 
 	switch subCmd {
 	case "":
-		b, bindingKey, usable := e.lookupEffectiveWorkspaceBinding(channelKey)
+		// Status lookup uses the thread-aware key so the hierarchical fallback
+		// in lookupEffectiveWorkspaceBinding can ascend thread → chat.
+		b, bindingKey, usable := e.lookupEffectiveWorkspaceBinding(threadKey)
 		if !usable {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
 		} else {
@@ -5369,34 +5430,53 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 
 	case "bind":
-		if len(args) < 2 {
+		threadScope, rest := parseScopeFlag(args[1:])
+		if len(rest) < 1 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsBindUsage))
 			return
 		}
-		bindWorkspace(projectKey, args[1], MsgWsBindSuccess)
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		bindWorkspace(projectKey, key, rest[0], MsgWsBindSuccess)
 
 	case "route":
-		if len(args) < 2 {
+		threadScope, rest := parseScopeFlag(args[1:])
+		if len(rest) < 1 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsRouteUsage))
 			return
 		}
-		routeWorkspace(projectKey, args[1:], MsgWsRouteUsage, MsgWsRouteSuccess)
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		routeWorkspace(projectKey, key, rest, MsgWsRouteUsage, MsgWsRouteSuccess)
 
 	case "init":
-		if len(args) < 2 {
+		threadScope, rest := parseScopeFlag(args[1:])
+		if len(rest) < 1 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsInitUsage))
 			return
 		}
-		initWorkspace(projectKey, args[1], MsgWsCloneSuccess)
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		initWorkspace(projectKey, key, rest[0], MsgWsBindLocalSuccess, MsgWsBindExistingSuccess, MsgWsCloneSuccess)
 
 	case "shared":
+		// Shared bindings are a cross-project fallback layer. Topic-scope
+		// shared bindings are niche enough that we keep this subcommand
+		// chat-only — simpler API, simpler docs. Use the regular
+		// `/workspace bind -t` if you need per-topic granularity.
 		sharedSubCmd := ""
 		if len(args) > 1 {
 			sharedSubCmd = matchSubCommand(args[1], []string{"init", "bind", "route", "unbind", "list"})
 		}
 		switch sharedSubCmd {
 		case "":
-			b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey)
+			b := e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, chatKey)
 			if b == nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedNoBinding))
 			} else {
@@ -5408,28 +5488,28 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
 				return
 			}
-			bindWorkspace(sharedWorkspaceBindingsKey, args[2], MsgWsSharedBindSuccess)
+			bindWorkspace(sharedWorkspaceBindingsKey, chatKey, args[2], MsgWsSharedBindSuccess)
 			return
 		case "route":
 			if len(args) < 3 {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
 				return
 			}
-			routeWorkspace(sharedWorkspaceBindingsKey, args[2:], MsgWsSharedUsage, MsgWsSharedRouteSuccess)
+			routeWorkspace(sharedWorkspaceBindingsKey, chatKey, args[2:], MsgWsSharedUsage, MsgWsSharedRouteSuccess)
 			return
 		case "init":
 			if len(args) < 3 {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUsage))
 				return
 			}
-			initWorkspace(sharedWorkspaceBindingsKey, args[2], MsgWsSharedBindSuccess)
+			initWorkspace(sharedWorkspaceBindingsKey, chatKey, args[2], MsgWsSharedBindSuccess, MsgWsSharedBindSuccess, MsgWsSharedBindSuccess)
 			return
 		case "unbind":
-			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey) == nil {
+			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, chatKey) == nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedNoBinding))
 				return
 			}
-			e.workspaceBindings.Unbind(sharedWorkspaceBindingsKey, channelKey)
+			e.workspaceBindings.Unbind(sharedWorkspaceBindingsKey, chatKey)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedUnbindSuccess))
 			return
 		case "list":
@@ -5441,15 +5521,20 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 		}
 
 	case "unbind":
-		if e.workspaceBindings.Lookup(projectKey, channelKey) == nil {
-			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, channelKey) != nil {
+		threadScope, _ := parseScopeFlag(args[1:])
+		key, ok := pickBindingKey(threadScope)
+		if !ok {
+			return
+		}
+		if e.workspaceBindings.Lookup(projectKey, key) == nil {
+			if e.workspaceBindings.Lookup(sharedWorkspaceBindingsKey, key) != nil {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsSharedOnlyHint))
 			} else {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNoBinding))
 			}
 			return
 		}
-		e.workspaceBindings.Unbind(projectKey, channelKey)
+		e.workspaceBindings.Unbind(projectKey, key)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsUnbindSuccess))
 
 	case "list":
@@ -13903,6 +13988,35 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 	return workspaceChannelKey(extractPlatformName(sessionKey), extractChannelID(sessionKey))
 }
 
+// workspaceChannelKeyForSessionKey returns the thread-aware workspace binding
+// channel key for a sessionKey. It first asks the owning platform (matched by
+// the session_key prefix) via the optional SessionChannelKeyResolver
+// interface, so platforms that encode thread/topic information into their
+// session keys (Feishu thread_isolation, Discord forum threads, etc.) can
+// preserve that scope. If no platform responds, falls back to
+// extractWorkspaceChannelKey, which is thread-blind.
+//
+// This is used by callers that have a session_key but no live Message —
+// ExecuteCronJob, card renderers like renderListCard, etc.
+func (e *Engine) workspaceChannelKeyForSessionKey(sessionKey string) string {
+	platformName := extractPlatformName(sessionKey)
+	if platformName == "" {
+		return extractWorkspaceChannelKey(sessionKey)
+	}
+	for _, p := range e.platforms {
+		if p.Name() != platformName {
+			continue
+		}
+		if resolver, ok := p.(SessionChannelKeyResolver); ok {
+			if id := resolver.ChannelKeyForSession(sessionKey); id != "" {
+				return workspaceChannelKey(platformName, id)
+			}
+		}
+		break
+	}
+	return extractWorkspaceChannelKey(sessionKey)
+}
+
 // effectiveChannelID returns the channel identifier from a Message.
 // It prefers the platform-provided ChannelKey (e.g. "chatID:threadID" for forum topics)
 // and falls back to parsing the session key.
@@ -13919,6 +14033,37 @@ func effectiveWorkspaceChannelKey(msg *Message) string {
 		return workspaceChannelKey(msg.Platform, msg.ChannelKey)
 	}
 	return extractWorkspaceChannelKey(msg.SessionKey)
+}
+
+// parentWorkspaceChannelKey returns the parent-scope workspace binding key by
+// stripping the last colon-separated segment, while preserving the platform
+// prefix. Used for hierarchical fallback (e.g. thread → chat). Returns "" if
+// the key is already at the platform-scoped chat level or has no parent.
+func parentWorkspaceChannelKey(channelKey string) string {
+	if channelKey == "" {
+		return ""
+	}
+	i := strings.LastIndexByte(channelKey, ':')
+	if i <= 0 {
+		return ""
+	}
+	parent := channelKey[:i]
+	// Refuse to strip below the platform prefix: "feishu" alone is not a key.
+	if !strings.ContainsRune(parent, ':') {
+		return ""
+	}
+	return parent
+}
+
+// parentChannelID returns the parent scope of a channel identifier by
+// stripping the last colon-separated segment. Used by name resolution for
+// hierarchical scope ascent (e.g. "chatID:threadID" → "chatID"). Returns ""
+// when there is no further parent.
+func parentChannelID(channelID string) string {
+	if i := strings.LastIndexByte(channelID, ':'); i > 0 {
+		return channelID[:i]
+	}
+	return ""
 }
 
 // commandContext resolves the appropriate agent, session manager, and interactive key
@@ -13960,7 +14105,11 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	// Use the thread-aware key when the owning platform supports it, so
+	// thread-scoped bindings created by `/workspace bind -t` are honored by
+	// card renderers, /switch, /list, /current, and other lookups that only
+	// have the sessionKey.
+	if channelKey := e.workspaceChannelKeyForSessionKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 				return wsAgent, wsSessions
@@ -14043,7 +14192,7 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if _, ok := e.interactiveStates[sessionKey]; ok {
 		return sessionKey
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	if channelKey := e.workspaceChannelKeyForSessionKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 		}
@@ -14097,22 +14246,41 @@ func findInteractiveKeyInStatesLocked(states map[string]*interactiveState, sessi
 
 // lookupEffectiveWorkspaceBinding returns the effective binding for a channel
 // plus whether the bound workspace is currently usable.
+//
+// When the exact channel key has no binding, the lookup ascends to parent
+// scopes (e.g. "feishu:chatID:rootID" → "feishu:chatID") so that messages in
+// a thread/topic inherit the parent chat's workspace by default. A
+// thread-specific binding (created by running `/workspace bind` inside the
+// thread) shadows the parent and is returned first.
 func (e *Engine) lookupEffectiveWorkspaceBinding(channelKey string) (*WorkspaceBinding, string, bool) {
 	if !e.multiWorkspace || e.workspaceBindings == nil || channelKey == "" {
 		return nil, "", false
 	}
 
 	projectKey := "project:" + e.name
-	b, bindingKey := e.workspaceBindings.LookupEffective(projectKey, channelKey)
+	lookupKey := channelKey
+	var b *WorkspaceBinding
+	var bindingKey string
+	for {
+		b, bindingKey = e.workspaceBindings.LookupEffective(projectKey, lookupKey)
+		if b != nil {
+			break
+		}
+		parent := parentWorkspaceChannelKey(lookupKey)
+		if parent == "" {
+			break
+		}
+		lookupKey = parent
+	}
 	if b == nil {
 		return nil, "", false
 	}
 
 	if _, err := os.Stat(b.Workspace); err != nil {
 		slog.Warn("bound workspace directory missing",
-			"workspace", b.Workspace, "channel_key", channelKey, "binding_scope", bindingKey)
+			"workspace", b.Workspace, "channel_key", lookupKey, "binding_scope", bindingKey)
 		if bindingKey != sharedWorkspaceBindingsKey {
-			e.workspaceBindings.Unbind(bindingKey, channelKey)
+			e.workspaceBindings.Unbind(bindingKey, lookupKey)
 		}
 		return b, bindingKey, false
 	}
@@ -14126,7 +14294,8 @@ func (e *Engine) lookupEffectiveWorkspaceBinding(channelKey string) (*WorkspaceB
 func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
 	channelKey := workspaceChannelKey(p.Name(), channelID)
 
-	// Step 1: Check existing binding
+	// Step 1: Check existing binding (with hierarchical fallback to parent
+	// scopes, e.g. thread → chat).
 	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
 		if !usable {
 			return "", b.ChannelName, nil
@@ -14134,14 +14303,27 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 		return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
 	}
 
-	// Step 2: Resolve channel name for convention match
+	// Step 2: Resolve channel name for convention match. For sub-scopes
+	// (e.g. "chatID:rootID"), ascend to the parent ID — the platform's
+	// name resolver typically only knows the chat itself, not its threads.
+	nameLookupID := channelID
+	nameLookupKey := channelKey
 	channelName := ""
 	if resolver, ok := p.(ChannelNameResolver); ok {
-		name, err := resolver.ResolveChannelName(channelID)
-		if err != nil {
-			slog.Warn("failed to resolve channel name", "channel", channelID, "err", err)
-		} else {
-			channelName = name
+		for {
+			name, err := resolver.ResolveChannelName(nameLookupID)
+			if err != nil {
+				slog.Warn("failed to resolve channel name", "channel", nameLookupID, "err", err)
+			} else if name != "" {
+				channelName = name
+				break
+			}
+			parent := parentChannelID(nameLookupID)
+			if parent == "" {
+				break
+			}
+			nameLookupID = parent
+			nameLookupKey = workspaceChannelKey(p.Name(), nameLookupID)
 		}
 	}
 
@@ -14149,15 +14331,16 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 		return "", "", nil
 	}
 
-	// Step 3: Convention match — check if base_dir/<channel-name> exists
+	// Step 3: Convention match — check if base_dir/<channel-name> exists.
+	// Auto-bind under the scope that resolved the name (typically chat-level,
+	// not thread-level) so sibling threads inherit the same workspace.
 	candidate := filepath.Join(e.baseDir, channelName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		// Auto-bind
 		projectKey := "project:" + e.name
 		normalized := normalizeWorkspacePath(candidate)
-		e.workspaceBindings.Bind(projectKey, channelKey, channelName, normalized)
+		e.workspaceBindings.Bind(projectKey, nameLookupKey, channelName, normalized)
 		slog.Info("workspace auto-bound by convention",
-			"channel", channelName, "workspace", normalized)
+			"channel", channelName, "workspace", normalized, "binding_key", nameLookupKey)
 		return normalized, channelName, nil
 	}
 

@@ -595,6 +595,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+	channelKey := p.channelKeyForBinding(chatID, sessionKey)
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
@@ -678,6 +679,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		h := p.getHandler()
 		go h(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
+			ChannelKey: channelKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -710,6 +712,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		h := p.getHandler()
 		go h(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
+			ChannelKey: channelKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -746,6 +749,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		h := p.getHandler()
 		go h(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
+			ChannelKey: channelKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -1168,6 +1172,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
+	channelKey := p.channelKeyForBinding(chatID, sessionKey)
+
 	switch msgType {
 	case "text":
 		var textBody struct {
@@ -1188,8 +1194,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
 		})
 
@@ -1211,8 +1218,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -1237,8 +1245,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -1256,8 +1265,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
 			ReplyCtx: rctx,
 		})
@@ -1284,8 +1294,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		mimeType := detectMimeType(fileData)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Files: []core.FileAttachment{{
 				MimeType: mimeType,
 				Data:     fileData,
@@ -1302,8 +1313,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content:  text,
 			Images:   images,
 			Files:    files,
@@ -1333,8 +1345,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -1369,8 +1382,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			ChannelKey: channelKey,
+			MessageID:  messageID,
+			UserID:     userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
 		})
 
@@ -3314,6 +3328,128 @@ func isThreadSessionKey(sessionKey string) bool {
 	}
 	_, ok := parseThreadRootID(parts[2])
 	return ok
+}
+
+// channelKeyForBinding returns the platform-provided channel key for workspace
+// binding. When thread_isolation is enabled and the message is inside a thread,
+// the key embeds the thread root ID so each thread can bind to its own
+// workspace; otherwise it returns the chat ID and preserves per-chat binding.
+func (p *Platform) channelKeyForBinding(chatID, sessionKey string) string {
+	if p.threadIsolation {
+		parts := strings.SplitN(sessionKey, ":", 3)
+		if len(parts) == 3 {
+			if rootID, ok := parseThreadRootID(parts[2]); ok {
+				return chatID + ":" + rootID
+			}
+		}
+	}
+	return chatID
+}
+
+// ResolveCronReplyTarget satisfies core.CronReplyTargetResolver. For groups
+// in topic mode (thread_isolation=true), each cron run posts a "📌 <title>"
+// anchor as a new top-level message — which becomes a new topic in the group
+// — and returns a reply context targeting that topic. Subsequent cron
+// messages (the engine's "⏰ <desc>" start notice + the agent's streamed
+// output and final reply) all thread inside that topic instead of each one
+// spawning its own.
+//
+// Returns ErrNotSupported when thread_isolation is off, so the engine falls
+// back to ReconstructReplyCtx and messages are sent directly without anchor.
+func (p *Platform) ResolveCronReplyTarget(sessionKey, title string) (string, any, error) {
+	if !p.threadIsolation {
+		return "", nil, core.ErrNotSupported
+	}
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != p.platformName || parts[1] == "" {
+		return "", nil, core.ErrNotSupported
+	}
+	chatID := parts[1]
+
+	anchor := strings.TrimSpace(title)
+	if anchor == "" {
+		anchor = "cron"
+	}
+	anchor = "📌 " + anchor
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msgID, err := p.createTopLevelTextMessage(ctx, chatID, anchor)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: post cron topic anchor: %w", p.tag(), err)
+	}
+
+	newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.platformName, chatID, msgID)
+	return newSessionKey, replyContext{
+		chatID:     chatID,
+		messageID:  msgID,
+		sessionKey: newSessionKey,
+	}, nil
+}
+
+// createTopLevelTextMessage posts a plain-text message at top level (no
+// reply parent) and returns the new message's ID. Used by
+// ResolveCronReplyTarget to plant the topic anchor.
+func (p *Platform) createTopLevelTextMessage(ctx context.Context, chatID, content string) (string, error) {
+	body, err := json.Marshal(map[string]string{"text": content})
+	if err != nil {
+		return "", fmt.Errorf("%s: marshal anchor text: %w", p.tag(), err)
+	}
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeText).
+			Content(string(body)).
+			Build()).
+		Build()
+	var resp *larkim.CreateMessageResp
+	if err := p.withTransientRetry(ctx, "cron anchor", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "cron anchor", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: cron anchor api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: cron anchor failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		return "", err
+	}
+	if resp == nil || resp.Data == nil || resp.Data.MessageId == nil || *resp.Data.MessageId == "" {
+		return "", fmt.Errorf("%s: cron anchor: no message ID returned", p.tag())
+	}
+	return *resp.Data.MessageId, nil
+}
+
+// ChannelKeyForSession satisfies core.SessionChannelKeyResolver. It maps a
+// session_key back to the channel key used for workspace bindings, preserving
+// thread/topic information when thread_isolation is on. Without this, the
+// engine would fall back to extractChannelID which drops the "root:rootID"
+// suffix, making thread-scoped bindings invisible to cron, card renderers,
+// and other lookups that do not have access to the originating Message.
+//
+// Session-key shapes handled:
+//   - "feishu:chatID:userID"        → "chatID"          (DM / non-thread)
+//   - "feishu:chatID:root:rootID"   → "chatID:rootID"   (thread, isolation on)
+//   - "feishu:chatID"               → "chatID"          (share_session_in_channel)
+//
+// Returns an empty string for non-feishu prefixes or malformed keys; the engine
+// then falls back to extractChannelID.
+func (p *Platform) ChannelKeyForSession(sessionKey string) string {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[0] != p.platformName {
+		return ""
+	}
+	chatID := parts[1]
+	if chatID == "" {
+		return ""
+	}
+	return p.channelKeyForBinding(chatID, sessionKey)
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
