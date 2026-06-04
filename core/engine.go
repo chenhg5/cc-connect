@@ -12646,10 +12646,10 @@ func (e *Engine) cmdTimerList(p Platform, msg *Message) {
 		}
 		remaining := FormatTimerRemaining(j.ScheduledAt)
 		fmt.Fprintf(&sb, "⏰ %s (%s)\n", desc, remaining)
-		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
+		fmt.Fprintf(&sb, "ID: %s\n", j.ID)
 	}
 
-	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgTimerListFooter)))
+	fmt.Fprintf(&sb, "\n%s", e.i18n.T(MsgTimerListFooter))
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
