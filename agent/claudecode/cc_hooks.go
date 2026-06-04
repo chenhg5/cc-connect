@@ -175,9 +175,10 @@ func stripJSONC(data []byte) []byte {
 
 		if inString {
 			out.WriteByte(ch)
-			if ch == '\\' {
+			switch ch {
+			case '\\':
 				escaped = true
-			} else if ch == '"' {
+			case '"':
 				inString = false
 			}
 			i++

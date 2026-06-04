@@ -65,7 +65,7 @@ func TestReadSettingsFile(t *testing.T) {
 	t.Run("valid json", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "settings.json")
-		os.WriteFile(path, []byte(`{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo allow"}]}]}}`), 0644)
+		_ = os.WriteFile(path, []byte(`{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo allow"}]}]}}`), 0644)
 		s, err := readSettingsFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -81,7 +81,7 @@ func TestReadSettingsFile(t *testing.T) {
 	t.Run("valid jsonc", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "settings.json")
-		os.WriteFile(path, []byte(`{
+		_ = os.WriteFile(path, []byte(`{
   // comment
   "hooks": {
     "PermissionRequest": [
@@ -111,7 +111,7 @@ func TestReadSettingsFile(t *testing.T) {
 	t.Run("malformed json", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "settings.json")
-		os.WriteFile(path, []byte(`{bad json`), 0644)
+		_ = os.WriteFile(path, []byte(`{bad json`), 0644)
 		_, err := readSettingsFile(path)
 		if err == nil {
 			t.Fatal("expected error for malformed json")
@@ -237,7 +237,7 @@ func TestTryHook(t *testing.T) {
 	t.Run("matching hook returns allow", func(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
-		os.MkdirAll(claudeDir, 0755)
+		_ = os.MkdirAll(claudeDir, 0755)
 		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
@@ -261,7 +261,7 @@ func TestTryHook(t *testing.T) {
 	t.Run("no matching hook", func(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
-		os.MkdirAll(claudeDir, 0755)
+		_ = os.MkdirAll(claudeDir, 0755)
 		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
@@ -282,7 +282,7 @@ func TestTryHook(t *testing.T) {
 	t.Run("hook returns ask falls through", func(t *testing.T) {
 		dir := t.TempDir()
 		claudeDir := filepath.Join(dir, ".claude")
-		os.MkdirAll(claudeDir, 0755)
+		_ = os.MkdirAll(claudeDir, 0755)
 		os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
 			"hooks": {
 				"PermissionRequest": [{
