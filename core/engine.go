@@ -4888,8 +4888,38 @@ func matchSubCommand(input string, candidates []string) string {
 	return input
 }
 
+// splitCommandArgs splits a command string into tokens, respecting single- and
+// double-quoted groups so paths like "/workspace bind '/my path/foo'" work
+// correctly (#1211). Quotes are stripped from the resulting tokens.
+func splitCommandArgs(s string) []string {
+	var tokens []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+		case (c == ' ' || c == '\t') && !inSingle && !inDouble:
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens
+}
+
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
-	parts := strings.Fields(raw)
+	parts := splitCommandArgs(raw)
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 	args := parts[1:]
 

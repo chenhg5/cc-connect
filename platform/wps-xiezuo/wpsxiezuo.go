@@ -657,6 +657,7 @@ func (p *Platform) handleChatMessage(plain []byte) {
 		UserID:     msgData.Sender.ID,
 		UserName:   msgData.Sender.ID, // WPS doesn't include name in event data
 		Content:    text,
+		ChannelKey: msgData.Chat.ID, // needed for per-group session isolation (#1217)
 		ReplyCtx:   rctx,
 	})
 }
