@@ -173,6 +173,13 @@ type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
 }
 
+// AtMentionSender is an optional interface for platforms that support @mention in
+// reply messages (e.g. DingTalk). Platforms that implement this interface can
+// include @user notifications when replying in group chats.
+type AtMentionSender interface {
+	ReplyWithAt(ctx context.Context, replyCtx any, content string, atUsers []string, atAll bool) error
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error

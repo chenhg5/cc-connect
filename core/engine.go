@@ -8954,10 +8954,10 @@ func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher Provide
 // SendToSession sends a message to an active session from an external caller (API/CLI).
 // If sessionKey is empty, it picks the first active session.
 func (e *Engine) SendToSession(sessionKey, message string) error {
-	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil)
+	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil, nil, false)
 }
 
-func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment, atUsers []string, atAll bool) error {
 	e.interactiveMu.Lock()
 
 	var state *interactiveState
@@ -9070,8 +9070,21 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		if err := e.waitOutgoing(p); err != nil {
 			return err
 		}
-		if err := p.Send(e.ctx, replyCtx, message); err != nil {
-			return err
+		// Use AtMentionSender when @users specified and platform supports it
+		if (len(atUsers) > 0 || atAll) {
+			if atSender, ok := p.(AtMentionSender); ok {
+				if err := atSender.ReplyWithAt(e.ctx, replyCtx, message, atUsers, atAll); err != nil {
+					return err
+				}
+			} else {
+				if err := p.Send(e.ctx, replyCtx, message); err != nil {
+					return err
+				}
+			}
+		} else {
+			if err := p.Send(e.ctx, replyCtx, message); err != nil {
+				return err
+			}
 		}
 		if state != nil {
 			state.mu.Lock()

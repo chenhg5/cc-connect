@@ -488,7 +488,7 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		slog.Error("dingtalk: failed to download image", "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("dingtalk: image download returned status", "status", resp.StatusCode)
@@ -547,7 +547,7 @@ func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("download returned status %d", resp.StatusCode)
@@ -598,7 +598,7 @@ func (p *Platform) getDownloadURL(downloadCode string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("api returned status %d", resp.StatusCode)
@@ -650,7 +650,7 @@ func (p *Platform) getAccessToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -689,6 +689,50 @@ func (p *Platform) getAccessToken() (string, error) {
 	return p.accessToken, nil
 }
 
+// ReplyWithAt sends a reply with @mention support. Uses text msgtype (not markdown)
+// because only text type supports highlighted/blue @mentions in DingTalk.
+func (p *Platform) ReplyWithAt(ctx context.Context, rctx any, content string, atUsers []string, atAll bool) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
+	}
+	if rc.proactive || rc.sessionWebhook == "" {
+		return p.sendProactiveMessage(ctx, rc, content)
+	}
+
+	payload := map[string]any{
+		"msgtype": "text",
+		"text":    map[string]string{"content": content},
+	}
+	if len(atUsers) > 0 || atAll {
+		payload["at"] = map[string]any{
+			"atUserIds": atUsers,
+			"isAtAll":   atAll,
+		}
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("dingtalk: marshal reply: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dingtalk: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("dingtalk: send reply: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -721,7 +765,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if err != nil {
 		return fmt.Errorf("dingtalk: send reply: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
@@ -904,7 +948,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	if err != nil {
 		return fmt.Errorf("dingtalk: send image request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	slog.Debug("dingtalk: oToMessages image response", "status", resp.StatusCode, "body", string(respBody))
@@ -999,7 +1043,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	if err != nil {
 		return fmt.Errorf("dingtalk: send file request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	slog.Debug("dingtalk: oToMessages file response", "status", resp.StatusCode, "body", string(respBody))
@@ -1124,7 +1168,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	if err != nil {
 		return fmt.Errorf("dingtalk: send audio request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	slog.Debug("dingtalk: oToMessages API response", "status", resp.StatusCode, "body", string(respBody))
@@ -1215,7 +1259,7 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 	if err != nil {
 		return "", fmt.Errorf("upload request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1535,7 +1579,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	if err != nil {
 		return fmt.Errorf("dingtalk: proactive send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

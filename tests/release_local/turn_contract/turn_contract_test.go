@@ -348,7 +348,7 @@ func TestSideChannelEchoContractAcrossOutboundModalities(t *testing.T) {
 			agent.session.waitRecords(t, 1)
 
 			sideText := "delivery ready"
-			if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, tt.images, tt.files); err != nil {
+			if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, tt.images, tt.files, nil, false); err != nil {
 				t.Fatalf("SendToSessionWithAttachments() error = %v", err)
 			}
 			agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: sideText, InputTokens: 52000, Done: true})
@@ -366,7 +366,7 @@ func TestSideChannelDifferentFinalContract(t *testing.T) {
 	agent.session.waitRecords(t, 1)
 
 	sideText := "delivery ready"
-	if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, nil, nil); err != nil {
+	if err := engine.SendToSessionWithAttachments(msg.SessionKey, sideText, nil, nil, nil, false); err != nil {
 		t.Fatalf("SendToSessionWithAttachments() error = %v", err)
 	}
 
