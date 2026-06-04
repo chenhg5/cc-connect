@@ -107,9 +107,6 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 		args = append(args, "@"+f)
 	}
 
-	// Append prompt as positional arg
-	args = append(args, prompt)
-
 	slog.Debug("piSession: launching", "resume", sid != "", "args", core.RedactArgs(args))
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
@@ -119,6 +116,10 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 		env = core.MergeEnv(env, s.extraEnv)
 	}
 	cmd.Env = env
+
+	// Pipe prompt via stdin so leading "---" (from reply chain headers) is
+	// not misinterpreted as a CLI option flag.
+	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
