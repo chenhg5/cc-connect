@@ -19,7 +19,7 @@ func runCron(args []string) {
 		return
 	}
 
-	switch args[0] {
+	switch canonicalCronSubcommand(args[0]) {
 	case "add":
 		runCronAdd(args[1:])
 	case "list":
@@ -28,6 +28,8 @@ func runCron(args []string) {
 		runCronEdit(args[1:])
 	case "info":
 		runCronInfo(args[1:])
+	case "exec":
+		runCronExec(args[1:])
 	case "del", "delete", "rm", "remove":
 		runCronDel(args[1:])
 	case "--help", "-h", "help":
@@ -36,6 +38,21 @@ func runCron(args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown cron subcommand: %s\n", args[0])
 		printCronUsage()
 		os.Exit(1)
+	}
+}
+
+func canonicalCronSubcommand(sub string) string {
+	switch sub {
+	case "run", "trigger":
+		return "exec"
+	default:
+		return sub
+	}
+}
+
+func closeCronResponseBody(body io.Closer) {
+	if err := body.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: close response body: %v\n", err)
 	}
 }
 
@@ -159,7 +176,7 @@ func runCronAdd(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer closeCronResponseBody(resp.Body)
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -226,7 +243,7 @@ func runCronList(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer closeCronResponseBody(resp.Body)
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -271,6 +288,54 @@ func runCronList(args []string) {
 	}
 }
 
+func runCronExec(args []string) {
+	var id, dataDir string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				i++
+				dataDir = args[i]
+			}
+		case "--help", "-h":
+			printCronExecUsage()
+			return
+		default:
+			if id == "" {
+				id = args[i]
+			}
+		}
+	}
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: job ID is required")
+		printCronExecUsage()
+		os.Exit(1)
+	}
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+
+	payload, _ := json.Marshal(map[string]any{"id": id})
+	resp, err := apiPost(sockPath, "/cron/exec", payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer closeCronResponseBody(resp.Body)
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+
+	fmt.Printf("Triggered cron job: %s\n", id)
+}
+
 func runCronDel(args []string) {
 	var dataDir string
 	var id string
@@ -304,7 +369,7 @@ func runCronDel(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer closeCronResponseBody(resp.Body)
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -360,7 +425,7 @@ func runCronInfo(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer closeCronResponseBody(resp.Body)
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
@@ -467,7 +532,7 @@ func runCronEdit(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer closeCronResponseBody(resp.Body)
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -534,6 +599,7 @@ func printCronUsage() {
 Commands:
   add       Create a new scheduled task
   list      List all scheduled tasks
+  exec <id> Trigger a scheduled task immediately
   edit      Edit a scheduled task field
   info <id> [field]  Show detailed info of a scheduled task
                      (optionally filter to a single field)
@@ -563,6 +629,20 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
+}
+
+func printCronExecUsage() {
+	fmt.Println(`Usage: cc-connect cron exec <id> [options]
+
+Trigger an existing scheduled task immediately.
+
+Options:
+      --data-dir <path>      Data directory (default: ~/.cc-connect)
+  -h, --help                 Show this help
+
+Example:
+  cc-connect cron exec abc123
+  cc-connect cron run abc123`)
 }
 
 func printCronEditUsage() {

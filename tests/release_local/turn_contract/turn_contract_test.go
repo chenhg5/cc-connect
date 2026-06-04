@@ -688,13 +688,13 @@ func TestReplyMetadataConfigurationMatrix(t *testing.T) {
 			name:       "context_and_footer_on_share_one_line",
 			showCtx:    true,
 			showFooter: true,
-			want:       []string{"answer", "*[ctx: ~14%] · glm-5.1 · …/tmp/release-agent*"},
+			want:       []string{"answer", "[ctx: ~14%] · glm-5.1 · /tmp/release-agent"},
 		},
 		{
 			name:       "context_off_footer_on_keeps_model_footer",
 			showCtx:    false,
 			showFooter: true,
-			want:       []string{"answer", "*glm-5.1 · …/tmp/release-agent*"},
+			want:       []string{"answer", "glm-5.1 · /tmp/release-agent"},
 			forbid:     []string{"[ctx:"},
 		},
 		{
