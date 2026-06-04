@@ -1101,6 +1101,11 @@ app_secret = "your-feishu-app-secret"
 # app_token = "xapp-your-app-level-token"
 # allow_from = "*"  # Allowed Slack user IDs / 允许的 Slack 用户 ID
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
+# session_scope = "user"  # Session granularity: "user" (default, per channel+user) |
+#                         # "channel" (one session per channel, same as share_session_in_channel) |
+#                         # "thread" (one session per Slack thread — a new top-level message starts
+#                         #  a fresh session, replies in the same thread continue it).
+#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
 
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
@@ -1529,6 +1534,12 @@ app_secret = "your-feishu-app-secret"
 # startup_wait_ms = 2000       # milliseconds to wait after init_command before accepting messages (default: 2000 when init_command is set)
 # prompt_pattern = '[\$#>%]\s*$'  # regex to detect shell prompt = command done (default shown)
 # poll_interval_ms = 200       # output poll interval in milliseconds (default: 200)
+# window_per_session = false   # When true, each cc-connect session gets its OWN tmux window
+#                              # (own init_command/agent instance) instead of sharing one pane.
+#                              # Enable this for true isolation when the platform splits sessions
+#                              # (e.g. Slack session_scope = "thread"); otherwise all sessions
+#                              # share a single agent and their conversations interleave.
+#                              # 为 true 时每个会话独占一个 tmux 窗口（独立 agent 实例），实现真正隔离。
 #
 # --- Running Claude Code inside tmux ---
 # Set init_command to start claude automatically; adjust prompt_pattern to match
