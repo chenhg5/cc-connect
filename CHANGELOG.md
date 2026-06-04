@@ -1,5 +1,38 @@
 # Changelog
 
+### New Features
+- **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.
+
+### ⚠️ QQ Bot Intent Configuration Change
+The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you previously set a custom `intents` value without this bit, inline keyboard buttons will not work — update your `intents` to include bit 26. If you use the default intents, no action is needed. See `config.example.toml` for the new `intents` option.
+
+## v1.3.3-beta.4 (2026-05-28)
+
+### New Features
+- **`max_turn_time_mins`**: new config option — absolute wall-clock cap per agent turn that does NOT reset on tool-call events. Prevents long-running bash commands from permanently locking the session (#1091). Uses a two-phase shutdown: soft stop (10s grace) then force-kill. Session is preserved and resumed via `--resume` on the next message.
+
+### Fixed
+- **Web console 404 regression**: `make release-all` did not depend on `make web`, so release binaries were built without frontend assets when `web/dist/` was empty (gitignored). All routes on the management port returned `404`. Fixed by adding `web` as a prerequisite of `release-all` (#1136)
+- **Slack @mention without space**: `stripAppMentionText` only matched `"> "` (with trailing space), so `@Bot/command` (no space) was forwarded verbatim to Claude instead of being parsed as a command
+- **DingTalk `msgtype="picture"` dropped**: image messages delivered as `"picture"` (instead of `"image"`) were silently dropped. Both types now route to the image handler (#1128)
+- **Feishu `require_mention = false` ignored**: the platform read `group_reply_all` but users set `require_mention = false`; now both are treated as equivalent (#1141)
+- **AskUserQuestion resolved with empty answer**: delivery receipts and read-notifications (empty messages) were accepted as valid answers to `AskUserQuestion`, resolving it within ~500ms before the user could respond. Empty/whitespace content is now rejected (#1086)
+
+## v1.3.3-beta.3 (2026-05-24)
+
+Beta release with blackbox testing infrastructure, cursor/opencode agent support, and bug fixes.
+
+### New Features
+- **Blackbox testing framework**: Phase 1-2 blackbox testing with P0/P1/P2 coverage, config-switch, and NewEnvWithSetup infrastructure
+- **Cursor/OpenCode agents**: add cursor and opencode agent support in blackbox tests
+
+### Fixed
+- **Core italic wrapping**: restore italic wrapping on reply footer
+- **Feishu footer asterisks**: strip asterisks from footer to prevent Feishu markdown italic rendering
+- **Kimi session UUID**: capture session UUID from stderr instead of stdout
+- **Codex stdio sentinel**: add stdio sentinel for Codex app_server backend
+- **Windows cross-compile**: add missing `CheckLinger` stub to `daemon/windows.go` and `daemon/unsupported.go` so `make release-all` succeeds for all target platforms
+
 ## v1.3.3-beta.2 (2026-05-09)
 
 Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.

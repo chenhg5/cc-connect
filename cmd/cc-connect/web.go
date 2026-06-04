@@ -70,8 +70,9 @@ func runWeb(args []string) {
 	fmt.Printf("Opening: %s\n", baseURL)
 	if err := openBrowser(loginURL); err != nil {
 		fmt.Printf("\nCould not open browser automatically.\n")
-		fmt.Printf("URL:   %s\n", baseURL)
-		fmt.Printf("Token: %s\n", token)
+		fmt.Printf("Open this URL in your browser:\n")
+		fmt.Printf("  %s/login?token=%s\n", baseURL, token)
+		fmt.Printf("\nNote: make sure cc-connect is running (it hosts the web admin on port %d).\n", port)
 	}
 }
 
@@ -82,6 +83,11 @@ func openBrowser(rawURL string) error {
 	case "linux":
 		if isWSL() {
 			return exec.Command("cmd.exe", "/c", "start", rawURL).Start()
+		}
+		// On headless Linux, xdg-open is often unavailable.
+		// Check early and return a clear error so the caller can print the URL.
+		if _, err := exec.LookPath("xdg-open"); err != nil {
+			return fmt.Errorf("xdg-open not found (headless server?): %w", err)
 		}
 		return exec.Command("xdg-open", rawURL).Start()
 	case "windows":

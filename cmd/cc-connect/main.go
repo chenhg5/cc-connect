@@ -278,6 +278,11 @@ func main() {
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
+		showWorkdir := true
+		if proj.ShowWorkdirIndicator != nil {
+			showWorkdir = *proj.ShowWorkdirIndicator
+		}
+		engine.SetShowWorkdirIndicator(showWorkdir)
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
@@ -523,6 +528,11 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+
+		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
+		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
+			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
 		}
 
 		// Wire queue depth
@@ -953,6 +963,7 @@ func main() {
 				Mode:                 u.Mode,
 				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
@@ -1051,6 +1062,7 @@ func main() {
 				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
 			}
 		}
+		relayMgr.SetVisibility(cfg.Relay.Visibility)
 		apiSrv.SetRelayManager(relayMgr)
 
 		// Create shared DirHistory for all engines
@@ -1350,6 +1362,7 @@ Commands:
   cron               Manage scheduled tasks
     add              Create a scheduled task (-c <expr> --prompt <text>)
     list             List scheduled tasks
+    exec             Trigger a scheduled task immediately
     del              Delete a scheduled task by ID
 
   sessions           Browse session history
@@ -1458,6 +1471,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Wire show_context_indicator and reply_footer from display config
 	engine.SetShowContextIndicator(showCtx)
+	showWorkdir := true
+	if proj.ShowWorkdirIndicator != nil {
+		showWorkdir = *proj.ShowWorkdirIndicator
+	}
+	engine.SetShowWorkdirIndicator(showWorkdir)
 	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings

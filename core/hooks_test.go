@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -106,6 +107,9 @@ func TestEmit_NilManager(t *testing.T) {
 }
 
 func TestEmit_CommandHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (touch, env) not available on Windows")
+	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "hook_fired")
 
@@ -133,6 +137,9 @@ func TestEmit_CommandHook(t *testing.T) {
 }
 
 func TestEmit_CommandHookEnvVars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (touch, env) not available on Windows")
+	}
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "env_out")
 
@@ -262,6 +269,9 @@ func TestEmit_WildcardMatchesAll(t *testing.T) {
 }
 
 func TestEmit_OnlyMatchingHooksFire(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (touch, env) not available on Windows")
+	}
 	dir := t.TempDir()
 	matchedFile := filepath.Join(dir, "matched")
 	unmatchedFile := filepath.Join(dir, "unmatched")
@@ -283,6 +293,9 @@ func TestEmit_OnlyMatchingHooksFire(t *testing.T) {
 }
 
 func TestEmit_AsyncDoesNotBlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (touch, env) not available on Windows")
+	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "async_done")
 
@@ -312,6 +325,9 @@ func TestEmit_AsyncDoesNotBlock(t *testing.T) {
 }
 
 func TestEmit_SyncBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (touch, env) not available on Windows")
+	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "sync_done")
 

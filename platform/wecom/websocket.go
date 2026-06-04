@@ -378,23 +378,26 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		}
 	}
 
-	if !core.AllowList(p.allowFrom, body.From.UserID) {
-		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
-		return
-	}
-
 	chatID := body.ChatID
 	if chatID == "" {
 		chatID = body.From.UserID
 	}
-
-	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 	rctx := wsReplyContext{
 		reqID:    reqID,
 		chatID:   chatID,
 		chatType: body.ChatType,
 		userID:   body.From.UserID,
 	}
+
+	if !core.AllowList(p.allowFrom, body.From.UserID) {
+		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
+		if err := p.Reply(context.Background(), rctx, core.UnauthorizedAccessMessage); err != nil {
+			slog.Warn("wecom-ws: unauthorized reply failed", "error", err)
+		}
+		return
+	}
+
+	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 
 	// WS mode does not provide display names; the protocol only carries userID.
 	// Name resolution would require a separate HTTP API call with corpSecret,

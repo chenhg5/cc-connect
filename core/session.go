@@ -24,6 +24,12 @@ type Session struct {
 	History             []HistoryEntry `json:"history"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`
+	// LastUserActivity records when a real user message was last received.
+	// Unlike UpdatedAt (bumped by every session.Unlock including heartbeats and
+	// unsolicited agent output), this field is only updated when the engine
+	// processes an actual incoming user message. It is used by reset_on_idle_mins
+	// so that automated activity cannot prevent idle session rotation.
+	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -127,6 +133,23 @@ func (s *Session) GetName() string {
 	return s.Name
 }
 
+// TouchUserActivity records the current time as the last user-driven activity
+// on this session. Call this once per incoming user message, after the idle
+// reset check, so that only real user interactions reset the idle timer.
+func (s *Session) TouchUserActivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastUserActivity = time.Now()
+}
+
+// GetLastUserActivity returns when the last real user message was received.
+// Returns zero time if no user message has been processed yet.
+func (s *Session) GetLastUserActivity() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastUserActivity
+}
+
 func (s *Session) GetUpdatedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,6 +203,13 @@ func (s *Session) ClearHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.History = nil
+}
+
+// HistoryLen returns the current number of history entries.
+func (s *Session) HistoryLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.History)
 }
 
 // GetHistory returns the last n entries. If n <= 0, returns all.

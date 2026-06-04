@@ -62,16 +62,16 @@ func TestWorkspaceState_BeginEndTurn(t *testing.T) {
 
 func TestWorkspacePool_ReapIdle(t *testing.T) {
 	pool := newWorkspacePool(50 * time.Millisecond)
-	pool.GetOrCreate("/workspace/a")
+	pool.GetOrCreate(normalizeWorkspacePath("/workspace/a"))
 
 	time.Sleep(100 * time.Millisecond)
 	reaped := pool.ReapIdle()
 
-	if len(reaped) != 1 || reaped[0] != "/workspace/a" {
-		t.Errorf("expected [/workspace/a] reaped, got %v", reaped)
+	if len(reaped) != 1 || reaped[0] != normalizeWorkspacePath("/workspace/a") {
+		t.Errorf("expected [%s] reaped, got %v", normalizeWorkspacePath("/workspace/a"), reaped)
 	}
 
-	if s := pool.Get("/workspace/a"); s != nil {
+	if s := pool.Get(normalizeWorkspacePath("/workspace/a")); s != nil {
 		t.Error("expected workspace removed after reap")
 	}
 }
@@ -153,7 +153,7 @@ func TestWorkspacePool_ReapIdle_KeepsActive(t *testing.T) {
 
 func TestWorkspacePool_ReapIdle_SkipsBusyWorkspace(t *testing.T) {
 	pool := newWorkspacePool(50 * time.Millisecond)
-	state := pool.GetOrCreate("/workspace/busy")
+	state := pool.GetOrCreate(normalizeWorkspacePath("/workspace/busy"))
 	state.BeginTurn()
 
 	time.Sleep(100 * time.Millisecond)
@@ -161,14 +161,14 @@ func TestWorkspacePool_ReapIdle_SkipsBusyWorkspace(t *testing.T) {
 	if len(reaped) != 0 {
 		t.Fatalf("expected busy workspace to be preserved, got %v", reaped)
 	}
-	if got := pool.Get("/workspace/busy"); got == nil {
+	if got := pool.Get(normalizeWorkspacePath("/workspace/busy")); got == nil {
 		t.Fatal("expected busy workspace to remain in pool")
 	}
 
 	state.EndTurn()
 	time.Sleep(60 * time.Millisecond)
 	reaped = pool.ReapIdle()
-	if len(reaped) != 1 || reaped[0] != "/workspace/busy" {
+	if len(reaped) != 1 || reaped[0] != normalizeWorkspacePath("/workspace/busy") {
 		t.Fatalf("expected busy workspace to reap after EndTurn, got %v", reaped)
 	}
 }

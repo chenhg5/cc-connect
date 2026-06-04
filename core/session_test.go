@@ -937,6 +937,21 @@ func TestLegacyData_ClearsAfterFirstNewCommand(t *testing.T) {
 // /sessions listing handler) lock s.mu, so concurrent reads + writes
 // were a data race. With SetName acquiring s.mu the race detector stays
 // quiet; without the production fix it reports DATA RACE.
+func TestSession_HistoryLen(t *testing.T) {
+	s := &Session{}
+	if got := s.HistoryLen(); got != 0 {
+		t.Fatalf("empty session: expected HistoryLen=0, got %d", got)
+	}
+	s.AddHistory("user", "hello")
+	if got := s.HistoryLen(); got != 1 {
+		t.Fatalf("after user entry: expected HistoryLen=1, got %d", got)
+	}
+	s.AddHistory("assistant", "world")
+	if got := s.HistoryLen(); got != 2 {
+		t.Fatalf("after assistant entry: expected HistoryLen=2, got %d", got)
+	}
+}
+
 func TestSession_SetName_RaceFree(t *testing.T) {
 	sm := NewSessionManager("")
 	s := sm.GetOrCreateActive("user1")
