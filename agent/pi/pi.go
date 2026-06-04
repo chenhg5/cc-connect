@@ -49,6 +49,13 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("pi: '%s' not found in PATH, install with: npm install -g @mariozechner/pi-coding-agent", cmd)
 	}
 
+	// If model not specified in opts, try defaultModel from settings.json
+	if model == "" {
+		if def, err := readDefaultModel(); err == nil && def != "" {
+			model = def
+		}
+	}
+
 	return &Agent{
 		cmd:     cmd,
 		workDir: workDir,
@@ -84,7 +91,12 @@ func (a *Agent) GetModel() string {
 }
 
 func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return nil // Pi uses its own model registry; no static list here.
+	models, err := readSettingsModels()
+	if err != nil {
+		slog.Debug("pi: AvailableModels: read settings", "error", err)
+		return nil
+	}
+	return models
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -281,6 +293,88 @@ func (a *Agent) SkillDirs() []string {
 		}
 	}
 	return dirs
+}
+
+// ── Settings helpers ─────────────────────────────────────────
+
+// piSettingsDir returns the pi agent config directory.
+// Respects PI_CODING_AGENT_DIR env var; defaults to ~/.pi/agent.
+func piSettingsDir() string {
+	if d := os.Getenv("PI_CODING_AGENT_DIR"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pi", "agent")
+}
+
+// settingsPath returns the path to settings.json.
+func settingsPath() string {
+	dir := piSettingsDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "settings.json")
+}
+
+// piSettings represents the structure of pi's settings.json relevant fields.
+type piSettings struct {
+	EnabledModels  []string `json:"enabledModels"`
+	DefaultModel   string   `json:"defaultModel"`
+	DefaultProvider string  `json:"defaultProvider"`
+}
+
+// readSettings reads and parses pi's settings.json.
+func readSettings() (*piSettings, error) {
+	path := settingsPath()
+	if path == "" {
+		return nil, fmt.Errorf("pi: cannot determine settings path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("pi: read settings: %w", err)
+	}
+	var s piSettings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("pi: parse settings: %w", err)
+	}
+	return &s, nil
+}
+
+// readSettingsModels returns the enabledModels from settings.json as ModelOptions.
+func readSettingsModels() ([]core.ModelOption, error) {
+	s, err := readSettings()
+	if err != nil {
+		return nil, err
+	}
+	if len(s.EnabledModels) == 0 {
+		return nil, nil
+	}
+	models := make([]core.ModelOption, 0, len(s.EnabledModels))
+	for _, m := range s.EnabledModels {
+		option := core.ModelOption{Name: m}
+		// Derive a short alias from the last segment after the final "/".
+		if idx := strings.LastIndex(m, "/"); idx >= 0 && idx+1 < len(m) {
+			option.Alias = m[idx+1:]
+		}
+		models = append(models, option)
+	}
+	return models, nil
+}
+
+// readDefaultModel returns the defaultModel from settings.json.
+func readDefaultModel() (string, error) {
+	s, err := readSettings()
+	if err != nil {
+		return "", err
+	}
+	// If defaultProvider is set, qualify the defaultModel with it.
+	if s.DefaultProvider != "" && s.DefaultModel != "" && !strings.Contains(s.DefaultModel, "/") {
+		return s.DefaultProvider + "/" + s.DefaultModel, nil
+	}
+	return s.DefaultModel, nil
 }
 
 // ── Session helpers ──────────────────────────────────────────
