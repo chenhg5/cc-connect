@@ -1586,6 +1586,9 @@ app_secret = "your-feishu-app-secret"
 # - "default": Standard mode / 标准模式
 # - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
 #
+# Optional: pass --agent to opencode (for plugin-defined agents) / 可选：传递 --agent 给 opencode（适用于插件定义的 agent）
+# agent = "Sisyphus - Ultraworker"
+#
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
