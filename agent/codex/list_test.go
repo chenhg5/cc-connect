@@ -79,7 +79,7 @@ func writeTestCodexStateDB(t *testing.T, codexHome string, rows ...struct {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	_, err = db.Exec(`create table threads (
 		id text primary key,
 		cwd text,

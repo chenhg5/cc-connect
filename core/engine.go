@@ -5496,7 +5496,7 @@ func (e *Engine) cmdWorkdirs(p Platform, msg *Message, args []string) {
 		sb.WriteString(e.i18n.Tf(MsgWorkdirsItem, marker, i+1, wd.Cwd, wd.SessionCount, wd.MessageCount, wd.ModifiedAt.Format("01-02 15:04")))
 	}
 	if totalPages > 1 {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgWorkdirsPageHint), page, totalPages))
+		fmt.Fprintf(&sb, e.i18n.T(MsgWorkdirsPageHint), page, totalPages)
 	}
 	sb.WriteString(e.i18n.T(MsgWorkdirsHint))
 	e.reply(p, msg.ReplyCtx, sb.String())

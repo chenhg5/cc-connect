@@ -134,18 +134,6 @@ func filterCodexProjectSessions(sessions []core.AgentSessionInfo, projectRoots [
 	return filtered
 }
 
-func codexProjectRootForCwd(cwd string, projectRoots []string) string {
-	return core.WorkdirRootForCwd(cwd, projectRoots)
-}
-
-func codexPathContains(root, child string) bool {
-	return core.WorkdirContains(root, child)
-}
-
-func normalizeCodexPath(path string) string {
-	return core.NormalizeWorkdirPath(path)
-}
-
 func listAllCodexSessions(codexHome string) []core.AgentSessionInfo {
 	home := resolveCodexHomeDir(codexHome)
 	index := loadCodexSessionIndex(home)
@@ -223,10 +211,6 @@ func mergeCodexSession(merged map[string]core.AgentSessionInfo, next core.AgentS
 	merged[next.ID] = cur
 }
 
-func matchesCodexCwd(sessionCwd, filterCwd string, filterIsProjectRoot bool) bool {
-	return core.MatchSessionWorkdir(sessionCwd, filterCwd, filterIsProjectRoot)
-}
-
 func listCodexSessionFiles(codexHome string) []string {
 	var files []string
 	root := filepath.Join(codexHome, "sessions")
@@ -254,7 +238,7 @@ func loadCodexSessionIndex(codexHome string) map[string]codexSessionIndexEntry {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	index := make(map[string]codexSessionIndexEntry)
 	scanner := bufio.NewScanner(f)
@@ -282,7 +266,7 @@ func listCodexDatabaseSessions(codexHome string) []core.AgentSessionInfo {
 	if err != nil {
 		return nil
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	query := `
 		select id, cwd, title, updated_at, updated_at_ms
@@ -295,7 +279,7 @@ func listCodexDatabaseSessions(codexHome string) []core.AgentSessionInfo {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var sessions []core.AgentSessionInfo
 	for rows.Next() {
@@ -328,7 +312,7 @@ func codexThreadsHasColumn(db *sql.DB, name string) bool {
 	if err != nil {
 		return false
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var cid int
@@ -355,7 +339,7 @@ func listCodexArchivedSessionIDs(codexHome string) map[string]struct{} {
 	if err != nil {
 		return nil
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var where []string
 	if codexThreadsHasColumn(db, "archived") {
@@ -372,7 +356,7 @@ func listCodexArchivedSessionIDs(codexHome string) map[string]struct{} {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	ids := make(map[string]struct{})
 	for rows.Next() {
@@ -407,7 +391,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	stat, err := f.Stat()
 	if err != nil {
@@ -457,7 +441,8 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				} `json:"content"`
 			}
 			if json.Unmarshal(entry.Payload, &item) == nil {
-				if item.Role == "user" {
+				switch item.Role {
+				case "user":
 					userMsgSeen++
 					msgCount++
 					// The actual user prompt is the last user response_item
@@ -468,7 +453,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 							summary = c.Text
 						}
 					}
-				} else if item.Role == "assistant" {
+				case "assistant":
 					msgCount++
 				}
 			}
@@ -525,7 +510,7 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var entries []core.HistoryEntry
 
