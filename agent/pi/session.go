@@ -344,7 +344,7 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 			fp, oldStr, newStr := extractPiEditArgs(args)
 			if oldStr != "" || newStr != "" {
 				diff := core.ComputeLineDiff(oldStr, newStr)
-				result = fp + "\n```diff\n" + diff + "\n```"
+				result = "📝 " + fp + "\n```diff\n" + diff + "\n```"
 			} else {
 				slog.Debug("piSession: no diff content in args", "tool", toolName)
 			}

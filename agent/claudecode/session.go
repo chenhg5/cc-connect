@@ -884,7 +884,7 @@ func (cs *claudeSession) emitEditToolResult(toolName string, input map[string]an
 	var content string
 	if oldStr != "" || newStr != "" {
 		diff := core.ComputeLineDiff(oldStr, newStr)
-		content = fp + "\n```diff\n" + diff + "\n```"
+		content = "📝 " + fp + "\n```diff\n" + diff + "\n```"
 	} else {
 		content = fp
 	}
