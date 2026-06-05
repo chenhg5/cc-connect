@@ -5844,7 +5844,22 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 
 	// Line 3: workdir
 	if e.showWorkdirIndicator {
-		if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
+		if rawDir := resolveWorkDir(session, agent, workspaceDir); rawDir != "" {
+			dir := compactReplyFooterPath(rawDir)
+			if branch := replyFooterGitBranch(rawDir); branch != "" {
+				const maxBranchLen = 30
+				if utf8.RuneCountInString(branch) > maxBranchLen {
+					i := 0
+					for pos := range branch {
+						if i == maxBranchLen {
+							branch = branch[:pos] + "…"
+							break
+						}
+						i++
+					}
+				}
+				dir += " (" + branch + ")"
+			}
 			lines = append(lines, dir)
 		}
 	}
@@ -6268,7 +6283,24 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 
 	var line2 string
 	if e.showWorkdirIndicator {
-		line2 = replyFooterWorkDir(session, agent, workspaceDir)
+		if rawDir := resolveWorkDir(session, agent, workspaceDir); rawDir != "" {
+			dir := compactReplyFooterPath(rawDir)
+			if branch := replyFooterGitBranch(rawDir); branch != "" {
+				const maxBranchLen = 30
+				if utf8.RuneCountInString(branch) > maxBranchLen {
+					i := 0
+					for pos := range branch {
+						if i == maxBranchLen {
+							branch = branch[:pos] + "…"
+							break
+						}
+						i++
+					}
+				}
+				dir += " (" + branch + ")"
+			}
+			line2 = dir
+		}
 	}
 
 	switch {
