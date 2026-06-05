@@ -218,10 +218,11 @@ type Engine struct {
 	outgoingRL        *OutgoingRateLimiter
 	streamPreview     StreamPreviewCfg
 	instantReply      InstantReplyCfg
-	references        ReferenceRenderCfg
-	relayManager      *RelayManager
-	eventIdleTimeout  time.Duration
-	maxQueuedMessages int
+	references         ReferenceRenderCfg
+	relayManager       *RelayManager
+	eventIdleTimeout   time.Duration
+	permissionTimeout  time.Duration
+	maxQueuedMessages  int
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
@@ -425,6 +426,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		permissionTimeout:     defaultPermissionTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
@@ -930,6 +932,12 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetPermissionTimeout sets the maximum time to wait for a user to respond
+// to a permission prompt before auto-denying. 0 disables the timeout.
+func (e *Engine) SetPermissionTimeout(d time.Duration) {
+	e.permissionTimeout = d
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -1480,6 +1488,10 @@ func (e *Engine) Start() error {
 		_, isAsync := p.(AsyncRecoverablePlatform)
 		if async, ok := p.(AsyncRecoverablePlatform); ok {
 			async.SetLifecycleHandler(e)
+		}
+		// Register disconnect handler if the platform supports it.
+		if dhn, ok := p.(TransportLifecycleNotifier); ok {
+			dhn.SetDisconnectHandler(e.ResetSessionOnDisconnect)
 		}
 		if err := p.Start(e.handleMessage); err != nil {
 			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
@@ -2360,6 +2372,13 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	}
 
 	lower := strings.ToLower(strings.TrimSpace(content))
+	// Strip perm: prefix from inline button callbacks (e.g. "perm:allow" → "allow").
+	// Card actions go through bridge.go which does this conversion separately;
+	// inline buttons on Silk/Telegram arrive as raw text and need it here.
+	if strings.HasPrefix(lower, "perm:") {
+		lower = strings.TrimPrefix(lower, "perm:")
+		lower = strings.ReplaceAll(lower, "_", " ")
+	}
 
 	if isApproveAllResponse(lower) {
 		state.mu.Lock()
@@ -3065,7 +3084,17 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 	}
 }
 
+// ResetSessionOnDisconnect is called by platforms when the transport layer
+// disconnects (e.g. WebSocket drops). It resolves any pending permissions and
+// cleans up the interactive state so the session doesn't hang forever.
+//
+// This is safe to call multiple times — subsequent calls are no-ops.
+func (e *Engine) ResetSessionOnDisconnect(sessionKey string) {
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+}
+
 const defaultEventIdleTimeout = 2 * time.Hour
+const defaultPermissionTimeout = 5 * time.Minute
 
 // cardToolEntry stores a tool call record for card content rendering.
 type cardToolEntry struct {
@@ -4020,13 +4049,51 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
-			<-pending.Resolved
-			slog.Info("permission resolved", "request_id", event.RequestID)
+		// Start a permission-specific timeout so we don't block forever
+		// if the transport disconnects or the user never responds.
+		var permTimerCh <-chan time.Time
+		if e.permissionTimeout > 0 {
+			permTimer := time.NewTimer(e.permissionTimeout)
+			defer permTimer.Stop()
+			permTimerCh = permTimer.C
+		}
 
-			// Restart idle timer after permission is resolved
-			if idleTimer != nil {
-				idleTimer.Reset(e.eventIdleTimeout)
+		select {
+		case <-pending.Resolved:
+			// User responded — normal path.
+		case <-stopCh:
+			// Session was stopped externally (e.g. transport disconnect).
+			// Auto-deny the pending permission so the agent can exit cleanly.
+			slog.Warn("permission auto-denied: session stopped", "request_id", event.RequestID)
+			state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				Behavior: "deny",
+				Message:  "Session reset while waiting for permission.",
+			})
+			pending.resolve()
+			sp.discard()
+			return
+		case <-permTimerCh:
+			// Permission request timed out — auto-deny and continue.
+			slog.Warn("permission auto-denied: timeout", "request_id", event.RequestID, "timeout", e.permissionTimeout)
+			if replyCtx != nil {
+				e.reply(p, replyCtx, e.i18n.T(MsgPermissionTimeout))
 			}
+			state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				Behavior: "deny",
+				Message:  "Permission request timed out.",
+			})
+			pending.resolve()
+			// Continue the event loop — the agent will handle the denial.
+		case <-e.ctx.Done():
+			slog.Warn("permission auto-denied: engine shutting down", "request_id", event.RequestID)
+			state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				Behavior: "deny",
+				Message:  "Engine shutting down.",
+			})
+			pending.resolve()
+			sp.discard()
+			return
+		}
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
@@ -4167,7 +4234,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Build final card content with full response
 				finalContent := buildCardContent(cardThinkingText, cardToolCalls, fullResponse)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
-					slog.Error("streaming card finalize failed, sending fallback", "error", err)
+					if errors.Is(err, ErrFinalizeFallback) {
+						slog.Debug("streaming card finalized, falling back to reply", "error", err)
+					} else {
+						slog.Error("streaming card finalize failed, sending fallback", "error", err)
+					}
 					// Fallback: send the response as a normal message
 					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {

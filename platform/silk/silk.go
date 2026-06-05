@@ -60,6 +60,8 @@ type Platform struct {
 	stopping bool
 	groupID  string
 
+	onDisconnect func(sessionKey string) // called when transport disconnects
+
 	metadataActive atomic.Bool
 	metadataReply  chan string
 
@@ -113,6 +115,11 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "silk" }
+
+// SetDisconnectHandler implements core.TransportLifecycleNotifier.
+func (p *Platform) SetDisconnectHandler(h func(sessionKey string)) {
+	p.onDisconnect = h
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -437,7 +444,7 @@ func (c *silkStreamingCard) Finalize(ctx context.Context, content string) error 
 		return err
 	}
 
-	return fmt.Errorf("silk: finalize triggers reply fallback for clean answer")
+	return core.ErrFinalizeFallback
 }
 
 // imageExtensions are file extensions that should render as images in chat.
@@ -725,6 +732,14 @@ func (p *Platform) connect(ctx context.Context) error {
 
 	slog.Info("[silk] connected", "groupId", ack.GroupID, "groupName", ack.GroupName)
 
+	// Defensive: clean up any session state leftover from the previous
+	// connection that may still be stuck (e.g. pending permission).
+	// This is safe to call even if there's no stuck state — cleanup is a no-op
+	// when there's nothing to clean up.
+	if p.onDisconnect != nil && ack.GroupID != "" {
+		p.onDisconnect(ack.GroupID)
+	}
+
 	// Run metadata query inline (before accepting messages) to prevent
 	// concurrent engine processing — the engine and Claude CLI do NOT
 	// support concurrent requests. Without this, a racing metadata
@@ -741,7 +756,13 @@ func (p *Platform) connect(ctx context.Context) error {
 		if err != nil {
 			p.mu.Lock()
 			p.conn = nil
+			groupID := p.groupID
 			p.mu.Unlock()
+			// Notify engine so any stuck session (e.g. pending permission)
+			// can be cleaned up instead of hanging forever.
+			if p.onDisconnect != nil && groupID != "" {
+				p.onDisconnect(groupID)
+			}
 			return fmt.Errorf("silk: read error: %w", err)
 		}
 

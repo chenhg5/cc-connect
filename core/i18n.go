@@ -149,6 +149,7 @@ const (
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
 	MsgPermissionDenied          MsgKey = "permission_denied_msg"
 	MsgPermissionHint            MsgKey = "permission_hint"
+	MsgPermissionTimeout         MsgKey = "permission_timeout"
 	MsgQuietOn                   MsgKey = "quiet_on"
 	MsgQuietOff                  MsgKey = "quiet_off"
 	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
@@ -790,6 +791,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 等待權限回應。請回覆 **允許** / **拒絕** / **允許所有**。",
 		LangJapanese:           "⚠️ 権限の応答を待っています。**allow** / **deny** / **allow all** で返信してください。",
 		LangSpanish:            "⚠️ Esperando respuesta de permiso. Responda **allow** / **deny** / **allow all**.",
+	},
+	MsgPermissionTimeout: {
+		LangEnglish:            "⏰ Permission request timed out. Automatically denied.",
+		LangChinese:            "⏰ 权限请求超时，已自动拒绝。",
+		LangTraditionalChinese: "⏰ 權限請求超時，已自動拒絕。",
+		LangJapanese:           "⏰ 権限リクエストがタイムアウトしました。自動的に拒否されました。",
+		LangSpanish:            "⏰ La solicitud de permiso expiró. Denegada automáticamente.",
 	},
 	MsgQuietOn: {
 		LangEnglish:            "🔇 Quiet mode ON — thinking and tool progress messages will be hidden.",

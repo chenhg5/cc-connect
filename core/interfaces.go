@@ -18,6 +18,12 @@ type Platform interface {
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
+// ErrFinalizeFallback is returned by StreamingCard.Finalize to signal that
+// the card was sent successfully, and the caller should also send a plain
+// reply as a fallback for platforms that don't render cards. This is NOT
+// an error — callers should treat it as a signal, not log it at ERROR level.
+var ErrFinalizeFallback = errors.New("finalize succeeded; trigger reply fallback for platforms that don't render cards")
+
 // ReplyContextReconstructor is an optional interface for platforms that can
 // recreate a reply context from a session key. This is needed for cron jobs
 // to send messages to users without an incoming message.
@@ -542,6 +548,16 @@ type StreamingCard interface {
 // events through it instead of sending individual messages.
 type StreamingCardPlatform interface {
 	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
+}
+
+// TransportLifecycleNotifier is an optional interface for platforms whose
+// transport layer can disconnect and reconnect (e.g. WebSocket-based
+// platforms like Silk). When the transport disconnects, the platform calls
+// the registered handler so the engine can clean up any stuck sessions
+// (e.g. pending permission requests waiting for a user response that will
+// never arrive on the old connection).
+type TransportLifecycleNotifier interface {
+	SetDisconnectHandler(h func(sessionKey string))
 }
 
 // CardStatus represents the visual status of a card header.
