@@ -193,7 +193,7 @@ type Engine struct {
 	commandSaveAddFunc func(name, description, prompt, exec, workDir string) error
 	commandSaveDelFunc func(name string) error
 
-	displaySaveFunc  func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error
+	displaySaveFunc  func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool, showEditResults *bool) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
@@ -741,7 +741,7 @@ func (e *Engine) SetCommandSaveDelFunc(fn func(name string) error) {
 	e.commandSaveDelFunc = fn
 }
 
-func (e *Engine) SetDisplaySaveFunc(fn func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error) {
+func (e *Engine) SetDisplaySaveFunc(fn func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool, showEditResults *bool) error) {
 	e.displaySaveFunc = fn
 }
 
@@ -3964,7 +3964,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolResult:
 			showResult := e.display.ToolMessages
 			forcedEditResult := false
-			if !showResult && e.display.ShowEditResults && isEditTool(event.ToolName) {
+			if !showResult && e.display.ShowEditResults && IsEditTool(event.ToolName) {
 				showResult = true
 				forcedEditResult = true
 			}
@@ -8561,7 +8561,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	if e.displaySaveFunc != nil {
 		tm := e.display.ThinkingMessages
 		tool := e.display.ToolMessages
-		if err := e.displaySaveFunc(&newMode, &tm, nil, nil, &tool); err != nil {
+		if err := e.displaySaveFunc(&newMode, &tm, nil, nil, &tool, nil); err != nil {
 			slog.Error("failed to persist display config after /quiet", "error", err)
 		}
 	}
@@ -12659,7 +12659,7 @@ func (e *Engine) configItems() []configItem {
 				if e.displaySaveFunc != nil {
 					tm := e.display.ThinkingMessages
 					tool := e.display.ToolMessages
-					return e.displaySaveFunc(&v, &tm, nil, nil, &tool)
+					return e.displaySaveFunc(&v, &tm, nil, nil, &tool, nil)
 				}
 				return nil
 			},
@@ -12678,7 +12678,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, &b, nil, nil, nil)
+					return e.displaySaveFunc(nil, &b, nil, nil, nil, nil)
 				}
 				return nil
 			},
@@ -12700,7 +12700,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ThinkingMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, &n, nil, nil)
+					return e.displaySaveFunc(nil, nil, &n, nil, nil, nil)
 				}
 				return nil
 			},
@@ -12719,7 +12719,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMessages = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, nil, nil, &b)
+					return e.displaySaveFunc(nil, nil, nil, nil, &b, nil)
 				}
 				return nil
 			},
@@ -12739,7 +12739,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ShowEditResults = b
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, nil, nil, nil)
+					return e.displaySaveFunc(nil, nil, nil, nil, nil, &b)
 				}
 				return nil
 			},
@@ -12761,7 +12761,7 @@ func (e *Engine) configItems() []configItem {
 				}
 				e.display.ToolMaxLen = n
 				if e.displaySaveFunc != nil {
-					return e.displaySaveFunc(nil, nil, nil, &n, nil)
+					return e.displaySaveFunc(nil, nil, nil, &n, nil, nil)
 				}
 				return nil
 			},
@@ -13337,7 +13337,7 @@ func toolCodeLang(toolName, input string) string {
 }
 
 // isEditTool reports whether toolName is known to edit file content.
-func isEditTool(toolName string) bool {
+func IsEditTool(toolName string) bool {
 	switch toolName {
 	case "Edit", "Write", "NotebookEdit", "MultiEdit",
 		"edit", "write", "replace", "ReplaceInFile",
@@ -13347,6 +13347,84 @@ func isEditTool(toolName string) bool {
 	default:
 		return false
 	}
+}
+
+// ComputeLineDiff computes minimal unified diff between old and new text.
+// Finds common prefix/suffix lines, shows changed lines with +/- prefix
+// and up to 1 line of surrounding context.
+func ComputeLineDiff(old, new_ string) string {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new_, "\n")
+
+	prefixLen := 0
+	minLen := len(oldLines)
+	if len(newLines) < minLen {
+		minLen = len(newLines)
+	}
+	for prefixLen < minLen && oldLines[prefixLen] == newLines[prefixLen] {
+		prefixLen++
+	}
+
+	suffixLen := 0
+	for suffixLen < len(oldLines)-prefixLen && suffixLen < len(newLines)-prefixLen {
+		oi := len(oldLines) - 1 - suffixLen
+		ni := len(newLines) - 1 - suffixLen
+		if oldLines[oi] != newLines[ni] {
+			break
+		}
+		suffixLen++
+	}
+
+	if prefixLen+suffixLen >= len(oldLines) && prefixLen+suffixLen >= len(newLines) {
+		return ""
+	}
+
+	if prefixLen == 0 && suffixLen == 0 {
+		var sb strings.Builder
+		for _, l := range oldLines {
+			sb.WriteString("- " + l + "\n")
+		}
+		for _, l := range newLines {
+			sb.WriteString("+ " + l + "\n")
+		}
+		return strings.TrimRight(sb.String(), "\n")
+	}
+
+	var sb strings.Builder
+	const contextN = 1
+
+	ctxStart := prefixLen - contextN
+	if ctxStart < 0 {
+		ctxStart = 0
+	}
+	if ctxStart > 0 {
+		sb.WriteString("  ...\n")
+	}
+	for i := ctxStart; i < prefixLen; i++ {
+		sb.WriteString("  " + oldLines[i] + "\n")
+	}
+	for i := prefixLen; i < len(oldLines)-suffixLen; i++ {
+		sb.WriteString("- " + oldLines[i] + "\n")
+	}
+	for i := prefixLen; i < len(newLines)-suffixLen; i++ {
+		sb.WriteString("+ " + newLines[i] + "\n")
+	}
+	for i := len(newLines) - suffixLen; i < len(newLines); i++ {
+		sb.WriteString("  " + newLines[i] + "\n")
+	}
+
+	ctxEnd := len(newLines) - suffixLen + contextN
+	if ctxEnd > len(newLines) {
+		ctxEnd = len(newLines)
+	}
+	for i := len(newLines) - suffixLen; i < ctxEnd && i < len(newLines); i++ {
+		sb.WriteString("  " + newLines[i] + "\n")
+	}
+	if ctxEnd < len(newLines) {
+		sb.WriteString("  ...\n")
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 func (e *Engine) formatToolResultEventFallback(toolName, result, status string, exitCode *int, success *bool) string {

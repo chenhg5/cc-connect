@@ -11873,7 +11873,7 @@ func TestEngine_SetterMethods(t *testing.T) {
 	})
 
 	// Test SetDisplaySaveFunc
-	e.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool) error {
+	e.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkMax, toolMax *int, toolMessages *bool, showEditResults *bool) error {
 		return nil
 	})
 

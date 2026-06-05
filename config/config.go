@@ -182,6 +182,7 @@ type DisplayConfig struct {
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ShowEditResults      *bool   `toml:"show_edit_results"`      // show edit tool results even in quiet/compact mode; default true
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 }
@@ -674,7 +675,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter bool) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showEditResults bool, showContextIndicator, replyFooter bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
 		projDisp = proj.Display
@@ -748,6 +749,11 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		getProjInt(func(d *DisplayConfig) *int { return d.ToolMaxLen }),
 		cfg.Display.ToolMaxLen,
 		500,
+	)
+	showEditResults = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.ShowEditResults }),
+		cfg.Display.ShowEditResults,
+		true,
 	)
 
 	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
@@ -1587,7 +1593,7 @@ func RemoveAlias(name string) error {
 
 // SaveDisplayConfig persists the display settings to the config file.
 // Uses surgical text editing to preserve comments and unknown fields.
-func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool, showEditResults *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if mode != nil {
@@ -1612,6 +1618,11 @@ func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, too
 	}
 	if toolMessages != nil {
 		if err := patchSectionField("display", "tool_messages", fmt.Sprintf("%t", *toolMessages)); err != nil {
+			return err
+		}
+	}
+	if showEditResults != nil {
+		if err := patchSectionField("display", "show_edit_results", fmt.Sprintf("%t", *showEditResults)); err != nil {
 			return err
 		}
 	}

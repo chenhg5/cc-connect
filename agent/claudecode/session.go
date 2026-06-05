@@ -58,6 +58,13 @@ type claudeSession struct {
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
+	// pendingEditResult captures auto-approved edit tool input so that
+	// EventToolResult is emitted at handleResult time (after tool execution).
+	pendingEditResult struct {
+		toolName string
+		input    map[string]any
+	}
+
 	gracefulStopTimeout time.Duration
 }
 
@@ -535,6 +542,15 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.usageMu.Unlock()
 	}
 
+	// Emit pending edit tool result now that the turn (and its tools) has completed.
+	if cs.pendingEditResult.toolName != "" {
+		cs.emitEditToolResult(cs.pendingEditResult.toolName, cs.pendingEditResult.input)
+		cs.pendingEditResult = struct {
+			toolName string
+			input    map[string]any
+		}{}
+	}
+
 	evt := core.Event{
 		Type:                     core.EventResult,
 		Content:                  content,
@@ -573,6 +589,10 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 			Behavior:     "allow",
 			UpdatedInput: input,
 		})
+		cs.pendingEditResult = struct {
+			toolName string
+			input    map[string]any
+		}{toolName: toolName, input: input}
 		return
 	}
 	if cs.dontAsk.Load() {
@@ -589,6 +609,10 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 			Behavior:     "allow",
 			UpdatedInput: input,
 		})
+		cs.pendingEditResult = struct {
+			toolName string
+			input    map[string]any
+		}{toolName: toolName, input: input}
 		return
 	}
 
@@ -759,6 +783,47 @@ func isClaudeEditTool(toolName string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// emitEditToolResult sends an EventToolResult for edit tools using the
+// permission input as a proxy for the result. Claude Code does not emit
+// separate tool-result events, but for edit tools the approved input
+// (file_path + old_string/new_string) accurately reflects what changed.
+func (cs *claudeSession) emitEditToolResult(toolName string, input map[string]any) {
+	if !isClaudeEditTool(toolName) || !core.IsEditTool(toolName) {
+		return
+	}
+	fp, _ := input["file_path"].(string)
+	oldStr, _ := input["old_string"].(string)
+	newStr, _ := input["new_string"].(string)
+	if oldStr == "" {
+		oldStr, _ = input["old_str"].(string)
+	}
+	if newStr == "" {
+		newStr, _ = input["new_str"].(string)
+	}
+
+	var content string
+	if oldStr != "" || newStr != "" {
+		diff := core.ComputeLineDiff(oldStr, newStr)
+		content = fp + "\n```diff\n" + diff + "\n```"
+	} else {
+		content = fp
+	}
+	if content == "" {
+		return
+	}
+
+	evt := core.Event{
+		Type:      core.EventToolResult,
+		ToolName:  toolName,
+		Content:   content,
+		ToolResult: content,
+	}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
 	}
 }
 
