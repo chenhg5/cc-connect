@@ -524,6 +524,136 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_CardActionPermissionAllow(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
+		"cc_project": "proj-a",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":       "perm:allow",
+				"perm_label":   "✅ 允许",
+				"perm_color":   "green",
+				"perm_body":    "Agent wants Bash",
+				"perm_project": "proj-a",
+				"session_key":  "feishu:oc_test_chat:ou_test_user",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_perm"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card response, got %#v", resp)
+	}
+	if resp.Toast == nil || resp.Toast.Content == "" {
+		t.Fatal("expected toast in permission card action response")
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "allow" {
+			t.Fatalf("message content = %q, want allow", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected permission allow message")
+	}
+}
+
+// Regression: P2P card actions must not be blocked by allow_chat sentinels that
+// only exist to reject group chats (e.g. __kb_p2p_only__).
+func TestInteractivePlatform_CardActionPermissionAllowP2PBypassesAllowChat(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
+		"cc_project": "kb",
+		"allow_chat": "__kb_p2p_only__",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.chatTypeCache.Store("oc_p2p_chat", "p2p")
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":       "perm:allow",
+				"perm_project": "kb",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_p2p_chat", OpenMessageID: "om_perm"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected card response for P2P permission allow")
+	}
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "allow" {
+			t.Fatalf("message content = %q, want allow", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler should run for P2P card action despite allow_chat sentinel")
+	}
+}
+
+func TestInteractivePlatform_CardActionPermissionProjectRouting(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
+		"cc_project": "proj-a",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	handled := false
+	ip.handler = func(_ core.Platform, _ *core.Message) {
+		handled = true
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":       "perm:allow",
+				"perm_project": "proj-b",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_perm"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response for foreign project, got %#v", resp)
+	}
+	if handled {
+		t.Fatal("handler should not run for foreign project permission action")
+	}
+}
+
 func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {

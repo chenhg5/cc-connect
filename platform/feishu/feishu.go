@@ -125,6 +125,7 @@ type Platform struct {
 	doneEmoji                  string
 	allowFrom                  string
 	allowChat                  string
+	ccProject                  string // cc-connect project name (from opts["cc_project"])
 	groupOnly                  bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
@@ -145,6 +146,7 @@ type Platform struct {
 	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
+	chatTypeCache    sync.Map          // chat_id -> chat type ("group" / "p2p")
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	recalledMu       sync.Mutex
 	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
@@ -222,6 +224,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
+	ccProject, _ := opts["cc_project"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
@@ -290,6 +293,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
+		ccProject:                  ccProject,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
@@ -553,9 +557,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return nil, nil
 	}
 
-	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
+	// Match onMessage routing: allow_chat applies to group chats only; P2P bypasses
+	// allow_chat unless group_only is set. Card callbacks don't include chat type,
+	// so consult the cache populated from inbound messages.
 	if event.Event.Context != nil && event.Event.Context.OpenChatID != "" {
-		if !core.AllowList(p.allowChat, event.Event.Context.OpenChatID) {
+		chatID := event.Event.Context.OpenChatID
+		if !p.shouldAcceptChat(p.chatTypeForChatID(chatID), chatID) {
+			slog.Debug(p.tag()+": card action from unauthorized chat",
+				"chat_id", chatID, "chat_type", p.chatTypeForChatID(chatID))
 			return nil, nil
 		}
 	}
@@ -662,6 +671,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// perm: — permission response with in-place card update
 	if strings.HasPrefix(actionVal, "perm:") {
+		if !p.cardActionTargetsThisProject(event.Event.Action.Value, "perm_project") {
+			return nil, nil
+		}
+
 		var responseText string
 		switch actionVal {
 		case "perm:allow":
@@ -676,15 +689,20 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		h := p.getHandler()
-		go h(p.dispatchPlatform(), &core.Message{
-			SessionKey: sessionKey,
-			Platform:   p.platformName,
-			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
-			Content:    responseText,
-			ReplyCtx:   rctx,
-		})
+		if h != nil {
+			go h(p.dispatchPlatform(), &core.Message{
+				SessionKey: sessionKey,
+				Platform:   p.platformName,
+				UserID:     userID,
+				UserName:   p.resolveUserName(userID),
+				ChatName:   p.resolveChatName(chatID),
+				Content:    responseText,
+				ReplyCtx:   rctx,
+			})
+		} else {
+			slog.Warn(p.tag()+": permission card action dropped, handler not ready",
+				"action", actionVal, "session_key", sessionKey)
+		}
 
 		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
 		permColor, _ := event.Event.Action.Value["perm_color"].(string)
@@ -697,6 +715,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			cb.Markdown(permBody)
 		}
 		return &callback.CardActionTriggerResponse{
+			Toast: &callback.Toast{
+				Type:    "success",
+				Content: permLabel,
+			},
 			Card: &callback.Card{
 				Type: "raw",
 				Data: renderCardMap(cb.Build(), sessionKey),
@@ -706,17 +728,21 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
+		if !p.cardActionTargetsThisProject(event.Event.Action.Value, "askq_project") {
+			return nil, nil
+		}
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		h := p.getHandler()
-		go h(p.dispatchPlatform(), &core.Message{
-			SessionKey: sessionKey,
-			Platform:   p.platformName,
-			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
-			Content:    actionVal,
-			ReplyCtx:   rctx,
-		})
+		if h := p.getHandler(); h != nil {
+			go h(p.dispatchPlatform(), &core.Message{
+				SessionKey: sessionKey,
+				Platform:   p.platformName,
+				UserID:     userID,
+				UserName:   p.resolveUserName(userID),
+				ChatName:   p.resolveChatName(chatID),
+				Content:    actionVal,
+				ReplyCtx:   rctx,
+			})
+		}
 
 		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)
 		askqQuestion, _ := event.Event.Action.Value["askq_question"].(string)
@@ -1091,12 +1117,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 
-	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
-		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
-		return nil
+	if chatID != "" && chatType != "" {
+		p.chatTypeCache.Store(chatID, chatType)
 	}
-	if chatType != "group" && p.groupOnly {
-		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
+	if !p.shouldAcceptChat(chatType, chatID) {
+		if chatType == "group" {
+			slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
+		} else {
+			slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
+		}
 		return nil
 	}
 
@@ -3039,6 +3068,52 @@ func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID strin
 		return fmt.Sprintf("%s:%s", p.tag(), chatID)
 	}
 	return fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
+}
+
+// shouldAcceptChat mirrors onMessage allow_chat / group_only routing.
+// Group chats must match allow_chat; P2P chats are rejected when group_only is set.
+func (p *Platform) shouldAcceptChat(chatType, chatID string) bool {
+	if chatType == "group" {
+		return core.AllowList(p.allowChat, chatID)
+	}
+	if chatType != "" && p.groupOnly {
+		return false
+	}
+	// Card callbacks may arrive before chat type is cached. For group_only
+	// platforms fall back to allow_chat; P2P-first configs skip the check.
+	if chatType == "" && p.groupOnly {
+		return core.AllowList(p.allowChat, chatID)
+	}
+	return true
+}
+
+func (p *Platform) chatTypeForChatID(chatID string) string {
+	if chatID == "" {
+		return ""
+	}
+	if v, ok := p.chatTypeCache.Load(chatID); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// cardActionTargetsThisProject returns true when the callback has no project tag
+// (legacy cards) or the tag matches this platform's cc-connect project.
+func (p *Platform) cardActionTargetsThisProject(value map[string]any, projectKey string) bool {
+	if value == nil || projectKey == "" {
+		return true
+	}
+	want, _ := value[projectKey].(string)
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return true
+	}
+	if p.ccProject == "" {
+		return false
+	}
+	return want == p.ccProject
 }
 
 func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[string]any) string {
