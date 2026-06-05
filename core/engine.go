@@ -3964,6 +3964,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolResult:
 			showResult := e.display.ToolMessages
 			forcedEditResult := false
+				slog.Info("EventToolResult dispatch", "tool", event.ToolName, "showEditResults", e.display.ShowEditResults, "toolMessages", e.display.ToolMessages, "isEditTool", IsEditTool(event.ToolName))
 			if !showResult && e.display.ShowEditResults && IsEditTool(event.ToolName) {
 				showResult = true
 				forcedEditResult = true
@@ -3979,7 +3980,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if forcedEditResult {
 						if result != "" {
-							textParts = append(textParts, "\n\n"+result)
+							// truncateIf may have cut off the closing ``` code fence.
+							// If missing, strip the truncation ellipsis and add a
+							// guaranteed closing fence so the code block doesn't
+							// swallow all subsequent content.
+							if !strings.HasSuffix(result, "\n```") {
+								result = strings.TrimSuffix(result, "...")
+								result = strings.TrimRight(result, "`\n ")
+								result += "\n```"
+							}
+							slog.Info("forcedEditResult: appending to textParts", "tool", event.ToolName, "result_len", len(result))
+							textParts = append(textParts, "\n\n"+result+"\n")
+						} else {
+							slog.Info("forcedEditResult: empty result", "tool", event.ToolName)
 						}
 						break
 					}
