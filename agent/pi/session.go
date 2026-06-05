@@ -375,6 +375,7 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 // extractToolInput pulls a concise summary from a tool call content item.
 // extractPiEditArgs pulls file path and old/new strings from Pi's edit tool arguments.
 // Pi uses "edits" array with oldText/newText/path, or sometimes old_string/new_string/file_path.
+// For write tools (no old/new), returns the file content as newStr.
 func extractPiEditArgs(args map[string]any) (fp, oldStr, newStr string) {
 	fp, _ = args["file_path"].(string)
 	if fp == "" {
@@ -394,9 +395,22 @@ func extractPiEditArgs(args map[string]any) (fp, oldStr, newStr string) {
 			if fp == "" {
 				fp, _ = first["path"].(string)
 			}
+			if newStr == "" {
+				newStr, _ = first["text"].(string)
+			}
+			if newStr == "" {
+				newStr, _ = first["content"].(string)
+			}
 			if oldStr == "" {
 				oldStr, _ = first["oldText"].(string)
 			}
+		// write tool: no old/new, extract content as newStr for display
+		if oldStr == "" && newStr == "" {
+			newStr, _ = args["content"].(string)
+		}
+		if newStr == "" {
+			newStr, _ = args["text"].(string)
+		}
 			if newStr == "" {
 				newStr, _ = first["newText"].(string)
 			}
