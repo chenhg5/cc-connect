@@ -43,6 +43,10 @@ type piSession struct {
 	// pendingToolInput stores edit tool arguments keyed by tool name, so that
 	// handleMessageEnd can format a useful diff instead of "Successfully replaced..."
 	pendingToolInput map[string]map[string]any
+
+	// diffEmitted tracks which tools had diff emitted at tool-call time
+	// so handleMessageEnd skips stale emission to avoid card duplication.
+	diffEmitted map[string]bool
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -61,6 +65,7 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 		ctx:    sessionCtx,
 		cancel: cancel,
 		pendingToolInput: make(map[string]map[string]any),
+		diffEmitted:      make(map[string]bool),
 	}
 	s.alive.Store(true)
 
@@ -302,7 +307,19 @@ func (s *piSession) emitToolFromMessage(ame map[string]any) {
 				name, _ := item["name"].(string)
 					args, _ := item["arguments"].(map[string]any)
 					if args != nil && core.IsEditTool(name) {
-						s.pendingToolInput[name] = args; slog.Debug("piSession: stored edit tool input", "tool", name, "has_old_str", args["old_string"] != nil || args["old_str"] != nil, "has_new_str", args["new_string"] != nil || args["new_str"] != nil)
+						s.pendingToolInput[name] = args
+						fp, os, ns := extractPiEditArgs(args)
+						if os != "" || ns != "" {
+							diff := core.ComputeLineDiff(os, ns)
+							s.diffEmitted[name] = true
+							slog.Debug("piSession: emitted edit diff at tool-call time", "tool", name)
+							evt := core.Event{Type: core.EventToolResult, ToolName: name, Content: "📝 " + fp + "\n```diff\n" + diff + "\n```"}
+							select {
+							case s.events <- evt:
+							case <-s.ctx.Done():
+								return
+							}
+						}
 					}
 				input := extractToolInput(item)
 				evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
@@ -338,20 +355,19 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 				}
 			}
 		}
-		result := truncStr(output, core.DefaultToolResultMaxLen)
-		if args, ok := s.pendingToolInput[toolName]; ok {
-			slog.Debug("piSession: formatting edit diff", "tool", toolName)
-			fp, oldStr, newStr := extractPiEditArgs(args)
-			if oldStr != "" || newStr != "" {
-				diff := core.ComputeLineDiff(oldStr, newStr)
-				result = "📝 " + fp + "\n```diff\n" + diff + "\n```"
-			} else {
-				slog.Debug("piSession: no diff content in args", "tool", toolName)
+		if s.diffEmitted[toolName] {
+			delete(s.diffEmitted, toolName)
+			if output != "" && !strings.HasPrefix(strings.TrimSpace(output), "Successfully") {
+				evt := core.Event{Type: core.EventText, Content: "❌ " + output}
+				select {
+				case s.events <- evt:
+				case <-s.ctx.Done():
+					return
+				}
 			}
-			delete(s.pendingToolInput, toolName)
-		} else {
-			slog.Debug("piSession: no stored args, using raw output", "tool", toolName, "output_len", len(output))
+			return
 		}
+		result := truncStr(output, core.DefaultToolResultMaxLen)
 		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: result}
 		select {
 		case s.events <- evt:

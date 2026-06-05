@@ -488,6 +488,13 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 							toolName string
 							input    map[string]any
 						}{toolName: toolName, input: input}
+						// Emit diff at tool_use time so it appears in correct card position
+						// before subsequent text blocks from the same assistant message.
+						cs.emitEditToolResult(toolName, input)
+						cs.pendingEditResult = struct {
+							toolName string
+							input    map[string]any
+						}{}
 					}
 				}
 			}
@@ -539,19 +546,27 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			// If we have the matching tool_use input, emit EventToolResult
 			// with a diff. This is the primary path in bypassPermissions mode.
 			toolUseID, _ := item["tool_use_id"].(string)
-			if stored, ok := cs.pendingToolInputByUseID[toolUseID]; ok {
-				cs.emitEditToolResult(stored.toolName, stored.input)
-				delete(cs.pendingToolInputByUseID, toolUseID)
-				// Clear pendingEditResult so handleResult doesn't double-emit
-				cs.pendingEditResult = struct {
-					toolName string
-					input    map[string]any
-				}{}
-			}
 			isError, _ := item["is_error"].(bool)
+			// Diff already emitted from handleAssistant at tool_use time.
+			// Just clean up to prevent stale entries.
+			if cs.pendingToolInputByUseID != nil {
+				delete(cs.pendingToolInputByUseID, toolUseID)
+			}
+			cs.pendingEditResult = struct {
+				toolName string
+				input    map[string]any
+			}{}
 			if isError {
 				result, _ := item["content"].(string)
-				slog.Debug("claudeSession: tool error", "content", result)
+				if result != "" {
+					slog.Debug("claudeSession: tool error", "content", result)
+					evt := core.Event{Type: core.EventText, Content: "❌ " + result}
+					select {
+					case cs.events <- evt:
+					case <-cs.ctx.Done():
+						return
+					}
+				}
 			}
 		}
 	}

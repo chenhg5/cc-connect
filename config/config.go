@@ -753,7 +753,7 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	showEditResults = pickBool(
 		getProjBool(func(d *DisplayConfig) *bool { return d.ShowEditResults }),
 		cfg.Display.ShowEditResults,
-		true,
+		false,
 	)
 
 	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
