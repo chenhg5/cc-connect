@@ -39,6 +39,10 @@ type piSession struct {
 	alive     atomic.Bool
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
+
+	// pendingToolInput stores edit tool arguments keyed by tool name, so that
+	// handleMessageEnd can format a useful diff instead of "Successfully replaced..."
+	pendingToolInput map[string]map[string]any
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -56,6 +60,7 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 		events: make(chan core.Event, 64),
 		ctx:    sessionCtx,
 		cancel: cancel,
+		pendingToolInput: make(map[string]map[string]any),
 	}
 	s.alive.Store(true)
 
@@ -295,6 +300,10 @@ func (s *piSession) emitToolFromMessage(ame map[string]any) {
 			itemType, _ := item["type"].(string)
 			if itemType == "toolCall" {
 				name, _ := item["name"].(string)
+					args, _ := item["arguments"].(map[string]any)
+					if args != nil && core.IsEditTool(name) {
+						s.pendingToolInput[name] = args; slog.Debug("piSession: stored edit tool input", "tool", name, "has_old_str", args["old_string"] != nil || args["old_str"] != nil, "has_new_str", args["new_string"] != nil || args["new_str"] != nil)
+					}
 				input := extractToolInput(item)
 				evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
 				select {
@@ -329,7 +338,24 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 				}
 			}
 		}
-		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncStr(output, core.DefaultToolResultMaxLen)}
+		result := truncStr(output, core.DefaultToolResultMaxLen); if _, ok := s.pendingToolInput[toolName]; ok { slog.Debug("piSession: using stored args for diff", "tool", toolName) } else { slog.Debug("piSession: no stored args, using raw output", "tool", toolName, "output_len", len(output)) }
+		if args, ok := s.pendingToolInput[toolName]; ok { slog.Debug("piSession: formatting edit diff", "tool", toolName, "has_old_string", args["old_string"] != nil, "has_file_path", args["file_path"] != nil)
+			fp, _ := args["file_path"].(string)
+			oldStr, _ := args["old_string"].(string)
+			newStr, _ := args["new_string"].(string)
+			if oldStr == "" {
+				oldStr, _ = args["old_str"].(string)
+			}
+			if newStr == "" {
+				newStr, _ = args["new_str"].(string)
+			}
+			if oldStr != "" || newStr != "" {
+				diff := core.ComputeLineDiff(oldStr, newStr)
+				result = fp + "\n```diff\n" + diff + "\n```"
+			}
+			delete(s.pendingToolInput, toolName)
+		}
+		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: result}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():

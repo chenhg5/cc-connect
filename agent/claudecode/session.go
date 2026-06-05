@@ -65,6 +65,13 @@ type claudeSession struct {
 		input    map[string]any
 	}
 
+	// pendingToolCallsByRequestID maps control_request IDs to edit tool info,
+	// so RespondPermission can set pendingEditResult for engine-driven approvals.
+	pendingToolCallsByRequestID map[string]struct {
+		toolName string
+		input    map[string]any
+	}
+
 	gracefulStopTimeout time.Duration
 }
 
@@ -543,6 +550,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 
 	// Emit pending edit tool result now that the turn (and its tools) has completed.
+	slog.Debug("claudeSession: handleResult", "pendingEditResult", cs.pendingEditResult.toolName)
 	if cs.pendingEditResult.toolName != "" {
 		cs.emitEditToolResult(cs.pendingEditResult.toolName, cs.pendingEditResult.input)
 		cs.pendingEditResult = struct {
@@ -583,6 +591,18 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
 
+	if core.IsEditTool(toolName) && input != nil {
+		if cs.pendingToolCallsByRequestID == nil {
+			cs.pendingToolCallsByRequestID = make(map[string]struct {
+				toolName string
+				input    map[string]any
+			})
+		}
+		cs.pendingToolCallsByRequestID[requestID] = struct {
+			toolName string
+			input    map[string]any
+		}{toolName: toolName, input: input}
+	}
 	if cs.autoApprove.Load() {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
@@ -759,6 +779,18 @@ func (cs *claudeSession) RespondPermission(requestID string, result core.Permiss
 		},
 	}
 
+	if result.Behavior == "allow" {
+		if stored, ok := cs.pendingToolCallsByRequestID[requestID]; ok {
+			cs.pendingEditResult = struct {
+				toolName string
+				input    map[string]any
+			}{toolName: stored.toolName, input: stored.input}
+			delete(cs.pendingToolCallsByRequestID, requestID)
+			slog.Debug("claudeSession: pending edit result set from engine approval", "tool", stored.toolName)
+		}
+	} else {
+		delete(cs.pendingToolCallsByRequestID, requestID)
+	}
 	slog.Debug("claudeSession: permission response", "request_id", requestID, "behavior", result.Behavior)
 	return cs.writeJSON(controlResponse)
 }
@@ -791,7 +823,9 @@ func isClaudeEditTool(toolName string) bool {
 // separate tool-result events, but for edit tools the approved input
 // (file_path + old_string/new_string) accurately reflects what changed.
 func (cs *claudeSession) emitEditToolResult(toolName string, input map[string]any) {
+	slog.Debug("claudeSession: emitEditToolResult called", "tool", toolName)
 	if !isClaudeEditTool(toolName) || !core.IsEditTool(toolName) {
+		slog.Debug("claudeSession: emitEditToolResult skipped, not edit tool", "tool", toolName)
 		return
 	}
 	fp, _ := input["file_path"].(string)
