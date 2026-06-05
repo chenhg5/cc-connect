@@ -97,6 +97,12 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			req.Message = args[i]
+		case "--tts":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("%s requires a value", args[i])
+			}
+			i++
+			req.TTSText = args[i]
 		case "--image":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--image requires a path")
@@ -186,8 +192,8 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	req.Files = append(files, audioFiles...)
 	req.Files = append(req.Files, videoFiles...)
 
-	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		return req, "", fmt.Errorf("message or attachment is required")
+	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 {
+		return req, "", fmt.Errorf("message, tts text, or attachment is required")
 	}
 
 	return req, dataDir, nil
@@ -328,12 +334,14 @@ func printSendUsage() {
        cc-connect send [options] --file <path>
        cc-connect send [options] --audio <path>
        cc-connect send [options] --video <path>
+       cc-connect send [options] --tts <text>
        echo "msg" | cc-connect send [options] --stdin
 
-Send a message or attachment to an active cc-connect session.
+Send a message, attachment, or synthesized voice message to an active cc-connect session.
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
+      --tts <text>         Synthesize text and send it as a voice/audio message
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --audio <path>       Send an audio attachment (repeatable)
@@ -353,6 +361,7 @@ Examples:
   cc-connect send --file /tmp/report.pdf
   cc-connect send --video /tmp/demo.mp4
   cc-connect send --audio /tmp/voice.opus
+  cc-connect send --tts "Hello from cc-connect"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)

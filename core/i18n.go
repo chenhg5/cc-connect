@@ -391,12 +391,12 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle    MsgKey = "ask_question_title"
+	MsgAskQuestionTitle     MsgKey = "ask_question_title"
 	MsgAskQuestionNote      MsgKey = "ask_question_note"
 	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
 	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt   MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered MsgKey = "ask_question_answered"
+	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"

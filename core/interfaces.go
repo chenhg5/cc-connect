@@ -71,7 +71,7 @@ Your normal text responses are automatically delivered to the user — just repl
 
 ## Available tools
 
-### Send generated images or files back to the user
+### Send generated images, files, or voice messages back to the user
 When you generate a local image or file that should be sent to the user, use:
 
   cc-connect send --image /absolute/path/to/image.png
@@ -80,6 +80,12 @@ When you generate a local image or file that should be sent to the user, use:
 
 You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
 If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
+
+When the user explicitly asks you to send a voice/audio reply, synthesize and send it with:
+
+  cc-connect send --tts "text to speak"
+
+After this command succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
 
 ### Scheduled tasks (cron)
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:

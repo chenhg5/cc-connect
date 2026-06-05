@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -269,12 +270,16 @@ type SpeechConfig struct {
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
-	Enabled    bool   `toml:"enabled"`
-	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
-	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
-	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
-	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
-	OpenAI     struct {
+	Enabled      bool                      `toml:"enabled"`
+	Provider     string                    `toml:"provider"`      // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+	Voice        string                    `toml:"voice"`         // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
+	VoiceID      string                    `toml:"voice_id"`      // alias for voice; useful for MiniMax voice IDs
+	Speed        float64                   `toml:"speed"`         // optional speaking speed multiplier; 0 = provider default
+	LanguageType string                    `toml:"language_type"` // optional provider-specific language hint
+	TTSMode      string                    `toml:"tts_mode"`      // "voice_only" (default) | "always"
+	MaxTextLen   int                       `toml:"max_text_len"`  // max rune count before skipping TTS; 0 = no limit
+	Agents       map[string]TTSAgentConfig `toml:"agents"`        // per-project/agent voice overrides keyed by [[projects]].name
+	OpenAI       struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
@@ -285,15 +290,129 @@ type TTSConfig struct {
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
 	MiniMax struct {
-		APIKey  string `toml:"api_key"`
-		BaseURL string `toml:"base_url"`
-		Model   string `toml:"model"`
+		APIKey     string `toml:"api_key"`
+		BaseURL    string `toml:"base_url"`
+		Model      string `toml:"model"`
+		ConfigFile string `toml:"config_file"` // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
 	} `toml:"minimax"`
 	Mimo struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"mimo"`
+}
+
+// TTSAgentConfig overrides global [tts] synthesis parameters for one project.
+// Keys are project names, which map naturally to cc-connect's agent workspaces
+// (for example assistant, reviewer).
+type TTSAgentConfig struct {
+	Provider     string  `toml:"provider,omitempty"`
+	Voice        string  `toml:"voice,omitempty"`
+	VoiceID      string  `toml:"voice_id,omitempty"`
+	Speed        float64 `toml:"speed,omitempty"`
+	LanguageType string  `toml:"language_type,omitempty"`
+	MaxTextLen   *int    `toml:"max_text_len,omitempty"`
+}
+
+// ResolvedTTSConfig is the effective TTS config for a single project after
+// applying [tts.agents.<project>] overrides.
+type ResolvedTTSConfig struct {
+	Enabled      bool
+	Provider     string
+	Voice        string
+	Speed        float64
+	LanguageType string
+	TTSMode      string
+	MaxTextLen   int
+}
+
+// ResolveTTSConfigForProject returns the effective TTS settings for projectName.
+// Legacy [tts].voice remains supported; [tts].voice_id is treated as an alias
+// and takes precedence when both are set.
+func ResolveTTSConfigForProject(tts TTSConfig, projectName string) ResolvedTTSConfig {
+	res := ResolvedTTSConfig{
+		Enabled:      tts.Enabled,
+		Provider:     strings.TrimSpace(tts.Provider),
+		Voice:        firstNonEmpty(tts.VoiceID, tts.Voice),
+		Speed:        tts.Speed,
+		LanguageType: tts.LanguageType,
+		TTSMode:      tts.TTSMode,
+		MaxTextLen:   tts.MaxTextLen,
+	}
+	if tts.Agents == nil {
+		return res
+	}
+	agent, ok := tts.Agents[projectName]
+	if !ok {
+		return res
+	}
+	if v := strings.TrimSpace(agent.Provider); v != "" {
+		res.Provider = v
+	}
+	if v := firstNonEmpty(agent.VoiceID, agent.Voice); v != "" {
+		res.Voice = v
+	}
+	if agent.Speed > 0 {
+		res.Speed = agent.Speed
+	}
+	if v := strings.TrimSpace(agent.LanguageType); v != "" {
+		res.LanguageType = v
+	}
+	if agent.MaxTextLen != nil {
+		res.MaxTextLen = *agent.MaxTextLen
+	}
+	return res
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// MiniMaxLocalConfig is the JSON shape used by Agent Studio / MiniMax skills.
+type MiniMaxLocalConfig struct {
+	APIKey  string `json:"api_key"`
+	APIHost string `json:"api_host"`
+	BaseURL string `json:"base_url"`
+}
+
+// LoadMiniMaxLocalConfig reads a MiniMax JSON config without exposing secrets.
+// It returns an empty config when the file does not exist.
+func LoadMiniMaxLocalConfig(dataDir, configFile string) (MiniMaxLocalConfig, error) {
+	if strings.TrimSpace(configFile) == "" {
+		configFile = filepath.Join(dataDir, "config", "minimax.json")
+	}
+	configFile = expandUserPath(configFile)
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MiniMaxLocalConfig{}, nil
+		}
+		return MiniMaxLocalConfig{}, fmt.Errorf("read minimax config: %w", err)
+	}
+	var cfg MiniMaxLocalConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return MiniMaxLocalConfig{}, fmt.Errorf("parse minimax config: %w", err)
+	}
+	return cfg, nil
+}
+
+func expandUserPath(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.

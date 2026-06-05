@@ -684,13 +684,16 @@ func main() {
 		}
 
 		// Wire text-to-speech if enabled
-		if cfg.TTS.Enabled {
+		ttsEffective := config.ResolveTTSConfigForProject(cfg.TTS, proj.Name)
+		if ttsEffective.Enabled {
 			ttsCfg := &core.TTSCfg{
-				Enabled:    true,
-				Voice:      cfg.TTS.Voice,
-				MaxTextLen: cfg.TTS.MaxTextLen,
+				Enabled:      true,
+				Voice:        ttsEffective.Voice,
+				LanguageType: ttsEffective.LanguageType,
+				Speed:        ttsEffective.Speed,
+				MaxTextLen:   ttsEffective.MaxTextLen,
 			}
-			initMode := cfg.TTS.TTSMode
+			initMode := ttsEffective.TTSMode
 			switch initMode {
 			case "always", "voice_only":
 			case "":
@@ -700,7 +703,7 @@ func main() {
 				initMode = "voice_only"
 			}
 			ttsCfg.SetTTSMode(initMode)
-			switch cfg.TTS.Provider {
+			switch ttsEffective.Provider {
 			case "qwen":
 				apiKey := cfg.TTS.Qwen.APIKey
 				baseURL := cfg.TTS.Qwen.BaseURL
@@ -715,6 +718,21 @@ func main() {
 				apiKey := cfg.TTS.MiniMax.APIKey
 				baseURL := cfg.TTS.MiniMax.BaseURL
 				model := cfg.TTS.MiniMax.Model
+				if apiKey == "" {
+					localCfg, err := config.LoadMiniMaxLocalConfig(cfg.DataDir, cfg.TTS.MiniMax.ConfigFile)
+					if err != nil {
+						slog.Warn("tts: failed to load minimax local config", "error", err)
+					} else {
+						apiKey = localCfg.APIKey
+						if baseURL == "" {
+							if localCfg.BaseURL != "" {
+								baseURL = localCfg.BaseURL
+							} else if localCfg.APIHost != "" {
+								baseURL = localCfg.APIHost
+							}
+						}
+					}
+				}
 				if apiKey != "" {
 					ttsCfg.TTS = core.NewMiniMaxTTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "minimax"
@@ -732,21 +750,21 @@ func main() {
 					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh" // default to Chinese
 				}
 				ttsCfg.TTS = core.NewEspeakTTS("", voice)
 				ttsCfg.Provider = "espeak"
 			case "pico":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN" // default to Chinese (Simplified)
 				}
 				ttsCfg.TTS = core.NewPicoTTS("", voice)
 				ttsCfg.Provider = "pico"
 			case "edge":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN-XiaoxiaoNeural" // default Chinese neural voice
 				}

@@ -444,6 +444,9 @@ level = "info" # debug, info, warn, error
 # enabled  = true
 # provider = "qwen"          # "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
 # voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等；MiMo 支持：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）
+# voice_id = ""              # optional alias for voice, useful for MiniMax voice IDs / 可选，MiniMax 音色 ID 可写这里
+# speed    = 0               # optional speed multiplier; 0 = provider default / 可选语速；0 表示服务商默认
+# language_type = ""         # optional provider-specific language hint / 可选语言提示
 # tts_mode = "voice_only"    # "voice_only" (default) | "always"
 # max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
 #                            # 超过此长度则跳过 TTS；0 表示不限制
@@ -467,9 +470,22 @@ level = "info" # debug, info, warn, error
 # # 备选：MiniMax TTS（T2A v2 流式 API）
 # # Docs: https://platform.minimaxi.com/document/T2A%20V2
 # [tts.minimax]
-# api_key  = "your-minimax-api-key"
-# base_url = ""              # optional: default "https://api.minimax.io" / 留空使用默认地址
+# api_key  = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""              # optional: default "https://api.minimaxi.com" / 留空使用默认地址
 # model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
+# config_file = ""           # optional MiniMax JSON config path; default data_dir/config/minimax.json
+#
+# # Per-project/agent voice overrides. Keys match [[projects]].name.
+# # 每个项目/Agent 可单独覆盖音色；key 与 [[projects]].name 一致。
+# # Agent tool command: cc-connect send --tts <text>
+# # Agent 工具命令：cc-connect send --tts <文本>
+# [tts.agents.assistant]
+# voice_id = "Chinese (Mandarin)_Crisp_Girl"
+# speed = 0.98
+#
+# [tts.agents.reviewer]
+# voice_id = "Chinese (Mandarin)_Gentle_Senior"
+# speed = 0.96
 #
 # # Alternative: Xiaomi MiMo-V2.5-TTS (OpenAI-compatible chat completions style)
 # # 备选：小米 MiMo-V2.5-TTS（OpenAI 兼容的 chat completions 风格）

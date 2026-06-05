@@ -579,20 +579,31 @@ brew install ffmpeg
 
 将 AI 回复合成语音发送。
 
-**支持平台：** 飞书
+**支持平台：** 实现音频发送的平台，例如飞书/Lark、钉钉、Telegram、Max、微信。
 
 ### 配置
 
 ```toml
 [tts]
 enabled = true
-provider = "qwen"        # 或 "openai"
-voice = "Cherry"
+provider = "minimax"     # qwen | openai | minimax | mimo | espeak | pico | edge
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
 tts_mode = "voice_only"  # "voice_only" | "always"
 max_text_len = 0
 
-[tts.qwen]
-api_key = "sk-xxx"
+[tts.minimax]
+api_key = ""             # 可留空，自动回退读取 data_dir/config/minimax.json
+base_url = ""            # 可留空，默认 https://api.minimaxi.com
+model = "speech-2.8-hd"
+
+[tts.agents.assistant]
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
+
+[tts.agents.reviewer]
+voice_id = "Chinese (Mandarin)_Gentle_Senior"
+speed = 0.96
 ```
 
 ### TTS 模式
@@ -606,9 +617,9 @@ api_key = "sk-xxx"
 
 ---
 
-## 图片与文件回传
+## 图片、文件与语音回传
 
-当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。
+当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。
 
 **当前支持平台：**
 - 飞书
@@ -631,6 +642,7 @@ api_key = "sk-xxx"
 这两个命令写入的是同一份 cc-connect 指令。执行任意一个即可。这样 Agent 才会知道：
 - 普通文本回复直接正常输出
 - 生成附件后用 `cc-connect send --image/--file` 回传
+- 用户要求语音时用 `cc-connect send --tts` 回传
 
 如果你以前已经执行过 setup，也建议升级后重新执行一次，以刷新到最新指令。
 
@@ -642,7 +654,7 @@ api_key = "sk-xxx"
 attachment_send = "off"
 ```
 
-默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。
+默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。TTS 语音回传走 `[tts]` provider 配置，由 TTS 是否可用决定。
 
 ### CLI 用法
 
@@ -650,11 +662,13 @@ attachment_send = "off"
 cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+cc-connect send --tts "你好"
 ```
 
 说明：
 - `--image` 用于图片附件。
 - `--file` 用于任意文件附件。
+- `--tts` 会合成文本并通过当前 TTS provider 发送语音。
 - `--message` 可选，用于先发一段说明文字，再发附件。
 - `--image` 和 `--file` 都可以重复多次。
 - 建议使用绝对路径，避免 Agent 当前工作目录变化导致找不到文件。
@@ -665,10 +679,11 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 1. Agent 生成了截图或图表，需要直接发给用户。
 2. Agent 生成了 PDF、Markdown 导出、日志包或补丁文件，需要作为附件交付。
 3. Agent 想告诉用户“结果已生成”，同时附上一个或多个文件。
+4. 用户自然说“发句 xx 的语音”，不想手输 slash 命令。
 
 ### 注意事项
 
-- 这个命令是给“附件回传”用的，不要拿它代替普通文本回复。
+- 这个命令是给“附件和语音回传”用的，不要拿它代替普通文本回复。
 - 只能发送本机上 Agent 可访问到的文件。
 - 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
 - 平台本身仍可能有文件大小或文件类型限制。
