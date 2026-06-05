@@ -72,6 +72,16 @@ type claudeSession struct {
 		input    map[string]any
 	}
 
+	// pendingToolInputByUseID captures edit tool inputs from assistant
+	// tool_use blocks (keyed by tool_use id), so that handleUser can
+	// emit EventToolResult when the corresponding tool_result arrives.
+	// This is the primary path for bypassPermissions mode where the CLI
+	// never sends control_request events.
+	pendingToolInputByUseID map[string]struct {
+		toolName string
+		input    map[string]any
+	}
+
 	gracefulStopTimeout time.Duration
 }
 
@@ -460,6 +470,27 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			if toolName == "AskUserQuestion" {
 				continue
 			}
+			// Capture edit tool input so handleUser can emit EventToolResult
+			// when the tool_result arrives. This covers bypassPermissions mode
+			// where the CLI never sends control_request events.
+			if core.IsEditTool(toolName) {
+				if cs.pendingToolInputByUseID == nil {
+					cs.pendingToolInputByUseID = make(map[string]struct {
+						toolName string
+						input    map[string]any
+					})
+				}
+				toolID, _ := item["id"].(string)
+				if toolID != "" {
+					input, _ := item["input"].(map[string]any)
+					if input != nil {
+						cs.pendingToolInputByUseID[toolID] = struct {
+							toolName string
+							input    map[string]any
+						}{toolName: toolName, input: input}
+					}
+				}
+			}
 			inputSummary := summarizeInput(toolName, item["input"])
 			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
 			select {
@@ -505,6 +536,18 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		}
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
+			// If we have the matching tool_use input, emit EventToolResult
+			// with a diff. This is the primary path in bypassPermissions mode.
+			toolUseID, _ := item["tool_use_id"].(string)
+			if stored, ok := cs.pendingToolInputByUseID[toolUseID]; ok {
+				cs.emitEditToolResult(stored.toolName, stored.input)
+				delete(cs.pendingToolInputByUseID, toolUseID)
+				// Clear pendingEditResult so handleResult doesn't double-emit
+				cs.pendingEditResult = struct {
+					toolName string
+					input    map[string]any
+				}{}
+			}
 			isError, _ := item["is_error"].(bool)
 			if isError {
 				result, _ := item["content"].(string)
