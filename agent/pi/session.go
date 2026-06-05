@@ -338,22 +338,19 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 				}
 			}
 		}
-		result := truncStr(output, core.DefaultToolResultMaxLen); if _, ok := s.pendingToolInput[toolName]; ok { slog.Debug("piSession: using stored args for diff", "tool", toolName) } else { slog.Debug("piSession: no stored args, using raw output", "tool", toolName, "output_len", len(output)) }
-		if args, ok := s.pendingToolInput[toolName]; ok { slog.Debug("piSession: formatting edit diff", "tool", toolName, "has_old_string", args["old_string"] != nil, "has_file_path", args["file_path"] != nil)
-			fp, _ := args["file_path"].(string)
-			oldStr, _ := args["old_string"].(string)
-			newStr, _ := args["new_string"].(string)
-			if oldStr == "" {
-				oldStr, _ = args["old_str"].(string)
-			}
-			if newStr == "" {
-				newStr, _ = args["new_str"].(string)
-			}
+		result := truncStr(output, core.DefaultToolResultMaxLen)
+		if args, ok := s.pendingToolInput[toolName]; ok {
+			slog.Debug("piSession: formatting edit diff", "tool", toolName)
+			fp, oldStr, newStr := extractPiEditArgs(args)
 			if oldStr != "" || newStr != "" {
 				diff := core.ComputeLineDiff(oldStr, newStr)
 				result = fp + "\n```diff\n" + diff + "\n```"
+			} else {
+				slog.Debug("piSession: no diff content in args", "tool", toolName)
 			}
 			delete(s.pendingToolInput, toolName)
+		} else {
+			slog.Debug("piSession: no stored args, using raw output", "tool", toolName, "output_len", len(output))
 		}
 		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: result}
 		select {
@@ -376,6 +373,38 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 }
 
 // extractToolInput pulls a concise summary from a tool call content item.
+// extractPiEditArgs pulls file path and old/new strings from Pi's edit tool arguments.
+// Pi uses "edits" array with oldText/newText/path, or sometimes old_string/new_string/file_path.
+func extractPiEditArgs(args map[string]any) (fp, oldStr, newStr string) {
+	fp, _ = args["file_path"].(string)
+	if fp == "" {
+		fp, _ = args["path"].(string)
+	}
+	oldStr, _ = args["old_string"].(string)
+	if oldStr == "" {
+		oldStr, _ = args["old_str"].(string)
+	}
+	newStr, _ = args["new_string"].(string)
+	if newStr == "" {
+		newStr, _ = args["new_str"].(string)
+	}
+	// Pi's edit tool may use "edits" array with oldText/newText/path
+	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
+		if first, ok := edits[0].(map[string]any); ok {
+			if fp == "" {
+				fp, _ = first["path"].(string)
+			}
+			if oldStr == "" {
+				oldStr, _ = first["oldText"].(string)
+			}
+			if newStr == "" {
+				newStr, _ = first["newText"].(string)
+			}
+		}
+	}
+	return fp, oldStr, newStr
+}
+
 func extractToolInput(item map[string]any) string {
 	args, _ := item["arguments"].(map[string]any)
 	if args == nil {

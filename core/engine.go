@@ -3979,8 +3979,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if forcedEditResult {
 						if result != "" {
-							editMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
-							e.sendRaw(p, replyCtx, editMsg)
+							textParts = append(textParts, "\n\n"+result)
 						}
 						break
 					}
