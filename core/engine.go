@@ -6172,14 +6172,6 @@ func replyFooterGitBranch(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func replyFooterWorkDir(session AgentSession, agent Agent, workspaceDir string) string {
-	dir := resolveWorkDir(session, agent, workspaceDir)
-	if dir == "" {
-		return ""
-	}
-	return compactReplyFooterPath(dir)
-}
-
 func compactReplyFooterPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
