@@ -110,8 +110,8 @@ type Config struct {
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`    // max minutes between consecutive agent events; 0 = no timeout; default 120
-	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"`   // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
+	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -176,14 +176,14 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
-	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
-	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
-	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -238,7 +238,8 @@ type RoleConfig struct {
 
 // RelayConfig controls bot-to-bot relay behavior.
 type RelayConfig struct {
-	TimeoutSecs *int `toml:"timeout_secs"` // max seconds to wait for relay response; 0 = disabled; default 120
+	TimeoutSecs *int   `toml:"timeout_secs"`         // max seconds to wait for relay response; 0 = disabled; default 120
+	Visibility  string `toml:"visibility,omitempty"` // "full" (default), "summary", or "none" for group visibility echoes
 }
 
 // SpeechConfig configures speech-to-text for voice messages.
@@ -361,10 +362,15 @@ type ProjectConfig struct {
 	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
 	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
-	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
+	// ShowContextIndicator: nil/true = render the reply footer's first line
+	// (model · effort · token usage · context %); false = hide that line.
+	// Subordinate to ReplyFooter — the master footer toggle.
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
-	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
-	// (model/reasoning/usage/workdir, when available) to assistant replies.
+	// ShowWorkdirIndicator: nil/true = render the reply footer's second line
+	// (workspace directory); false = hide that line. Subordinate to ReplyFooter.
+	ShowWorkdirIndicator *bool `toml:"show_workdir_indicator,omitempty"`
+	// ReplyFooter: nil/true = render the reply footer; false = disable it
+	// entirely (the per-line indicator flags above become no-ops).
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
 	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
@@ -464,20 +470,18 @@ type LogConfig struct {
 	Level string `toml:"level"`
 }
 
-func Load(path string) (*Config, error) {
+// load parses, env-resolves, and wires providers in the config file but does
+// NOT validate — callers must call validate() or validatePermissive() themselves.
+func load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
-
-	cfg := &Config{
-		Log: LogConfig{Level: "info"},
-	}
+	cfg := &Config{Log: LogConfig{Level: "info"}}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	resolveEnvInConfig(cfg)
-
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
@@ -489,9 +493,29 @@ func Load(path string) (*Config, error) {
 	if cfg.AttachmentSend == "" {
 		cfg.AttachmentSend = "on"
 	}
-
 	cfg.ResolveProviderRefs()
+	return cfg, nil
+}
 
+// LoadPermissive loads the config file and performs all validation except the
+// "at least one platform per project" check. Use this for commands (like
+// `cc-connect web`) that should work even before platforms are configured.
+func LoadPermissive(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validatePermissive(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func Load(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -771,7 +795,18 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
+// validatePermissive is like validate but skips the "at least one platform"
+// requirement so that commands like `cc-connect web` can operate on agent-only
+// configs before platforms have been set up.
+func (c *Config) validatePermissive() error {
+	return c.validateInternal(true)
+}
+
 func (c *Config) validate() error {
+	return c.validateInternal(false)
+}
+
+func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
 	}
@@ -782,6 +817,11 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Relay.Visibility)) {
+	case "", "full", "summary", "none":
+	default:
+		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -794,7 +834,7 @@ func (c *Config) validate() error {
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
 		}
-		if len(proj.Platforms) == 0 {
+		if len(proj.Platforms) == 0 && !permissive {
 			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {
@@ -2831,6 +2871,7 @@ type ProjectSettingsUpdate struct {
 	Mode                 *string
 	AgentType            *string
 	ShowContextIndicator *bool
+	ShowWorkdirIndicator *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
@@ -2909,6 +2950,10 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.ShowContextIndicator != nil {
 			v := *update.ShowContextIndicator
 			proj.ShowContextIndicator = &v
+		}
+		if update.ShowWorkdirIndicator != nil {
+			v := *update.ShowWorkdirIndicator
+			proj.ShowWorkdirIndicator = &v
 		}
 		if update.ReplyFooter != nil {
 			v := *update.ReplyFooter
@@ -2995,6 +3040,9 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
+		}
+		if p.ShowWorkdirIndicator != nil {
+			result["show_workdir_indicator"] = *p.ShowWorkdirIndicator
 		}
 		if p.ReplyFooter != nil {
 			result["reply_footer"] = *p.ReplyFooter

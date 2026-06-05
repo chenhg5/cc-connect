@@ -1,32 +1,32 @@
 {
   "version": 2,
-  "updated_at": "2026-05-23",
+  "updated_at": "2026-06-03",
   "providers": [
     {
       "name": "minimax",
       "display_name": "MiniMax",
       "invite_url": "https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link",
-      "description": "Next-gen LLM with 1M context window, strong SWE performance (56.2% SWE-Pro). Exclusive 12% off Token Plan for cc-connect users!",
-      "description_zh": "新一代大模型，支持 1M 超长上下文，软件工程能力突出（SWE-Pro 56.2%）。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "Extended Thinking", "SWE-Pro 56.2%"],
+      "description": "MiniMax M3 — frontier coding & agentic LLM with 1M context via MiniMax Sparse Attention, natively multimodal. Exclusive 12% off Token Plan for cc-connect users!",
+      "description_zh": "MiniMax M3 — 前沿 Coding 与 Agentic 大模型，1M 上下文（MiniMax Sparse Attention），原生多模态。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "M3 Frontier", "Multimodal", "SWE-Bench Pro 59.0"],
       "tier": 1,
       "website": "https://platform.minimax.io",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },
@@ -34,27 +34,27 @@
       "name": "minimax-cn",
       "display_name": "MiniMax (中国站)",
       "invite_url": "https://platform.minimaxi.com/subscribe/token-plan?code=lqYrKBvjke&source=link",
-      "description": "MiniMax China endpoint — lower latency for users in mainland China.",
-      "description_zh": "MiniMax 国内站 — 大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "低延迟 (CN)", "Extended Thinking"],
+      "description": "MiniMax M3 China endpoint — frontier coding & agentic LLM, lower latency for users in mainland China.",
+      "description_zh": "MiniMax M3 国内站 — 前沿 Coding 与 Agentic 大模型，大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "M3 Frontier", "Multimodal", "低延迟 (CN)"],
       "tier": 1,
       "website": "https://platform.minimaxi.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },

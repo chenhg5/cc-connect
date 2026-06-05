@@ -42,6 +42,17 @@ func TestNormalizeMode(t *testing.T) {
 // ── Agent constructor ────────────────────────────────────────
 
 func TestNew_DefaultValues(t *testing.T) {
+	// Isolate from real settings.json so we test pure defaults.
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	t.Cleanup(func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	})
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+
 	// Use a command that exists on all systems.
 	ag, err := New(map[string]any{"cmd": "echo"})
 	if err != nil {
@@ -154,8 +165,172 @@ func TestAgent_ModeGetSet(t *testing.T) {
 
 func TestAgent_AvailableModels(t *testing.T) {
 	a := &Agent{}
-	if models := a.AvailableModels(context.Background()); models != nil {
-		t.Errorf("AvailableModels() = %v, want nil", models)
+	// Without settings.json, should return nil (no error logged — just empty).
+	models := a.AvailableModels(context.Background())
+	if models == nil {
+		// No settings file — acceptable in test environments.
+		return
+	}
+	// If settings.json exists with enabledModels, should return them.
+	for _, m := range models {
+		if m.Name == "" {
+			t.Errorf("model with empty Name: %+v", m)
+		}
+	}
+}
+
+func TestReadSettingsModels(t *testing.T) {
+	// Save and restore settings path.
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	t.Cleanup(func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	})
+
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	// No settings.json -> error.
+	_, err := readSettingsModels()
+	if err == nil {
+		t.Error("expected error for missing settings.json")
+	}
+
+	// Write settings.json with enabledModels.
+	settings := map[string]any{
+		"enabledModels": []string{
+			"provider-a/family-a/model-alpha",
+			"provider-a/family-a/model-beta",
+			"provider-b/family-b/model-gamma",
+		},
+		"defaultModel":  "family-a/model-beta",
+		"defaultProvider": "provider-a",
+	}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	models, err := readSettingsModels()
+	if err != nil {
+		t.Fatalf("readSettingsModels() error = %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("got %d models, want 3", len(models))
+	}
+
+	tests := []struct {
+		name  string
+		alias string
+	}{
+		{"provider-a/family-a/model-alpha", "model-alpha"},
+		{"provider-a/family-a/model-beta", "model-beta"},
+		{"provider-b/family-b/model-gamma", "model-gamma"},
+	}
+	for i, tt := range tests {
+		if models[i].Name != tt.name {
+			t.Errorf("models[%d].Name = %q, want %q", i, models[i].Name, tt.name)
+		}
+		if models[i].Alias != tt.alias {
+			t.Errorf("models[%d].Alias = %q, want %q", i, models[i].Alias, tt.alias)
+		}
+	}
+}
+
+func TestReadDefaultModel(t *testing.T) {
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	t.Cleanup(func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	})
+
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	// No file -> error.
+	_, err := readDefaultModel()
+	if err == nil {
+		t.Error("expected error for missing settings.json")
+	}
+
+	// Write with both defaultProvider and defaultModel.
+	settings := map[string]any{
+		"defaultModel":    "family-a/model-beta",
+		"defaultProvider": "provider-a",
+	}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	model, err := readDefaultModel()
+	if err != nil {
+		t.Fatalf("readDefaultModel() error = %v", err)
+	}
+	if model != "family-a/model-beta" {
+		t.Errorf("defaultModel = %q, want %q", model, "family-a/model-beta")
+	}
+
+	// With model without provider prefix and defaultProvider set.
+	settings2 := map[string]any{
+		"defaultModel":    "gpt-4o",
+		"defaultProvider": "provider-b",
+	}
+	data2, _ := json.Marshal(settings2)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data2, 0o644); err != nil {
+		t.Fatalf("write settings2: %v", err)
+	}
+
+	model2, _ := readDefaultModel()
+	if model2 != "provider-b/gpt-4o" {
+		t.Errorf("qualified defaultModel = %q, want %q", model2, "provider-b/gpt-4o")
+	}
+}
+
+func TestPiSettingsDir(t *testing.T) {
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	defer func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	}()
+
+	// With env var set.
+	t.Setenv("PI_CODING_AGENT_DIR", "/custom/pi/path")
+	if d := piSettingsDir(); d != "/custom/pi/path" {
+		t.Errorf("piSettingsDir() = %q, want /custom/pi/path", d)
+	}
+
+	// Unset env var -> default.
+	_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+	home, _ := os.UserHomeDir()
+	want := filepath.Join(home, ".pi", "agent")
+	if d := piSettingsDir(); d != want {
+		t.Errorf("piSettingsDir() = %q, want %q", d, want)
+	}
+}
+
+func TestSettingsPath(t *testing.T) {
+	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
+	defer func() {
+		if savedEnv != "" {
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+		} else {
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
+		}
+	}()
+
+	t.Setenv("PI_CODING_AGENT_DIR", "/custom")
+	if p := settingsPath(); p != "/custom/settings.json" {
+		t.Errorf("settingsPath() = %q, want /custom/settings.json", p)
 	}
 }
 
@@ -212,7 +387,7 @@ func TestAgent_MemoryFiles(t *testing.T) {
 	}
 
 	global := a.GlobalMemoryFile()
-	if !strings.HasSuffix(global, filepath.Join(".pi", "AGENTS.md")) {
+	if !strings.HasSuffix(global, filepath.Join(".pi", "agent", "AGENTS.md")) {
 		t.Errorf("GlobalMemoryFile() = %q", global)
 	}
 }

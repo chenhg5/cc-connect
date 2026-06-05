@@ -562,16 +562,19 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
 
-To list, edit, or delete cron jobs:
+To list, run, edit, or delete cron jobs:
   cc-connect cron list
+  cc-connect cron exec <job-id>
   cc-connect cron edit <job-id> <field> <value>
   cc-connect cron del <job-id>
 
+Use `cron exec <job-id>` to run an existing scheduled task immediately; this is different from the `--exec <command>` flag used when creating a shell-command cron job.
 Use `cron edit` to modify a single field instead of delete-and-recreate.
 Common editable fields: cron_expr, prompt, exec, description, enabled (true/false), mute (true/false), timeout_mins (int).
 Run `cc-connect cron edit --help` for the full field list.
 
 Examples:
+  cc-connect cron exec abc123
   cc-connect cron edit abc123 cron_expr "0 9 * * *"
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 prompt "Updated daily summary task"

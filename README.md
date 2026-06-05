@@ -47,9 +47,9 @@
 <details open>
 <summary>Sponsors</summary>
 
-[![MiniMax](assets/banners/minimax-en.jpeg)](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link)
+[![MiniMax](assets/banners/minimax-en.png)](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link)
 
-MiniMax-M2.7 is a next-generation large language model designed for autonomous evolution and real-world productivity. Unlike traditional models, M2.7 actively participates in its own improvement through agent teams, dynamic tool use, and reinforcement learning loops. It delivers strong performance in software engineering (56.22% on SWE-Pro, 55.6% on VIBE-Pro, 57.0% on Terminal Bench 2) and excels in complex office workflows, achieving a leading 1495 ELO on GDPval-AA. With high-fidelity editing across Word, Excel, and PowerPoint, and a 97% adherence rate across 40+ complex skills, M2.7 sets a new standard for building AI-native workflows and organizations.
+MiniMax-M3 pushes the frontier of coding and agentic AI, with a 1M-token context window powered by MiniMax Sparse Attention and natively multimodal capabilities from step zero. It leads across SWE-Bench Pro (59.0), Terminal Bench 2.1 (66.0), VIBE V2 (60.1), SVG-Bench (63.7), KernelBench Hard (28.8), BrowseComp (83.5), GDPval rubrics (74.7), Banker ToolBench (76.1), MCP Atlas (74.2), and OSWorld-verified (70.0). Build, learn, and ship with the MiniMax Token Plan.
 
 [Click here](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link) to get an exclusive 12% off the MiniMax Token Plan + voucher for cc-connect users!
 
@@ -219,7 +219,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 ## ✨ Why cc-connect?
 
 ### 🤖 Universal Agent Support
-**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
+**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin, Copilot — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
 **13 Chat Platforms** — Feishu, WPS Xiezuo, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), Matrix, plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
@@ -353,6 +353,7 @@ cc-connect update --pre     # Include pre-releases
 | Agent | iFlow CLI | ✅ Supported |
 | Agent | Kimi CLI (Moonshot) | ✅ Supported |
 | Agent | Pi (Cursor Background Agent) | ✅ Supported |
+| Agent | Copilot (GitHub) | ✅ Supported |
 | Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
 | Agent | Devin (Cognition) | ✅ Supported (via ACP) |
 | Agent | Goose (Block) | 🔜 Planned |

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandleSend_AllowsAttachmentOnly(t *testing.T) {
@@ -124,5 +125,147 @@ func TestHandleSend_EmptyProjectMultipleEnginesRequiresName(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleCronExec_TriggersJob(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("triggered from local api")
+	engine := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	defer engine.cancel()
+	engine.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", engine)
+
+	job := &CronJob{
+		ID:          "job-run-api",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "run now",
+		Description: "Run from API",
+		Enabled:     false,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &APIServer{engines: map[string]*Engine{"test": engine}, cron: scheduler}
+	body, err := json.Marshal(map[string]any{"id": job.ID})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/cron/exec", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleCronExec(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for local api trigger, sent=%v", platform.getSent())
+}
+
+func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("triggered from local api alias")
+	engine := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	defer engine.cancel()
+	engine.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", engine)
+
+	job := &CronJob{
+		ID:          "job-run-api-alias",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "run alias now",
+		Description: "Run from API alias",
+		Enabled:     false,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &APIServer{engines: map[string]*Engine{"test": engine}, cron: scheduler, mux: http.NewServeMux()}
+	api.mux.HandleFunc("/cron/exec", api.handleCronExec)
+	api.mux.HandleFunc("/cron/run", api.handleCronExec)
+	body, err := json.Marshal(map[string]any{"id": job.ID})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/cron/run", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for local api alias trigger, sent=%v", platform.getSent())
+}
+
+func TestHandleCronExec_ProjectMissingIsBadRequest(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID:         "job-run-missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "run now",
+		Enabled:    true,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &APIServer{cron: scheduler}
+	body, err := json.Marshal(map[string]any{"id": job.ID})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/cron/exec", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleCronExec(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }

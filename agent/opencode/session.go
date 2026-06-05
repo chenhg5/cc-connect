@@ -28,6 +28,7 @@ type opencodeSession struct {
 	workDir           string
 	model             string
 	mode              string
+	agentName         string
 	extraEnv          []string
 	events            chan core.Event
 	chatID            atomic.Value // stores string — OpenCode session ID
@@ -39,18 +40,19 @@ type opencodeSession struct {
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 }
 
-func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		agentName: agentName,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
 	}
 	s.alive.Store(true)
 
@@ -157,6 +159,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 	if chatID != "" {
 		args = append(args, "--session", chatID)
+	}
+	if s.agentName != "" {
+		args = append(args, "--agent", s.agentName)
 	}
 	if s.model != "" {
 		args = append(args, "--model", s.model)

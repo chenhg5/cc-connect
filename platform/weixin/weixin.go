@@ -655,7 +655,10 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 }
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
-// When sendMessage returns ret=-2, it retries with a fresh context_token.
+// When sendMessage returns ret=-2, it tries to refresh the context_token from
+// storage (which is updated by every inbound message) before retrying.
+// If the stored token is the same as the current one (no refresh possible),
+// it fails fast rather than burning retries on a stale token.
 // chunkIdx and totalChunks are 1-based indices used for logging context.
 func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string, chunkIdx, totalChunks int) error {
 	var lastErr error
@@ -666,28 +669,40 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 			return nil
 		}
 		lastErr = err
-		// Check if error is ret=-2 (API declined) - retry with fresh token
+		// Check if error is ret=-2 (API declined) - attempt token refresh
 		if strings.Contains(err.Error(), "ret=-2") {
 			preview := []rune(chunk)
 			if len(preview) > 50 {
 				preview = preview[:50]
+			}
+			// Refresh context_token from stored tokens (may have been updated by a
+			// concurrent inbound message while we were waiting).
+			freshToken := p.getContextToken(rc.peerUserID)
+			if freshToken == "" || freshToken == rc.contextToken {
+				// No fresh token available — further retries would use the same stale
+				// token and all fail. Fail fast with an actionable error.
+				slog.Warn("weixin: sendMessage ret=-2, no fresh context_token available — "+
+					"user must send a new message to refresh the session token",
+					"attempt", attempt+1, "peer", rc.peerUserID,
+					"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
+					"chunk_runes", utf8.RuneCountInString(chunk),
+					"preview", string(preview))
+				return fmt.Errorf("weixin: sendMessage ret=-2 (expired context_token); "+
+					"user must send a new message to peer %q to refresh the session token: %w",
+					rc.peerUserID, lastErr)
 			}
 			slog.Warn("weixin: sendMessage ret=-2, retrying with fresh context_token",
 				"attempt", attempt+1, "peer", rc.peerUserID,
 				"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
 				"chunk_runes", utf8.RuneCountInString(chunk),
 				"preview", string(preview))
-			// Add delay before retry
+			rc.contextToken = freshToken
+			slog.Debug("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
+			// Brief delay before retry
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(weixinSendRetryDelay):
-			}
-			// Refresh context_token from stored tokens (may have been updated by new incoming message)
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken != "" && freshToken != rc.contextToken {
-				rc.contextToken = freshToken
-				slog.Debug("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
 			}
 			continue
 		}

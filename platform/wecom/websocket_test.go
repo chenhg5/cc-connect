@@ -178,6 +178,83 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 	}
 }
 
+func TestHandleMsgCallback_RepliesToUnauthorizedSender(t *testing.T) {
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+		var frame wsFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			serverDone <- err
+			return
+		}
+		var body struct {
+			Stream struct {
+				Content string `json:"content"`
+			} `json:"stream"`
+		}
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			serverDone <- err
+			return
+		}
+		if frame.Cmd != "aibot_respond_msg" {
+			serverDone <- fmt.Errorf("cmd = %q, want aibot_respond_msg", frame.Cmd)
+			return
+		}
+		if got := body.Stream.Content; got != core.UnauthorizedAccessMessage {
+			serverDone <- fmt.Errorf("content = %q, want %q", got, core.UnauthorizedAccessMessage)
+			return
+		}
+		serverDone <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	p := &WSPlatform{
+		allowFrom: "allowed-user",
+		conn:      conn,
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	body := wsMsgCallbackBody{
+		MsgID:    "msg_unauthorized",
+		ChatID:   "chat_group",
+		ChatType: "group",
+		MsgType:  "text",
+	}
+	body.From.UserID = "blocked-user"
+	body.Text.Content = "@bot hello"
+	body.CreateTime = time.Now().Unix()
+	p.handleMsgCallback(wsCallbackFrame(t, "req_unauthorized", body))
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized reply frame")
+	}
+}
+
 func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
 	p, captured := newCapturedWSPlatform()
 	p.botID = "robot01"
