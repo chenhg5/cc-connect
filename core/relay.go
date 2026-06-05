@@ -238,9 +238,11 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		return nil, fmt.Errorf("relay: %w", err)
 	}
 
-	// Post the response to the group chat for visibility
+	// Post the response to the group chat for visibility.
+	// Strip data URIs before truncation to avoid cutting base64 payloads in half.
 	if targetEngine != nil {
-		label := fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
+		clean := StripDataURIs(response)
+		label := fmt.Sprintf("[%s] %s", toName, truncateRelay(clean, 2000))
 		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
 	}
 

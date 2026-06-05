@@ -183,7 +183,12 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 		return nil
 	}
 
-	// Extract image URLs and send each as a separate reply message
+	// Decode data: URIs embedded in the markdown (e.g. ![chart](data:image/webp;base64,...))
+	// into real image attachments that the Silk frontend can render.
+	// Also strips the data URIs from the text to prevent garbled base64 display.
+	decodedImages, content := extractAndStripDataURIs(content)
+
+	// Extract HTTP image URLs and send each as a separate reply message
 	// so the Silk bridge's convertImageUrls() can pick them up cleanly.
 	imageURLs := extractImageURLs(content)
 	for _, imgURL := range imageURLs {
@@ -194,11 +199,144 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 		})
 	}
 
+	// Send the reply with decoded images attached (same format as incoming message images).
+	if len(decodedImages) > 0 {
+		return p.sendReplyWithImages(content, decodedImages)
+	}
+
 	return p.sendJSON(map[string]any{
 		"type":    "reply",
 		"content": content,
 		"format":  "markdown",
 	})
+}
+
+// dataURIRegex matches a data: URI inside markdown link/image syntax.
+// Captures: $1=alt text, $2=full data: URI.
+var dataURIRegex = regexp.MustCompile(`!?\[([^\]]*)\]\((data:[^)]+)\)`)
+
+// maxDataURIBytes is the maximum decoded size for a single data URI image (5 MB).
+const maxDataURIBytes = 5 * 1024 * 1024
+
+// extractAndStripDataURIs finds data: URIs in markdown content, decodes the
+// base64 image data, and returns the images in the format expected by the Silk
+// frontend. The returned content has data URIs replaced with "[image]".
+func extractAndStripDataURIs(content string) (images []map[string]any, cleaned string) {
+	matches := dataURIRegex.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil, content
+	}
+
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		dataURI := m[2]
+		if seen[dataURI] {
+			continue
+		}
+		seen[dataURI] = true
+
+		// Only handle image data URIs
+		if !strings.HasPrefix(dataURI, "data:image/") {
+			continue
+		}
+
+		mimeType, rawData, err := parseDataURI(dataURI)
+		if err != nil {
+			slog.Debug("[silk] failed to parse data URI", "error", err, "prefix", dataURI[:min(len(dataURI), 80)])
+			continue
+		}
+		if len(rawData) > maxDataURIBytes {
+			slog.Warn("[silk] data URI too large, skipping", "size", len(rawData))
+			continue
+		}
+
+		// Encode back to base64 for the wire format (same as incoming message images).
+		b64 := base64.StdEncoding.EncodeToString(rawData)
+
+		// Derive a filename from the MIME type.
+		ext := "png"
+		if parts := strings.SplitN(mimeType, "/", 2); len(parts) == 2 {
+			ext = parts[1]
+		}
+		fileName := "image." + ext
+
+		images = append(images, map[string]any{
+			"mime_type": mimeType,
+			"data":      b64,
+			"file_name": fileName,
+		})
+	}
+
+	// Replace data URIs in the text with "[image]" placeholders.
+	cleaned = dataURIRegex.ReplaceAllStringFunc(content, func(match string) string {
+		parts := dataURIRegex.FindStringSubmatch(match)
+		if len(parts) < 3 || !strings.HasPrefix(parts[2], "data:") {
+			return match
+		}
+		alt := strings.TrimSpace(parts[1])
+		if alt != "" {
+			return alt + " [image]"
+		}
+		return "[image]"
+	})
+
+	return images, cleaned
+}
+
+// parseDataURI parses a data: URI and returns the MIME type and decoded bytes.
+// Format: data:[<mime type>][;base64],<data>
+func parseDataURI(uri string) (mimeType string, data []byte, err error) {
+	if !strings.HasPrefix(uri, "data:") {
+		return "", nil, fmt.Errorf("not a data URI")
+	}
+
+	rest := uri[5:] // strip "data:"
+
+	// Find the comma separator between metadata and data.
+	commaIdx := strings.IndexByte(rest, ',')
+	if commaIdx < 0 {
+		return "", nil, fmt.Errorf("malformed data URI: no comma")
+	}
+
+	meta := rest[:commaIdx]
+	rawData := rest[commaIdx+1:]
+
+	// Parse MIME type and optional ";base64" flag.
+	isBase64 := false
+	if strings.HasSuffix(meta, ";base64") {
+		isBase64 = true
+		mimeType = strings.TrimSuffix(meta, ";base64")
+	} else {
+		// Strip other parameters (e.g. ;charset=utf-8) but keep them in mimeType.
+		if semiIdx := strings.IndexByte(meta, ';'); semiIdx >= 0 {
+			mimeType = meta[:semiIdx]
+		} else {
+			mimeType = meta
+		}
+	}
+
+	if mimeType == "" {
+		mimeType = "text/plain"
+	}
+
+	if isBase64 {
+		data, err = base64.StdEncoding.DecodeString(rawData)
+		if err != nil {
+			return "", nil, fmt.Errorf("base64 decode failed: %w", err)
+		}
+	} else {
+		// URL-encoded data — uncommon for images, but handle it.
+		decoded, uerr := url.QueryUnescape(rawData)
+		if uerr != nil {
+			return "", nil, fmt.Errorf("URL decode failed: %w", uerr)
+		}
+		data = []byte(decoded)
+	}
+
+	return mimeType, data, nil
 }
 
 // extractImageURLs finds HTTP URLs ending with image extensions in text.
@@ -221,6 +359,8 @@ func (p *Platform) UpdateMessage(ctx context.Context, replyCtx any, content stri
 	if p.metadataActive.Load() {
 		return nil
 	}
+	// Strip data: URIs from streaming previews too — same rationale as Reply.
+	content = core.StripDataURIs(content)
 	return p.sendJSON(map[string]any{
 		"type":    "reply_stream",
 		"content": content,

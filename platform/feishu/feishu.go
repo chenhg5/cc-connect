@@ -2535,6 +2535,8 @@ var mdLinkRe = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
 
 // sanitizeMarkdownURLs rewrites markdown links with non-HTTP(S) schemes
 // to plain text, preventing Feishu API rejection (code 230001).
+// data: URIs are stripped entirely because they can be enormous
+// (base64-encoded images) and are never renderable by Feishu.
 func sanitizeMarkdownURLs(md string) string {
 	return mdLinkRe.ReplaceAllStringFunc(md, func(match string) string {
 		parts := mdLinkRe.FindStringSubmatch(match)
@@ -2544,7 +2546,15 @@ func sanitizeMarkdownURLs(md string) string {
 		if isValidFeishuHref(parts[2]) {
 			return match
 		}
-		// Convert invalid-scheme link to "text (url)" plain text
+		// Strip data: URIs — they can't be rendered and may be huge.
+		if strings.HasPrefix(parts[2], "data:") {
+			alt := strings.TrimSpace(parts[1])
+			if alt != "" {
+				return alt + " [image]"
+			}
+			return "[image]"
+		}
+		// Convert other invalid-scheme links to "text (url)" plain text
 		return parts[1] + " (" + parts[2] + ")"
 	})
 }

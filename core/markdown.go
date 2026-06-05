@@ -19,6 +19,29 @@ var (
 	reBlockquote  = regexp.MustCompile(`(?m)^>\s?`)
 )
 
+// reDataURI matches an inline data URI (standalone or inside a markdown link).
+// Captures: $1=alt text (may be empty), $2=full data: URI.
+var reDataURI = regexp.MustCompile(`!?\[([^\]]*)\]\((data:[^)]+)\)`)
+
+// StripDataURIs replaces markdown image/links that use data: URIs with a
+// compact placeholder. Data URIs can be enormous (base64-encoded images)
+// and are never renderable by messaging platforms; stripping them prevents
+// garbage text from appearing in chats when the 4000-char chunking splits
+// the base64 payload in the middle.
+func StripDataURIs(s string) string {
+	return reDataURI.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reDataURI.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		alt := strings.TrimSpace(parts[1])
+		if alt != "" {
+			return alt + " [image]"
+		}
+		return "[image]"
+	})
+}
+
 // StripMarkdown converts Markdown-formatted text to clean plain text.
 // Useful for platforms that don't support Markdown rendering (WeChat, LINE, etc.).
 func StripMarkdown(s string) string {

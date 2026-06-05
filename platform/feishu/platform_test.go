@@ -868,9 +868,19 @@ func TestSanitizeMarkdownURLs(t *testing.T) {
 			want:  "open file (file:///tmp/foo.txt)",
 		},
 		{
-			name:  "data scheme removed",
+			name:  "data scheme stripped",
 			input: "img [pic](data:image/png;base64,abc)",
-			want:  "img pic (data:image/png;base64,abc)",
+			want:  "img pic [image]",
+		},
+		{
+			name:  "data scheme no alt stripped",
+			input: "see [](data:image/webp;base64,xyz)",
+			want:  "see [image]",
+		},
+		{
+			name:  "data scheme image syntax stripped",
+			input: "chart ![sales](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA)",
+			want:  "chart !sales [image]",
 		},
 		{
 			name:  "mixed links",
