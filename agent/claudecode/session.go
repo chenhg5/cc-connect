@@ -564,7 +564,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 				}
 				if filePath != "" {
 					slog.Debug("claudeSession: edit tool error", "tool_use_id", toolUseID, "file", filePath)
-					evt := core.Event{Type: core.EventText, Content: "❌ failed to edit " + filePath}
+					evt := core.Event{Type: core.EventText, Content: "\n❌ failed to edit " + filePath}
 					select {
 					case cs.events <- evt:
 					case <-cs.ctx.Done():
