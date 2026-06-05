@@ -547,20 +547,24 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			// with a diff. This is the primary path in bypassPermissions mode.
 			toolUseID, _ := item["tool_use_id"].(string)
 			isError, _ := item["is_error"].(bool)
-			// Diff already emitted from handleAssistant at tool_use time.
-			// Just clean up to prevent stale entries.
-			if cs.pendingToolInputByUseID != nil {
-				delete(cs.pendingToolInputByUseID, toolUseID)
-			}
-			cs.pendingEditResult = struct {
-				toolName string
-				input    map[string]any
-			}{}
+
+			// For edit tool failures, emit clean error message instead of raw
+			// tool_use_error XML. Non-edit tool failures are silently ignored
+			// since they don't correspond to optimistically-emitted diffs.
 			if isError {
-				result, _ := item["content"].(string)
-				if result != "" {
-					slog.Debug("claudeSession: tool error", "content", result)
-					evt := core.Event{Type: core.EventText, Content: "❌ " + result}
+				var filePath string
+				if cs.pendingToolInputByUseID != nil {
+					if stored, ok := cs.pendingToolInputByUseID[toolUseID]; ok && core.IsEditTool(stored.toolName) {
+						fp, _ := stored.input["file_path"].(string)
+						if fp == "" {
+							fp, _ = stored.input["path"].(string)
+						}
+						filePath = fp
+					}
+				}
+				if filePath != "" {
+					slog.Debug("claudeSession: edit tool error", "tool_use_id", toolUseID, "file", filePath)
+					evt := core.Event{Type: core.EventText, Content: "❌ failed to edit " + filePath}
 					select {
 					case cs.events <- evt:
 					case <-cs.ctx.Done():
@@ -568,6 +572,14 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 					}
 				}
 			}
+
+			if cs.pendingToolInputByUseID != nil {
+				delete(cs.pendingToolInputByUseID, toolUseID)
+			}
+			cs.pendingEditResult = struct {
+				toolName string
+				input    map[string]any
+			}{}
 		}
 	}
 }
