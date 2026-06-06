@@ -719,23 +719,6 @@ func truncatePreview(s string, max int) string {
 	return s[:max] + "..."
 }
 
-func splitUTF8(s string, maxRunes int) []string {
-	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
-		return []string{s}
-	}
-	var out []string
-	runes := []rune(s)
-	for len(runes) > 0 {
-		n := maxRunes
-		if len(runes) < n {
-			n = len(runes)
-		}
-		out = append(out, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return out
-}
-
 // ReconstructReplyCtx implements core.ReplyContextReconstructor for cron / proactive sends.
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !strings.HasPrefix(sessionKey, sessionKeyPrefix) {
