@@ -1447,9 +1447,9 @@ func TestLoadModelsContextWindows(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	t.Cleanup(func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	})
 
@@ -1472,7 +1472,9 @@ func TestLoadModelsContextWindows(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(modelsJSON)
-	os.WriteFile(filepath.Join(tmpDir, "models.json"), data, 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "models.json"), data, 0o644); err != nil {
+		t.Fatalf("write models.json: %v", err)
+	}
 
 	m := loadModelsContextWindows()
 	if m == nil {
@@ -1503,9 +1505,9 @@ func TestLoadModelsContextWindows_FileNotFound(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	t.Cleanup(func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	})
 
@@ -1523,15 +1525,17 @@ func TestLoadModelsContextWindows_MalformedJSON(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	t.Cleanup(func() {
 		if savedEnv != "" {
-			os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
+			_ = os.Setenv("PI_CODING_AGENT_DIR", savedEnv)
 		} else {
-			os.Unsetenv("PI_CODING_AGENT_DIR")
+			_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 		}
 	})
 
 	tmpDir := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
-	os.WriteFile(filepath.Join(tmpDir, "models.json"), []byte("{invalid"), 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "models.json"), []byte("{invalid"), 0o644); err != nil {
+		t.Fatalf("write models.json: %v", err)
+	}
 
 	m := loadModelsContextWindows()
 	if m != nil {
