@@ -305,22 +305,22 @@ func (s *piSession) emitToolFromMessage(ame map[string]any) {
 			itemType, _ := item["type"].(string)
 			if itemType == "toolCall" {
 				name, _ := item["name"].(string)
-					args, _ := item["arguments"].(map[string]any)
-					if args != nil && core.IsEditTool(name) {
-						s.pendingToolInput[name] = args
-						fp, os, ns := extractPiEditArgs(args)
-						if os != "" || ns != "" {
-							diff := core.ComputeLineDiff(os, ns)
-							s.diffEmitted[name] = true
-							slog.Debug("piSession: emitted edit diff at tool-call time", "tool", name)
-							evt := core.Event{Type: core.EventToolResult, ToolName: name, Content: "📝 " + fp + "\n```diff\n" + diff + "\n```"}
-							select {
-							case s.events <- evt:
-							case <-s.ctx.Done():
-								return
-							}
+				args, _ := item["arguments"].(map[string]any)
+				if args != nil && core.IsEditTool(name) {
+					s.pendingToolInput[name] = args
+					fp, os, ns := extractPiEditArgs(args)
+					if os != "" || ns != "" {
+						diff := core.ComputeLineDiff(os, ns)
+						s.diffEmitted[name] = true
+						slog.Debug("piSession: emitted edit diff at tool-call time", "tool", name)
+						evt := core.Event{Type: core.EventToolResult, ToolName: name, Content: "📝 " + fp + "\n```diff\n" + diff + "\n```"}
+						select {
+						case s.events <- evt:
+						case <-s.ctx.Done():
+							return
 						}
 					}
+				}
 				input := extractToolInput(item)
 				evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
 				select {
@@ -345,6 +345,35 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 	switch role {
 	case "toolResult":
 		toolName, _ := msg["toolName"].(string)
+		isError, _ := msg["isError"].(bool)
+		if !isError {
+			if e, ok := raw["isError"].(bool); ok {
+				isError = e
+			}
+		}
+
+		// Edit tool failures: emit clean error instead of raw validation error.
+		if isError && core.IsEditTool(toolName) {
+			if args, ok := s.pendingToolInput[toolName]; ok {
+				fp, _ := args["file_path"].(string)
+				if fp == "" {
+					fp, _ = args["path"].(string)
+				}
+				delete(s.pendingToolInput, toolName)
+				delete(s.diffEmitted, toolName)
+				if fp != "" {
+					slog.Debug("piSession: edit tool error", "file", fp)
+					evt := core.Event{Type: core.EventText, Content: "\n❌ failed to edit " + fp}
+					select {
+					case s.events <- evt:
+					case <-s.ctx.Done():
+						return
+					}
+					return
+				}
+			}
+		}
+
 		content, _ := msg["content"].([]any)
 		var output string
 		for _, c := range content {
@@ -358,7 +387,15 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 		if s.diffEmitted[toolName] {
 			delete(s.diffEmitted, toolName)
 			if output != "" && !strings.HasPrefix(strings.TrimSpace(output), "Successfully") {
-				evt := core.Event{Type: core.EventText, Content: "❌ " + output}
+				fp, _ := s.pendingToolInput[toolName]["file_path"].(string)
+				if fp == "" {
+					fp, _ = s.pendingToolInput[toolName]["path"].(string)
+				}
+				if fp == "" {
+					fp = toolName
+				}
+				delete(s.pendingToolInput, toolName)
+				evt := core.Event{Type: core.EventText, Content: "\n❌ failed to edit " + fp}
 				select {
 				case s.events <- evt:
 				case <-s.ctx.Done():
@@ -420,17 +457,17 @@ func extractPiEditArgs(args map[string]any) (fp, oldStr, newStr string) {
 			if oldStr == "" {
 				oldStr, _ = first["oldText"].(string)
 			}
-		// write tool: no old/new, extract content as newStr for display
-		if oldStr == "" && newStr == "" {
-			newStr, _ = args["content"].(string)
-		}
-		if newStr == "" {
-			newStr, _ = args["text"].(string)
-		}
 			if newStr == "" {
 				newStr, _ = first["newText"].(string)
 			}
 		}
+	}
+	// write tool: no old/new, extract content as newStr for display
+	if oldStr == "" && newStr == "" {
+		newStr, _ = args["content"].(string)
+	}
+	if newStr == "" {
+		newStr, _ = args["text"].(string)
 	}
 	return fp, oldStr, newStr
 }
@@ -528,7 +565,7 @@ func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string 
 		case "image/gif":
 			ext = ".gif"
 		case "image/webp":
-			ext = ".webp"
+		ext = ".webp"
 		}
 		fname := sanitizePiAttachmentName(img.FileName)
 		if fname == "" {
