@@ -48,16 +48,24 @@ type Agent struct {
 	modesCache    []core.PermissionModeInfo
 	modesCurrent  string
 
+	// model cache is populated by reportModelOptions callbacks from
+	// the session handshake. Used by AvailableModels() and GetModel().
+	modelMu        sync.RWMutex
+	modelOptions   []core.ModelOption
+	modelCurrent   string
+	modelPending   string // set by SetModel, takes precedence over modelCurrent
+
 	mu sync.RWMutex
 }
 
 // sessionCallbacks lets a running acpSession report what it learned
 // during the handshake back to its parent Agent. The session is owned
 // by cc-connect's engine (not the agent), so without this the agent
-// would never see availableModes / capability advertisements.
+// would never see availableModes / capability advertisements / model options.
 type sessionCallbacks interface {
 	reportModes(block acpModesBlock)
 	reportListSupported(supported bool)
+	reportModelOptions(opts []core.ModelOption, currentModel string)
 }
 
 // Ensure *Agent satisfies sessionCallbacks at compile time.
@@ -232,6 +240,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extra = append(extra, a.sessionEnv...)
 	a.mu.RUnlock()
 
+	a.modelMu.RLock()
+	pendingModel := a.modelPending
+	a.modelMu.RUnlock()
+
 	return newACPSession(ctx, acpSessionConfig{
 		command:         command,
 		args:            args,
@@ -240,6 +252,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		resumeSessionID: sessionID,
 		authMethod:      authMethod,
 		initialMode:     pendingMode,
+		initialModel:    pendingModel,
 		callbacks:       a,
 	})
 }
@@ -369,4 +382,48 @@ func (a *Agent) reportListSupported(supported bool) {
 	} else {
 		a.listUnsupported.Store(false)
 	}
+}
+
+// reportModelOptions caches model options reported by a session handshake.
+func (a *Agent) reportModelOptions(opts []core.ModelOption, currentModel string) {
+	a.modelMu.Lock()
+	a.modelOptions = append(a.modelOptions[:0], opts...)
+	if currentModel != "" {
+		a.modelCurrent = currentModel
+	}
+	a.modelMu.Unlock()
+}
+
+// -- ModelSwitcher --
+
+// SetModel stores a model ID to apply to future sessions via
+// StartSession. ModelSwitcher says "Model changes take effect on the
+// next session." See also the session-level SetLiveModel for changing
+// the model of an already-running session.
+func (a *Agent) SetModel(model string) {
+	a.modelMu.Lock()
+	a.modelPending = strings.TrimSpace(model)
+	a.modelMu.Unlock()
+	slog.Info("acp: model changed for future sessions", "model", model)
+}
+
+// GetModel returns the active model. Pending SetModel wins over
+// server-reported currentValue.
+func (a *Agent) GetModel() string {
+	a.modelMu.RLock()
+	defer a.modelMu.RUnlock()
+	if a.modelPending != "" {
+		return a.modelPending
+	}
+	return a.modelCurrent
+}
+
+// AvailableModels returns the model list cached from the most recent
+// session handshake. Returns nil before the first handshake.
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.modelMu.RLock()
+	defer a.modelMu.RUnlock()
+	out := make([]core.ModelOption, len(a.modelOptions))
+	copy(out, a.modelOptions)
+	return out
 }
