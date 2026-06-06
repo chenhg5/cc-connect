@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -744,11 +745,19 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return p.sendProactiveMessage(ctx, rc, content)
 	}
 
+	atUserIds := extractAtUserIds(content)
+
 	content = preprocessDingTalkMarkdown(content)
 
 	payload := map[string]any{
 		"msgtype":  "markdown",
 		"markdown": map[string]string{"title": "reply", "text": content},
+	}
+	if len(atUserIds) > 0 {
+		payload["at"] = map[string]any{
+			"atUserIds": atUserIds,
+			"isAtAll":   false,
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1590,6 +1599,21 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	return nil
 }
 
+// extractAtUserIds extracts @userId patterns from content for DingTalk's atUserIds field.
+// Matches @ followed by numeric DingTalk user IDs (e.g. @194252073827812352).
+func extractAtUserIds(content string) []string {
+	re := regexp.MustCompile(`@(\d{4,})`)
+	matches := re.FindAllStringSubmatch(content, -1)
+	seen := make(map[string]bool)
+	var ids []string
+	for _, m := range matches {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			ids = append(ids, m[1])
+		}
+	}
+	return ids
+}
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
 //   - Leading spaces → non-breaking spaces (prevents markdown from stripping indentation)
 //   - Single \n between non-empty lines → trailing two-space forced line break
