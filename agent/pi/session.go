@@ -42,6 +42,10 @@ type piSession struct {
 
 	// modelsCW is a cached map of model ID → contextWindow, loaded once
 	// from ~/.pi/agent/models.json so every turn can look up the window.
+	// Loaded at session start and never refreshed — if models.json changes
+	// mid-session the new context windows won't be visible until restart.
+	// Sessions are typically short-lived and the 200K fallback handles
+	// unknown models, so a session-lifetime cache is acceptable.
 	modelsCW map[string]int
 
 	usageMu   sync.Mutex
@@ -414,17 +418,19 @@ func (s *piSession) handleAgentEnd(raw map[string]any) {
 		outputTokens, _ := usageRaw["output"].(float64)
 		cacheReadTokens, _ := usageRaw["cacheRead"].(float64)
 		cacheWriteTokens, _ := usageRaw["cacheWrite"].(float64)
-		totalTokens, _ := usageRaw["totalTokens"].(float64)
 
 		input := int(inputTokens)
 		output := int(outputTokens)
 		cr := int(cacheReadTokens)
+		cw := int(cacheWriteTokens)
 
-		total := int(totalTokens)
-		if total <= 0 {
-			cw := int(cacheWriteTokens)
-			total = input + output + cr + cw
-		}
+		// UsedTokens mirrors claudecode's per-sub-call pattern: track input
+		// + cache tokens from the last assistant message. The LLM API's
+		// input_tokens already counts the full conversation history, so this
+		// naturally represents cumulative context load across turns.
+		// TotalTokens = context load + output for this turn.
+		used := input + cw + cr
+		total := used + output
 
 		// Look up context window from models.json, fallback to 200K.
 		ctxWindow := s.modelsCW[model]
@@ -434,13 +440,16 @@ func (s *piSession) handleAgentEnd(raw map[string]any) {
 
 		s.usageMu.Lock()
 		s.lastUsage = &core.ContextUsage{
-			UsedTokens:               total,
+			UsedTokens:               used,
 			TotalTokens:              total,
 			InputTokens:              input,
 			OutputTokens:             output,
 			CachedInputTokens:        cr,
-			CacheCreationInputTokens: int(cacheWriteTokens),
+			CacheCreationInputTokens: cw,
 			ContextWindow:            ctxWindow,
+			// BaselineTokens and ReasoningOutputTokens are left zero — pi's
+			// RPC protocol does not report these. The engine's UI must handle
+			// zero values (e.g. hide the "baseline" or "reasoning" segments).
 		}
 		s.usageMu.Unlock()
 		return

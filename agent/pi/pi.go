@@ -321,7 +321,11 @@ func loadModelsContextWindows() map[string]int {
 	path := filepath.Join(dir, "models.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		slog.Warn("pi: read models.json", "path", path, "error", err)
+		if os.IsNotExist(err) {
+			slog.Info("pi: models.json not found, using 200K fallback", "path", path)
+		} else {
+			slog.Warn("pi: read models.json", "path", path, "error", err)
+		}
 		return nil
 	}
 	var cfg modelsJSON
