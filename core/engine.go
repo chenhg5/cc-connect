@@ -293,18 +293,19 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
-	messageID     string
-	platform      Platform
-	replyCtx      any
-	content       string
-	images        []ImageAttachment
-	files         []FileAttachment
-	fromVoice     bool
-	userID        string
-	userName      string // sender's display name for sender injection
-	msgPlatform   string // platform name for sender injection
-	msgSessionKey string // session key for extracting chat ID
-	channelKey    string // platform-provided channel identifier (preferred over sessionKey extraction)
+	messageID         string
+	platform          Platform
+	replyCtx          any
+	content           string
+	images            []ImageAttachment
+	files             []FileAttachment
+	fromVoice         bool
+	userID            string
+	userName          string // sender's display name for sender injection
+	msgPlatform       string // platform name for sender injection
+	msgSessionKey     string // session key for extracting chat ID
+	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
+	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -340,6 +341,103 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
+
+	// lastCompletedUserMessageTimeMs is the max platform user-message create time
+	// (ms) for which an agent turn has finished with EventResult.
+	lastCompletedUserMessageTimeMs int64
+	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
+	// foreground turn (including a queued turn after EventResult).
+	currentTurnUserMessageTimeMs int64
+}
+
+// latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
+// completed turns, the in-flight turn, and queued messages for this session.
+// state.mu must be held by the caller.
+func latestUserMessageWatermarkLocked(state *interactiveState) int64 {
+	if state == nil {
+		return 0
+	}
+	wm := state.lastCompletedUserMessageTimeMs
+	if state.currentTurnUserMessageTimeMs > wm {
+		wm = state.currentTurnUserMessageTimeMs
+	}
+	for _, q := range state.pendingMessages {
+		if q.userMessageTimeMs > wm {
+			wm = q.userMessageTimeMs
+		}
+	}
+	return wm
+}
+
+type userMessageWatermarkSnapshot struct {
+	maxMs       int64
+	completedMs int64
+	inFlightMs  int64
+	queuedMaxMs int64
+}
+
+// userMessageWatermarkSnapshotLocked captures the per-source watermark values.
+// state.mu must be held by the caller.
+func userMessageWatermarkSnapshotLocked(state *interactiveState) userMessageWatermarkSnapshot {
+	if state == nil {
+		return userMessageWatermarkSnapshot{}
+	}
+	snap := userMessageWatermarkSnapshot{
+		completedMs: state.lastCompletedUserMessageTimeMs,
+		inFlightMs:  state.currentTurnUserMessageTimeMs,
+	}
+	for _, q := range state.pendingMessages {
+		if q.userMessageTimeMs > snap.queuedMaxMs {
+			snap.queuedMaxMs = q.userMessageTimeMs
+		}
+	}
+	snap.maxMs = latestUserMessageWatermarkLocked(state)
+	return snap
+}
+
+// acceptReason describes which accepted message makes an older create_time stale.
+func (s userMessageWatermarkSnapshot) acceptReason() string {
+	if s.maxMs <= 0 {
+		return "none"
+	}
+	// Prefer the most specific active state when multiple sources tie.
+	if s.inFlightMs == s.maxMs && s.inFlightMs > 0 {
+		return "processing"
+	}
+	if s.queuedMaxMs == s.maxMs && s.queuedMaxMs > 0 {
+		return "queued"
+	}
+	if s.completedMs == s.maxMs && s.completedMs > 0 {
+		return "completed"
+	}
+	return "unknown"
+}
+
+func (e *Engine) logStaleUserMessageDropped(action string, msg *Message, interactiveKey string, snap userMessageWatermarkSnapshot) {
+	if msg == nil {
+		return
+	}
+	slog.Info("stale user message dropped: received from platform but create_time older than accepted watermark",
+		"action", action,
+		"platform", msg.Platform,
+		"session", msg.SessionKey,
+		"interactive_key", interactiveKey,
+		"msg_id", msg.MessageID,
+		"msg_create_time_ms", msg.UserMessageTimeMs,
+		"watermark_ms", snap.maxMs,
+		"watermark_reason", snap.acceptReason(),
+		"watermark_processing_ms", snap.inFlightMs,
+		"watermark_queued_max_ms", snap.queuedMaxMs,
+		"watermark_completed_ms", snap.completedMs,
+	)
+	slog.Debug("stale user message dropped detail",
+		"action", action,
+		"msg_id", msg.MessageID,
+		"msg_create_time_ms", msg.UserMessageTimeMs,
+		"watermark_ms", snap.maxMs,
+		"watermark_reason", snap.acceptReason(),
+		"content_len", len(msg.Content),
+	)
 }
 
 type pendingProviderAddState struct {
@@ -1847,6 +1945,74 @@ func (e *Engine) removeQueuedMessageByID(messageID string) (string, bool) {
 	return "", false
 }
 
+// isStaleUserMessageLocked reports whether timeMs is strictly older than the
+// latest user message already accepted for this session (completed, in-flight,
+// or queued). state.mu must be held by the caller. timeMs <= 0 is never stale.
+func (e *Engine) isStaleUserMessageLocked(state *interactiveState, timeMs int64) bool {
+	if timeMs <= 0 {
+		return false
+	}
+	wm := latestUserMessageWatermarkLocked(state)
+	return wm > 0 && timeMs < wm
+}
+
+// noteUserTurnCompleted advances lastCompletedUserMessageTimeMs after an
+// agent turn ends with EventResult.
+func (e *Engine) noteUserTurnCompleted(state *interactiveState) {
+	state.mu.Lock()
+	t := state.currentTurnUserMessageTimeMs
+	if t > 0 && t > state.lastCompletedUserMessageTimeMs {
+		state.lastCompletedUserMessageTimeMs = t
+	}
+	state.mu.Unlock()
+}
+
+// noteUserMessageAccepted records that a user message was accepted for this
+// session (direct processing). Queued messages update the watermark via
+// pendingMessages instead. This closes the window before processInteractiveMessageWith
+// starts where a redelivery could slip through while the session lock is held.
+func (e *Engine) noteUserMessageAccepted(interactiveKey string, timeMs int64) {
+	if timeMs <= 0 {
+		return
+	}
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	if timeMs > state.currentTurnUserMessageTimeMs {
+		state.currentTurnUserMessageTimeMs = timeMs
+	}
+	state.mu.Unlock()
+}
+
+// discardStaleUserMessageIfNeeded returns true when the message is dropped
+// because a newer user message is already in progress, queued, or completed
+// for this interactive session (e.g. Feishu redelivery with a new message_id
+// but an older create_time).
+func (e *Engine) discardStaleUserMessageIfNeeded(interactiveKey string, msg *Message) bool {
+	if msg == nil || msg.UserMessageTimeMs <= 0 {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	stale := e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs)
+	snap := userMessageWatermarkSnapshotLocked(state)
+	state.mu.Unlock()
+	if !stale {
+		return false
+	}
+	e.logStaleUserMessageDropped("reject_before_handle", msg, interactiveKey, snap)
+	return true
+}
+
 func (e *Engine) stopCurrentMessageIfRecalled(sessionKey string) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
@@ -2125,6 +2291,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if e.discardStaleUserMessageIfNeeded(interactiveKey, msg) {
+		return
+	}
+
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
@@ -2165,6 +2335,14 @@ sessionLocked:
 	// processor so messages arriving during session startup can be queued
 	// instead of dropped (issue #565).
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	slog.Debug("user message accepted for processing",
+		"platform", msg.Platform,
+		"session", msg.SessionKey,
+		"interactive_key", interactiveKey,
+		"msg_id", msg.MessageID,
+		"msg_create_time_ms", msg.UserMessageTimeMs,
+	)
 
 	slog.Info("processing message",
 		"platform", msg.Platform,
@@ -2256,6 +2434,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
 	state.mu.Lock()
+	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
+		snap := userMessageWatermarkSnapshotLocked(state)
+		state.mu.Unlock()
+		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
+		return true
+	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		state.mu.Unlock()
@@ -2263,21 +2447,30 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
-		messageID:     msg.MessageID,
-		platform:      p,
-		replyCtx:      msg.ReplyCtx,
-		content:       msg.Content,
-		images:        msg.Images,
-		files:         msg.Files,
-		fromVoice:     msg.FromVoice,
-		userID:        msg.UserID,
-		userName:      msg.UserName,
-		msgPlatform:   msg.Platform,
-		msgSessionKey: msg.SessionKey,
-		channelKey:    msg.ChannelKey,
+		messageID:         msg.MessageID,
+		platform:          p,
+		replyCtx:          msg.ReplyCtx,
+		content:           msg.Content,
+		images:            msg.Images,
+		files:             msg.Files,
+		fromVoice:         msg.FromVoice,
+		userID:            msg.UserID,
+		userName:          msg.UserName,
+		msgPlatform:       msg.Platform,
+		msgSessionKey:     msg.SessionKey,
+		channelKey:        msg.ChannelKey,
+		userMessageTimeMs: msg.UserMessageTimeMs,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
+
+	slog.Debug("user message accepted into queue",
+		"session", msg.SessionKey,
+		"interactive_key", interactiveKey,
+		"msg_id", msg.MessageID,
+		"msg_create_time_ms", msg.UserMessageTimeMs,
+		"queue_depth", queueDepth,
+	)
 
 	slog.Info("message queued for busy session",
 		"session", msg.SessionKey,
@@ -2650,6 +2843,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
@@ -4354,6 +4548,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"silent", isSilent,
 			)
 
+			e.noteUserTurnCompleted(state)
+
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
 			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == state.sideText
@@ -4542,6 +4738,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
 			state.mu.Lock()
+			droppedStale := 0
+			for len(state.pendingMessages) > 0 && e.isStaleUserMessageLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+				state.pendingMessages = state.pendingMessages[1:]
+				droppedStale++
+			}
+			if droppedStale > 0 {
+				slog.Info("dropped stale queued user messages after completed turn",
+					"session", sessionKey,
+					"dropped", droppedStale,
+				)
+			}
 			if len(state.pendingMessages) > 0 {
 				queued := state.pendingMessages[0]
 				state.pendingMessages = state.pendingMessages[1:]
@@ -4550,6 +4757,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
+				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
 
 				// Stop the previous turn's typing indicator
@@ -4853,12 +5061,29 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			state.mu.Unlock()
 			return true
 		}
+		droppedStale := 0
+		for len(state.pendingMessages) > 0 && e.isStaleUserMessageLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+			state.pendingMessages = state.pendingMessages[1:]
+			droppedStale++
+		}
+		if droppedStale > 0 {
+			slog.Info("dropped stale queued user messages while draining",
+				"session", sessionKey,
+				"dropped", droppedStale,
+			)
+		}
+		if len(state.pendingMessages) == 0 {
+			session.Unlock()
+			state.mu.Unlock()
+			return true
+		}
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
+		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)

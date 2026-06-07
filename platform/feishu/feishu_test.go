@@ -80,6 +80,7 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 		"",
 		replyContext{messageID: "om_drop", sessionKey: "feishu:ou_user:ou_user"},
 		"",
+		0,
 	)
 
 	if called {
@@ -185,6 +186,7 @@ func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
 				"",
 				replyContext{messageID: "om_child", sessionKey: "feishu:oc_chat:ou_user"},
 				parentMessageID,
+				0,
 			)
 
 			select {
@@ -285,6 +287,7 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 		"oc_chat",
 		replyContext{messageID: "om_child", sessionKey: "feishu:oc_chat:ou_user"},
 		parentMessageID,
+		0,
 	)
 
 	select {
