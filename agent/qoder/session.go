@@ -76,7 +76,11 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 	}
 
 	if qs.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		if os.Geteuid() == 0 {
+			slog.Warn("qoderSession: --dangerously-skip-permissions not allowed under root, skipping flag")
+		} else {
+			args = append(args, "--dangerously-skip-permissions")
+		}
 	}
 
 	if qs.model != "" {

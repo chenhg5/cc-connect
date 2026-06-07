@@ -64,6 +64,13 @@ type claudeSession struct {
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
+	// Claude Code rejects bypassPermissions when running as root.
+	// Downgrade to "auto" which auto-approves internally in cc-connect.
+	if mode == "bypassPermissions" && os.Geteuid() == 0 {
+		slog.Warn("claudeSession: bypassPermissions not allowed under root, downgrading to auto mode")
+		mode = "auto"
+	}
+
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
 	// cliArgsFlag these get bundled into a single passthrough string.
 	// outerArgs are flags the wrapper itself understands (e.g. --model).

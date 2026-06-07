@@ -5144,6 +5144,7 @@ var builtinCommands = []struct {
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"stop"}, "stop"},
+	{[]string{"cancel"}, "cancel"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
 	{[]string{"commands", "command", "cmd"}, "commands"},
@@ -5361,6 +5362,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCompress(p, msg)
 	case "stop":
 		e.cmdStop(p, msg)
+	case "cancel":
+		e.cmdCancel(p, msg)
 	case "help":
 		e.cmdHelp(p, msg)
 	case "start":
@@ -8057,6 +8060,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpSessionSection,
 			items: []helpCardItem{
 				{command: "/new", action: "act:/new"},
+				{command: "/cancel", action: "cmd:/cancel"},
 				{command: "/list", action: "nav:/list"},
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
@@ -8836,6 +8840,37 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// cmdCancel stops the current execution and starts a fresh session.
+// Unlike /stop which only halts execution, /cancel also resets the session
+// so the user can immediately continue with new instructions.
+func (e *Engine) cmdCancel(p Platform, msg *Message) {
+	_, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	slog.Info("cmdCancel: stopping execution and creating new session", "session_key", msg.SessionKey)
+
+	// Stop the current execution (like /stop)
+	stopped := e.stopInteractiveSession(interactiveKey, p, msg.ReplyCtx)
+	if !stopped {
+		// No execution in progress, but still create a new session
+		slog.Debug("cmdCancel: no execution to stop, proceeding with new session", "session_key", msg.SessionKey)
+	}
+
+	// Clear old session's agent session ID so it cannot be resumed
+	old := sessions.GetOrCreateActive(msg.SessionKey)
+	old.SetAgentSessionID("", "")
+	old.ClearHistory()
+	sessions.Save()
+
+	// Create a new session (like /new)
+	sessions.NewSession(msg.SessionKey, "")
+
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionCancelled))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {

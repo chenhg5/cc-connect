@@ -189,7 +189,6 @@ level = "info" # debug, info, warn, error
 # # profile. Secrets belong in the target user's ~/.claude/settings.json
 # # env block, NOT here.
 # run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
-
 # =============================================================================
 # Streaming Preview / 流式预览
 # =============================================================================
@@ -670,8 +669,13 @@ name = "my-backend"
 # filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
-# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec).
-# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec）。
+# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec).
+# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec）。
+#
+# admin_from must be defined at the [[projects]] level.
+# Do NOT put it under [projects.platforms.options], or it will be ignored.
+# admin_from 必须写在 [[projects]] 这一层。
+# 不要写到 [projects.platforms.options] 下面，否则会被忽略。
 #
 # 💡 TIP: Send /whoami or /status to the bot to get your User ID for allow_from / admin_from.
 # 💡 提示：向机器人发送 /whoami 或者 /status  即可获取你的 User ID，用于填写 allow_from / admin_from。
@@ -1033,6 +1037,9 @@ app_secret = "your-feishu-app-secret"
 # token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 # allow_from = "*"  # Allowed Telegram user IDs, e.g. "123456789,987654321"; "*" = all
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
+# proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Telegram Bot API / 可选 HTTP/SOCKS5 代理
+# proxy_username = ""              # Optional proxy auth username / 代理用户名
+# proxy_password = ""              # Optional proxy auth password / 代理密码
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
