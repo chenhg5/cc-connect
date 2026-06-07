@@ -143,7 +143,8 @@ func (s *opencodeSession) streamSSEOnce(ctx context.Context, sid, eventURL strin
 		}
 		return fmt.Errorf("opencode: connect SSE: %w", err)
 	}
-	defer resp.Body.Close()
+	// Body close errors are non-fatal after a successful SSE read loop.
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)

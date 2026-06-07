@@ -13172,7 +13172,7 @@ func TestStartUnsolicitedReaderStartsOptionalProducer(t *testing.T) {
 		started:                  make(chan context.Context, 1),
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessionKey := "test:producer:u1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -13209,7 +13209,7 @@ func TestStartUnsolicitedReaderProducerErrorDoesNotBlockReader(t *testing.T) {
 		err:                      errors.New("producer unavailable"),
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessionKey := "test:producer-error:u1"
 	session := e.sessions.GetOrCreateActive(sessionKey)

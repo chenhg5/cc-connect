@@ -384,8 +384,8 @@ func TestOpenCodeSSEWatcherEmitsAssistantStopMessage(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_sse_emit","type":"text","text":"BACKGROUND_REPRO_DONE"}}}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_1","sessionID":"ses_sse_emit","role":"assistant","finish":"stop"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_sse_emit","type":"text","text":"BACKGROUND_REPRO_DONE"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_1","sessionID":"ses_sse_emit","role":"assistant","finish":"stop"}}}`)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -399,7 +399,7 @@ func TestOpenCodeSSEWatcherEmitsAssistantStopMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if err := s.StartUnsolicitedEvents(ctx); err != nil {
 		t.Fatalf("StartUnsolicitedEvents: %v", err)
@@ -428,8 +428,8 @@ func TestOpenCodeSSEWatcherSkipsStdoutSeenPart(t *testing.T) {
 	const sid = "ses_sse_seen"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_existing","messageID":"msg_existing","sessionID":"ses_sse_seen","type":"text","text":"already sent"}}}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_existing","sessionID":"ses_sse_seen","role":"assistant","finish":"stop"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_existing","messageID":"msg_existing","sessionID":"ses_sse_seen","type":"text","text":"already sent"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_existing","sessionID":"ses_sse_seen","role":"assistant","finish":"stop"}}}`)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -443,7 +443,7 @@ func TestOpenCodeSSEWatcherSkipsStdoutSeenPart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	s.markSeen("", "prt_existing")
 
 	if err := s.StartUnsolicitedEvents(ctx); err != nil {
@@ -461,8 +461,8 @@ func TestOpenCodeSSEWatcherEmitsNewPartForStdoutSeenMessage(t *testing.T) {
 	const sid = "ses_sse_new_part"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_followup","messageID":"msg_existing","sessionID":"ses_sse_new_part","type":"text","text":"BACKGROUND_REPRO_DONE"}}}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_existing","sessionID":"ses_sse_new_part","role":"assistant","finish":"stop"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_followup","messageID":"msg_existing","sessionID":"ses_sse_new_part","type":"text","text":"BACKGROUND_REPRO_DONE"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_existing","sessionID":"ses_sse_new_part","role":"assistant","finish":"stop"}}}`)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -476,7 +476,7 @@ func TestOpenCodeSSEWatcherEmitsNewPartForStdoutSeenMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	s.handleEvent(map[string]any{
 		"type": "text",
 		"part": map[string]any{
@@ -518,7 +518,7 @@ func TestOpenCodeProducerHandlesEmptyAttachURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if err := s.StartUnsolicitedEvents(context.Background()); err != nil {
 		t.Fatalf("StartUnsolicitedEvents: %v", err)
@@ -541,8 +541,8 @@ func TestOpenCodeProducerStopsOnContextCancel(t *testing.T) {
 		case <-r.Context().Done():
 			return
 		}
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_cancel","messageID":"msg_cancel","sessionID":"ses_sse_cancel","type":"text","text":"late"}}}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_cancel","sessionID":"ses_sse_cancel","role":"assistant","finish":"stop"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_cancel","messageID":"msg_cancel","sessionID":"ses_sse_cancel","type":"text","text":"late"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_cancel","sessionID":"ses_sse_cancel","role":"assistant","finish":"stop"}}}`)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -554,7 +554,7 @@ func TestOpenCodeProducerStopsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if err := s.StartUnsolicitedEvents(ctx); err != nil {
 		t.Fatalf("StartUnsolicitedEvents: %v", err)
