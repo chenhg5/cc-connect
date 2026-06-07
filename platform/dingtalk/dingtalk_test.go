@@ -1083,3 +1083,108 @@ func TestOnMessageRepliesToUnauthorizedSender(t *testing.T) {
 		t.Fatal("timed out waiting for unauthorized reply")
 	}
 }
+
+func TestExtractAtUserIds(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{name: "empty string", content: "", want: nil},
+		{name: "plain text no at", content: "hello world", want: nil},
+		{name: "3-digit not matched", content: "@123", want: nil},
+		{name: "4-digit match", content: "@1234", want: []string{"1234"}},
+		{name: "9-digit match", content: "@194252073", want: []string{"194252073"}},
+		{name: "18-digit match", content: "@194252073827812352", want: []string{"194252073827812352"}},
+		{name: "alphabetic no-match", content: "@user @admin", want: nil},
+		{name: "dedup", content: "@1234 @1234 @1234", want: []string{"1234"}},
+		{name: "multiple distinct", content: "@1234 @5678", want: []string{"1234", "5678"}},
+		{name: "embedded in text", content: "hello @1234 world", want: []string{"1234"}},
+		{name: "mixed valid and invalid", content: "@123 @1234 @user @567890", want: []string{"1234", "567890"}},
+		{name: "only at sign no digits", content: "@ @ @@", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAtUserIds(tt.content)
+			if len(got) == 0 && len(tt.want) == 0 {
+				return // both nil/empty
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractAtUserIds(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("extractAtUserIds(%q) = %v, want %v", tt.content, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestReply_IncludesExtractedAtUserIds(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	err := p.Reply(context.Background(), rc, "hello @12345678 world")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		at, ok := payload["at"].(map[string]any)
+		if !ok {
+			t.Fatal("expected 'at' field in payload")
+		}
+		atUserIds, ok := at["atUserIds"].([]any)
+		if !ok {
+			t.Fatal("expected 'at.atUserIds' field in payload")
+		}
+		if len(atUserIds) != 1 || atUserIds[0] != "12345678" {
+			t.Fatalf("atUserIds = %v, want [\"12345678\"]", atUserIds)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
+func TestReply_NoAtUserIdsWhenNoMention(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	err := p.Reply(context.Background(), rc, "hello world, no mentions here")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		if _, ok := payload["at"]; ok {
+			t.Fatal("expected no 'at' field when content has no @userId")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}

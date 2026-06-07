@@ -1599,11 +1599,12 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	return nil
 }
 
+var atUserIDRegexp = regexp.MustCompile(`@(\d{4,})`)
+
 // extractAtUserIds extracts @userId patterns from content for DingTalk's atUserIds field.
 // Matches @ followed by numeric DingTalk user IDs (e.g. @194252073827812352).
 func extractAtUserIds(content string) []string {
-	re := regexp.MustCompile(`@(\d{4,})`)
-	matches := re.FindAllStringSubmatch(content, -1)
+	matches := atUserIDRegexp.FindAllStringSubmatch(content, -1)
 	seen := make(map[string]bool)
 	var ids []string
 	for _, m := range matches {
@@ -1614,6 +1615,7 @@ func extractAtUserIds(content string) []string {
 	}
 	return ids
 }
+
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
 //   - Leading spaces → non-breaking spaces (prevents markdown from stripping indentation)
 //   - Single \n between non-empty lines → trailing two-space forced line break
