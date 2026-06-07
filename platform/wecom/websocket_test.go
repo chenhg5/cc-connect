@@ -625,7 +625,7 @@ func TestWSPlatformSendFile_UploadsAndSendsMedia(t *testing.T) {
 			serverDone <- err
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		serverDone <- assertWeComWSSendFileFrames(conn, fileData)
 	}))
 	defer server.Close()
@@ -635,7 +635,7 @@ func TestWSPlatformSendFile_UploadsAndSendsMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial test websocket: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	p := &WSPlatform{conn: conn}
 	go func() {
