@@ -166,10 +166,11 @@ alias = "opus"
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
-# MiniMax — OpenAI-compatible, 1M context
+# MiniMax — OpenAI-compatible agent provider, 1M context
 [[projects.agent.providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
+# Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
@@ -675,7 +676,7 @@ Synthesize AI replies into voice messages.
 enabled = true
 provider = "minimax"     # qwen | openai | minimax | mimo | espeak | pico | edge
 voice_id = "Chinese (Mandarin)_Crisp_Girl"
-speed = 0.98
+speed = 0.98             # provider-specific range; MiniMax commonly accepts 0.5-2.0
 tts_mode = "voice_only"  # "voice_only" | "always"
 max_text_len = 0         # 0 = no limit
 

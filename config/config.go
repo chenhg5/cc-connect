@@ -402,6 +402,8 @@ func LoadMiniMaxLocalConfig(dataDir, configFile string) (MiniMaxLocalConfig, err
 }
 
 func expandUserPath(path string) string {
+	// Only the current user's home shorthand is expanded; ~user paths are left
+	// unchanged to avoid platform-specific user lookup behavior.
 	if path == "~" {
 		if home, err := os.UserHomeDir(); err == nil {
 			return home

@@ -164,10 +164,11 @@ alias = "opus"
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
-# MiniMax — 兼容 OpenAI 接口，1M 超长上下文
+# MiniMax — 兼容 OpenAI 接口的 Agent provider，1M 超长上下文
 [[projects.agent.providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
+# 中国区账号可使用 https://api.minimaxi.com/v1
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
@@ -588,7 +589,7 @@ brew install ffmpeg
 enabled = true
 provider = "minimax"     # qwen | openai | minimax | mimo | espeak | pico | edge
 voice_id = "Chinese (Mandarin)_Crisp_Girl"
-speed = 0.98
+speed = 0.98             # 有效范围取决于 provider；MiniMax 通常支持 0.5-2.0
 tts_mode = "voice_only"  # "voice_only" | "always"
 max_text_len = 0
 

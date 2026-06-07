@@ -1017,6 +1017,16 @@ func TestLoadMiniMaxLocalConfig_DefaultDataDir(t *testing.T) {
 	}
 }
 
+func TestLoadMiniMaxLocalConfig_MissingFileReturnsEmpty(t *testing.T) {
+	cfg, err := LoadMiniMaxLocalConfig(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("LoadMiniMaxLocalConfig() error: %v", err)
+	}
+	if cfg != (MiniMaxLocalConfig{}) {
+		t.Fatalf("config = %#v, want empty", cfg)
+	}
+}
+
 const multiProjectConfigTOML = `# multi-project config
 [[projects]]
 name = "alpha"
