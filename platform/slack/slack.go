@@ -53,6 +53,11 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
 	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
+	if scope == "thread" {
+		slog.Warn("slack: session_scope=thread gives each Slack thread its own session; " +
+			"if your agent runtime is tmux, also set window_per_session=true — " +
+			"without it, concurrent threads share a single pane and their output will interleave")
+	}
 	return &Platform{
 		botToken:         botToken,
 		appToken:         appToken,

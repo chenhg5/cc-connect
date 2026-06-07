@@ -3211,6 +3211,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", startSessionID)
 	}
 
+	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
+	if warner, ok := agentSession.(StartupWarner); ok {
+		if msg := warner.StartupWarning(); msg != "" {
+			e.send(p, replyCtx, msg)
+		}
+	}
+
 	if newID := agentSession.CurrentSessionID(); newID != "" {
 		// Track the latest session ID Claude reports. Each --resume forks a new
 		// session_id, so the stored ID must follow the live process or a later

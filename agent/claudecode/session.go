@@ -59,16 +59,27 @@ type claudeSession struct {
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
+
+	// startupWarning holds a one-time message to surface to the IM user at
+	// session start (e.g. when a permission mode was silently downgraded).
+	startupWarning string
 }
+
+// StartupWarning implements core.StartupWarner. Returns a non-empty string
+// when the session was started under degraded conditions that the user should
+// know about (e.g. bypassPermissions downgraded to auto under root).
+func (cs *claudeSession) StartupWarning() string { return cs.startupWarning }
 
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
 	// Downgrade to "auto" which auto-approves internally in cc-connect.
+	var rootDowngradeWarning string
 	if mode == "bypassPermissions" && os.Geteuid() == 0 {
 		slog.Warn("claudeSession: bypassPermissions not allowed under root, downgrading to auto mode")
 		mode = "auto"
+		rootDowngradeWarning = "⚠️ Running as root: bypassPermissions mode is not supported and has been downgraded to auto. The agent may still pause on high-risk operations."
 	}
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
@@ -226,6 +237,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		cancel:              cancel,
 		done:                make(chan struct{}),
 		gracefulStopTimeout: 120 * time.Second,
+		startupWarning:      rootDowngradeWarning,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)

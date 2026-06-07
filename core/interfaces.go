@@ -538,6 +538,15 @@ type LiveModeSwitcher interface {
 	SetLiveMode(mode string) bool
 }
 
+// StartupWarner is an optional interface for agent sessions that need to surface
+// a one-time warning to the IM user at session start (e.g. when a requested
+// permission mode was silently downgraded due to OS constraints). The engine
+// sends the returned message to the IM platform immediately after starting the
+// session. Returns empty string when no warning is needed.
+type StartupWarner interface {
+	StartupWarning() string
+}
+
 // PermissionModeInfo describes a permission mode for display.
 type PermissionModeInfo struct {
 	Key    string
