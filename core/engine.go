@@ -2761,7 +2761,31 @@ func buildAskQuestionResponse(originalInput map[string]any, questions []UserQues
 	return result
 }
 
+// mentionRe matches an @mention token preceded by start-of-string or
+// whitespace: '@' followed by a Unicode letter/digit/underscore and then
+// more word characters (including dots and dashes for ASCII bot names).
+// The preceding (^|\s) anchor keeps regular emails (e.g. user@example.com)
+// intact — only @-tokens that look like standalone mentions are stripped.
+// Used to strip platform-injected @-mentions from permission responses
+// in group chats (e.g. WeChat Work "允许 @群机器人"), where the mention
+// is appended to the user's response and would otherwise fail the
+// exact-match comparison in isAllowResponse / isDenyResponse /
+// isApproveAllResponse.
+var mentionRe = regexp.MustCompile(`(?:^|\s)@[\p{L}\p{N}_][\p{L}\p{N}_\-.]*`)
+
+// stripMentions removes @mention tokens from s and returns the result
+// with surrounding whitespace trimmed and internal whitespace
+// normalized. Supports CJK mention names (e.g. "@群机器人") as well as
+// ASCII names with dots/dashes/underscores (e.g. "@bot.example-1").
+// Regular emails (e.g. "user@example.com") are preserved because the
+// '@' is not at the start of a token.
+func stripMentions(s string) string {
+	stripped := mentionRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(stripped)
+}
+
 func isApproveAllResponse(s string) bool {
+	s = stripMentions(s)
 	for _, w := range []string{
 		"allow all", "allowall", "approve all", "yes all",
 		"允许所有", "允许全部", "全部允许", "所有允许", "都允许", "全部同意",
@@ -2774,6 +2798,7 @@ func isApproveAllResponse(s string) bool {
 }
 
 func isAllowResponse(s string) bool {
+	s = stripMentions(s)
 	for _, w := range []string{"allow", "yes", "y", "ok", "允许", "同意", "可以", "好", "好的", "是", "确认", "approve"} {
 		if s == w {
 			return true
@@ -2783,6 +2808,7 @@ func isAllowResponse(s string) bool {
 }
 
 func isDenyResponse(s string) bool {
+	s = stripMentions(s)
 	for _, w := range []string{"deny", "no", "n", "reject", "拒绝", "不允许", "不行", "不", "否", "取消", "cancel"} {
 		if s == w {
 			return true

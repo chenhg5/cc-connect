@@ -14120,3 +14120,81 @@ func TestMaybeAutoResetSessionOnIdle_NotFiredWhenUserActivityRecent(t *testing.T
 		t.Fatal("expected no idle reset because LastUserActivity is only 5min ago")
 	}
 }
+
+// TestStripMentions is a regression test for issue #476: in WeChat Work
+// (and other) group chats, platform-injected @-mentions get appended to
+// user responses like "允许 @群机器人". The exact-match permission
+// response checkers (isAllowResponse, isDenyResponse, isApproveAllResponse)
+// then fail because the comparison string is no longer exact. stripMentions
+// must remove @-mention tokens regardless of position.
+func TestStripMentions(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"no_mention", "允许", "允许"},
+		{"mention_suffix_cjk", "允许 @群机器人", "允许"},
+		{"mention_prefix_cjk", "@群机器人 允许", "允许"},
+		{"mention_between", "允许 @群机器人 全部同意", "允许 全部同意"},
+		{"multiple_mentions_prefix", "@bot1 @bot2 同意", "同意"},
+		{"multiple_mentions_middle", "允许 @bot1 @bot2 全部同意", "允许 全部同意"},
+		{"mention_with_ascii", "yes @user.name_1", "yes"},
+		{"mention_with_dash", "deny @some-bot-2", "deny"},
+		{"mention_alone", "@群机器人", ""},
+		{"surrounding_whitespace", "  允许  @群机器人  ", "允许"},
+		{"email_like_not_stripped", "user@example.com", "user@example.com"},
+		{"at_sign_alone", "@", "@"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripMentions(tt.in); got != tt.want {
+				t.Errorf("stripMentions(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPermissionResponseMatchersWithMentions covers the integration of
+// stripMentions with the three permission response matchers used to
+// detect "allow / deny / allow-all" replies to pending permission
+// requests in group chats.
+func TestPermissionResponseMatchersWithMentions(t *testing.T) {
+	cases := []struct {
+		input      string
+		allow      bool
+		deny       bool
+		allowAll   bool
+		desc       string
+	}{
+		// issue #476 exact failure mode
+		{"允许 @群机器人", true, false, false, "wecom allow + mention"},
+		{"拒绝 @群机器人", false, true, false, "wecom deny + mention"},
+		{"全部允许 @群机器人", false, false, true, "wecom allow-all + mention"},
+		// mention prefix
+		{"@群机器人 允许", true, false, false, "wecom mention then allow"},
+		{"@群机器人 拒绝", false, true, false, "wecom mention then deny"},
+		// plain positive control
+		{"允许", true, false, false, "plain allow"},
+		{"拒绝", false, true, false, "plain deny"},
+		// english
+		{"yes @bot", true, false, false, "english yes + mention"},
+		{"no @bot", false, true, false, "english no + mention"},
+		// not a permission response at all
+		{"hello world", false, false, false, "non-permission text"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := isAllowResponse(tc.input); got != tc.allow {
+				t.Errorf("isAllowResponse(%q) = %v, want %v", tc.input, got, tc.allow)
+			}
+			if got := isDenyResponse(tc.input); got != tc.deny {
+				t.Errorf("isDenyResponse(%q) = %v, want %v", tc.input, got, tc.deny)
+			}
+			if got := isApproveAllResponse(tc.input); got != tc.allowAll {
+				t.Errorf("isApproveAllResponse(%q) = %v, want %v", tc.input, got, tc.allowAll)
+			}
+		})
+	}
+}
