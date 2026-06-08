@@ -1994,3 +1994,190 @@ func TestCardAction_NavSlow_NilCard_NoRefresh(t *testing.T) {
 		t.Fatalf("RefreshCard should not be called for nil card, called %d times", got)
 	}
 }
+
+// TestOnMessage_OldMessageAfterRestartIsFiltered verifies that a Feishu message whose
+// create_time is before the process start time is silently dropped.  This is the
+// expected "drop replayed pre-restart messages" behaviour described in issue #972.
+func TestOnMessage_OldMessageAfterRestartIsFiltered(t *testing.T) {
+	// Simulate a daemon "restart" by pinning StartTime to now.
+	restartTime := time.Now()
+	orig := core.StartTime
+	core.StartTime = restartTime
+	defer func() { core.StartTime = orig }()
+
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	handlerCalled := false
+	ip.handler = func(_ core.Platform, _ *core.Message) {
+		handlerCalled = true
+	}
+
+	// A message created 10 minutes before the restart — must be dropped.
+	oldCreateTime := strconv.FormatInt(restartTime.Add(-10*time.Minute).UnixMilli(), 10)
+	msgID := "om_old_test"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	content := `{"text":"hello"}`
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &oldCreateTime,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	if handlerCalled {
+		t.Error("handler should NOT be called for pre-restart message (create_time before StartTime)")
+	}
+}
+
+// TestOnMessage_NewMessageAfterRestartIsProcessed verifies that a Feishu message whose
+// create_time is after the process start time is delivered to the handler normally.
+// Regression test for issue #972: new messages must not be mis-classified as "old".
+func TestOnMessage_NewMessageAfterRestartIsProcessed(t *testing.T) {
+	// Simulate a daemon "restart" by pinning StartTime to 5 minutes ago.
+	restartTime := time.Now().Add(-5 * time.Minute)
+	orig := core.StartTime
+	core.StartTime = restartTime
+	defer func() { core.StartTime = orig }()
+
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	var (
+		wg          sync.WaitGroup
+		receivedMsg *core.Message
+	)
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+
+	// A message created 2 minutes AFTER restart — must be processed.
+	newCreateTime := strconv.FormatInt(restartTime.Add(2*time.Minute).UnixMilli(), 10)
+	msgID := "om_new_test"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	content := `{"text":"/list"}`
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &newCreateTime,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Error("handler should be called for post-restart message (create_time after StartTime)")
+	}
+}
+
+// TestOnMessage_GracePeriodMessageIsProcessed verifies that a message created within
+// the 2-second grace window just before StartTime is NOT dropped (issue #972 edge case).
+func TestOnMessage_GracePeriodMessageIsProcessed(t *testing.T) {
+	restartTime := time.Now()
+	orig := core.StartTime
+	core.StartTime = restartTime
+	defer func() { core.StartTime = orig }()
+
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	var (
+		wg          sync.WaitGroup
+		receivedMsg *core.Message
+	)
+	wg.Add(1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		defer wg.Done()
+		receivedMsg = msg
+	}
+
+	// A message created 1 second before restart — within the 2s grace window, must pass.
+	graceCreateTime := strconv.FormatInt(restartTime.Add(-1*time.Second).UnixMilli(), 10)
+	msgID := "om_grace_test"
+	chatID := "oc_test"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	content := `{"text":"grace"}`
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &graceCreateTime,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	wg.Wait()
+	if receivedMsg == nil {
+		t.Error("handler should be called for message within the 2s grace window")
+	}
+}

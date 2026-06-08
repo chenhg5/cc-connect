@@ -40,6 +40,7 @@ type Agent struct {
 	modelCachePath       string
 	persistentModelCache *opencodePersistentModelCache
 	refreshingModelCache bool
+	refreshWg            sync.WaitGroup // tracks in-flight background model-cache refresh goroutines
 	mu                   sync.RWMutex
 }
 
@@ -344,9 +345,11 @@ func (a *Agent) startPersistentModelRefresh(snapshot opencodeModelDiscoverySnaps
 		return
 	}
 	a.refreshingModelCache = true
+	a.refreshWg.Add(1)
 	a.mu.Unlock()
 
 	go func() {
+		defer a.refreshWg.Done()
 		defer func() {
 			a.mu.Lock()
 			a.refreshingModelCache = false

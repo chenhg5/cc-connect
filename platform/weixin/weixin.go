@@ -65,6 +65,12 @@ type Platform struct {
 	cancel   context.CancelFunc
 	stopping bool
 
+	// lifecycleHandler receives readiness callbacks once the ilink long-poll
+	// actually confirms a working session (first successful getUpdates).
+	// This is what distinguishes ready-for-poll from a Start()-time
+	// ready-for-publish signal that does not yet mean "messages can flow".
+	lifecycleHandler core.PlatformLifecycleHandler
+
 	syncBufMu   sync.Mutex
 	syncBuf     string
 	syncBufPath string
@@ -312,6 +318,17 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
+// SetLifecycleHandler registers a handler that will be notified once the ilink
+// long-poll has confirmed a working session. Implements
+// core.AsyncRecoverablePlatform so the engine waits for the actual
+// ready-for-poll signal before logging "platform ready" and initialising
+// platform-level capabilities.
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
+
 func (p *Platform) Stop() error {
 	p.mu.Lock()
 	if p.cancel != nil {
@@ -326,6 +343,7 @@ func (p *Platform) Stop() error {
 func (p *Platform) pollLoop(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	readyNotified := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -367,6 +385,22 @@ func (p *Platform) pollLoop(ctx context.Context) {
 		}
 		if resp.Ret != 0 && resp.Errmsg != "" {
 			slog.Warn("weixin: getUpdates ret", "ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
+		}
+
+		// First successful getUpdates round-trip: ilink has accepted our token
+		// and the long-poll plumbing is alive. Treat this as the authoritative
+		// ready-for-poll signal; surface it to the engine so it can finish
+		// initialising platform-level capabilities and stop gating the
+		// "platform ready" log on a Start()-time promise.
+		if !readyNotified {
+			readyNotified = true
+			p.mu.RLock()
+			handler := p.lifecycleHandler
+			p.mu.RUnlock()
+			if handler != nil {
+				slog.Info("weixin: ilink ready-for-poll")
+				handler.OnPlatformReady(p)
+			}
 		}
 
 		p.mu.RLock()
@@ -655,7 +689,10 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 }
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
-// When sendMessage returns ret=-2, it retries with a fresh context_token.
+// When sendMessage returns ret=-2, it tries to refresh the context_token from
+// storage (which is updated by every inbound message) before retrying.
+// If the stored token is the same as the current one (no refresh possible),
+// it fails fast rather than burning retries on a stale token.
 // chunkIdx and totalChunks are 1-based indices used for logging context.
 func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string, chunkIdx, totalChunks int) error {
 	var lastErr error
@@ -666,28 +703,40 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 			return nil
 		}
 		lastErr = err
-		// Check if error is ret=-2 (API declined) - retry with fresh token
+		// Check if error is ret=-2 (API declined) - attempt token refresh
 		if strings.Contains(err.Error(), "ret=-2") {
 			preview := []rune(chunk)
 			if len(preview) > 50 {
 				preview = preview[:50]
+			}
+			// Refresh context_token from stored tokens (may have been updated by a
+			// concurrent inbound message while we were waiting).
+			freshToken := p.getContextToken(rc.peerUserID)
+			if freshToken == "" || freshToken == rc.contextToken {
+				// No fresh token available — further retries would use the same stale
+				// token and all fail. Fail fast with an actionable error.
+				slog.Warn("weixin: sendMessage ret=-2, no fresh context_token available — "+
+					"user must send a new message to refresh the session token",
+					"attempt", attempt+1, "peer", rc.peerUserID,
+					"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
+					"chunk_runes", utf8.RuneCountInString(chunk),
+					"preview", string(preview))
+				return fmt.Errorf("weixin: sendMessage ret=-2 (expired context_token); "+
+					"user must send a new message to peer %q to refresh the session token: %w",
+					rc.peerUserID, lastErr)
 			}
 			slog.Warn("weixin: sendMessage ret=-2, retrying with fresh context_token",
 				"attempt", attempt+1, "peer", rc.peerUserID,
 				"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
 				"chunk_runes", utf8.RuneCountInString(chunk),
 				"preview", string(preview))
-			// Add delay before retry
+			rc.contextToken = freshToken
+			slog.Debug("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
+			// Brief delay before retry
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(weixinSendRetryDelay):
-			}
-			// Refresh context_token from stored tokens (may have been updated by new incoming message)
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken != "" && freshToken != rc.contextToken {
-				rc.contextToken = freshToken
-				slog.Debug("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
 			}
 			continue
 		}
@@ -746,4 +795,5 @@ var (
 	_ core.ImageSender                   = (*Platform)(nil)
 	_ core.FileSender                    = (*Platform)(nil)
 	_ core.TypingIndicator               = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
 )

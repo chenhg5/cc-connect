@@ -408,6 +408,21 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
 		},
 		{
+			name:     "path with dots (hidden dirs and version numbers)",
+			input:    "/home/user/.nvm/versions/node/v22.22.2/lib",
+			expected: "-home-user--nvm-versions-node-v22-22-2-lib",
+		},
+		{
+			name:     "path with @ (scoped npm packages)",
+			input:    "/home/user/node_modules/@anthropic-ai/claude-code",
+			expected: "-home-user-node-modules--anthropic-ai-claude-code",
+		},
+		{
+			name:     "path with both dots and @",
+			input:    "/home/user/.local/share/@org/my.project",
+			expected: "-home-user--local-share--org-my-project",
+		},
+		{
 			name:     "empty path",
 			input:    "",
 			expected: "",

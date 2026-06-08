@@ -470,20 +470,18 @@ type LogConfig struct {
 	Level string `toml:"level"`
 }
 
-func Load(path string) (*Config, error) {
+// load parses, env-resolves, and wires providers in the config file but does
+// NOT validate — callers must call validate() or validatePermissive() themselves.
+func load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
-
-	cfg := &Config{
-		Log: LogConfig{Level: "info"},
-	}
+	cfg := &Config{Log: LogConfig{Level: "info"}}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	resolveEnvInConfig(cfg)
-
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
@@ -495,9 +493,29 @@ func Load(path string) (*Config, error) {
 	if cfg.AttachmentSend == "" {
 		cfg.AttachmentSend = "on"
 	}
-
 	cfg.ResolveProviderRefs()
+	return cfg, nil
+}
 
+// LoadPermissive loads the config file and performs all validation except the
+// "at least one platform per project" check. Use this for commands (like
+// `cc-connect web`) that should work even before platforms are configured.
+func LoadPermissive(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validatePermissive(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func Load(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -777,7 +795,18 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
+// validatePermissive is like validate but skips the "at least one platform"
+// requirement so that commands like `cc-connect web` can operate on agent-only
+// configs before platforms have been set up.
+func (c *Config) validatePermissive() error {
+	return c.validateInternal(true)
+}
+
 func (c *Config) validate() error {
+	return c.validateInternal(false)
+}
+
+func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
 	}
@@ -805,7 +834,7 @@ func (c *Config) validate() error {
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
 		}
-		if len(proj.Platforms) == 0 {
+		if len(proj.Platforms) == 0 && !permissive {
 			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {

@@ -1342,10 +1342,12 @@ func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
 
-	// Build the encoded key character by character
+	// Build the encoded key character by character.
+	// Claude Code replaces path separators, special punctuation, and non-ASCII
+	// characters with hyphens when deriving the project directory name.
 	var result strings.Builder
 	for _, r := range normalized {
-		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' {
+		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' || r == '.' || r == '@' {
 			result.WriteRune('-')
 		} else if r < 128 { // ASCII range (0-127)
 			result.WriteRune(r)

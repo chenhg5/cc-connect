@@ -19,7 +19,9 @@ func runWeb(args []string) {
 		os.Exit(1)
 	}
 
-	cfg, err := config.Load(configPath)
+	// Use LoadPermissive so `cc-connect web` works even before any platforms
+	// are configured (e.g. during initial setup via the Web Admin UI).
+	cfg, err := config.LoadPermissive(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)

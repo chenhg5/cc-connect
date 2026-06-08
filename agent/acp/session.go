@@ -373,6 +373,8 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
 	sid := s.currentACPSessionID()
+	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
+	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
 	for _, ev := range mapSessionUpdate(sid, params) {
 		s.emit(ev)
 	}
@@ -612,11 +614,13 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 		"prompt":    promptBlocks,
 	}
 
-	_, err := s.tr.call(s.ctx, "session/prompt", params)
+	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
+	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
 	// Text was streamed via session/update; engine aggregates EventText.
 	s.emit(core.Event{

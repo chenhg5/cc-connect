@@ -151,21 +151,26 @@ func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext
 			return nil
 		}
 		lastErr = err
-		// Check if error is ret=-2 (API declined) - retry with fresh token
+		// Check if error is ret=-2 (API declined) - attempt token refresh
 		if strings.Contains(err.Error(), "ret=-2") {
-			slog.Warn("weixin: sendMessage ret=-2 for media, retrying",
+			freshToken := p.getContextToken(rc.peerUserID)
+			if freshToken == "" || freshToken == rc.contextToken {
+				slog.Warn("weixin: sendMessage ret=-2 for media, no fresh context_token — "+
+					"user must send a new message to refresh session token",
+					"attempt", attempt+1, "peer", rc.peerUserID)
+				return fmt.Errorf("weixin: sendMessage ret=-2 (expired context_token); "+
+					"user must send a new message to peer %q to refresh the session token: %w",
+					rc.peerUserID, lastErr)
+			}
+			slog.Warn("weixin: sendMessage ret=-2 for media, retrying with fresh context_token",
 				"attempt", attempt+1, "peer", rc.peerUserID)
-			// Add delay before retry
+			rc.contextToken = freshToken
+			slog.Debug("weixin: using refreshed context_token for media retry", "peer", rc.peerUserID)
+			// Brief delay before retry
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(weixinSendRetryDelay):
-			}
-			// Refresh context_token from stored tokens
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken != "" && freshToken != rc.contextToken {
-				rc.contextToken = freshToken
-				slog.Debug("weixin: using refreshed context_token for media retry", "peer", rc.peerUserID)
 			}
 			continue
 		}

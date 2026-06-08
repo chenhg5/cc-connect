@@ -1033,6 +1033,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 
+	var createTimeMs int64
 	if msg.CreateTime != nil {
 		if ms, err := strconv.ParseInt(*msg.CreateTime, 10, 64); err == nil {
 			msgTime := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
@@ -1040,6 +1041,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 				slog.Debug(p.tag()+": ignoring old message after restart", "create_time", *msg.CreateTime)
 				return nil
 			}
+			createTimeMs = ms
 		}
 	}
 
@@ -1128,7 +1130,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
+	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs)
 
 	return nil
 }
@@ -1145,7 +1147,7 @@ func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContex
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string) {
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64) {
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -1191,6 +1193,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "image":
@@ -1213,8 +1216,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
-			ReplyCtx: rctx,
+			Images:            []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "audio":
@@ -1245,7 +1249,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				Format:   "ogg",
 				Duration: audioBody.Duration / 1000,
 			},
-			ReplyCtx: rctx,
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "post":
@@ -1259,7 +1264,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
-			ReplyCtx: rctx,
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "file":
@@ -1291,7 +1297,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				Data:     fileData,
 				FileName: fileBody.FileName,
 			}},
-			ReplyCtx: rctx,
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "merge_forward":
@@ -1304,10 +1311,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content:  text,
-			Images:   images,
-			Files:    files,
-			ReplyCtx: rctx,
+			Content:           text,
+			Images:            images,
+			Files:             files,
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
 		}
 		p.dispatchCoreMessage(coreMsg)
 
@@ -1328,6 +1336,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
 				Content: "[sticker]", ExtraContent: quoted.text, ReplyCtx: rctx,
+				UserMessageTimeMs: createTimeMs,
 			})
 			return
 		}
@@ -1335,8 +1344,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
-			ReplyCtx: rctx,
+			Images:            []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "media":
@@ -1372,6 +1382,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	default:
@@ -2486,7 +2497,15 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		return larkim.FileTypeXls
 	case strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx"):
 		return larkim.FileTypePpt
-	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
+	// Feishu's file API only has "mp4" as the video type. We map all common
+	// video MIME types and extensions to FileTypeMp4 so the message renders
+	// as a native video player bubble rather than a generic file download.
+	// Actual playback compatibility (e.g. webm/mkv) depends on the Feishu
+	// client platform; mp4 H.264 has the broadest support.
+	case strings.HasPrefix(mimeType, "video/") ||
+		strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".mov") ||
+		strings.HasSuffix(name, ".avi") || strings.HasSuffix(name, ".m4v") ||
+		strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".webm"):
 		return larkim.FileTypeMp4
 	case mimeType == "audio/ogg" || mimeType == "audio/opus" || mimeType == "application/ogg" || strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".opus"):
 		return larkim.FileTypeOpus
