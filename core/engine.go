@@ -8638,6 +8638,52 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	agentSession := state.agentSession
 	state.mu.Unlock()
 
+	// If the agent session supports graceful turn cancellation (e.g. ACP),
+	// send a cancel notification and keep the session alive for the next
+	// user message, rather than killing the process and destroying state.
+	if canceller, ok := agentSession.(AgentSessionCanceller); ok && agentSession != nil {
+		// Keep the state in the map so the next message reuses this session.
+		// Don't markStopped — the session is still usable.
+		// Don't delete from interactiveStates — keep it alive.
+		e.interactiveMu.Unlock()
+
+		if pending != nil {
+			pending.resolve()
+		}
+		if notifyQueued {
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
+		} else {
+			state.mu.Lock()
+			state.pendingMessages = nil
+			state.mu.Unlock()
+		}
+
+		// Mark eventsNeedResync so the next turn drains stale events from
+		// the cancelled turn before processing fresh input.
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		state.mu.Unlock()
+
+		cancelErr := canceller.CancelTurn()
+		if cancelErr != nil {
+			slog.Warn("agent session CancelTurn failed, falling back to Close",
+				"session_key", sessionKey, "error", cancelErr)
+			// Fall through to normal cleanup below.
+			goto normalCleanup
+		}
+
+		slog.Info("agent session turn cancelled, session kept alive",
+			"session_key", sessionKey)
+
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventSessionEnded,
+			SessionKey: sessionKey,
+		})
+
+		return true
+	}
+
+normalCleanup:
 	state.markStopped()
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()

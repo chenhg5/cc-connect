@@ -473,6 +473,14 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// AgentSessionCanceller is an optional interface for agent sessions that support
+// cancelling the current turn without terminating the session or its underlying
+// process. When implemented, the engine calls CancelTurn instead of Close() for
+// /stop, allowing the session to remain alive for the next user message.
+type AgentSessionCanceller interface {
+	CancelTurn() error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.
