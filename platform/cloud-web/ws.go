@@ -80,7 +80,7 @@ func (t *wsTransport) Stop() error {
 	t.conn = nil
 	t.mu.Unlock()
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 	}
 	return nil
 }
@@ -139,16 +139,16 @@ func (t *wsTransport) connectOnce(ctx context.Context) error {
 
 	reg, err := json.Marshal(buildRegisterPayload(t.name, t.project, "websocket"))
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 	if err := conn.WriteMessage(websocket.TextMessage, reg); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 	conn.SetPongHandler(func(string) error {
@@ -157,19 +157,19 @@ func (t *wsTransport) connectOnce(ctx context.Context) error {
 
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("read register_ack: %w", err)
 	}
 	caps, err := parseRegisterAck(raw)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 	t.setCaps(caps)
 
 	t.mu.Lock()
 	if t.conn != nil {
-		t.conn.Close()
+		_ = t.conn.Close()
 	}
 	t.conn = conn
 	t.mu.Unlock()
@@ -209,19 +209,19 @@ func (t *wsTransport) connectOnce(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			conn.Close()
+			_ = conn.Close()
 			<-pingDone
 			return nil
 		default:
 		}
 		if err := conn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			<-pingDone
 			return err
 		}
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			<-pingDone
 			return err
 		}

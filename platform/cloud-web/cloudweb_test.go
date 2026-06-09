@@ -76,7 +76,7 @@ func TestWebSocketIntegration(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, regRaw, err := conn.ReadMessage()
 		if err != nil {
 			return
@@ -144,7 +144,7 @@ func TestWebSocketIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Stop()
+	defer func() { _ = p.Stop() }()
 
 	received.Wait()
 	select {
@@ -212,7 +212,7 @@ func TestLongPollIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Stop()
+	defer func() { _ = p.Stop() }()
 
 	select {
 	case content := <-got:
@@ -259,7 +259,7 @@ func TestGatewayWebhook(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	defer p.Stop()
+	defer func() { _ = p.Stop() }()
 
 	gt := p.tp.(*gatewayTransport)
 	if gt.listener == nil {
@@ -276,7 +276,7 @@ func TestGatewayWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("webhook post: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}

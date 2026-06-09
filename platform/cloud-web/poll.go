@@ -105,7 +105,7 @@ func (t *pollTransport) register(ctx context.Context) (map[string]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud_web: register request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
@@ -153,7 +153,7 @@ func (t *pollTransport) pollOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return err
@@ -248,7 +248,7 @@ func (t *pollTransport) Send(ctx context.Context, msg map[string]any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("cloud_web: send HTTP %d: %s", resp.StatusCode, string(raw))
