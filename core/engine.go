@@ -9865,11 +9865,15 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 	if supportsCards(p) {
 		body := fmt.Sprintf(e.i18n.T(MsgPermCardBody), toolName, toolInput)
 		extra := func(label, color string) map[string]string {
-			return map[string]string{
+			m := map[string]string{
 				"perm_label": label,
 				"perm_color": color,
 				"perm_body":  body,
 			}
+			if e.name != "" {
+				m["perm_project"] = e.name
+			}
+			return m
 		}
 		allowBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllow), Type: "primary", Value: "perm:allow",
 			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllow), "green")}
@@ -9935,6 +9939,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 				cb.ListItemBtnExtra(desc, opt.Label, "default", answerData, map[string]string{
 					"askq_label":    opt.Label,
 					"askq_question": q.Question,
+					"askq_project":  e.name,
 				})
 			}
 			cb.Note(e.i18n.T(MsgAskQuestionNote))
