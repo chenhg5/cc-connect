@@ -58,6 +58,83 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
 }
 
+func resolveMiniMaxMediaAuth(dataDir, apiKey, baseURL, configFile, logPrefix string) (string, string) {
+	if strings.TrimSpace(apiKey) != "" {
+		return apiKey, baseURL
+	}
+	localCfg, err := config.LoadMiniMaxLocalConfig(dataDir, configFile)
+	if err != nil {
+		slog.Warn(logPrefix+": failed to load minimax local config", "error", err)
+		return "", baseURL
+	}
+	apiKey = localCfg.APIKey
+	if strings.TrimSpace(baseURL) == "" {
+		if localCfg.BaseURL != "" {
+			baseURL = localCfg.BaseURL
+		} else if localCfg.APIHost != "" {
+			baseURL = localCfg.APIHost
+		}
+	}
+	return apiKey, baseURL
+}
+
+func newCommandMediaGenerator(kind string, commandCfg config.MediaCommandConfig) *core.CommandMediaGenerator {
+	command := strings.TrimSpace(commandCfg.Command)
+	if command == "" {
+		return nil
+	}
+	gen := core.NewCommandMediaGenerator(kind, command, commandCfg.Args)
+	gen.WorkDir = commandCfg.WorkDir
+	gen.Env = append([]string(nil), commandCfg.Env...)
+	gen.Format = commandCfg.Format
+	if commandCfg.TimeoutSecs > 0 {
+		gen.Timeout = time.Duration(commandCfg.TimeoutSecs) * time.Second
+	}
+	return gen
+}
+
+func defaultOpenClawMediaCommand(kind string) config.MediaCommandConfig {
+	switch kind {
+	case "image":
+		return config.MediaCommandConfig{
+			Command: "openclaw",
+			Args:    []string{"capability", "image", "generate", "--prompt", "{{prompt}}", "--output", "{{output}}"},
+			Format:  "png",
+		}
+	case "video":
+		return config.MediaCommandConfig{
+			Command:     "openclaw",
+			Args:        []string{"capability", "video", "generate", "--prompt", "{{prompt}}", "--output", "{{output}}"},
+			Format:      "mp4",
+			TimeoutSecs: 900,
+		}
+	default:
+		return config.MediaCommandConfig{}
+	}
+}
+
+func mergeCommandMediaConfig(base, override config.MediaCommandConfig) config.MediaCommandConfig {
+	if strings.TrimSpace(override.Command) != "" {
+		base.Command = override.Command
+	}
+	if len(override.Args) > 0 {
+		base.Args = append([]string(nil), override.Args...)
+	}
+	if strings.TrimSpace(override.WorkDir) != "" {
+		base.WorkDir = override.WorkDir
+	}
+	if len(override.Env) > 0 {
+		base.Env = append([]string(nil), override.Env...)
+	}
+	if strings.TrimSpace(override.Format) != "" {
+		base.Format = override.Format
+	}
+	if override.TimeoutSecs > 0 {
+		base.TimeoutSecs = override.TimeoutSecs
+	}
+	return base
+}
+
 // logSizeSource describes where the resolved log size came from, so the
 // caller can log it and operators can audit the active setting without
 // grepping systemd/launchd definitions.
@@ -883,6 +960,151 @@ func main() {
 					return config.SaveTTSMode(mode)
 				})
 				slog.Info("tts: enabled", "provider", ttsCfg.Provider, "voice", ttsCfg.Voice, "mode", initMode)
+			}
+		}
+
+		// Wire text-to-image generation if enabled
+		if cfg.Image.Enabled {
+			imageCfg := &core.ImageGenerationCfg{
+				Enabled:      true,
+				MaxPromptLen: cfg.Image.MaxPromptLen,
+			}
+			switch strings.ToLower(strings.TrimSpace(cfg.Image.Provider)) {
+			case "openai", "openai-compatible", "openai_compatible":
+				apiKey := strings.TrimSpace(cfg.Image.OpenAI.APIKey)
+				if apiKey != "" {
+					gen := core.NewOpenAIImageGenerator(apiKey, cfg.Image.OpenAI.BaseURL, cfg.Image.OpenAI.Model, nil)
+					gen.Size = cfg.Image.OpenAI.Size
+					gen.Quality = cfg.Image.OpenAI.Quality
+					gen.ResponseFormat = cfg.Image.OpenAI.ResponseFormat
+					gen.OutputFormat = cfg.Image.OpenAI.OutputFormat
+					gen.Background = cfg.Image.OpenAI.Background
+					gen.Style = cfg.Image.OpenAI.Style
+					imageCfg.Provider = "openai"
+					imageCfg.Generator = gen
+				} else {
+					slog.Warn("image: openai provider enabled but api_key is empty")
+				}
+			case "command":
+				if gen := newCommandMediaGenerator("image", cfg.Image.Command); gen != nil {
+					imageCfg.Provider = "command"
+					imageCfg.Generator = gen
+				} else {
+					slog.Warn("image: command provider enabled but command is empty")
+				}
+			case "openclaw":
+				commandCfg := mergeCommandMediaConfig(defaultOpenClawMediaCommand("image"), cfg.Image.Command)
+				if gen := newCommandMediaGenerator("image", commandCfg); gen != nil {
+					imageCfg.Provider = "openclaw"
+					imageCfg.Generator = gen
+				} else {
+					slog.Warn("image: openclaw provider enabled but command is empty")
+				}
+			case "", "minimax":
+				apiKey, baseURL := resolveMiniMaxMediaAuth(cfg.DataDir, cfg.Image.MiniMax.APIKey, cfg.Image.MiniMax.BaseURL, cfg.Image.MiniMax.ConfigFile, "image")
+				if apiKey != "" {
+					gen := core.NewMiniMaxImageGenerator(apiKey, baseURL, cfg.Image.MiniMax.Model, nil)
+					gen.ResponseFormat = cfg.Image.MiniMax.ResponseFormat
+					gen.AspectRatio = cfg.Image.MiniMax.AspectRatio
+					gen.Width = cfg.Image.MiniMax.Width
+					gen.Height = cfg.Image.MiniMax.Height
+					gen.PromptOptimizer = cfg.Image.MiniMax.PromptOptimizer
+					imageCfg.Provider = "minimax"
+					imageCfg.Generator = gen
+				} else {
+					slog.Warn("image: minimax provider enabled but api_key is empty")
+				}
+			default:
+				slog.Warn("image: unsupported provider", "provider", cfg.Image.Provider)
+			}
+			if imageCfg.Generator != nil {
+				engine.SetImageGenerationConfig(imageCfg)
+				slog.Info("image: enabled", "provider", imageCfg.Provider)
+			}
+		}
+
+		// Wire text-to-video generation if enabled
+		if cfg.Video.Enabled {
+			videoCfg := &core.VideoGenerationCfg{
+				Enabled:      true,
+				MaxPromptLen: cfg.Video.MaxPromptLen,
+			}
+			switch strings.ToLower(strings.TrimSpace(cfg.Video.Provider)) {
+			case "", "minimax":
+				apiKey, baseURL := resolveMiniMaxMediaAuth(cfg.DataDir, cfg.Video.MiniMax.APIKey, cfg.Video.MiniMax.BaseURL, cfg.Video.MiniMax.ConfigFile, "video")
+				if apiKey != "" {
+					gen := core.NewMiniMaxVideoGenerator(apiKey, baseURL, cfg.Video.MiniMax.Model, nil)
+					gen.Duration = cfg.Video.MiniMax.Duration
+					gen.Resolution = cfg.Video.MiniMax.Resolution
+					if cfg.Video.MiniMax.PollIntervalSecs > 0 {
+						gen.PollInterval = time.Duration(cfg.Video.MiniMax.PollIntervalSecs) * time.Second
+					}
+					if cfg.Video.MiniMax.TimeoutSecs > 0 {
+						gen.Timeout = time.Duration(cfg.Video.MiniMax.TimeoutSecs) * time.Second
+					}
+					videoCfg.Provider = "minimax"
+					videoCfg.Generator = gen
+				} else {
+					slog.Warn("video: minimax provider enabled but api_key is empty")
+				}
+			case "command":
+				if gen := newCommandMediaGenerator("video", cfg.Video.Command); gen != nil {
+					videoCfg.Provider = "command"
+					videoCfg.Generator = gen
+				} else {
+					slog.Warn("video: command provider enabled but command is empty")
+				}
+			case "openclaw":
+				commandCfg := mergeCommandMediaConfig(defaultOpenClawMediaCommand("video"), cfg.Video.Command)
+				if gen := newCommandMediaGenerator("video", commandCfg); gen != nil {
+					videoCfg.Provider = "openclaw"
+					videoCfg.Generator = gen
+				} else {
+					slog.Warn("video: openclaw provider enabled but command is empty")
+				}
+			default:
+				slog.Warn("video: unsupported provider", "provider", cfg.Video.Provider)
+			}
+			if videoCfg.Generator != nil {
+				engine.SetVideoGenerationConfig(videoCfg)
+				slog.Info("video: enabled", "provider", videoCfg.Provider)
+			}
+		}
+
+		// Wire text-to-music generation if enabled
+		if cfg.Music.Enabled {
+			musicCfg := &core.MusicGenerationCfg{
+				Enabled:         true,
+				MaxPromptLen:    cfg.Music.MaxPromptLen,
+				LyricsOptimizer: cfg.Music.MiniMax.LyricsOptimizer,
+				Instrumental:    cfg.Music.MiniMax.Instrumental,
+			}
+			switch strings.ToLower(strings.TrimSpace(cfg.Music.Provider)) {
+			case "", "minimax":
+				apiKey, baseURL := resolveMiniMaxMediaAuth(cfg.DataDir, cfg.Music.MiniMax.APIKey, cfg.Music.MiniMax.BaseURL, cfg.Music.MiniMax.ConfigFile, "music")
+				if apiKey != "" {
+					gen := core.NewMiniMaxMusicGenerator(apiKey, baseURL, cfg.Music.MiniMax.Model, nil)
+					gen.SampleRate = cfg.Music.MiniMax.SampleRate
+					gen.Bitrate = cfg.Music.MiniMax.Bitrate
+					gen.Format = cfg.Music.MiniMax.Format
+					musicCfg.Provider = "minimax"
+					musicCfg.Generator = gen
+				} else {
+					slog.Warn("music: minimax provider enabled but api_key is empty")
+				}
+			case "command":
+				if gen := newCommandMediaGenerator("music", cfg.Music.Command); gen != nil {
+					musicCfg.Provider = "command"
+					musicCfg.Generator = gen
+				} else {
+					slog.Warn("music: command provider enabled but command is empty")
+				}
+			default:
+				slog.Warn("music: unsupported provider", "provider", cfg.Music.Provider)
+			}
+			if musicCfg.Generator != nil {
+				engine.SetMusicGenerationConfig(musicCfg)
+				slog.Info("music: enabled", "provider", musicCfg.Provider)
 			}
 		}
 
