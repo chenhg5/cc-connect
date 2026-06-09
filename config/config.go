@@ -99,6 +99,8 @@ type Config struct {
 	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
 	Speech             SpeechConfig            `toml:"speech"`
 	TTS                TTSConfig               `toml:"tts"`
+	Video              VideoConfig             `toml:"video"`
+	Music              MusicConfig             `toml:"music"`
 	Display            DisplayConfig           `toml:"display"`
 	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
 	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
@@ -309,6 +311,41 @@ type TTSConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"mimo"`
+}
+
+// VideoConfig configures direct text-to-video generation for cc-connect send.
+type VideoConfig struct {
+	Enabled      bool   `toml:"enabled"`
+	Provider     string `toml:"provider"`       // currently "minimax"
+	MaxPromptLen int    `toml:"max_prompt_len"` // max rune count before rejecting generation; 0 = no limit
+	MiniMax      struct {
+		APIKey           string `toml:"api_key"`
+		BaseURL          string `toml:"base_url"`
+		Model            string `toml:"model"`
+		ConfigFile       string `toml:"config_file"`        // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
+		Duration         int    `toml:"duration"`           // seconds; provider default when 0
+		Resolution       string `toml:"resolution"`         // e.g. "1080P"; provider default when empty
+		PollIntervalSecs int    `toml:"poll_interval_secs"` // default 10
+		TimeoutSecs      int    `toml:"timeout_secs"`       // default 600
+	} `toml:"minimax"`
+}
+
+// MusicConfig configures direct text-to-music generation for cc-connect send.
+type MusicConfig struct {
+	Enabled      bool   `toml:"enabled"`
+	Provider     string `toml:"provider"`       // currently "minimax"
+	MaxPromptLen int    `toml:"max_prompt_len"` // max rune count before rejecting generation; 0 = no limit
+	MiniMax      struct {
+		APIKey          string `toml:"api_key"`
+		BaseURL         string `toml:"base_url"`
+		Model           string `toml:"model"`
+		ConfigFile      string `toml:"config_file"` // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
+		SampleRate      int    `toml:"sample_rate"` // default 44100
+		Bitrate         int    `toml:"bitrate"`     // default 256000
+		Format          string `toml:"format"`      // default "mp3"
+		LyricsOptimizer bool   `toml:"lyrics_optimizer"`
+		Instrumental    bool   `toml:"instrumental"`
+	} `toml:"minimax"`
 }
 
 // TTSAgentConfig overrides global [tts] synthesis parameters for one project.

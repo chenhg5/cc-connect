@@ -736,9 +736,9 @@ Switch: `/tts always` or `/tts voice_only`
 
 ---
 
-## Image, File, and Voice Send-Back
+## Image, File, Voice, and Generated Media Send-Back
 
-When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
+When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI. If `[video]` or `[music]` is configured, the agent can generate video/music directly through the provider and send the result back as an attachment.
 
 **Currently supported platforms:**
 - Feishu
@@ -762,6 +762,7 @@ These two commands write the same cc-connect instructions. Either one is enough.
 - normal text replies should be returned normally
 - generated attachments should be sent back with `cc-connect send --image/--file`
 - requested voice messages should be sent with `cc-connect send --tts`
+- generated video/music should be sent with `cc-connect send --generate-video` or `--generate-music`
 
 If you have run setup before, run it again after upgrading so the instructions are refreshed to the latest version.
 
@@ -773,7 +774,40 @@ Add this to `config.toml` if you want to disable agent-driven attachment send-ba
 attachment_send = "off"
 ```
 
-The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
+The default is `on`. This switch is independent from the agent's `/mode` and affects `cc-connect send --image/--file` plus generated media delivery from `--generate-video/--generate-music`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
+
+### Generated video/music providers
+
+Generated media uses provider settings in `config.toml`. MiniMax is currently supported; if `api_key` is empty, cc-connect reads the same MiniMax JSON config path used by TTS (`data_dir/config/minimax.json` by default).
+
+```toml
+[video]
+enabled = true
+provider = "minimax"
+
+[video.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # default: https://api.minimaxi.com
+model = "MiniMax-Hailuo-2.3"
+duration = 6
+resolution = "1080P"
+poll_interval_secs = 10
+timeout_secs = 600
+
+[music]
+enabled = true
+provider = "minimax"
+
+[music.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # default: https://api.minimaxi.com
+model = "music-2.6"
+sample_rate = 44100
+bitrate = 256000
+format = "mp3"
+lyrics_optimizer = true
+instrumental = false
+```
 
 ### CLI examples
 
@@ -782,16 +816,21 @@ cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 cc-connect send --tts "Hello from cc-connect"
+cc-connect send --generate-video "A cinematic sunrise over Hangzhou, 6 seconds"
+cc-connect send --generate-music "Ambient synthwave, night drive" --music-instrumental
+cc-connect send --generate-music "Upbeat pop chorus about shipping code" --music-lyrics-optimizer
 ```
 
 Notes:
 - `--image` is for image attachments.
 - `--file` is for any file attachment.
 - `--tts` synthesizes text and sends the generated audio through the active TTS provider.
+- `--generate-video` and `--generate-music` use configured providers and send the generated media as file attachments.
+- `--music-lyrics` provides explicit lyrics; `--music-lyrics-optimizer` lets the provider generate lyrics from the music prompt.
 - `--message` is optional and sends a text note before the attachments.
 - `--image` and `--file` can both be repeated.
 - Absolute paths are recommended so the command does not depend on the agent's current working directory.
-- With `attachment_send = "off"`, image/file send-back is blocked but ordinary text replies still work.
+- With `attachment_send = "off"`, image/file/generated-media send-back is blocked but ordinary text replies still work.
 
 ### Typical use cases
 
@@ -799,6 +838,7 @@ Notes:
 2. The agent generates a PDF, Markdown export, log bundle, or patch file that should be delivered as an attachment.
 3. The agent wants to send a short status message together with one or more generated files.
 4. The user asks the agent to "send this as voice" without typing a slash command.
+5. The user asks the agent to generate a short video or piece of music and the matching provider is configured.
 
 ### Important notes
 

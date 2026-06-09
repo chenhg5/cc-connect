@@ -31,14 +31,19 @@ type APIServer struct {
 
 // SendRequest is the JSON body for POST /send.
 type SendRequest struct {
-	Project    string            `json:"project"`
-	SessionKey string            `json:"session_key"`
-	Message    string            `json:"message"`
-	TTSText    string            `json:"tts_text,omitempty"`
-	Images     []ImageAttachment `json:"images,omitempty"`
-	Files      []FileAttachment  `json:"files,omitempty"`
-	AtUsers    []string          `json:"at_users,omitempty"`
-	AtAll      bool              `json:"at_all,omitempty"`
+	Project              string            `json:"project"`
+	SessionKey           string            `json:"session_key"`
+	Message              string            `json:"message"`
+	TTSText              string            `json:"tts_text,omitempty"`
+	VideoPrompt          string            `json:"video_prompt,omitempty"`
+	MusicPrompt          string            `json:"music_prompt,omitempty"`
+	MusicLyrics          string            `json:"music_lyrics,omitempty"`
+	MusicInstrumental    bool              `json:"music_instrumental,omitempty"`
+	MusicLyricsOptimizer bool              `json:"music_lyrics_optimizer,omitempty"`
+	Images               []ImageAttachment `json:"images,omitempty"`
+	Files                []FileAttachment  `json:"files,omitempty"`
+	AtUsers              []string          `json:"at_users,omitempty"`
+	AtAll                bool              `json:"at_all,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -157,8 +162,8 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
+	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && strings.TrimSpace(req.VideoPrompt) == "" && strings.TrimSpace(req.MusicPrompt) == "" && len(req.Images) == 0 && len(req.Files) == 0 {
+		http.Error(w, "message, tts_text, video_prompt, music_prompt, or attachment is required", http.StatusBadRequest)
 		return
 	}
 
@@ -197,6 +202,20 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if strings.TrimSpace(req.TTSText) != "" {
 		if err := engine.SendTTSToSession(req.SessionKey, req.TTSText); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if strings.TrimSpace(req.VideoPrompt) != "" {
+		if err := engine.SendGeneratedVideoToSession(req.SessionKey, req.VideoPrompt); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if strings.TrimSpace(req.MusicPrompt) != "" {
+		if err := engine.SendGeneratedMusicToSession(req.SessionKey, req.MusicPrompt, req.MusicLyrics, req.MusicInstrumental, req.MusicLyricsOptimizer); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -86,6 +87,83 @@ func TestHandleSend_AllowsTTSTextOnly(t *testing.T) {
 	}
 	if _, format, audioCalls := platform.audioSnapshot(); audioCalls != 1 || format != "mp3" {
 		t.Fatalf("audio calls/format = %d/%q", audioCalls, format)
+	}
+}
+
+type recordingVideoGenerator struct {
+	prompt string
+	calls  int
+}
+
+func (g *recordingVideoGenerator) GenerateVideo(_ context.Context, prompt string) ([]byte, string, error) {
+	g.prompt = prompt
+	g.calls++
+	return []byte("video-bytes"), "mp4", nil
+}
+
+type recordingMusicGenerator struct {
+	prompt string
+	opts   MusicGenerationOpts
+	calls  int
+}
+
+func (g *recordingMusicGenerator) GenerateMusic(_ context.Context, prompt string, opts MusicGenerationOpts) ([]byte, string, error) {
+	g.prompt = prompt
+	g.opts = opts
+	g.calls++
+	return []byte("music-bytes"), "mp3", nil
+}
+
+func TestHandleSend_AllowsGeneratedVideoAndMusic(t *testing.T) {
+	video := &recordingVideoGenerator{}
+	music := &recordingMusicGenerator{}
+	platform := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	engine := NewEngine("test", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	engine.SetVideoGenerationConfig(&VideoGenerationCfg{Enabled: true, Provider: "minimax", Generator: video})
+	engine.SetMusicGenerationConfig(&MusicGenerationCfg{Enabled: true, Provider: "minimax", Generator: music})
+	engine.interactiveStates["session-1"] = &interactiveState{
+		platform: platform,
+		replyCtx: "reply-ctx",
+	}
+
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	body, err := json.Marshal(SendRequest{
+		Project:              "test",
+		SessionKey:           "session-1",
+		VideoPrompt:          "cinematic sunset",
+		MusicPrompt:          "ambient synthwave",
+		MusicLyrics:          "[Verse]\nhello",
+		MusicInstrumental:    true,
+		MusicLyricsOptimizer: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/send", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleSend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if video.calls != 1 || video.prompt != "cinematic sunset" {
+		t.Fatalf("video calls/prompt = %d/%q", video.calls, video.prompt)
+	}
+	if music.calls != 1 || music.prompt != "ambient synthwave" {
+		t.Fatalf("music calls/prompt = %d/%q", music.calls, music.prompt)
+	}
+	if music.opts.Lyrics != "[Verse]\nhello" || !music.opts.Instrumental || !music.opts.LyricsOptimizer {
+		t.Fatalf("music opts = %#v", music.opts)
+	}
+	if len(platform.files) != 2 {
+		t.Fatalf("sent files = %d, want 2", len(platform.files))
+	}
+	if platform.files[0].MimeType != "video/mp4" || string(platform.files[0].Data) != "video-bytes" {
+		t.Fatalf("video file = %#v", platform.files[0])
+	}
+	if platform.files[1].MimeType != "audio/mpeg" || string(platform.files[1].Data) != "music-bytes" {
+		t.Fatalf("music file = %#v", platform.files[1])
 	}
 }
 

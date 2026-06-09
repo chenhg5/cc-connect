@@ -39,10 +39,12 @@
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
-# Attachment send-back switch for `cc-connect send --image/--file`.
+# Attachment send-back switch for `cc-connect send --image/--file`
+# and generated media sent by `--generate-video/--generate-music`.
 # Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
 # `cc-connect send --message` without attachments is unaffected.
-# 附件回传开关，用于控制 `cc-connect send --image/--file`。
+# 附件回传开关，用于控制 `cc-connect send --image/--file`
+# 以及 `--generate-video/--generate-music` 生成后的媒体附件回传。
 # 它与 agent 的 /mode 独立；设为 "off" 会禁用通过 IM 回传图片/文件。
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
@@ -507,6 +509,48 @@ level = "info" # debug, info, warn, error
 # base_url = ""              # optional: default "https://api.xiaomimimo.com/v1" / 留空使用默认地址
 #                            # Token Plan 国内地址：https://token-plan-cn.xiaomimimo.com/v1
 # model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
+
+# =============================================================================
+# Generated Video and Music Send-Back / 视频与音乐生成回传
+# =============================================================================
+# Enable these sections to let agents call `cc-connect send --generate-video`
+# or `cc-connect send --generate-music` directly through configured providers.
+# The generated media is sent back as a file attachment, so `attachment_send = "off"`
+# blocks delivery before provider generation starts.
+# 启用后，Agent 可以直接调用 `cc-connect send --generate-video` 或
+# `cc-connect send --generate-music`，不需要额外 CLI/skill。生成结果作为文件附件回传，
+# 因此 `attachment_send = "off"` 会在调用 provider 前直接拒绝。
+
+# [video]
+# enabled = false
+# provider = "minimax"
+# max_prompt_len = 0          # max rune count before rejecting generation; 0 = no limit
+#
+# [video.minimax]
+# api_key = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""                    # optional: default "https://api.minimaxi.com"
+# model = "MiniMax-Hailuo-2.3"
+# config_file = ""                 # optional MiniMax JSON config path; default data_dir/config/minimax.json
+# duration = 6                     # seconds; 0 = provider default
+# resolution = "1080P"             # empty = provider default
+# poll_interval_secs = 10
+# timeout_secs = 600
+#
+# [music]
+# enabled = false
+# provider = "minimax"
+# max_prompt_len = 0          # max rune count before rejecting generation; 0 = no limit
+#
+# [music.minimax]
+# api_key = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""                    # optional: default "https://api.minimaxi.com"
+# model = "music-2.6"
+# config_file = ""                 # optional MiniMax JSON config path; default data_dir/config/minimax.json
+# sample_rate = 44100
+# bitrate = 256000
+# format = "mp3"
+# lyrics_optimizer = true          # useful for prompt-only lyric songs
+# instrumental = false
 
 # =============================================================================
 # Daemon Mode / 守护进程模式

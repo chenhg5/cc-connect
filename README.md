@@ -517,10 +517,10 @@ This refreshes the cc-connect instructions in the project memory file so the age
 You can control this feature globally in `config.toml`:
 
 ```toml
-attachment_send = "on"  # default: "on"; set to "off" to block image/file send-back
+attachment_send = "on"  # default: "on"; set to "off" to block image/file/generated-media send-back
 ```
 
-This switch is independent from the agent's `/mode`. It only controls `cc-connect send --image/--file`. Voice send-back uses the TTS config instead.
+This switch is independent from the agent's `/mode`. It controls `cc-connect send --image/--file` and generated media delivery from `--generate-video/--generate-music`. Voice send-back uses the TTS config instead.
 
 Examples:
 
@@ -529,13 +529,16 @@ cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 cc-connect send --tts "Hello from cc-connect"
+cc-connect send --generate-video "A cinematic sunrise over Hangzhou, 6 seconds"
+cc-connect send --generate-music "Ambient synthwave, night drive" --music-instrumental
 ```
 
 Notes:
 - Absolute paths are the safest option.
 - `--image` and `--file` can both be repeated.
 - `--tts` sends synthesized speech when the user asks for a voice reply.
-- `attachment_send = "off"` disables only attachment send-back; ordinary text replies still work.
+- `--generate-video` and `--generate-music` use configured `[video]` / `[music]` providers, currently MiniMax.
+- `attachment_send = "off"` disables attachment and generated-media send-back; ordinary text replies still work.
 - This command is for generated attachments, not ordinary text replies.
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)

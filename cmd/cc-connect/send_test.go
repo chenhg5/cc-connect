@@ -127,6 +127,28 @@ func TestParseSendArgs_TTSOnly(t *testing.T) {
 	}
 }
 
+func TestParseSendArgs_GeneratedMediaPrompts(t *testing.T) {
+	req, _, err := parseSendArgs([]string{
+		"--generate-video", "cinematic sunset",
+		"--generate-music", "ambient synthwave",
+		"--music-lyrics", "[Verse]\nhello",
+		"--music-instrumental",
+		"--music-lyrics-optimizer",
+	})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if req.VideoPrompt != "cinematic sunset" {
+		t.Fatalf("video prompt = %q", req.VideoPrompt)
+	}
+	if req.MusicPrompt != "ambient synthwave" || req.MusicLyrics != "[Verse]\nhello" {
+		t.Fatalf("music prompt/lyrics = %q/%q", req.MusicPrompt, req.MusicLyrics)
+	}
+	if !req.MusicInstrumental || !req.MusicLyricsOptimizer {
+		t.Fatalf("music flags = instrumental:%v optimizer:%v", req.MusicInstrumental, req.MusicLyricsOptimizer)
+	}
+}
+
 func TestParseSendArgs_AudioRejectsNonAudio(t *testing.T) {
 	dir := t.TempDir()
 	docPath := filepath.Join(dir, "report.txt")

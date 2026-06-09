@@ -103,6 +103,28 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			req.TTSText = args[i]
+		case "--generate-video":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--generate-video requires a prompt")
+			}
+			i++
+			req.VideoPrompt = args[i]
+		case "--generate-music":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--generate-music requires a prompt")
+			}
+			i++
+			req.MusicPrompt = args[i]
+		case "--music-lyrics":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--music-lyrics requires a value")
+			}
+			i++
+			req.MusicLyrics = args[i]
+		case "--music-instrumental":
+			req.MusicInstrumental = true
+		case "--music-lyrics-optimizer":
+			req.MusicLyricsOptimizer = true
 		case "--image":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--image requires a path")
@@ -192,8 +214,8 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	req.Files = append(files, audioFiles...)
 	req.Files = append(req.Files, videoFiles...)
 
-	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		return req, "", fmt.Errorf("message, tts text, or attachment is required")
+	if req.Message == "" && req.TTSText == "" && req.VideoPrompt == "" && req.MusicPrompt == "" && len(req.Images) == 0 && len(req.Files) == 0 {
+		return req, "", fmt.Errorf("message, tts text, generated media prompt, or attachment is required")
 	}
 
 	return req, dataDir, nil
@@ -335,9 +357,11 @@ func printSendUsage() {
        cc-connect send [options] --audio <path>
        cc-connect send [options] --video <path>
        cc-connect send [options] --tts <text>
+       cc-connect send [options] --generate-video <prompt>
+       cc-connect send [options] --generate-music <prompt>
        echo "msg" | cc-connect send [options] --stdin
 
-Send a message, attachment, or synthesized voice message to an active cc-connect session.
+Send a message, attachment, synthesized voice message, or generated media to an active cc-connect session.
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
@@ -347,6 +371,12 @@ Options:
       --audio <path>       Send an audio attachment (repeatable)
       --video <path>       Send a video attachment (repeatable)
       --stdin              Read message from stdin (best for long/special-char messages)
+      --generate-video <p> Generate a video via configured [video] provider and send it
+      --generate-music <p> Generate music via configured [music] provider and send it
+      --music-lyrics <txt> Lyrics for --generate-music
+      --music-instrumental Generate instrumental music
+      --music-lyrics-optimizer
+                           Let provider generate lyrics from the music prompt
       --at-users <ids>     @ user IDs, comma-separated (DingTalk)
       --at-all             @ everyone (DingTalk)
   -p, --project <name>     Target project (optional if only one project)
@@ -362,6 +392,8 @@ Examples:
   cc-connect send --video /tmp/demo.mp4
   cc-connect send --audio /tmp/voice.opus
   cc-connect send --tts "Hello from cc-connect"
+  cc-connect send --generate-video "A cinematic sunrise over Hangzhou, 6 seconds"
+  cc-connect send --generate-music "Ambient synthwave, night drive" --music-instrumental
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)

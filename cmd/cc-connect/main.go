@@ -52,6 +52,26 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
 }
 
+func resolveMiniMaxMediaAuth(dataDir, apiKey, baseURL, configFile, logPrefix string) (string, string) {
+	if strings.TrimSpace(apiKey) != "" {
+		return apiKey, baseURL
+	}
+	localCfg, err := config.LoadMiniMaxLocalConfig(dataDir, configFile)
+	if err != nil {
+		slog.Warn(logPrefix+": failed to load minimax local config", "error", err)
+		return "", baseURL
+	}
+	apiKey = localCfg.APIKey
+	if strings.TrimSpace(baseURL) == "" {
+		if localCfg.BaseURL != "" {
+			baseURL = localCfg.BaseURL
+		} else if localCfg.APIHost != "" {
+			baseURL = localCfg.APIHost
+		}
+	}
+	return apiKey, baseURL
+}
+
 // logSizeSource describes where the resolved log size came from, so the
 // caller can log it and operators can audit the active setting without
 // grepping systemd/launchd definitions.
@@ -794,6 +814,69 @@ func main() {
 					return config.SaveTTSMode(mode)
 				})
 				slog.Info("tts: enabled", "provider", ttsCfg.Provider, "voice", ttsCfg.Voice, "mode", initMode)
+			}
+		}
+
+		// Wire text-to-video generation if enabled
+		if cfg.Video.Enabled {
+			videoCfg := &core.VideoGenerationCfg{
+				Enabled:      true,
+				MaxPromptLen: cfg.Video.MaxPromptLen,
+			}
+			switch strings.TrimSpace(cfg.Video.Provider) {
+			case "", "minimax":
+				apiKey, baseURL := resolveMiniMaxMediaAuth(cfg.DataDir, cfg.Video.MiniMax.APIKey, cfg.Video.MiniMax.BaseURL, cfg.Video.MiniMax.ConfigFile, "video")
+				if apiKey != "" {
+					gen := core.NewMiniMaxVideoGenerator(apiKey, baseURL, cfg.Video.MiniMax.Model, nil)
+					gen.Duration = cfg.Video.MiniMax.Duration
+					gen.Resolution = cfg.Video.MiniMax.Resolution
+					if cfg.Video.MiniMax.PollIntervalSecs > 0 {
+						gen.PollInterval = time.Duration(cfg.Video.MiniMax.PollIntervalSecs) * time.Second
+					}
+					if cfg.Video.MiniMax.TimeoutSecs > 0 {
+						gen.Timeout = time.Duration(cfg.Video.MiniMax.TimeoutSecs) * time.Second
+					}
+					videoCfg.Provider = "minimax"
+					videoCfg.Generator = gen
+				} else {
+					slog.Warn("video: minimax provider enabled but api_key is empty")
+				}
+			default:
+				slog.Warn("video: unsupported provider", "provider", cfg.Video.Provider)
+			}
+			if videoCfg.Generator != nil {
+				engine.SetVideoGenerationConfig(videoCfg)
+				slog.Info("video: enabled", "provider", videoCfg.Provider)
+			}
+		}
+
+		// Wire text-to-music generation if enabled
+		if cfg.Music.Enabled {
+			musicCfg := &core.MusicGenerationCfg{
+				Enabled:         true,
+				MaxPromptLen:    cfg.Music.MaxPromptLen,
+				LyricsOptimizer: cfg.Music.MiniMax.LyricsOptimizer,
+				Instrumental:    cfg.Music.MiniMax.Instrumental,
+			}
+			switch strings.TrimSpace(cfg.Music.Provider) {
+			case "", "minimax":
+				apiKey, baseURL := resolveMiniMaxMediaAuth(cfg.DataDir, cfg.Music.MiniMax.APIKey, cfg.Music.MiniMax.BaseURL, cfg.Music.MiniMax.ConfigFile, "music")
+				if apiKey != "" {
+					gen := core.NewMiniMaxMusicGenerator(apiKey, baseURL, cfg.Music.MiniMax.Model, nil)
+					gen.SampleRate = cfg.Music.MiniMax.SampleRate
+					gen.Bitrate = cfg.Music.MiniMax.Bitrate
+					gen.Format = cfg.Music.MiniMax.Format
+					musicCfg.Provider = "minimax"
+					musicCfg.Generator = gen
+				} else {
+					slog.Warn("music: minimax provider enabled but api_key is empty")
+				}
+			default:
+				slog.Warn("music: unsupported provider", "provider", cfg.Music.Provider)
+			}
+			if musicCfg.Generator != nil {
+				engine.SetMusicGenerationConfig(musicCfg)
+				slog.Info("music: enabled", "provider", musicCfg.Provider)
 			}
 		}
 

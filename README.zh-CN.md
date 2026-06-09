@@ -505,10 +505,10 @@ cc-connect doctor user-isolation
 你也可以在 `config.toml` 里全局控制这项能力：
 
 ```toml
-attachment_send = "on"  # 默认 "on"；设为 "off" 会禁用图片/文件回传
+attachment_send = "on"  # 默认 "on"；设为 "off" 会禁用图片/文件/生成媒体回传
 ```
 
-这个开关与 agent 的 `/mode` 独立，只控制 `cc-connect send --image/--file` 这条附件回传路径。语音回传走 TTS 配置。
+这个开关与 agent 的 `/mode` 独立，控制 `cc-connect send --image/--file` 以及 `--generate-video/--generate-music` 生成媒体回传。语音回传走 TTS 配置。
 
 回传方式：
 
@@ -517,13 +517,16 @@ cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 cc-connect send --tts "你好"
+cc-connect send --generate-video "杭州日出的电影感镜头，6 秒"
+cc-connect send --generate-music "夜间驾驶氛围 synthwave" --music-instrumental
 ```
 
 要点：
 - 使用绝对路径最稳妥。
 - `--image` 和 `--file` 都可以重复传多个。
 - `--tts` 用当前 TTS provider 合成并发送语音，适合用户自然要求“发语音”的场景。
-- `attachment_send = "off"` 只会关闭附件回传，普通文本回复仍然正常。
+- `--generate-video` 和 `--generate-music` 使用已配置的 `[video]` / `[music]` provider，目前支持 MiniMax。
+- `attachment_send = "off"` 会关闭附件和生成媒体回传，普通文本回复仍然正常。
 - 这个命令是给“生成后的附件回传”用的，不是给普通文本回复用的。
 
 📖 **完整文档：** [docs/usage.zh-CN.md](docs/usage.zh-CN.md)

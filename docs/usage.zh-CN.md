@@ -649,9 +649,9 @@ speed = 0.96
 
 ---
 
-## 图片、文件与语音回传
+## 图片、文件、语音和生成媒体回传
 
-当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。
+当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。如果配置了 `[video]` 或 `[music]`，Agent 还可以直接通过 provider 生成视频/音乐，并把结果作为附件回传。
 
 **当前支持平台：**
 - 飞书
@@ -675,6 +675,7 @@ speed = 0.96
 - 普通文本回复直接正常输出
 - 生成附件后用 `cc-connect send --image/--file` 回传
 - 用户要求语音时用 `cc-connect send --tts` 回传
+- 生成视频/音乐时用 `cc-connect send --generate-video` 或 `--generate-music` 回传
 
 如果你以前已经执行过 setup，也建议升级后重新执行一次，以刷新到最新指令。
 
@@ -686,7 +687,40 @@ speed = 0.96
 attachment_send = "off"
 ```
 
-默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。TTS 语音回传走 `[tts]` provider 配置，由 TTS 是否可用决定。
+默认值是 `on`。这个开关与 agent 的 `/mode` 独立，影响 `cc-connect send --image/--file` 以及 `--generate-video/--generate-music` 生成媒体回传。TTS 语音回传走 `[tts]` provider 配置，由 TTS 是否可用决定。
+
+### 生成视频/音乐 provider
+
+生成媒体使用 `config.toml` 里的 provider 配置。目前支持 MiniMax；如果 `api_key` 留空，cc-connect 会读取与 TTS 相同的 MiniMax JSON 配置路径（默认 `data_dir/config/minimax.json`）。
+
+```toml
+[video]
+enabled = true
+provider = "minimax"
+
+[video.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # 默认：https://api.minimaxi.com
+model = "MiniMax-Hailuo-2.3"
+duration = 6
+resolution = "1080P"
+poll_interval_secs = 10
+timeout_secs = 600
+
+[music]
+enabled = true
+provider = "minimax"
+
+[music.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # 默认：https://api.minimaxi.com
+model = "music-2.6"
+sample_rate = 44100
+bitrate = 256000
+format = "mp3"
+lyrics_optimizer = true
+instrumental = false
+```
 
 ### CLI 用法
 
@@ -695,16 +729,21 @@ cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 cc-connect send --tts "你好"
+cc-connect send --generate-video "杭州日出的电影感镜头，6 秒"
+cc-connect send --generate-music "夜间驾驶氛围 synthwave" --music-instrumental
+cc-connect send --generate-music "关于发布代码的轻快流行副歌" --music-lyrics-optimizer
 ```
 
 说明：
 - `--image` 用于图片附件。
 - `--file` 用于任意文件附件。
 - `--tts` 会合成文本并通过当前 TTS provider 发送语音。
+- `--generate-video` 和 `--generate-music` 使用已配置 provider 生成媒体，并以文件附件回传。
+- `--music-lyrics` 提供明确歌词；`--music-lyrics-optimizer` 让 provider 根据音乐 prompt 生成歌词。
 - `--message` 可选，用于先发一段说明文字，再发附件。
 - `--image` 和 `--file` 都可以重复多次。
 - 建议使用绝对路径，避免 Agent 当前工作目录变化导致找不到文件。
-- 如果设置了 `attachment_send = "off"`，图片/文件回传会被拒绝，但普通文本回复仍然正常。
+- 如果设置了 `attachment_send = "off"`，图片/文件/生成媒体回传会被拒绝，但普通文本回复仍然正常。
 
 ### 典型场景
 
@@ -712,10 +751,11 @@ cc-connect send --tts "你好"
 2. Agent 生成了 PDF、Markdown 导出、日志包或补丁文件，需要作为附件交付。
 3. Agent 想告诉用户“结果已生成”，同时附上一个或多个文件。
 4. 用户自然说“发句 xx 的语音”，不想手输 slash 命令。
+5. 用户要求生成一段短视频或音乐，且对应 provider 已配置。
 
 ### 注意事项
 
-- 这个命令是给“附件和语音回传”用的，不要拿它代替普通文本回复。
+- 这个命令是给“附件、生成媒体和语音回传”用的，不要拿它代替普通文本回复。
 - 只能发送本机上 Agent 可访问到的文件。
 - 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
 - 平台本身仍可能有文件大小或文件类型限制。

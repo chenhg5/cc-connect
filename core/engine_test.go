@@ -796,6 +796,30 @@ func TestEngineSendToSessionWithAttachments_DisabledByConfig(t *testing.T) {
 	}
 }
 
+func TestEngineSendGeneratedMedia_DisabledByConfigSkipsProviders(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAttachmentSendEnabled(false)
+	video := &recordingVideoGenerator{}
+	music := &recordingMusicGenerator{}
+	e.SetVideoGenerationConfig(&VideoGenerationCfg{Enabled: true, Provider: "minimax", Generator: video})
+	e.SetMusicGenerationConfig(&MusicGenerationCfg{Enabled: true, Provider: "minimax", Generator: music})
+	e.interactiveStates["session-1"] = &interactiveState{
+		platform: p,
+		replyCtx: "ctx-1",
+	}
+
+	if err := e.SendGeneratedVideoToSession("session-1", "cinematic sunset"); !errors.Is(err, ErrAttachmentSendDisabled) {
+		t.Fatalf("video err = %v, want ErrAttachmentSendDisabled", err)
+	}
+	if err := e.SendGeneratedMusicToSession("session-1", "ambient synthwave", "", false, false); !errors.Is(err, ErrAttachmentSendDisabled) {
+		t.Fatalf("music err = %v, want ErrAttachmentSendDisabled", err)
+	}
+	if video.calls != 0 || music.calls != 0 {
+		t.Fatalf("provider calls = video:%d music:%d, want both 0", video.calls, music.calls)
+	}
+}
+
 func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -2195,6 +2219,12 @@ func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "cc-connect send --tts") {
 		t.Fatalf("prompt missing tts send instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "cc-connect send --generate-video") {
+		t.Fatalf("prompt missing generated video instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "cc-connect send --generate-music") {
+		t.Fatalf("prompt missing generated music instructions: %q", prompt)
 	}
 	if !strings.Contains(prompt, "NO_REPLY") {
 		t.Fatalf("prompt missing silent reply guidance for voice tool: %q", prompt)
@@ -7237,6 +7267,9 @@ func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "cc-connect send --image") {
 		t.Fatalf("expected refreshed attachment instructions, got %q", string(content))
+	}
+	if !strings.Contains(string(content), "cc-connect send --generate-video") {
+		t.Fatalf("expected refreshed generated media instructions, got %q", string(content))
 	}
 }
 
