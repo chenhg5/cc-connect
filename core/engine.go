@@ -2350,6 +2350,22 @@ func (e *Engine) isStaleUserMessageLocked(state *interactiveState, timeMs int64)
 	return wm > 0 && timeMs < wm
 }
 
+// isQueuedUserMessageStaleForDrainLocked reports whether a queued message is
+// older than an already processed or currently in-flight turn. It intentionally
+// ignores other queued messages so a FIFO queue with increasing create_time
+// does not drop earlier queued messages just because later queued messages
+// have already been accepted.
+func (e *Engine) isQueuedUserMessageStaleForDrainLocked(state *interactiveState, timeMs int64) bool {
+	if timeMs <= 0 {
+		return false
+	}
+	wm := state.lastCompletedUserMessageTimeMs
+	if state.currentTurnUserMessageTimeMs > wm {
+		wm = state.currentTurnUserMessageTimeMs
+	}
+	return wm > 0 && timeMs < wm
+}
+
 // noteUserTurnCompleted advances lastCompletedUserMessageTimeMs after an
 // agent turn ends with EventResult.
 func (e *Engine) noteUserTurnCompleted(state *interactiveState) {
@@ -5352,7 +5368,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// for the next turn instead of returning.
 			state.mu.Lock()
 			droppedStale := 0
-			for len(state.pendingMessages) > 0 && e.isStaleUserMessageLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
 				state.pendingMessages = state.pendingMessages[1:]
 				droppedStale++
 			}
@@ -5682,7 +5698,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return true
 		}
 		droppedStale := 0
-		for len(state.pendingMessages) > 0 && e.isStaleUserMessageLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+		for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
 			state.pendingMessages = state.pendingMessages[1:]
 			droppedStale++
 		}
