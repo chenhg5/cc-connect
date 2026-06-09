@@ -88,8 +88,9 @@ type reasonixSession struct {
 	readLoopDone chan struct{}
 
 	// Turn synchronization
-	turnDone chan struct{} // signaled when turn_done event received, creates if nil
-	errTurn  error        // error from turn_done, read after turnDone
+	turnDone      chan struct{} // signaled when turn_done event received
+	errTurn       error        // error from turn_done, read after turnDone
+	inTurn        atomic.Bool  // true while a turn is in progress
 
 	// Pending approval tracking
 	pendingApprovalID string
@@ -159,8 +160,10 @@ func (s *reasonixSession) Send(prompt string, images []core.ImageAttachment, fil
 	}
 
 	// Submit to reasonix
+	s.inTurn.Store(true)
 	body := map[string]string{"input": prompt}
 	if err := s.httpPost("/submit", body); err != nil {
+		s.inTurn.Store(false)
 		return fmt.Errorf("reasonix: submit: %w", err)
 	}
 
@@ -210,36 +213,78 @@ func (s *reasonixSession) Close() error {
 
 // ── SSE read loop ────────────────────────────────────────────────
 
+// readLoop maintains a persistent SSE connection to reasonix serve.
+// If the connection drops, it automatically retries with exponential backoff.
 func (s *reasonixSession) readLoop(ctx context.Context) {
 	defer close(s.readLoopDone)
-	defer s.alive.Store(false)
 
-	// Connect to SSE stream
-	req, err := http.NewRequestWithContext(ctx, "GET", s.serveURL+"/events", nil)
-	if err != nil {
-		slog.Error("reasonix: create SSE request failed", "error", err)
-		return
-	}
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
 
-	resp, err := s.sseClient.Do(req)
-	if err != nil {
-		slog.Error("reasonix: SSE connect failed", "error", err)
-		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("SSE connect: %w", err)})
-		return
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Warn("reasonix: SSE close body", "error", err)
+	for {
+		select {
+		case <-ctx.Done():
+			s.alive.Store(false)
+			return
+		default:
 		}
-	}()
 
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("reasonix: SSE unexpected status", "status", resp.StatusCode)
-		return
+		req, err := http.NewRequestWithContext(ctx, "GET", s.serveURL+"/events", nil)
+		if err != nil {
+			slog.Error("reasonix: create SSE request failed", "error", err)
+			return
+		}
+
+		resp, err := s.sseClient.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				s.alive.Store(false)
+				return
+			}
+			slog.Warn("reasonix: SSE connect failed, retrying", "error", err, "backoff", backoff)
+			s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("SSE connect: %w (reconnecting)", err)})
+			goto retryWait
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			slog.Warn("reasonix: SSE unexpected status, retrying", "status", resp.StatusCode, "backoff", backoff)
+			goto retryWait
+		}
+
+		slog.Info("reasonix: SSE connected")
+		s.alive.Store(true)
+		backoff = 1 * time.Second // reset on successful connection
+		s.readSSE(ctx, resp.Body)
+		_ = resp.Body.Close()
+
+		// Connection dropped; if context is still alive, reconnect
+		if ctx.Err() != nil {
+			s.alive.Store(false)
+			return
+		}
+		// If a turn is in progress, unblock Send() with a reconnect error
+		if s.inTurn.Load() {
+			s.mu.Lock()
+			s.errTurn = fmt.Errorf("reasonix: SSE disconnected during turn")
+			s.mu.Unlock()
+			s.emit(core.Event{Type: core.EventResult, Done: true, Error: fmt.Errorf("SSE disconnected, reconnecting")})
+			s.inTurn.Store(false)
+			s.turnDone <- struct{}{}
+		}
+		slog.Warn("reasonix: SSE connection lost, reconnecting", "backoff", backoff)
+
+	retryWait:
+		select {
+		case <-ctx.Done():
+			s.alive.Store(false)
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+		}
 	}
-
-	slog.Info("reasonix: SSE connected")
-	s.readSSE(ctx, resp.Body)
 }
 
 func (s *reasonixSession) readSSE(ctx context.Context, r io.Reader) {
@@ -362,6 +407,7 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 
 	case "turn_done":
 		s.flushThinking()
+		s.inTurn.Store(false)
 		s.mu.Lock()
 		if we.Err != "" {
 			s.errTurn = fmt.Errorf("%s", we.Err)
