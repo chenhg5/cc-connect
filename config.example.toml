@@ -1291,6 +1291,36 @@ app_secret = "your-feishu-app-secret"
 # token_endpoint = ""              # Optional: override token endpoint / 可选：自定义 token 接口地址
 # ws_endpoint = ""                 # Optional: override WebSocket endpoint / 可选：自定义 WebSocket 地址
 
+# Cloud Web / 自建 IM Gateway (uncomment to enable / 取消注释以启用)
+# Connect cc-connect to your self-hosted IM gateway using CWIP protocol.
+# 通过 CWIP 协议将 cc-connect 接入自建 IM Gateway。
+# transport: "websocket" | "long_poll" | "gateway"
+
+# [[projects.platforms]]
+# type = "cloud_web"
+#
+# [projects.platforms.options]
+# transport = "websocket"
+# token = "your-shared-secret"
+# base_url = "https://gateway.example.com"
+# allow_from = "*"
+# share_session_in_channel = false
+# group_reply_all = false
+#
+# # websocket mode
+# ws_url = "wss://gateway.example.com/cloud-web/ws"
+#
+# # long_poll mode (set transport = "long_poll")
+# # long_poll_timeout_ms = 30000
+# # events_path = "/cloud-web/v1/events"
+# # send_path = "/cloud-web/v1/send"
+#
+# # gateway mode (set transport = "gateway")
+# # listen = ":8099"
+# # webhook_path = "/cloud-web/webhook"
+# # public_url = "https://your-public-host/cloud-web/webhook"
+# # register_url = "https://gateway.example.com/cloud-web/v1/register"
+
 # WeChat Work / 企业微信 (uncomment to enable / 取消注释以启用)
 # 1. Log in to https://work.weixin.qq.com/wework_admin/frame
 #    登录企业微信管理后台

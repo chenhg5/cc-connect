@@ -25,7 +25,8 @@ CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemin
 │  ├── acp/            │  ├── qq/                 │
 │  └── qoder/          │  ├── qqbot/              │
 │                      │  ├── line/               │
-│                      │  └── weibo/              │
+│                      │  ├── weibo/              │
+│                      │  └── cloud-web/          │
 ├──────────────────────┴──────────────────────────┤
 │                     daemon/                     │  ← systemd/launchd service
 └─────────────────────────────────────────────────┘

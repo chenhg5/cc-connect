@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, ChevronDown, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui';
 import { addPlatformToProject } from '@/api/projects';
+import { validateCloudWebForm } from '@/lib/cloudWebFormValidation';
 import { platformMeta, type FieldDef } from '@/lib/platformMeta';
 import { cn } from '@/lib/utils';
 
@@ -18,7 +19,12 @@ interface Props {
 export default function PlatformManualForm({ platformType, projectName, workDir, agentType, onComplete, onCancel }: Props) {
   const { t } = useTranslation();
   const meta = platformMeta[platformType];
-  const [values, setValues] = useState<Record<string, any>>({});
+  const [values, setValues] = useState<Record<string, any>>(() => {
+    if (platformType === 'cloud_web') {
+      return { transport: 'websocket' };
+    }
+    return {};
+  });
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -31,14 +37,36 @@ export default function PlatformManualForm({ platformType, projectName, workDir,
     );
   }
 
-  const basicFields = meta.fields.filter(f => f.group !== 'advanced');
-  const advancedFields = meta.fields.filter(f => f.group === 'advanced');
+  function fieldVisible(f: FieldDef): boolean {
+    if (!f.showWhen) return true;
+    for (const [depKey, allowed] of Object.entries(f.showWhen)) {
+      const current = String(values[depKey] ?? '');
+      if (!allowed.includes(current)) return false;
+    }
+    return true;
+  }
+
+  function visibleFields(fields: FieldDef[]) {
+    return fields.filter(fieldVisible);
+  }
+
+  const basicFields = visibleFields(meta.fields.filter(f => f.group !== 'advanced'));
+  const advancedFields = visibleFields(meta.fields.filter(f => f.group === 'advanced'));
 
   const handleSave = async () => {
-    const missing = meta.fields.filter(f => f.required && !values[f.key]);
+    const missing = meta.fields.filter(f => fieldVisible(f) && f.required && !values[f.key]);
     if (missing.length > 0) {
       setError(missing.map(f => t(f.labelKey)).join(', ') + ' required');
       return;
+    }
+
+    if (platformType === 'cloud_web') {
+      const issue = validateCloudWebForm(values);
+      if (issue) {
+        const field = issue.fieldLabelKey ? t(issue.fieldLabelKey) : undefined;
+        setError(t(issue.messageKey, field ? { field } : undefined));
+        return;
+      }
     }
 
     setSaving(true);
@@ -46,6 +74,7 @@ export default function PlatformManualForm({ platformType, projectName, workDir,
     try {
       const opts: Record<string, any> = {};
       for (const f of meta.fields) {
+        if (!fieldVisible(f)) continue;
         const v = values[f.key];
         if (v !== undefined && v !== '' && v !== false) {
           opts[f.key] = v;
@@ -104,6 +133,26 @@ function FieldInput({ field, value, onChange, t }: { field: FieldDef; value: any
   const [showPwd, setShowPwd] = useState(false);
   const label = t(field.labelKey);
   const hint = field.hintKey ? t(field.hintKey) : undefined;
+
+  if (field.type === 'select' && field.options?.length) {
+    return (
+      <div>
+        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+          {label} {field.required && <span className="text-red-400">*</span>}
+        </label>
+        <select
+          value={value || field.options[0]}
+          onChange={e => onChange(e.target.value)}
+          className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
+        >
+          {field.options.map(opt => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+        {hint && <p className="text-[11px] text-gray-400 mt-1">{hint}</p>}
+      </div>
+    );
+  }
 
   if (field.type === 'boolean') {
     return (
