@@ -227,7 +227,11 @@ func (s *reasonixSession) readLoop(ctx context.Context) {
 		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("SSE connect: %w", err)})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("reasonix: SSE close body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("reasonix: SSE unexpected status", "status", resp.StatusCode)
@@ -425,7 +429,11 @@ func (s *reasonixSession) httpPost(path string, body any) error {
 	if err != nil {
 		return fmt.Errorf("reasonix: POST %s: %w", path, err)
 	}
-	resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("reasonix: POST close body", "path", path, "error", err)
+		}
+	}()
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("reasonix: POST %s returned %d", path, resp.StatusCode)
