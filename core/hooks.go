@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -170,7 +171,12 @@ func (hm *HookManager) executeCommand(h *HookConfig, event HookEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", h.Command)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", h.Command)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", h.Command)
+	}
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = append(os.Environ(), eventToEnv(event)...)
 
