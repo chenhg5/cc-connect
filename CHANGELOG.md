@@ -10,6 +10,7 @@ The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `
 
 ### New Features
 - **`max_turn_time_mins`**: new config option — absolute wall-clock cap per agent turn that does NOT reset on tool-call events. Prevents long-running bash commands from permanently locking the session (#1091). Uses a two-phase shutdown: soft stop (10s grace) then force-kill. Session is preserved and resumed via `--resume` on the next message.
+- **Continue terminal Claude Code sessions from IM** (`/attach`, `/resume-latest`, `/detach`): when you were chatting with `claude` in a local terminal and want to continue from Feishu/Telegram/etc, these privileged commands explicitly bind an external Claude Code session to the current IM thread. With v1.3.2's `filter_external_sessions` defaulting off, `/list`/`/switch` already surface external jsonls — what `/attach` adds beyond plain switching is (1) a 30-second concurrent-write guard that refuses to adopt a jsonl a terminal `claude` may still be writing (`--force` overrides), (2) a 5-message history preview before binding, and (3) a symmetric `/detach` that stops the live subprocess via `stopInteractiveSession`, clears the agent binding, and prints the exact `claude --resume <uuid>` command to paste in a terminal. Pair with `reset_on_idle_mins` as an automatic safety net. Full i18n coverage (en/zh/zh-TW/ja/es). (#666)
 
 ### Fixed
 - **Web console 404 regression**: `make release-all` did not depend on `make web`, so release binaries were built without frontend assets when `web/dist/` was empty (gitignored). All routes on the management port returned `404`. Fixed by adding `web` as a prerequisite of `release-all` (#1136)
@@ -132,7 +133,6 @@ Patch release with critical bug fixes for session management, config preservatio
 - **Weibo image & file support**: send and receive images and files in Weibo DMs via base64 encoding within the WebSocket `send_message` payload. Implements `ImageSender` and `FileSender` interfaces.
 - **Comprehensive session tests**: 12 new `SessionManager` unit tests covering `PastAgentSessionIDs`, legacy data migration, and version-based schema detection. 9 new `Engine` integration tests covering `/list` visibility across `/new`, provider switch, and real-world legacy data scenarios, plus end-to-end session name mapping tests for all three agent ID patterns (immediate, EventText, EventResult).
 - **Config preservation tests**: 8 new tests verifying comment and field preservation for `SaveActiveProvider`, `SaveAgentModel`, `SaveProviderModel`, `SaveLanguage`, `SaveDisplayConfig`, `SaveTTSMode`, multi-project config, and global provider refs.
-
 ## v1.3.0 (2026-04-19)
 
 First stable release of the 1.3 series. 555 commits since v1.2.1 with major new features, platform improvements, and broad community contributions.
@@ -203,7 +203,6 @@ Thanks to all contributors who made this release possible:
 - [@sidney061212-ai](https://github.com/sidney061212-ai) — Agent session ID persistence
 - [@zkunzhu](https://github.com/zkunzhu) — Daemon proxy env preservation
 - [@Yuri0314](https://github.com/Yuri0314) — TTS language type fix
-
 ## v1.2.2-beta.5 (2026-03-31)
 
 Beta release with embedded web admin, Discord proxy support, multimodal fixes, and major platform improvements.
