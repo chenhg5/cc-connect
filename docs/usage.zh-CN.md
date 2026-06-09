@@ -649,9 +649,9 @@ speed = 0.96
 
 ---
 
-## 图片、文件与语音回传
+## 图片、文件、语音和生成媒体回传
 
-当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。
+当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。如果配置了 `[image]`、`[video]` 或 `[music]`，Agent 还可以直接通过 provider 生成图片/视频/音乐，并把结果作为附件回传。
 
 **当前支持平台：**
 - 飞书
@@ -675,6 +675,7 @@ speed = 0.96
 - 普通文本回复直接正常输出
 - 生成附件后用 `cc-connect send --image/--file` 回传
 - 用户要求语音时用 `cc-connect send --tts` 回传
+- 生成图片/视频/音乐时用 `cc-connect send --generate-image`、`--generate-video` 或 `--generate-music` 回传
 
 如果你以前已经执行过 setup，也建议升级后重新执行一次，以刷新到最新指令。
 
@@ -686,7 +687,89 @@ speed = 0.96
 attachment_send = "off"
 ```
 
-默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。TTS 语音回传走 `[tts]` provider 配置，由 TTS 是否可用决定。
+默认值是 `on`。这个开关与 agent 的 `/mode` 独立，影响 `cc-connect send --image/--file` 以及 `--generate-image/--generate-video/--generate-music` 生成媒体回传。TTS 语音回传走 `[tts]` provider 配置，由 TTS 是否可用决定。
+
+### 生成图片/视频/音乐 provider
+
+生成媒体使用 `config.toml` 里的 provider 配置。图片生成支持 OpenAI-compatible 图片接口、MiniMax 和 command adapter。视频生成支持 MiniMax，也支持 command/OpenClaw adapter，所以 Seedance 这类 provider-specific 模型可以通过 OpenClaw 或其他 CLI 暴露出来。音乐生成支持 MiniMax，也支持 command wrapper，可以接 Suno 或其他音乐生成 API。
+
+command adapter 会直接执行配置里的命令，不经过 shell。参数里可以使用 `{{prompt}}`、`{{output}}`、`{{format}}`；音乐命令还可以使用 `{{lyrics}}` 和 `{{instrumental}}`。如果 args 里出现 `{{output}}`，cc-connect 会在命令结束后读取这个文件；否则把 stdout 当成生成媒体字节。
+
+Anthropic API key 不会被当成这里的原生媒体生成 provider。Anthropic 公开 API 支持图片输入和视觉理解，但不是图片/视频/音乐生成接口。
+
+如果 MiniMax `api_key` 留空，cc-connect 会读取与 TTS 相同的 MiniMax JSON 配置路径（默认 `data_dir/config/minimax.json`）。
+
+```toml
+[image]
+enabled = true
+provider = "openai"          # "openai"（OpenAI-compatible）、"minimax"、"command" 或 "openclaw"
+
+[image.openai]
+api_key = "${OPENAI_API_KEY}"
+base_url = ""                # 默认：https://api.openai.com/v1；也可以指向 OpenAI-compatible /v1 endpoint
+model = "gpt-image-1"
+size = ""                    # 例如 "1024x1024"；留空使用 provider/model 默认值
+quality = ""                 # 例如 "auto", "high", "medium", "low", "standard", "hd"
+response_format = ""         # DALL-E-compatible provider 可用 "b64_json" 或 "url"；GPT image model 留空
+output_format = ""           # GPT image model 可用 "png", "jpeg", "webp"
+background = ""              # 支持的 GPT image model 可用 "transparent", "opaque", "auto"
+style = ""                   # DALL-E 3 可用 "vivid" 或 "natural"
+
+[image.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # 默认：https://api.minimaxi.com
+model = "image-01"
+response_format = "base64" # "base64"（默认）或 "url"
+aspect_ratio = ""          # 例如 "1:1" 或 "16:9"；留空使用 provider 默认值
+width = 0                  # 可选自定义宽度；需要与 height 一起设置
+height = 0                 # 可选自定义高度；需要与 width 一起设置
+prompt_optimizer = false
+
+[image.command]
+command = "openclaw"
+args = ["capability", "image", "generate", "--prompt", "{{prompt}}", "--output", "{{output}}"]
+format = "png"
+timeout_secs = 600
+
+[video]
+enabled = true
+provider = "openclaw"        # "minimax"、"command" 或 "openclaw"
+
+[video.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # 默认：https://api.minimaxi.com
+model = "MiniMax-Hailuo-2.3"
+duration = 6
+resolution = "1080P"
+poll_interval_secs = 10
+timeout_secs = 600
+
+[video.command]
+command = "openclaw"
+args = ["capability", "video", "generate", "--model", "byteplus/seedance-1-0-lite-t2v-250428", "--prompt", "{{prompt}}", "--output", "{{output}}"]
+format = "mp4"
+timeout_secs = 900
+
+[music]
+enabled = true
+provider = "command"         # "minimax" 或 "command"
+
+[music.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # 默认：https://api.minimaxi.com
+model = "music-2.6"
+sample_rate = 44100
+bitrate = 256000
+format = "mp3"
+lyrics_optimizer = true
+instrumental = false
+
+[music.command]
+command = "suno-generate"
+args = ["--prompt", "{{prompt}}", "--lyrics", "{{lyrics}}", "--instrumental", "{{instrumental}}", "--output", "{{output}}"]
+format = "mp3"
+timeout_secs = 900
+```
 
 ### CLI 用法
 
@@ -695,16 +778,25 @@ cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 cc-connect send --tts "你好"
+cc-connect send --generate-image "月光下的水彩狐狸"
+cc-connect send --generate-video "杭州日出的电影感镜头，6 秒"
+cc-connect send --generate-music "夜间驾驶氛围 synthwave" --music-instrumental
+cc-connect send --generate-music "关于发布代码的轻快流行副歌" --music-lyrics-optimizer
 ```
 
 说明：
 - `--image` 用于图片附件。
 - `--file` 用于任意文件附件。
 - `--tts` 会合成文本并通过当前 TTS provider 发送语音。
+- `--generate-image` 使用已配置 provider 生成图片，并以图片附件回传。
+- `--generate-video` 和 `--generate-music` 使用已配置 provider 生成媒体，并走视频/音频附件路径回传。
+- `provider = "openclaw"` 是 OpenClaw 图片/视频生成的便捷 command adapter；需要固定具体 provider/model 时，在 `[image.command]` 或 `[video.command]` 里写 args。
+- `provider = "command"` 可以接任何本地 wrapper，只要它写入 `{{output}}` 或把媒体字节输出到 stdout。
+- `--music-lyrics` 提供明确歌词；`--music-lyrics-optimizer` 让 provider 根据音乐 prompt 生成歌词。
 - `--message` 可选，用于先发一段说明文字，再发附件。
 - `--image` 和 `--file` 都可以重复多次。
 - 建议使用绝对路径，避免 Agent 当前工作目录变化导致找不到文件。
-- 如果设置了 `attachment_send = "off"`，图片/文件回传会被拒绝，但普通文本回复仍然正常。
+- 如果设置了 `attachment_send = "off"`，图片/文件/生成媒体回传会被拒绝，但普通文本回复仍然正常。
 - 每个附件默认上限 **50 MiB**。可在 config.toml 用 `max_attachment_size_mb`（单位 MiB）调整，或用环境变量 `CC_MAX_ATTACHMENT_SIZE_MB` 覆盖该值（同样单位 MiB，设置后优先级更高），例如 `CC_MAX_ATTACHMENT_SIZE_MB=100 cc-connect send --file big.bin`。
 
 ### 典型场景
@@ -713,10 +805,11 @@ cc-connect send --tts "你好"
 2. Agent 生成了 PDF、Markdown 导出、日志包或补丁文件，需要作为附件交付。
 3. Agent 想告诉用户“结果已生成”，同时附上一个或多个文件。
 4. 用户自然说“发句 xx 的语音”，不想手输 slash 命令。
+5. 用户要求生成图片、短视频或音乐，且对应 provider 已配置。
 
 ### 注意事项
 
-- 这个命令是给“附件和语音回传”用的，不要拿它代替普通文本回复。
+- 这个命令是给“附件、生成媒体和语音回传”用的，不要拿它代替普通文本回复。
 - 只能发送本机上 Agent 可访问到的文件。
 - 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
 - 目标平台在投递时还会校验自己的文件大小/类型上限；实际生效的是它与 `max_attachment_size_mb` 中**更小**的那个（通过了 cc-connect 的文件仍可能在投递时被平台拒绝）。

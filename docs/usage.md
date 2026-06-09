@@ -736,9 +736,9 @@ Switch: `/tts always` or `/tts voice_only`
 
 ---
 
-## Image, File, and Voice Send-Back
+## Image, File, Voice, and Generated Media Send-Back
 
-When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
+When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI. If `[image]`, `[video]`, or `[music]` is configured, the agent can generate image/video/music directly through the provider and send the result back as an attachment.
 
 **Currently supported platforms:**
 - Feishu
@@ -762,6 +762,7 @@ These two commands write the same cc-connect instructions. Either one is enough.
 - normal text replies should be returned normally
 - generated attachments should be sent back with `cc-connect send --image/--file`
 - requested voice messages should be sent with `cc-connect send --tts`
+- generated image/video/music should be sent with `cc-connect send --generate-image`, `--generate-video`, or `--generate-music`
 
 If you have run setup before, run it again after upgrading so the instructions are refreshed to the latest version.
 
@@ -773,7 +774,89 @@ Add this to `config.toml` if you want to disable agent-driven attachment send-ba
 attachment_send = "off"
 ```
 
-The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
+The default is `on`. This switch is independent from the agent's `/mode` and affects `cc-connect send --image/--file` plus generated media delivery from `--generate-image/--generate-video/--generate-music`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
+
+### Generated image/video/music providers
+
+Generated media uses provider settings in `config.toml`. Image generation supports OpenAI-compatible image endpoints, MiniMax, and command adapters. Video generation supports MiniMax plus command/OpenClaw adapters, so provider-specific models such as Seedance can be exposed through OpenClaw or another CLI. Music generation supports MiniMax plus command wrappers, which can target Suno or other music APIs.
+
+The command adapter executes the configured command directly without a shell. Arguments may use `{{prompt}}`, `{{output}}`, and `{{format}}`; music commands may also use `{{lyrics}}` and `{{instrumental}}`. If `{{output}}` appears in the args, cc-connect reads that file after the command exits. Otherwise it treats stdout as the generated media bytes.
+
+Anthropic API keys are not used here as a native media-generation provider. Anthropic's public API supports image input/vision understanding, but it is not an image/video/music generation endpoint.
+
+If a MiniMax `api_key` is empty, cc-connect reads the same MiniMax JSON config path used by TTS (`data_dir/config/minimax.json` by default).
+
+```toml
+[image]
+enabled = true
+provider = "openai"          # "openai" (OpenAI-compatible), "minimax", "command", or "openclaw"
+
+[image.openai]
+api_key = "${OPENAI_API_KEY}"
+base_url = ""                # default: https://api.openai.com/v1; may point to an OpenAI-compatible /v1 endpoint
+model = "gpt-image-1"
+size = ""                    # e.g. "1024x1024"; empty = provider/model default
+quality = ""                 # e.g. "auto", "high", "medium", "low", "standard", "hd"
+response_format = ""         # "b64_json" or "url" for DALL-E-compatible providers; empty for GPT image models
+output_format = ""           # "png", "jpeg", or "webp" for GPT image models
+background = ""              # "transparent", "opaque", or "auto" for supported GPT image models
+style = ""                   # "vivid" or "natural" for DALL-E 3
+
+[image.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # default: https://api.minimaxi.com
+model = "image-01"
+response_format = "base64" # "base64" (default) or "url"
+aspect_ratio = ""          # e.g. "1:1" or "16:9"; empty = provider default
+width = 0                  # optional custom width; set together with height
+height = 0                 # optional custom height; set together with width
+prompt_optimizer = false
+
+[image.command]
+command = "openclaw"
+args = ["capability", "image", "generate", "--prompt", "{{prompt}}", "--output", "{{output}}"]
+format = "png"
+timeout_secs = 600
+
+[video]
+enabled = true
+provider = "openclaw"        # "minimax", "command", or "openclaw"
+
+[video.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # default: https://api.minimaxi.com
+model = "MiniMax-Hailuo-2.3"
+duration = 6
+resolution = "1080P"
+poll_interval_secs = 10
+timeout_secs = 600
+
+[video.command]
+command = "openclaw"
+args = ["capability", "video", "generate", "--model", "byteplus/seedance-1-0-lite-t2v-250428", "--prompt", "{{prompt}}", "--output", "{{output}}"]
+format = "mp4"
+timeout_secs = 900
+
+[music]
+enabled = true
+provider = "command"         # "minimax" or "command"
+
+[music.minimax]
+api_key = "${MINIMAX_API_KEY}"
+base_url = ""              # default: https://api.minimaxi.com
+model = "music-2.6"
+sample_rate = 44100
+bitrate = 256000
+format = "mp3"
+lyrics_optimizer = true
+instrumental = false
+
+[music.command]
+command = "suno-generate"
+args = ["--prompt", "{{prompt}}", "--lyrics", "{{lyrics}}", "--instrumental", "{{instrumental}}", "--output", "{{output}}"]
+format = "mp3"
+timeout_secs = 900
+```
 
 ### CLI examples
 
@@ -782,16 +865,25 @@ cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 cc-connect send --tts "Hello from cc-connect"
+cc-connect send --generate-image "A watercolor fox under moonlight"
+cc-connect send --generate-video "A cinematic sunrise over Hangzhou, 6 seconds"
+cc-connect send --generate-music "Ambient synthwave, night drive" --music-instrumental
+cc-connect send --generate-music "Upbeat pop chorus about shipping code" --music-lyrics-optimizer
 ```
 
 Notes:
 - `--image` is for image attachments.
 - `--file` is for any file attachment.
 - `--tts` synthesizes text and sends the generated audio through the active TTS provider.
+- `--generate-image` uses the configured provider and sends the generated result as an image attachment.
+- `--generate-video` and `--generate-music` use configured providers and send the generated media through video/audio attachment paths.
+- `provider = "openclaw"` is a convenience command adapter for OpenClaw image/video generation. Add `[image.command]` or `[video.command]` args to pin provider-specific models.
+- `provider = "command"` works with any local wrapper that writes to `{{output}}` or emits media bytes on stdout.
+- `--music-lyrics` provides explicit lyrics; `--music-lyrics-optimizer` lets the provider generate lyrics from the music prompt.
 - `--message` is optional and sends a text note before the attachments.
 - `--image` and `--file` can both be repeated.
 - Absolute paths are recommended so the command does not depend on the agent's current working directory.
-- With `attachment_send = "off"`, image/file send-back is blocked but ordinary text replies still work.
+- With `attachment_send = "off"`, image/file/generated-media send-back is blocked but ordinary text replies still work.
 - Each attachment is capped at **50 MiB** by default. Configure it with `max_attachment_size_mb` (MiB) in config.toml, or override that value with the `CC_MAX_ATTACHMENT_SIZE_MB` env var (same MiB unit; takes precedence when set), e.g. `CC_MAX_ATTACHMENT_SIZE_MB=100 cc-connect send --file big.bin`.
 
 ### Typical use cases
@@ -800,6 +892,7 @@ Notes:
 2. The agent generates a PDF, Markdown export, log bundle, or patch file that should be delivered as an attachment.
 3. The agent wants to send a short status message together with one or more generated files.
 4. The user asks the agent to "send this as voice" without typing a slash command.
+5. The user asks the agent to generate an image, short video, or piece of music and the matching provider is configured.
 
 ### Important notes
 
