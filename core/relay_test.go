@@ -295,3 +295,60 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 		t.Fatal("session was not closed after EventResult")
 	}
 }
+
+// TestParseSessionKeyParts_TypeTaggedKeys covers session keys that prefix the
+// channel with a single-char conversation type tag (dingtalk's "g"/"d", qq's
+// "g", qqbot's "g"). The previous parser returned the tag itself as chatID, so
+// every shared-session group on those platforms collapsed to chatID="g" — all
+// /bind bindings ended up at rm.bindings["g"] and relay messages from any
+// group routed to the first-bound chat.
+func TestParseSessionKeyParts_TypeTaggedKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		key         string
+		wantPlat    string
+		wantChat    string
+	}{
+		// Existing shapes we mustn't regress.
+		{"feishu plain", "feishu:oc_chat:user42", "feishu", "oc_chat"},
+		{"slack plain", "slack:C123:U456", "slack", "C123"},
+		{"telegram thread", "telegram:12345:67:89", "telegram", "12345"},
+		{"relay 3 segments", "relay:src:cidXX", "relay", "cidXX"},
+		// Type-tagged keys — these were broken (returned the tag as chatID).
+		{"dingtalk group shared", "dingtalk:g:cidXXX", "dingtalk", "cidXXX"},
+		{"dingtalk group per-user", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX"},
+		{"dingtalk direct", "dingtalk:d:cidYYY:staff2", "dingtalk", "cidYYY"},
+		{"qq group shared", "qq:g:12345", "qq", "12345"},
+		{"qqbot group shared", "qqbot:g:groupOpenID", "qqbot", "groupOpenID"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plat, chat, err := parseSessionKeyParts(tt.key)
+			if err != nil {
+				t.Fatalf("parseSessionKeyParts(%q) error = %v", tt.key, err)
+			}
+			if plat != tt.wantPlat {
+				t.Errorf("platform = %q, want %q", plat, tt.wantPlat)
+			}
+			if chat != tt.wantChat {
+				t.Errorf("chatID = %q, want %q", chat, tt.wantChat)
+			}
+		})
+	}
+}
+
+func TestParseSessionKeyParts_DistinctGroupsDontCollide(t *testing.T) {
+	// Regression for: two dingtalk groups, /bind run in each, both bindings
+	// collapse to chatID="g" so the second group's binding overwrites the
+	// first and relay routes to the wrong chat.
+	_, chatA, err := parseSessionKeyParts("dingtalk:g:cid_groupA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, chatB, err := parseSessionKeyParts("dingtalk:g:cid_groupB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chatA == chatB {
+		t.Fatalf("two distinct dingtalk groups produced the same chatID %q — bindings will collide", chatA)
+	}
+}
