@@ -1119,6 +1119,19 @@ app_secret = "your-feishu-app-secret"
 # group_reply_all = false                 # respond to all room messages without @mention / 群聊无需 @ 也响应
 # proxy = ""                              # optional HTTP/SOCKS5 proxy / 可选代理
 
+# Webex (Cisco) (uncomment to enable / 取消注释以启用)
+# 1. Create a bot at https://developer.webex.com/my-apps/new/bot
+#    在 https://developer.webex.com/my-apps/new/bot 创建机器人
+# 2. Copy the bot access token below / 复制 access token 到下方
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "webex"
+#
+# [projects.platforms.options]
+# token = "YOUR_WEBEX_BOT_ACCESS_TOKEN"   # from developer.webex.com (Bot)
+# allow_from = "you@cisco.com"            # comma-separated email allowlist / 逗号分隔的邮箱白名单
+
 # MAX messenger (uncomment to enable / 取消注释以启用)
 # 1. Create a bot via @MasterBot in MAX, get the access token
 #    在 MAX 中通过 @MasterBot 创建机器人，获取 access token
