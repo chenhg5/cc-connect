@@ -118,3 +118,13 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 func (p *Platform) FormattingInstructions() string {
 	return "Webex supports standard Markdown (bold, italic, lists, code blocks, links). Use it freely."
 }
+
+// Compile-time interface conformance checks.
+var (
+	_ core.Platform                      = (*Platform)(nil)
+	_ core.ImageSender                   = (*Platform)(nil)
+	_ core.FileSender                    = (*Platform)(nil)
+	_ core.ReplyContextReconstructor     = (*Platform)(nil)
+	_ core.FormattingInstructionProvider = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
+)
