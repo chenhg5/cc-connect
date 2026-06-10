@@ -346,6 +346,21 @@ func resolveParentChannelID(channelID string, ops discordThreadOps) string {
 	return channelID
 }
 
+// resolveThreadParentID is the error-surfacing variant of
+// resolveParentChannelID, backing core.ThreadParentResolver: callers like
+// cron workspace resolution need to distinguish "not a thread" (ID returned
+// unchanged) from "lookup failed" (error) to log the fallback accurately.
+func resolveThreadParentID(channelID string, ops discordThreadOps) (string, error) {
+	ch, err := ops.ResolveChannel(channelID)
+	if err != nil {
+		return "", fmt.Errorf("discord: resolve channel %s: %w", channelID, err)
+	}
+	if isThreadChannelType(ch.Type) && ch.ParentID != "" {
+		return ch.ParentID, nil
+	}
+	return channelID, nil
+}
+
 // resolveThreadReplyContext routes a guild message into a Discord thread for
 // thread_isolation mode and returns the per-thread session key, the reply
 // context, and the parent channel ID.
@@ -1067,6 +1082,7 @@ func (p *progressPlatform) ProgressUpdateInterval() time.Duration {
 var _ core.ImageSender = (*Platform)(nil)
 var _ core.FileSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
+var _ core.ThreadParentResolver = (*Platform)(nil)
 var _ core.ProgressStyleProvider = (*progressPlatform)(nil)
 var _ core.ProgressCardPayloadSupport = (*progressPlatform)(nil)
 var _ core.ProgressUpdateThrottler = (*progressPlatform)(nil)
@@ -1093,6 +1109,13 @@ func (p *Platform) ResolveCronReplyTarget(sessionKey string, title string) (stri
 		return "", nil, err
 	}
 	return resolvedSessionKey, rc, nil
+}
+
+// ResolveThreadParent implements core.ThreadParentResolver. Session keys
+// rewritten by thread_isolation carry a thread ID where workspace bindings
+// are keyed by the parent channel; this maps the thread back to that channel.
+func (p *Platform) ResolveThreadParent(channelID string) (string, error) {
+	return resolveThreadParentID(channelID, sessionThreadOps{session: p.session})
 }
 
 // discordPreviewHandle stores the IDs needed to edit or delete a preview message.

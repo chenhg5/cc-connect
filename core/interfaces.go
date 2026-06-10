@@ -597,6 +597,17 @@ type ChannelNameResolver interface {
 	ResolveChannelName(channelID string) (string, error)
 }
 
+// ThreadParentResolver is an optional interface for platforms whose session
+// keys may carry a thread ID instead of a channel ID (e.g. Discord with
+// thread_isolation). Workspace bindings are keyed by the parent channel, so
+// sessionKey-only paths (such as cron jobs, whose stored key has no Message
+// context) need this to map a thread back to its bindable channel.
+type ThreadParentResolver interface {
+	// ResolveThreadParent returns the parent channel ID for a thread ID.
+	// A non-thread channel ID is returned unchanged.
+	ResolveThreadParent(channelID string) (string, error)
+}
+
 // StreamingCard represents an active streaming card that aggregates
 // an entire agent turn (tool calls, thinking, text) into a single
 // updatable message.
