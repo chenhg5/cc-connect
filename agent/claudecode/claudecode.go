@@ -131,6 +131,13 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "claude")
 	cmdArgsFlag, _ := opts["cmd_args_flag"].(string)
+	if cmdArgsFlag == "" {
+		if v, ok := opts["cli_args_flag"].(string); ok && v != "" {
+			slog.Warn("DEPRECATED: 'cli_args_flag' is deprecated, use 'cmd_args_flag' instead",
+				"value", v)
+			cmdArgsFlag = v
+		}
+	}
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
