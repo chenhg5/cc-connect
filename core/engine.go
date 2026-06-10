@@ -53,6 +53,7 @@ func previewText(s string, maxRunes int) string {
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
+	defaultHistoryMaxLen  = 1000
 )
 
 // Slow-operation thresholds. Operations exceeding these durations produce a
@@ -168,6 +169,7 @@ type DisplayCfg struct {
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
+	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -270,8 +272,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -8593,18 +8595,31 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📜 History (last %d):\n\n", len(entries)))
+	maxLen := e.historyEntryMaxLen()
 	for _, h := range entries {
 		icon := "👤"
 		if h.Role == "assistant" {
 			icon = "🤖"
 		}
-		content := h.Content
-		if len([]rune(content)) > 200 {
-			content = string([]rune(content)[:200]) + "..."
-		}
+		content := truncateHistoryEntry(h.Content, maxLen)
 		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content))
 	}
 	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) historyEntryMaxLen() int {
+	if e.display.HistoryMaxLen != nil {
+		return *e.display.HistoryMaxLen
+	}
+	return defaultHistoryMaxLen
+}
+
+func truncateHistoryEntry(content string, maxLen int) string {
+	if maxLen <= 0 || utf8.RuneCountInString(content) <= maxLen {
+		return content
+	}
+	runes := []rune(content)
+	return string(runes[:maxLen]) + "..."
 }
 
 func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
@@ -12431,15 +12446,13 @@ func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 	}
 
 	var sb strings.Builder
+	maxLen := e.historyEntryMaxLen()
 	for _, h := range entries {
 		icon := "👤"
 		if h.Role == "assistant" {
 			icon = "🤖"
 		}
-		content := h.Content
-		if len([]rune(content)) > 200 {
-			content = string([]rune(content)[:200]) + "..."
-		}
+		content := truncateHistoryEntry(h.Content, maxLen)
 		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content))
 	}
 

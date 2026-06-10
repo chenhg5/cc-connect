@@ -429,9 +429,62 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveHistoryMaxLen(t *testing.T) {
+	globalLen, projectLen, unlimited := 800, 1200, 0
+
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want int
+	}{
+		{
+			name: "default",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			want: 1000,
+		},
+		{
+			name: "global display",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &globalLen},
+			},
+			proj: ProjectConfig{},
+			want: 800,
+		},
+		{
+			name: "project display overrides global",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &globalLen},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{HistoryMaxLen: &projectLen},
+			},
+			want: 1200,
+		},
+		{
+			name: "zero disables truncation",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &unlimited},
+			},
+			proj: ProjectConfig{},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EffectiveHistoryMaxLen(&tt.cfg, &tt.proj); got != tt.want {
+				t.Fatalf("EffectiveHistoryMaxLen() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateProjectDisplayConfig(t *testing.T) {
 	mode := "verbose"
 	cardMode := "modern"
+	negativeHistoryMaxLen := -1
 
 	tests := []struct {
 		name    string
@@ -447,6 +500,11 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 			name:    "invalid project card mode",
 			display: &DisplayConfig{CardMode: &cardMode},
 			wantErr: `projects[0].display.card_mode must be "legacy" or "rich"`,
+		},
+		{
+			name:    "invalid project history max len",
+			display: &DisplayConfig{HistoryMaxLen: &negativeHistoryMaxLen},
+			wantErr: `projects[0].display.history_max_len must be >= 0`,
 		},
 	}
 

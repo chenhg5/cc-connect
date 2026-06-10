@@ -198,6 +198,7 @@ type DisplayConfig struct {
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 }
@@ -915,6 +916,19 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	return
 }
 
+// EffectiveHistoryMaxLen returns the per-entry /history truncation length.
+// Resolution: project [display] > global [display] > default 1000. A value
+// of 0 disables truncation.
+func EffectiveHistoryMaxLen(cfg *Config, proj *ProjectConfig) int {
+	if proj != nil && proj.Display != nil && proj.Display.HistoryMaxLen != nil {
+		return *proj.Display.HistoryMaxLen
+	}
+	if cfg != nil && cfg.Display.HistoryMaxLen != nil {
+		return *cfg.Display.HistoryMaxLen
+	}
+	return 1000
+}
+
 // EffectiveShell returns the shell binary, flag, and init command for the project.
 // Resolution: per-project > global > platform default.
 // The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
@@ -1062,6 +1076,9 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 		default:
 			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
 		}
+	}
+	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
+		return fmt.Errorf("config: %s.history_max_len must be >= 0", prefix)
 	}
 	return nil
 }
@@ -3455,6 +3472,11 @@ func GetGlobalSettings() map[string]any {
 		result["tool_max_len"] = *cfg.Display.ToolMaxLen
 	} else {
 		result["tool_max_len"] = 500
+	}
+	if cfg.Display.HistoryMaxLen != nil {
+		result["history_max_len"] = *cfg.Display.HistoryMaxLen
+	} else {
+		result["history_max_len"] = 1000
 	}
 	// Stream preview
 	spEnabled := true

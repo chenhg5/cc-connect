@@ -37,7 +37,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/list` | List all agent sessions for this project |
 | `/switch <id>` | Switch to a different session |
 | `/current` | Show current session info |
-| `/history [n]` | Show last n messages (default 10) |
+| `/history [n]` | Show last n messages (default 10; each entry follows `[display].history_max_len`, default 1000) |
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
 | `/model [switch <alias>]` | List available models or switch by alias |
