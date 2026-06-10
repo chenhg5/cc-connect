@@ -31,14 +31,16 @@ func init() {
 //   - "plan":     --mode plan (read-only analysis)
 //   - "ask":      --mode ask (Q&A style, read-only)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "agent"
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.RWMutex
+	workDir      string
+	model        string
+	mode         string
+	cmd          string   // CLI binary name, default "agent"
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	providers    []core.ProviderConfig
+	activeIdx    int
+	sessionEnv   []string
+	mu           sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -49,20 +51,19 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "agent"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "agent")
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install with: npm i -g @anthropic-ai/cursor-agent (or from Cursor IDE settings)", cmd)
 	}
 
 	return &Agent{
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		cmd:       cmd,
-		activeIdx: -1,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		activeIdx:    -1,
 	}, nil
 }
 
@@ -193,8 +194,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
-	extraEnv := a.providerEnvLocked()
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -203,7 +206,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.RUnlock()
 
-	return newCursorSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
 }
 
 // ListSessions reads sessions from Cursor Agent CLI chat storage.
