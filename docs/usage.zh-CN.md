@@ -13,10 +13,12 @@ cc-connect 完整功能使用指南。
 - [飞书配置 CLI](#飞书配置-cli)
 - [微信个人号配置 CLI](#微信个人号配置-cli)
 - [Claude Code Router 集成](#claude-code-router-集成)
+- [Claude Code PermissionRequest Hooks](#claude-code-permissionrequest-hooks)
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
 - [定时任务 (Cron)](#定时任务-cron)
+- [Shell 配置](#shell-配置)
 - [多机器人中继](#多机器人中继)
 - [守护进程模式](#守护进程模式)
 - [多工作区模式](#多工作区模式)
@@ -164,10 +166,11 @@ alias = "opus"
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
-# MiniMax — 兼容 OpenAI 接口，1M 超长上下文
+# MiniMax — 兼容 OpenAI 接口的 Agent provider，1M 超长上下文
 [[projects.agent.providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
+# 中国区账号可使用 https://api.minimaxi.com/v1
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
@@ -263,10 +266,23 @@ alias = "spark"
 
 ### 行为说明
 
+- `/dir` 属于特权命令，使用前需要在 `config.toml` 的 `[[projects]]` 下设置 `admin_from`。
+- 不要把 `admin_from` 写到 `[projects.platforms.options]` 里，否则会被忽略。
+- 可先发送 `/whoami` 或 `/status` 获取当前 `User ID`，再把这个 ID 填到 `admin_from`。
+- 如果是个人单人使用，也可以设置 `admin_from = "*"`，但这会让所有已允许用户都拥有特权命令权限。
+- 修改 `config.toml` 后，需要重启 `cc-connect`。
 - 目录切换会作用于当前项目的下一次会话。
 - 相对路径基于当前 Agent 工作目录解析。
 - 目录历史按项目隔离，可通过序号快速切换。
 - `/cd` 为兼容保留，建议优先使用 `/dir`。
+
+配置示例：
+
+```toml
+[[projects]]
+name = "my-project"
+admin_from = "ou_xxx"
+```
 
 示例：
 
@@ -526,6 +542,35 @@ router_api_key = "your-secret-key"
 
 ---
 
+## Claude Code PermissionRequest Hooks
+
+如果你在 Claude Code 的 `settings.json` 中配置了 [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks)，cc-connect 会读取并执行它们——匹配的 hook 可以在请求到达消息平台之前自动批准或拒绝。
+
+### 为什么 hook 会被执行两次
+
+cc-connect 使用 `--permission-prompt-tool stdio` 模式启动 Claude Code，这意味着 Claude Code 自身执行 hook 的输出会被丢弃（stdout 被协议占用）。为了让你的 hook 真正生效，cc-connect 会从 `settings.json` 中读取 hook 定义，然后**独立重新执行一次**。
+
+也就是说，每次权限请求你的 hook 命令会被执行**两次**：
+
+1. Claude Code 执行一次（结果丢弃）
+2. cc-connect 执行一次（结果生效）
+
+### LLM 类 hook 如何避免重复消耗
+
+如果你的 hook 是规则类的（例如"拒绝 `rm -rf`"），执行两次无所谓。但如果你的 hook 调用了 LLM（如 [ccgate](https://github.com/tak848/ccgate)），第一次执行就是在白白浪费 token。在 hook 开头加上这个判断：
+
+```bash
+#!/bin/bash
+if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then
+  exit 0  # cc-connect 会在不含此变量的环境下重新执行我们
+fi
+# ... 你的 hook 逻辑 ...
+```
+
+cc-connect 启动 Claude Code 子进程时会在环境中设置 `CC_CONNECT_PERMISSION_HOOK_SKIP=1`。当你的 hook 检测到这个变量时，说明它运行在 Claude Code 内部（结果会被丢弃）——跳过昂贵的逻辑即可。cc-connect 在自己执行 hook 时会剥离这个变量，所以第二次执行会正常运行。
+
+---
+
 ## 语音消息（语音转文字）
 
 发送语音消息，自动转文字。
@@ -566,20 +611,31 @@ brew install ffmpeg
 
 将 AI 回复合成语音发送。
 
-**支持平台：** 飞书
+**支持平台：** 实现音频发送的平台，例如飞书/Lark、钉钉、Telegram、Max、微信。
 
 ### 配置
 
 ```toml
 [tts]
 enabled = true
-provider = "qwen"        # 或 "openai"
-voice = "Cherry"
+provider = "minimax"     # qwen | openai | minimax | mimo | espeak | pico | edge
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98             # 有效范围取决于 provider；MiniMax 通常支持 0.5-2.0
 tts_mode = "voice_only"  # "voice_only" | "always"
 max_text_len = 0
 
-[tts.qwen]
-api_key = "sk-xxx"
+[tts.minimax]
+api_key = ""             # 可留空，自动回退读取 data_dir/config/minimax.json
+base_url = ""            # 可留空，默认 https://api.minimaxi.com
+model = "speech-2.8-hd"
+
+[tts.agents.assistant]
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
+
+[tts.agents.reviewer]
+voice_id = "Chinese (Mandarin)_Gentle_Senior"
+speed = 0.96
 ```
 
 ### TTS 模式
@@ -593,9 +649,9 @@ api_key = "sk-xxx"
 
 ---
 
-## 图片与文件回传
+## 图片、文件与语音回传
 
-当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。
+当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。
 
 **当前支持平台：**
 - 飞书
@@ -618,6 +674,7 @@ api_key = "sk-xxx"
 这两个命令写入的是同一份 cc-connect 指令。执行任意一个即可。这样 Agent 才会知道：
 - 普通文本回复直接正常输出
 - 生成附件后用 `cc-connect send --image/--file` 回传
+- 用户要求语音时用 `cc-connect send --tts` 回传
 
 如果你以前已经执行过 setup，也建议升级后重新执行一次，以刷新到最新指令。
 
@@ -629,7 +686,7 @@ api_key = "sk-xxx"
 attachment_send = "off"
 ```
 
-默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。
+默认值是 `on`。这个开关与 agent 的 `/mode` 独立，只影响 `cc-connect send --image/--file` 这条图片/文件回传路径。TTS 语音回传走 `[tts]` provider 配置，由 TTS 是否可用决定。
 
 ### CLI 用法
 
@@ -637,11 +694,13 @@ attachment_send = "off"
 cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+cc-connect send --tts "你好"
 ```
 
 说明：
 - `--image` 用于图片附件。
 - `--file` 用于任意文件附件。
+- `--tts` 会合成文本并通过当前 TTS provider 发送语音。
 - `--message` 可选，用于先发一段说明文字，再发附件。
 - `--image` 和 `--file` 都可以重复多次。
 - 建议使用绝对路径，避免 Agent 当前工作目录变化导致找不到文件。
@@ -652,10 +711,11 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 1. Agent 生成了截图或图表，需要直接发给用户。
 2. Agent 生成了 PDF、Markdown 导出、日志包或补丁文件，需要作为附件交付。
 3. Agent 想告诉用户“结果已生成”，同时附上一个或多个文件。
+4. 用户自然说“发句 xx 的语音”，不想手输 slash 命令。
 
 ### 注意事项
 
-- 这个命令是给“附件回传”用的，不要拿它代替普通文本回复。
+- 这个命令是给“附件和语音回传”用的，不要拿它代替普通文本回复。
 - 只能发送本机上 Agent 可访问到的文件。
 - 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
 - 平台本身仍可能有文件大小或文件类型限制。
@@ -698,6 +758,78 @@ cc-connect cron del <job-id>
 > "每天早上6点帮我总结 GitHub trending"
 
 Claude Code 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执行一次 `/cron setup` 或 `/bind setup`，效果相同。
+
+---
+
+## Shell 配置
+
+默认情况下，cc-connect 在 Unix 上使用 `sh`，Windows 上使用 `powershell.exe` 来执行所有 shell 命令（`/shell`、cron exec、hooks 和 webhook exec）。你可以配置使用其他 shell。
+
+### 支持的 Shell
+
+| Shell | 配置值 | 参数标志 |
+|-------|--------|---------|
+| sh（Unix 默认） | `sh` | `-c` |
+| bash | `/bin/bash` | `-c` |
+| zsh | `/bin/zsh` | `-c` |
+| fish | `/bin/fish` | `-c` |
+| cmd（Windows） | `cmd` | `/C` |
+| PowerShell（Windows 默认） | `powershell.exe` | `-Command` |
+| PowerShell Core | `pwsh` | `-Command` |
+
+参数标志会根据 shell 名称自动检测，无需手动配置。
+
+### 全局配置
+
+在 `config.toml` 顶层设置 `shell`，更改所有项目的默认 shell：
+
+```toml
+shell = "/bin/zsh"
+```
+
+### 项目级覆盖
+
+为特定项目覆盖 shell：
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+```
+
+### Shell Profile
+
+使用 `shell_profile` 在每条 shell 命令前添加初始化脚本。适用于加载 shell profile，使自定义函数、别名和环境变量可用：
+
+```toml
+shell = "/bin/zsh"
+shell_profile = "source ~/.zshrc"
+```
+
+shell profile 和用户命令会用换行符拼接后作为一个整体脚本传给 shell，避免引号转义问题。例如 `/shell echo $MY_VAR` 实际执行的是：
+
+```zsh
+source ~/.zshrc
+echo $MY_VAR
+```
+
+`shell_profile` 同样支持项目级覆盖：
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+shell_profile = "source ~/.config/fish/config.fish"
+```
+
+### 影响范围
+
+Shell 配置适用于 cc-connect 中所有命令执行路径：
+
+- **`/shell` 命令** — 聊天中的交互式 shell 命令
+- **Cron exec 任务** — `[[cron]]` 中 `exec` 字段的定时任务
+- **Hooks** — `[[hooks]]` 中 `type = "command"` 的钩子
+- **Webhook exec** — webhook 请求中 `exec` 字段的命令
 
 ---
 

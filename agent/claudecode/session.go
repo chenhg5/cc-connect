@@ -83,10 +83,48 @@ type claudeSession struct {
 	}
 
 	gracefulStopTimeout time.Duration
+	ccHooks             *ccPermissionHookRunner // Claude Code PermissionRequest hook runner
+
+	// startupWarning holds a one-time message to surface to the IM user at
+	// session start (e.g. when a permission mode was silently downgraded).
+	startupWarning string
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+// StartupWarning implements core.StartupWarner. Returns a non-empty string
+// when the session was started under degraded conditions that the user should
+// know about (e.g. bypassPermissions downgraded to auto under root).
+func (cs *claudeSession) StartupWarning() string { return cs.startupWarning }
+
+// buildAppendSystemPrompt concatenates the cc-connect functionality prompt,
+// platform formatting instructions, and the user's custom append prompt into
+// the single string passed to Claude's --append-system-prompt flag. That flag
+// only honors its last occurrence (a second flag overwrites the first), so all
+// appended content must be merged here. Returns "" when nothing is to append.
+func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) string {
+	var parts []string
+	if agentPrompt != "" {
+		if platformPrompt != "" {
+			agentPrompt += "\n## Formatting\n" + platformPrompt + "\n"
+		}
+		parts = append(parts, agentPrompt)
+	}
+	if userAppend != "" {
+		parts = append(parts, userAppend)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+
+	// Claude Code rejects bypassPermissions when running as root.
+	// Downgrade to "auto" which auto-approves internally in cc-connect.
+	var rootDowngradeWarning string
+	if mode == "bypassPermissions" && os.Geteuid() == 0 {
+		slog.Warn("claudeSession: bypassPermissions not allowed under root, downgrading to auto mode")
+		mode = "auto"
+		rootDowngradeWarning = "⚠️ Running as root: bypassPermissions mode is not supported and has been downgraded to auto. The agent may still pause on high-risk operations."
+	}
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
 	// cliArgsFlag these get bundled into a single passthrough string.
@@ -119,17 +157,17 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
-	// Handle custom system prompt
+	// Handle custom system prompt (replaces Claude's default system prompt).
 	if systemPrompt != "" {
 		innerArgs = append(innerArgs, "--system-prompt", systemPrompt)
 	}
 
-	// Always append cc-connect system prompt for functionality awareness
-	if sysPrompt := core.AgentSystemPrompt(); sysPrompt != "" {
-		if platformPrompt != "" {
-			sysPrompt += "\n## Formatting\n" + platformPrompt + "\n"
-		}
-		innerArgs = append(innerArgs, "--append-system-prompt", sysPrompt)
+	// Append the cc-connect functionality prompt, platform formatting hints,
+	// and the user's custom append prompt — all as a single flag. Claude's
+	// --append-system-prompt only honors its last occurrence, so the pieces
+	// must be concatenated here rather than passed as repeated flags.
+	if appended := buildAppendSystemPrompt(core.AgentSystemPrompt(), platformPrompt, appendSystemPrompt); appended != "" {
+		innerArgs = append(innerArgs, "--append-system-prompt", appended)
 	}
 
 	if effort != "" {
@@ -192,6 +230,13 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
+	// Signal to PermissionRequest hooks that they are running inside
+	// cc-connect. Hooks can check this env var to skip LLM calls on
+	// the Claude Code side (the hook result is ignored anyway when
+	// --permission-prompt-tool stdio is active). cc-connect runs the
+	// hook itself without this env var, so the real work happens only
+	// once.
+	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
 	// When run_as_user is set, strip the supervisor's environment down to
 	// the allowlist before passing it to sudo. sudo --preserve-env also
 	// enforces this, but filtering here makes the cc-connect spawn argv
@@ -243,6 +288,8 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		cancel:              cancel,
 		done:                make(chan struct{}),
 		gracefulStopTimeout: 120 * time.Second,
+		ccHooks:             newCCPermissionHookRunner(workDir),
+		startupWarning:      rootDowngradeWarning,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -706,6 +753,29 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		return
 	}
 
+	// Check Claude Code's PermissionRequest hooks before forwarding to platform.
+	hctx := hookContext{
+		sessionID:      cs.CurrentSessionID(),
+		toolName:       toolName,
+		toolInput:      input,
+		cwd:            cs.workDir,
+		permissionMode: cs.permissionModeValue(),
+		transcriptPath: cs.transcriptPath(),
+	}
+	if decision, ok := cs.ccHooks.tryHook(cs.ctx, hctx); ok {
+		slog.Info("claudeSession: hook decided",
+			"request_id", requestID, "tool", toolName, "behavior", decision.Behavior)
+		result := core.PermissionResult{
+			Behavior:     decision.Behavior,
+			UpdatedInput: input,
+		}
+		if decision.Behavior == "deny" && decision.Message != "" {
+			result.Message = decision.Message
+		}
+		_ = cs.RespondPermission(requestID, result)
+		return
+	}
+
 	slog.Info("claudeSession: permission request", "request_id", requestID, "tool", toolName)
 	evt := core.Event{
 		Type:         core.EventPermissionRequest,
@@ -954,6 +1024,33 @@ func (cs *claudeSession) Events() <-chan core.Event {
 func (cs *claudeSession) CurrentSessionID() string {
 	v, _ := cs.sessionID.Load().(string)
 	return v
+}
+
+func (cs *claudeSession) permissionModeValue() string {
+	v, _ := cs.permissionMode.Load().(string)
+	return v
+}
+
+// transcriptPath returns the path to the Claude Code JSONL transcript
+// for the current session, or "" if it cannot be determined.
+func (cs *claudeSession) transcriptPath() string {
+	sessionID := cs.CurrentSessionID()
+	if sessionID == "" || cs.workDir == "" {
+		return ""
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	absWorkDir, err := filepath.Abs(cs.workDir)
+	if err != nil {
+		return ""
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return ""
+	}
+	return filepath.Join(projectDir, sessionID+".jsonl")
 }
 
 // GetModel returns the model id reported by the CLI's init event (e.g.

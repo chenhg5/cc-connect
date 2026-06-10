@@ -295,6 +295,54 @@ func (a *Agent) SkillDirs() []string {
 	return dirs
 }
 
+// ── Models JSON helpers ─────────────────────────────────────
+
+// modelsJSON represents the structure of ~/.pi/agent/models.json.
+type modelsJSON struct {
+	Providers map[string]struct {
+		Models []struct {
+			ID            string `json:"id"`
+			ContextWindow int    `json:"contextWindow"`
+		} `json:"models"`
+	} `json:"providers"`
+}
+
+// loadModelsContextWindows reads ~/.pi/agent/models.json and returns
+// a map of model ID → contextWindow. Keys include both the short ID
+// (e.g. "deepseek/deepseek-v4-pro") and the fully-qualified
+// provider/ID (e.g. "my-provider/my-model").
+// Returns nil on any error (caller falls back to 200K).
+func loadModelsContextWindows() map[string]int {
+	dir := piSettingsDir()
+	if dir == "" {
+		slog.Warn("pi: cannot determine pi settings dir for models.json")
+		return nil
+	}
+	path := filepath.Join(dir, "models.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Info("pi: models.json not found, using 200K fallback", "path", path)
+		} else {
+			slog.Warn("pi: read models.json", "path", path, "error", err)
+		}
+		return nil
+	}
+	var cfg modelsJSON
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		slog.Warn("pi: parse models.json", "path", path, "error", err)
+		return nil
+	}
+	m := make(map[string]int)
+	for provider, p := range cfg.Providers {
+		for _, mdl := range p.Models {
+			m[mdl.ID] = mdl.ContextWindow
+			m[provider+"/"+mdl.ID] = mdl.ContextWindow
+		}
+	}
+	return m
+}
+
 // ── Settings helpers ─────────────────────────────────────────
 
 // piSettingsDir returns the pi agent config directory.

@@ -23,17 +23,23 @@ import (
 // Each Send() spawns `qodercli -p <prompt> -f stream-json -q`.
 // Subsequent turns use `-r <sessionID>` to resume the conversation.
 type qoderSession struct {
-	workDir   string
-	model     string
-	mode      string
-	extraEnv  []string
-	events    chan core.Event
-	sessionID atomic.Value // stores string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
+	workDir        string
+	model          string
+	mode           string
+	extraEnv       []string
+	events         chan core.Event
+	sessionID      atomic.Value // stores string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
+	startupWarning string
 }
+
+// StartupWarning implements core.StartupWarner. Returns a non-empty string
+// when the session was started under degraded conditions (e.g. yolo mode
+// silently skipped under root).
+func (qs *qoderSession) StartupWarning() string { return qs.startupWarning }
 
 func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string, extraEnv []string) (*qoderSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -48,6 +54,12 @@ func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string,
 		cancel:   cancel,
 	}
 	qs.alive.Store(true)
+
+	// Detect root-induced yolo downgrade and surface it to the IM user via StartupWarning.
+	// The actual flag skip happens inside Send() when building the CLI args.
+	if mode == "yolo" && os.Geteuid() == 0 {
+		qs.startupWarning = "⚠️ Running as root: --dangerously-skip-permissions (yolo mode) is not supported and has been skipped. The agent may pause on high-risk operations."
+	}
 
 	if resumeID != "" && resumeID != core.ContinueSession {
 		qs.sessionID.Store(resumeID)
@@ -76,7 +88,11 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 	}
 
 	if qs.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		if os.Geteuid() == 0 {
+			slog.Warn("qoderSession: --dangerously-skip-permissions not allowed under root, skipping flag")
+		} else {
+			args = append(args, "--dangerously-skip-permissions")
+		}
 	}
 
 	if qs.model != "" {

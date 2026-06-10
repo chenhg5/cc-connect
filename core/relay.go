@@ -304,6 +304,8 @@ func normalizeRelayVisibility(mode string) string {
 	case "", RelayVisibilityFull:
 		return RelayVisibilityFull
 	default:
+		slog.Warn("relay: unknown visibility mode, falling back to full", "mode", mode,
+			"valid_values", []string{RelayVisibilityNone, RelayVisibilitySummary, RelayVisibilityFull})
 		return RelayVisibilityFull
 	}
 }

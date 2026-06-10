@@ -211,6 +211,26 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 		if r.URL.Path != "/v1/t2a_v2" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
+		var req struct {
+			Model        string `json:"model"`
+			Text         string `json:"text"`
+			VoiceSetting struct {
+				VoiceID string  `json:"voice_id"`
+				Speed   float64 `json:"speed"`
+			} `json:"voice_setting"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Model != "speech-2.8-hd" || req.Text != "hello" {
+			t.Fatalf("unexpected model/text: %q/%q", req.Model, req.Text)
+		}
+		if req.VoiceSetting.VoiceID != "voice-test" {
+			t.Fatalf("voice_id = %q", req.VoiceSetting.VoiceID)
+		}
+		if req.VoiceSetting.Speed != 0.98 {
+			t.Fatalf("speed = %v, want 0.98", req.VoiceSetting.Speed)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		// "fake-mp3" hex-encoded
 		hexAudio := "66616b652d6d7033"
@@ -231,7 +251,7 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 	defer apiServer.Close()
 
 	tts := NewMiniMaxTTS("test-key", apiServer.URL, "speech-2.8-hd", nil)
-	audio, format, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	audio, format, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{Voice: "voice-test", Speed: 0.98})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

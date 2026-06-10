@@ -688,6 +688,174 @@ func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error 
 }
 
 // ---------------------------------------------------------------------------
+// SendFile
+// ---------------------------------------------------------------------------
+
+func TestWSPlatformSendFile_UploadsAndSendsMedia(t *testing.T) {
+	fileData := []byte("<html><body>hello</body></html>")
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		serverDone <- assertWeComWSSendFileFrames(conn, fileData)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	p := &WSPlatform{conn: conn}
+	go func() {
+		for {
+			var frame wsFrame
+			if err := conn.ReadJSON(&frame); err != nil {
+				return
+			}
+			p.handleFrame(frame)
+		}
+	}()
+
+	err = p.SendFile(context.Background(), wsReplyContext{chatID: "chat1", userID: "u1"}, core.FileAttachment{
+		MimeType: "text/html",
+		Data:     fileData,
+		FileName: "hello.html",
+	})
+	if err != nil {
+		t.Fatalf("SendFile returned error: %v", err)
+	}
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe all expected frames")
+	}
+}
+
+func assertWeComWSSendFileFrames(conn *websocket.Conn, fileData []byte) error {
+	var initFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			Type        string `json:"type"`
+			Filename    string `json:"filename"`
+			TotalSize   int    `json:"total_size"`
+			TotalChunks int    `json:"total_chunks"`
+			MD5         string `json:"md5"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&initFrame); err != nil {
+		return fmt.Errorf("read init frame: %w", err)
+	}
+	sum := md5.Sum(fileData)
+	if initFrame.Cmd != "aibot_upload_media_init" ||
+		initFrame.Body.Type != "file" ||
+		initFrame.Body.Filename != "hello.html" ||
+		initFrame.Body.TotalSize != len(fileData) ||
+		initFrame.Body.TotalChunks != 1 ||
+		initFrame.Body.MD5 != hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("unexpected init frame: %#v", initFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": initFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"upload_id": "upload-f1"},
+	}); err != nil {
+		return fmt.Errorf("write init ack: %w", err)
+	}
+
+	var chunkFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID   string `json:"upload_id"`
+			ChunkIndex int    `json:"chunk_index"`
+			Base64Data string `json:"base64_data"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&chunkFrame); err != nil {
+		return fmt.Errorf("read chunk frame: %w", err)
+	}
+	if chunkFrame.Cmd != "aibot_upload_media_chunk" ||
+		chunkFrame.Body.UploadID != "upload-f1" ||
+		chunkFrame.Body.ChunkIndex != 0 ||
+		chunkFrame.Body.Base64Data != base64.StdEncoding.EncodeToString(fileData) {
+		return fmt.Errorf("unexpected chunk frame: %#v", chunkFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": chunkFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write chunk ack: %w", err)
+	}
+
+	var finishFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID string `json:"upload_id"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&finishFrame); err != nil {
+		return fmt.Errorf("read finish frame: %w", err)
+	}
+	if finishFrame.Cmd != "aibot_upload_media_finish" || finishFrame.Body.UploadID != "upload-f1" {
+		return fmt.Errorf("unexpected finish frame: %#v", finishFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": finishFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"media_id": "media-f1"},
+	}); err != nil {
+		return fmt.Errorf("write finish ack: %w", err)
+	}
+
+	var sendFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			ChatID  string `json:"chatid"`
+			MsgType string `json:"msgtype"`
+			File    struct {
+				MediaID string `json:"media_id"`
+			} `json:"file"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&sendFrame); err != nil {
+		return fmt.Errorf("read send frame: %w", err)
+	}
+	if sendFrame.Cmd != "aibot_send_msg" ||
+		sendFrame.Body.ChatID != "chat1" ||
+		sendFrame.Body.MsgType != "file" ||
+		sendFrame.Body.File.MediaID != "media-f1" {
+		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": sendFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write send ack: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // generateReqID — concurrency safety
 // ---------------------------------------------------------------------------
 

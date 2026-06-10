@@ -87,11 +87,40 @@ token = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz-123456"
 #   "*" → same as not set, but explicit (no WARN).
 #   "id1,id2" → only these Telegram user IDs can interact with the bot.
 # allow_from = "123456789"
+
+# Optional proxy for Telegram Bot API access.
+# Supports URLs like:
+#   http://127.0.0.1:7890
+#   socks5://127.0.0.1:1080
+# proxy = "http://127.0.0.1:7890"
+# proxy_username = ""
+# proxy_password = ""
 ```
 
 > **Common mistake:** `admin_from` goes under `[[projects]]` (project level), NOT inside `[projects.platforms.options]`. If placed in the wrong section, it will be silently ignored.
 >
 > To find your Telegram user ID, send any message to **@userinfobot**.
+
+### 2.1 Optional: Use a Proxy
+
+If your machine cannot reach the Telegram Bot API directly, set a forward proxy in the Telegram platform options:
+
+```toml
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz-123456"
+proxy = "socks5://127.0.0.1:1080"
+proxy_username = ""
+proxy_password = ""
+```
+
+Notes:
+
+- `proxy` accepts HTTP or SOCKS5 proxy URLs.
+- Leave `proxy_username` and `proxy_password` empty when the proxy does not require authentication.
+- The proxy only affects Telegram Bot API requests for this Telegram platform instance.
 
 ---
 

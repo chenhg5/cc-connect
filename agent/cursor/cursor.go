@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -205,7 +206,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newCursorSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
 }
 
-// ListSessions reads sessions from ~/.cursor/chats/<workspace_hash>/.
+// ListSessions reads sessions from Cursor Agent CLI chat storage.
+// The CLI may store chats under ~/.cursor/chats or ~/.config/Cursor/chats
+// depending on XDG_CONFIG_HOME and platform; all known locations are scanned.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	workDir := a.GetWorkDir()
 	return listCursorSessions(workDir)
@@ -217,10 +220,9 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 		return fmt.Errorf("cursor: cannot determine home dir: %w", err)
 	}
 	workDir := a.GetWorkDir()
-	hash := workspaceHash(workDir)
-	dir := filepath.Join(homeDir, ".cursor", "chats", hash, sessionID)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("session not found: %s", sessionID)
+	dir, err := findCursorSessionDir(homeDir, workDir, sessionID)
+	if err != nil {
+		return err
 	}
 	return os.RemoveAll(dir)
 }
@@ -235,9 +237,15 @@ func (a *Agent) SkillDirs() []string {
 	if err != nil {
 		absDir = workDir
 	}
-	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
+	dirs := []string{
+		filepath.Join(absDir, ".cursor", "skills"),
+		filepath.Join(absDir, ".claude", "skills"),
+	}
 	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
+		dirs = append(dirs,
+			filepath.Join(home, ".cursor", "skills"),
+			filepath.Join(home, ".claude", "skills"),
+		)
 	}
 	return dirs
 }
@@ -341,60 +349,109 @@ func workspaceHash(workDir string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// cursorChatsBaseDirs returns candidate Cursor Agent CLI chat roots, in priority order.
+// When XDG_CONFIG_HOME is set the CLI stores under $XDG_CONFIG_HOME/Cursor/chats;
+// otherwise it may use ~/.config/Cursor/chats or the legacy ~/.cursor/chats.
+func cursorChatsBaseDirs(homeDir string) []string {
+	var dirs []string
+	seen := make(map[string]struct{})
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		dirs = append(dirs, path)
+	}
+
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		add(filepath.Join(xdg, "Cursor", "chats"))
+	}
+	add(filepath.Join(homeDir, ".config", "Cursor", "chats"))
+	add(filepath.Join(homeDir, ".cursor", "chats"))
+	return dirs
+}
+
+func workspaceChatsDirs(homeDir, workDir string) []string {
+	hash := workspaceHash(workDir)
+	var dirs []string
+	for _, base := range cursorChatsBaseDirs(homeDir) {
+		dir := filepath.Join(base, hash)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+func findCursorSessionDir(homeDir, workDir, sessionID string) (string, error) {
+	for _, chatsDir := range workspaceChatsDirs(homeDir, workDir) {
+		dir := filepath.Join(chatsDir, sessionID)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("session not found: %s", sessionID)
+}
+
 func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cursor: cannot determine home dir: %w", err)
 	}
 
-	hash := workspaceHash(workDir)
-	chatsDir := filepath.Join(homeDir, ".cursor", "chats", hash)
-
-	entries, err := os.ReadDir(chatsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("cursor: read chats dir: %w", err)
+	chatsDirs := workspaceChatsDirs(homeDir, workDir)
+	if len(chatsDirs) == 0 {
+		return nil, nil
 	}
 
-	var sessions []core.AgentSessionInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessionID := entry.Name()
-		dbPath := filepath.Join(chatsDir, sessionID, "store.db")
-		if _, err := os.Stat(dbPath); err != nil {
-			continue
-		}
-
-		info, err := entry.Info()
+	byID := make(map[string]core.AgentSessionInfo)
+	for _, chatsDir := range chatsDirs {
+		entries, err := os.ReadDir(chatsDir)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("cursor: read chats dir %s: %w", chatsDir, err)
 		}
 
-		meta := readSessionMeta(dbPath)
-		msgCount, firstUserMsg := countSessionMessages(dbPath, meta.RootBlobID)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			sessionID := entry.Name()
+			dbPath := filepath.Join(chatsDir, sessionID, "store.db")
+			if _, err := os.Stat(dbPath); err != nil {
+				continue
+			}
 
-		summary := meta.Name
-		if summary == "" || summary == "New Agent" {
-			if firstUserMsg != "" {
-				summary = firstUserMsg
-			} else {
-				summary = sessionID[:12] + "..."
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			meta := readSessionMeta(dbPath)
+			msgCount, firstUserMsg := countSessionMessages(dbPath, meta.RootBlobID)
+
+			summary := cursorSessionSummary(meta.Name, firstUserMsg, sessionID)
+
+			candidate := core.AgentSessionInfo{
+				ID:           sessionID,
+				Summary:      summary,
+				MessageCount: msgCount,
+				ModifiedAt:   info.ModTime(),
+			}
+			if existing, ok := byID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
+				byID[sessionID] = candidate
 			}
 		}
-		if utf8.RuneCountInString(summary) > 60 {
-			summary = string([]rune(summary)[:60]) + "..."
-		}
+	}
 
-		sessions = append(sessions, core.AgentSessionInfo{
-			ID:           sessionID,
-			Summary:      summary,
-			MessageCount: msgCount,
-			ModifiedAt:   info.ModTime(),
-		})
+	sessions := make([]core.AgentSessionInfo, 0, len(byID))
+	for _, s := range byID {
+		sessions = append(sessions, s)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -450,6 +507,73 @@ func readSessionMeta(dbPath string) sessionMeta {
 	}
 
 	return sessionMeta{AgentID: m.AgentID, Name: m.Name, Mode: m.Mode, RootBlobID: m.RootBlobID}
+}
+
+var cursorUserQueryRE = regexp.MustCompile(`(?is)<user_query>\s*(.*?)\s*</user_query>`)
+
+func cursorSessionSummary(metaName, firstUserMsg, sessionID string) string {
+	summary := strings.TrimSpace(metaName)
+	if summary == "" || strings.EqualFold(summary, "New Agent") {
+		summary = strings.TrimSpace(firstUserMsg)
+	}
+	if summary == "" {
+		if len(sessionID) > 12 {
+			summary = sessionID[:12] + "..."
+		} else {
+			summary = sessionID
+		}
+	}
+	if utf8.RuneCountInString(summary) > 60 {
+		summary = string([]rune(summary)[:60]) + "..."
+	}
+	return summary
+}
+
+func cursorMessageContentText(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var parts []string
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
+}
+
+func extractCursorUserSummary(content any) string {
+	text := strings.TrimSpace(cursorMessageContentText(content))
+	if text == "" {
+		return ""
+	}
+
+	if m := cursorUserQueryRE.FindStringSubmatch(text); len(m) == 2 {
+		if query := strings.TrimSpace(m[1]); query != "" {
+			return query
+		}
+	}
+
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(lower, "<user_info>") ||
+		strings.HasPrefix(lower, "<open_and_recently_viewed_files>") ||
+		strings.HasPrefix(lower, "<attached_files>") ||
+		strings.HasPrefix(lower, "<agent_transcripts>") {
+		return ""
+	}
+
+	if strings.HasPrefix(text, "<") {
+		return ""
+	}
+	return text
 }
 
 // countSessionMessages reads the root blob from store.db and counts conversation
@@ -544,15 +668,8 @@ func countSessionMessages(dbPath, rootBlobID string) (int, string) {
 		}
 		roleCount[msg.Role]++
 		if msg.Role == "user" && firstUserMsg == "" {
-			if s, ok := msg.Content.(string); ok {
-				s = strings.TrimSpace(s)
-				// Skip injected context (XML tags, conversation summaries, etc.)
-				if len(s) > 0 && !strings.HasPrefix(s, "<") && !strings.HasPrefix(s, "[") && !strings.HasPrefix(s, "{") {
-					if utf8.RuneCountInString(s) > 50 {
-						s = string([]rune(s)[:50]) + "..."
-					}
-					firstUserMsg = s
-				}
+			if summary := extractCursorUserSummary(msg.Content); summary != "" {
+				firstUserMsg = summary
 			}
 		}
 	}

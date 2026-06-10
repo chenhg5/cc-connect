@@ -31,11 +31,13 @@ type TTSSynthesisOpts struct {
 
 // TTSCfg holds TTS configuration for the engine (mirrors SpeechCfg).
 type TTSCfg struct {
-	Enabled    bool
-	Provider   string
-	Voice      string // default voice used when TTSSynthesisOpts.Voice is empty
-	TTS        TextToSpeech
-	MaxTextLen int // max rune count before skipping TTS; 0 = no limit
+	Enabled      bool
+	Provider     string
+	Voice        string  // default voice used when TTSSynthesisOpts.Voice is empty
+	LanguageType string  // optional provider-specific language hint
+	Speed        float64 // speaking speed multiplier; 0 = provider default
+	TTS          TextToSpeech
+	MaxTextLen   int // max rune count before skipping TTS; 0 = no limit
 
 	mu      sync.RWMutex
 	ttsMode string // "voice_only" (default) | "always"
@@ -265,7 +267,7 @@ type MiniMaxTTS struct {
 // NewMiniMaxTTS creates a new MiniMaxTTS instance.
 func NewMiniMaxTTS(apiKey, baseURL, model string, client *http.Client) *MiniMaxTTS {
 	if baseURL == "" {
-		baseURL = "https://api.minimax.io"
+		baseURL = "https://api.minimaxi.com"
 	}
 	if model == "" {
 		model = "speech-2.8-hd"
@@ -293,9 +295,9 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 	}
 
 	reqBody := map[string]any{
-		"model":        m.Model,
-		"text":         text,
-		"stream":       true,
+		"model":  m.Model,
+		"text":   text,
+		"stream": true,
 		"voice_setting": map[string]any{
 			"voice_id": voice,
 			"speed":    speed,

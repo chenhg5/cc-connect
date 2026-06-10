@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -75,14 +74,17 @@ type HookEvent struct {
 
 // HookManager dispatches lifecycle events to configured hook handlers.
 type HookManager struct {
-	hooks   []HookConfig
-	project string
-	mu      sync.RWMutex
-	client  *http.Client
+	hooks       []HookConfig
+	project     string
+	shell       string // shell binary (e.g. "sh", "/bin/zsh")
+	shellFlag   string // shell flag (e.g. "-c", "-Command")
+	shellProfile string // prepended to every command
+	mu          sync.RWMutex
+	client      *http.Client
 }
 
 // NewHookManager creates a manager for the given project name.
-func NewHookManager(project string, hooks []HookConfig) *HookManager {
+func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, shellProfile string) *HookManager {
 	valid := make([]HookConfig, 0, len(hooks))
 	for _, h := range hooks {
 		if err := validateHookConfig(h); err != nil {
@@ -92,9 +94,12 @@ func NewHookManager(project string, hooks []HookConfig) *HookManager {
 		valid = append(valid, h)
 	}
 	return &HookManager{
-		hooks:   valid,
-		project: project,
-		client:  &http.Client{},
+		hooks:       valid,
+		project:     project,
+		shell:       shell,
+		shellFlag:   shellFlag,
+		shellProfile: shellProfile,
+		client:      &http.Client{},
 	}
 }
 
@@ -170,7 +175,7 @@ func (hm *HookManager) executeCommand(h *HookConfig, event HookEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", h.Command)
+	cmd := shellExecCommand(ctx, hm.shell, hm.shellFlag, hm.shellProfile, h.Command)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = append(os.Environ(), eventToEnv(event)...)
 

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -51,6 +50,63 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 		return time.Duration(*configured) * time.Minute, false
 	}
 	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
+}
+
+// logSizeSource describes where the resolved log size came from, so the
+// caller can log it and operators can audit the active setting without
+// grepping systemd/launchd definitions.
+type logSizeSource string
+
+const (
+	logSizeSourceFlag    logSizeSource = "flag"
+	logSizeSourceEnv     logSizeSource = "env"
+	logSizeSourceDefault logSizeSource = "default"
+)
+
+// resolveLogMaxSize picks the effective max log size in bytes, applying the
+// priority order: explicit flag value > CC_LOG_MAX_SIZE env var > built-in
+// default. flagValue is the raw string from --log-max-size ("" if not set).
+// Returns the byte count and which source won. Invalid flag/env values are
+// logged to stderr and the value is ignored — a malformed setting must never
+// silently downgrade to "0 bytes" or another surprise.
+func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogSize(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-size=%q: %v\n", flagValue, err)
+		} else {
+			return n, logSizeSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
+		n, err := daemon.ParseLogSize(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_SIZE=%q: %v\n", v, err)
+		} else {
+			return n, logSizeSourceEnv
+		}
+	}
+	return int64(daemon.DefaultLogMaxSize), logSizeSourceDefault
+}
+
+// preScanLogMaxSizeFlag returns the value passed via --log-max-size before
+// flag.Parse() runs, so the rotating-writer setup can honour the flag too.
+// Returns "" if the flag is absent. Both "--log-max-size VALUE" and
+// "--log-max-size=VALUE" forms are recognised.
+func preScanLogMaxSizeFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-size" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-size=") {
+			return strings.TrimPrefix(a, "--log-max-size=")
+		}
+	}
+	return ""
 }
 
 type initialModelRefreshStarter interface {
@@ -118,15 +174,15 @@ func main() {
 	}
 
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
+	// Log file setup happens before flag.Parse() so the rotating writer is in
+	// place before any slog output. To still honour --log-max-size, we
+	// pre-scan os.Args here for the flag value; this is a small, deliberate
+	// duplication of flag parsing for one well-known key.
 	var logWriter io.Writer
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
-		maxSize := int64(daemon.DefaultLogMaxSize)
-		if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
-			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-				maxSize = n
-			}
-		}
+		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
+		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s)\n", logFile, maxSize, maxSizeSrc)
 		w, err := daemon.NewRotatingWriter(logFile, maxSize)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
@@ -142,8 +198,20 @@ func main() {
 	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
 	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
+	logMaxSizeFlag := flag.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
 	flag.Usage = printUsage
 	flag.Parse()
+
+	// Cross-check: the rotating-writer setup above consumed a pre-scanned
+	// value of --log-max-size, but flag.Parse() may have been called for
+	// tests or wrappers that pre-scan differently. Validate the parsed flag
+	// value here so the binding is exercised and a typo caught by
+	// flag.Parse() surfaces a clear error.
+	if strings.TrimSpace(*logMaxSizeFlag) != "" {
+		if _, err := daemon.ParseLogSize(*logMaxSizeFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", *logMaxSizeFlag, err)
+		}
+	}
 
 	if *showVersion {
 		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
@@ -418,6 +486,10 @@ func main() {
 			})
 		}
 
+		// Wire shell configuration
+		shell, shellFlag, shellProfile := config.EffectiveShell(cfg, &proj)
+		engine.SetShell(shell, shellFlag, shellProfile)
+
 		// Wire hooks
 		if len(cfg.Hooks) > 0 {
 			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
@@ -431,7 +503,7 @@ func main() {
 					Async:   h.Async,
 				}
 			}
-			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, shellProfile))
 		}
 
 		// Wire local reference normalization / rendering
@@ -617,13 +689,16 @@ func main() {
 		}
 
 		// Wire text-to-speech if enabled
-		if cfg.TTS.Enabled {
+		ttsEffective := config.ResolveTTSConfigForProject(cfg.TTS, proj.Name)
+		if ttsEffective.Enabled {
 			ttsCfg := &core.TTSCfg{
-				Enabled:    true,
-				Voice:      cfg.TTS.Voice,
-				MaxTextLen: cfg.TTS.MaxTextLen,
+				Enabled:      true,
+				Voice:        ttsEffective.Voice,
+				LanguageType: ttsEffective.LanguageType,
+				Speed:        ttsEffective.Speed,
+				MaxTextLen:   ttsEffective.MaxTextLen,
 			}
-			initMode := cfg.TTS.TTSMode
+			initMode := ttsEffective.TTSMode
 			switch initMode {
 			case "always", "voice_only":
 			case "":
@@ -633,7 +708,7 @@ func main() {
 				initMode = "voice_only"
 			}
 			ttsCfg.SetTTSMode(initMode)
-			switch cfg.TTS.Provider {
+			switch ttsEffective.Provider {
 			case "qwen":
 				apiKey := cfg.TTS.Qwen.APIKey
 				baseURL := cfg.TTS.Qwen.BaseURL
@@ -648,6 +723,21 @@ func main() {
 				apiKey := cfg.TTS.MiniMax.APIKey
 				baseURL := cfg.TTS.MiniMax.BaseURL
 				model := cfg.TTS.MiniMax.Model
+				if apiKey == "" {
+					localCfg, err := config.LoadMiniMaxLocalConfig(cfg.DataDir, cfg.TTS.MiniMax.ConfigFile)
+					if err != nil {
+						slog.Warn("tts: failed to load minimax local config", "error", err)
+					} else {
+						apiKey = localCfg.APIKey
+						if baseURL == "" {
+							if localCfg.BaseURL != "" {
+								baseURL = localCfg.BaseURL
+							} else if localCfg.APIHost != "" {
+								baseURL = localCfg.APIHost
+							}
+						}
+					}
+				}
 				if apiKey != "" {
 					ttsCfg.TTS = core.NewMiniMaxTTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "minimax"
@@ -665,21 +755,21 @@ func main() {
 					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh" // default to Chinese
 				}
 				ttsCfg.TTS = core.NewEspeakTTS("", voice)
 				ttsCfg.Provider = "espeak"
 			case "pico":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN" // default to Chinese (Simplified)
 				}
 				ttsCfg.TTS = core.NewPicoTTS("", voice)
 				ttsCfg.Provider = "pico"
 			case "edge":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN-XiaoxiaoNeural" // default Chinese neural voice
 				}

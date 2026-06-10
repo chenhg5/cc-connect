@@ -1131,12 +1131,13 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 
 	// Create synthetic message and forward to engine as a permission response
 	msg := &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "qqbot",
-		MessageID:  d.ID,
-		UserID:     userID,
-		Content:    responseText,
-		ReplyCtx:   rctx,
+		SessionKey:           sessionKey,
+		Platform:             "qqbot",
+		MessageID:            d.ID,
+		UserID:               userID,
+		Content:              responseText,
+		ReplyCtx:             rctx,
+		IsPermissionResponse: true,
 	}
 
 	slog.Debug("qqbot: forwarding button click as permission response",
