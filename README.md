@@ -87,6 +87,11 @@ MiniMax-M3 pushes the frontier of coding and agentic AI, with a 1M-token context
 </tr>
 
 <tr>
+<td width="150"><a href="https://runapi.co/register?aff=4BXa"><img src="assets/sponsors/runapi.jpg" alt="RunAPI" width="120"></a></td>
+<td>Thanks to RunAPI for sponsoring this project! RunAPI is an efficient and stable API platform—an alternative to OpenRouter. A single API Key gives you access to 150+ leading models, including OpenAI, Claude, Gemini, DeepSeek, Grok, and more, at prices as low as 10% of the original (up to 90% off), with exceptional stability. It's seamlessly compatible with tools like Claude Code, OpenClaw, and others. RunAPI offers an exclusive perk for cc-connect users: register and contact an administrator to claim ¥7 in free credit.</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://www.aicodemirror.com/register?invitecode=KDHMUP"><img src="assets/sponsors/aicodemirror.jpg" alt="AICodeMirror" width="120"></a></td>
 <td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CC users: register via <a href="https://www.aicodemirror.com/register?invitecode=KDHMUP">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
 </tr>
@@ -315,6 +320,7 @@ vim ~/.cc-connect/config.toml
 ```
 
 Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
+`admin_from` must be placed under `[[projects]]` (not under `[projects.platforms.options]`). You can use `/whoami` or `/status` to get your current `User ID`.
 When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
 
 
@@ -514,7 +520,7 @@ You can control this feature globally in `config.toml`:
 attachment_send = "on"  # default: "on"; set to "off" to block image/file send-back
 ```
 
-This switch is independent from the agent's `/mode`. It only controls `cc-connect send --image/--file`.
+This switch is independent from the agent's `/mode`. It only controls `cc-connect send --image/--file`. Voice send-back uses the TTS config instead.
 
 Examples:
 
@@ -522,11 +528,13 @@ Examples:
 cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+cc-connect send --tts "Hello from cc-connect"
 ```
 
 Notes:
 - Absolute paths are the safest option.
 - `--image` and `--file` can both be repeated.
+- `--tts` sends synthesized speech when the user asks for a voice reply.
 - `attachment_send = "off"` disables only attachment send-back; ordinary text replies still work.
 - This command is for generated attachments, not ordinary text replies.
 

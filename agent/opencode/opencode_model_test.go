@@ -660,6 +660,14 @@ func TestAvailableModels_PrefersPersistentCacheOverDiscoveredModels(t *testing.T
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	a := agent.(*Agent)
+	// AvailableModels with a cached result launches a background refresh goroutine that
+	// writes into dataDir. Register cleanup BEFORE calling AvailableModels so that
+	// t.Cleanup runs in LIFO order: our Wait() fires first, then t.TempDir's RemoveAll.
+	// Without this, the goroutine can still be writing when RemoveAll runs, causing
+	// "TempDir RemoveAll cleanup: directory not empty" under -cover (see #1118).
+	t.Cleanup(func() { a.refreshWg.Wait() })
+
 	switcher, ok := agent.(core.ModelSwitcher)
 	if !ok {
 		t.Fatalf("New() agent does not implement core.ModelSwitcher")

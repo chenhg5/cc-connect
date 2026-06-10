@@ -41,6 +41,54 @@ func TestHandleSend_AllowsAttachmentOnly(t *testing.T) {
 	}
 }
 
+func TestHandleSend_AllowsTTSTextOnly(t *testing.T) {
+	tts := &recordingTTS{}
+	platform := &audioStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	engine := NewEngine("test", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	engine.SetTTSConfig(&TTSCfg{
+		Enabled:  true,
+		Provider: "minimax",
+		Voice:    "voice-x",
+		Speed:    0.98,
+		TTS:      tts,
+	})
+	engine.interactiveStates["session-1"] = &interactiveState{
+		platform: platform,
+		replyCtx: "reply-ctx",
+	}
+
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	body, err := json.Marshal(SendRequest{
+		Project:    "test",
+		SessionKey: "session-1",
+		TTSText:    "hello voice",
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/send", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleSend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	text, opts, calls := tts.snapshot()
+	if calls != 1 {
+		t.Fatalf("tts calls = %d, want 1", calls)
+	}
+	if text != "hello voice" {
+		t.Fatalf("tts text = %q", text)
+	}
+	if opts.Voice != "voice-x" || opts.Speed != 0.98 {
+		t.Fatalf("tts opts = %#v", opts)
+	}
+	if _, format, audioCalls := platform.audioSnapshot(); audioCalls != 1 || format != "mp3" {
+		t.Fatalf("audio calls/format = %d/%q", audioCalls, format)
+	}
+}
+
 // TestHandleSend_UnknownProjectReturns404 ensures the API does NOT silently
 // fall back to the only registered engine when the caller named a different
 // project. Previously a typo'd project name routed messages to whatever

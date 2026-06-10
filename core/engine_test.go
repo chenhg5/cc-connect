@@ -380,9 +380,9 @@ func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, co
 	return nil
 }
 
-func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string {
+func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "rich status=%s title=%s streaming=%t elapsed=%s\n", status, title, streaming, elapsed)
+	fmt.Fprintf(&b, "rich status=%s title=%s streaming=%t footer=%s\n", status, title, streaming, statusFooter)
 	for _, step := range steps {
 		fmt.Fprintf(&b, "step=%+v\n", step)
 	}
@@ -2193,6 +2193,12 @@ func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	if !strings.Contains(prompt, "cc-connect send --file") {
 		t.Fatalf("prompt missing file send instructions: %q", prompt)
 	}
+	if !strings.Contains(prompt, "cc-connect send --tts") {
+		t.Fatalf("prompt missing tts send instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "NO_REPLY") {
+		t.Fatalf("prompt missing silent reply guidance for voice tool: %q", prompt)
+	}
 }
 
 func countCardActionValues(card *Card, prefix string) int {
@@ -3212,6 +3218,7 @@ func TestHandleMessage_AutoResetOnIdle_RotatesToNewSession(t *testing.T) {
 	old.SetAgentSessionID("old-session", "stub")
 	staleAt := time.Now().Add(-2 * time.Hour)
 	old.mu.Lock()
+	old.LastUserActivity = staleAt
 	old.UpdatedAt = staleAt
 	old.mu.Unlock()
 
@@ -3287,6 +3294,7 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
 	session.SetAgentSessionID("existing-session", "stub")
 	recentAt := time.Now().Add(-5 * time.Minute)
 	session.mu.Lock()
+	session.LastUserActivity = recentAt
 	session.UpdatedAt = recentAt
 	session.mu.Unlock()
 
@@ -3325,6 +3333,71 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_AutoResetOnIdle_FiresWhenHeartbeatBumpedUpdatedAt(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("fresh reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetResetOnIdle(60 * time.Minute)
+
+	key := "test:user1"
+	old := e.sessions.GetOrCreateActive(key)
+	old.AddHistory("user", "stale context")
+	old.SetAgentSessionID("old-session", "stub")
+
+	// Last user message was a long time ago — well past the idle threshold.
+	staleAt := time.Now().Add(-2 * time.Hour)
+	old.mu.Lock()
+	old.LastUserActivity = staleAt
+	old.mu.Unlock()
+
+	// Simulate a heartbeat (or unsolicited agent response) finishing right
+	// before this test's user message: Unlock() bumps UpdatedAt to now, but
+	// LastUserActivity is intentionally NOT touched by those code paths.
+	old.Unlock()
+
+	if !old.GetUpdatedAt().After(staleAt) {
+		t.Fatalf("expected Unlock to bump UpdatedAt, got %v vs %v", old.GetUpdatedAt(), staleAt)
+	}
+	if !old.GetLastUserActivity().Equal(staleAt) {
+		t.Fatalf("expected LastUserActivity to remain at %v, got %v", staleAt, old.GetLastUserActivity())
+	}
+
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello after idle",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		active := e.sessions.GetOrCreateActive(key)
+		sent := p.getSent()
+		if active.ID != old.ID && len(active.GetHistory(0)) >= 2 && len(sent) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for idle auto-reset despite heartbeat-bumped UpdatedAt, sent=%v active=%s old=%s", sent, active.ID, old.ID)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID == old.ID {
+		t.Fatal("expected a new active session after idle auto-reset")
+	}
+	sent := p.getSent()
+	if !strings.Contains(sent[0], "Session auto-reset") {
+		t.Fatalf("first reply = %q, want auto-reset notice", sent[0])
+	}
+}
+
 func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -3336,6 +3409,7 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.
 	session.SetAgentSessionID("old-session", "stub")
 	staleAt := time.Now().Add(-2 * time.Hour)
 	session.mu.Lock()
+	session.LastUserActivity = staleAt
 	session.UpdatedAt = staleAt
 	session.mu.Unlock()
 
@@ -8633,6 +8707,78 @@ func TestQueueMessage_NilAgentSession_DuringStartup(t *testing.T) {
 	state.mu.Unlock()
 }
 
+// TestProcessInteractiveMessageWith_NilAgentSession_NoPanic is a regression
+// test for issue #1181. When a long-running agent turn is force-killed
+// (e.g. by max_turn_time_mins) the cleanup path may leave an interactive
+// state in the map with agentSession==nil. A subsequent message routed to
+// that state must NOT panic with a nil-pointer deref at the old engine.go
+// v1.3.2 line 2164 site (drainEvents(state.agentSession.Events())) —
+// processInteractiveMessageWith should detect the nil state, send a
+// user-visible failure reply, and return cleanly.
+func TestProcessInteractiveMessageWith_NilAgentSession_NoPanic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			return nil, fmt.Errorf("simulated agent start failure")
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "test:user-nil-after-abandon"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	// First call: agent.StartSession fails, leaving state.agentSession == nil.
+	// The nil guard at engine.go:2851 must send a failure reply and return
+	// without panicking. This branch protects against the v1.3.2 panic at
+	// the old line 2164.
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("processInteractiveMessageWith panicked on nil agentSession: %v", r)
+			}
+			close(done)
+		}()
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: sessionKey,
+			UserID:     "user-nil",
+			Content:    "trigger nil guard",
+			ReplyCtx:   "ctx-nil",
+		}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveMessageWith did not return after nil agentSession")
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a failure reply on the platform, got none")
+	}
+	if !strings.Contains(sent[0], e.i18n.T(MsgFailedToStartAgentSession)) {
+		t.Fatalf("expected MsgFailedToStartAgentSession, got %q", sent[0])
+	}
+
+	// State must still be present (cleanup did NOT run) and agentSession must
+	// still be nil — the user should be able to retry with a fresh message.
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		t.Fatal("expected interactive state to remain in the map for retry")
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.agentSession != nil {
+		t.Fatal("expected agentSession to remain nil after failed start")
+	}
+}
+
 // --- 2. /compress flow ---
 
 type stubCompressorAgent struct {
@@ -11878,6 +12024,107 @@ func TestEstimateTokensWithPendingAssistant(t *testing.T) {
 	}
 }
 
+type recordingTTS struct {
+	mu    sync.Mutex
+	text  string
+	opts  TTSSynthesisOpts
+	calls int
+}
+
+func (t *recordingTTS) Synthesize(_ context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.text = text
+	t.opts = opts
+	t.calls++
+	return []byte("audio-bytes"), "mp3", nil
+}
+
+func (t *recordingTTS) snapshot() (string, TTSSynthesisOpts, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.text, t.opts, t.calls
+}
+
+type audioStubPlatform struct {
+	stubPlatformEngine
+	mu         sync.Mutex
+	audio      []byte
+	format     string
+	audioCalls int
+}
+
+func (p *audioStubPlatform) SendAudio(_ context.Context, _ any, audio []byte, format string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.audio = append([]byte(nil), audio...)
+	p.format = format
+	p.audioCalls++
+	return nil
+}
+
+func (p *audioStubPlatform) audioSnapshot() ([]byte, string, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]byte(nil), p.audio...), p.format, p.audioCalls
+}
+
+func TestSynthesizedTTSReply_PropagatesSpeed(t *testing.T) {
+	tts := &recordingTTS{}
+	p := &audioStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("assistant", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetTTSConfig(&TTSCfg{Enabled: true, Voice: "voice-b", Speed: 1.06, TTS: tts})
+
+	if err := e.synthesizeAndSendTTS(p, "ctx", "hello"); err != nil {
+		t.Fatalf("synthesizeAndSendTTS() error = %v", err)
+	}
+	_, opts, calls := tts.snapshot()
+	if calls != 1 {
+		t.Fatalf("tts calls = %d, want 1", calls)
+	}
+	if opts.Speed != 1.06 {
+		t.Fatalf("speed = %v, want 1.06", opts.Speed)
+	}
+}
+
+func TestSynthesizedTTSReply_ErrorWhenTTSDisabled(t *testing.T) {
+	p := &audioStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("assistant", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetTTSConfig(&TTSCfg{Enabled: false, TTS: &recordingTTS{}})
+
+	err := e.synthesizeAndSendTTS(p, "ctx", "hello")
+	if err == nil || !strings.Contains(err.Error(), "tts is not configured") {
+		t.Fatalf("error = %v, want tts is not configured", err)
+	}
+}
+
+func TestSynthesizedTTSReply_ErrorWhenProviderMissing(t *testing.T) {
+	p := &audioStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("assistant", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetTTSConfig(&TTSCfg{Enabled: true})
+
+	err := e.synthesizeAndSendTTS(p, "ctx", "hello")
+	if err == nil || !strings.Contains(err.Error(), "tts provider is not configured") {
+		t.Fatalf("error = %v, want tts provider is not configured", err)
+	}
+}
+
+func TestSynthesizedTTSReply_ErrorWhenPlatformCannotSendAudio(t *testing.T) {
+	tts := &recordingTTS{}
+	p := &stubPlatformEngine{n: "discord"}
+	e := NewEngine("assistant", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetTTSConfig(&TTSCfg{Enabled: true, TTS: tts})
+
+	err := e.synthesizeAndSendTTS(p, "ctx", "hello")
+	if err == nil || !strings.Contains(err.Error(), "platform discord does not support audio sending") {
+		t.Fatalf("error = %v, want unsupported audio sender error", err)
+	}
+	_, _, calls := tts.snapshot()
+	if calls != 0 {
+		t.Fatalf("tts calls = %d, want 0", calls)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Engine setter method coverage tests
 // ---------------------------------------------------------------------------
@@ -14035,4 +14282,103 @@ func TestMaybeAutoResetSessionOnIdle_NotFiredWhenUserActivityRecent(t *testing.T
 	if rotated != nil {
 		t.Fatal("expected no idle reset because LastUserActivity is only 5min ago")
 	}
+}
+
+// TestHandlePendingPermission_StalePermissionCallback_Dropped verifies that
+// permission-callback messages synthesized by inline-button / card-action paths
+// (Telegram callback_query, Feishu card_action, QQBot interaction button, and
+// the bridge web admin card_action) are silently dropped when there is no
+// matching interactive state or pending request — instead of letting the
+// literal "allow" / "deny" string reach the agent's prompt stream. Plain
+// text "allow" / "deny" from a real user must continue to fall through
+// (return false) so the caller can route them through the normal message
+// handler. Regression test for #826.
+func TestHandlePendingPermission_StalePermissionCallback_Dropped(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	t.Run("no interactive state — stale callback is dropped (returns true)", func(t *testing.T) {
+		msg := &Message{
+			SessionKey:           "ghost-session",
+			Content:              "allow",
+			IsPermissionResponse: true,
+		}
+		if !e.handlePendingPermission(p, msg, "allow", "ghost-ikey") {
+			t.Fatal("handlePendingPermission returned false, want true (drop stale callback)")
+		}
+		if rec.calls != 0 {
+			t.Fatalf("RespondPermission called %d times, want 0 (stale callback must not reach agent)", rec.calls)
+		}
+	})
+
+	t.Run("no pending request — stale callback is dropped (returns true)", func(t *testing.T) {
+		iKey := "ws:sk-stale-no-pending"
+		e.interactiveMu.Lock()
+		e.interactiveStates[iKey] = &interactiveState{
+			agentSession: rec,
+			pending:      nil,
+		}
+		e.interactiveMu.Unlock()
+
+		msg := &Message{
+			SessionKey:           "sk-stale-no-pending",
+			Content:              "deny",
+			IsPermissionResponse: true,
+		}
+		if !e.handlePendingPermission(p, msg, "deny", iKey) {
+			t.Fatal("handlePendingPermission returned false, want true (drop stale callback)")
+		}
+		if rec.calls != 0 {
+			t.Fatalf("RespondPermission called %d times, want 0 (stale callback must not reach agent)", rec.calls)
+		}
+	})
+
+	t.Run("plain text 'allow' from real user falls through (returns false)", func(t *testing.T) {
+		// No flag, no state → must return false so caller routes to normal handler.
+		msg := &Message{
+			SessionKey: "sk-plain",
+			Content:    "allow",
+		}
+		if e.handlePendingPermission(p, msg, "allow", "sk-plain-ikey") {
+			t.Fatal("handlePendingPermission returned true, want false (plain user message must fall through)")
+		}
+		if rec.calls != 0 {
+			t.Fatalf("RespondPermission called %d times, want 0 (plain user message should not auto-resolve)", rec.calls)
+		}
+	})
+
+	t.Run("matching pending request — callback still resolves", func(t *testing.T) {
+		iKey := "ws:sk-fresh"
+		pending := &pendingPermission{
+			RequestID: "req-fresh",
+			ToolName:  "Bash",
+			ToolInput: map[string]any{"command": "ls"},
+			Resolved:  make(chan struct{}),
+		}
+		e.interactiveMu.Lock()
+		e.interactiveStates[iKey] = &interactiveState{
+			agentSession: rec,
+			pending:      pending,
+		}
+		e.interactiveMu.Unlock()
+
+		msg := &Message{
+			SessionKey:           "sk-fresh",
+			Content:              "allow",
+			IsPermissionResponse: true,
+		}
+		if !e.handlePendingPermission(p, msg, "allow", iKey) {
+			t.Fatal("handlePendingPermission returned false, want true (matching pending must resolve)")
+		}
+		if rec.calls != 1 {
+			t.Fatalf("RespondPermission calls = %d, want 1", rec.calls)
+		}
+		if rec.lastID != "req-fresh" {
+			t.Fatalf("RespondPermission id = %q, want req-fresh", rec.lastID)
+		}
+		if rec.lastResult.Behavior != "allow" {
+			t.Fatalf("RespondPermission behavior = %q, want allow", rec.lastResult.Behavior)
+		}
+	})
 }

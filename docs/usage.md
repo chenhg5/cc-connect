@@ -12,10 +12,12 @@ Complete guide to using cc-connect features.
 - [Feishu Setup CLI](#feishu-setup-cli)
 - [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
+- [Claude Code PermissionRequest Hooks](#claude-code-permissionrequest-hooks)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
+- [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
 - [Daemon Mode](#daemon-mode)
 - [Multi-Workspace Mode](#multi-workspace-mode)
@@ -166,10 +168,11 @@ alias = "opus"
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
-# MiniMax — OpenAI-compatible, 1M context
+# MiniMax — OpenAI-compatible agent provider, 1M context
 [[projects.agent.providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
+# Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
@@ -265,10 +268,23 @@ Switch where the next agent session starts, directly from chat.
 
 ### Behavior Notes
 
+- `/dir` is a privileged command. You must set `admin_from` under `[[projects]]` in `config.toml` before it can be used.
+- Do not put `admin_from` under `[projects.platforms.options]`, or it will be ignored.
+- Use `/whoami` or `/status` to get your current `User ID`, then place that ID into `admin_from`.
+- If you are the only user of this bot, `admin_from = "*"` also works, but it grants every allowed user privileged command access.
+- Restart `cc-connect` after updating `config.toml`.
 - Directory changes apply to the next session in the current project.
 - Relative paths are resolved from the current agent work directory.
 - Directory history is project-scoped and can be switched by index.
 - `/cd` is kept for compatibility, but `/dir` is the primary command.
+
+Example config:
+
+```toml
+[[projects]]
+name = "my-project"
+admin_from = "ou_xxx"
+```
 
 Examples:
 
@@ -611,6 +627,35 @@ router_api_key = "your-secret-key"  # optional
 
 ---
 
+## Claude Code PermissionRequest Hooks
+
+If you have [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) configured in your Claude Code `settings.json`, cc-connect will respect them — matching hooks can auto-approve or deny tool requests before they reach the messaging platform.
+
+### Why hooks run twice
+
+cc-connect launches Claude Code with `--permission-prompt-tool stdio`, which means Claude Code's own hook execution output is discarded (stdout is consumed by the protocol). To make your hooks actually take effect, cc-connect reads the hook definitions from `settings.json` and **re-runs them independently**.
+
+This means your hook command is executed **twice** per permission request:
+
+1. Once by Claude Code (result discarded)
+2. Once by cc-connect (result used)
+
+### Avoiding double cost for LLM-based hooks
+
+If your hook is rule-based (e.g. "deny `rm -rf`"), running twice is harmless. But if your hook calls an LLM (like [ccgate](https://github.com/tak848/ccgate)), the first execution wastes tokens. Add this guard at the top of your hook:
+
+```bash
+#!/bin/bash
+if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then
+  exit 0  # cc-connect will re-run us without this flag
+fi
+# ... your actual hook logic ...
+```
+
+cc-connect sets `CC_CONNECT_PERMISSION_HOOK_SKIP=1` in the Claude Code subprocess environment. When your hook sees this variable, it's running inside Claude Code (result will be discarded) — skip the expensive work. cc-connect strips this variable when it runs the hook itself, so the second execution proceeds normally.
+
+---
+
 ## Voice Messages (Speech-to-Text)
 
 Send voice messages — cc-connect transcribes them automatically.
@@ -653,21 +698,31 @@ brew install ffmpeg
 
 Synthesize AI replies into voice messages.
 
-**Supported:** Feishu (Lark)
+**Supported:** Platforms that implement audio sending, such as Feishu/Lark, DingTalk, Telegram, Max, and Weixin.
 
 ### Configure
 
 ```toml
 [tts]
 enabled = true
-provider = "qwen"        # or "openai"
-voice = "Cherry"
+provider = "minimax"     # qwen | openai | minimax | mimo | espeak | pico | edge
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98             # provider-specific range; MiniMax commonly accepts 0.5-2.0
 tts_mode = "voice_only"  # "voice_only" | "always"
 max_text_len = 0         # 0 = no limit
 
-[tts.qwen]
-api_key = "sk-xxx"
-# model = "qwen3-tts-flash"
+[tts.minimax]
+api_key = ""             # optional: falls back to data_dir/config/minimax.json
+base_url = ""            # optional: default https://api.minimaxi.com
+model = "speech-2.8-hd"
+
+[tts.agents.assistant]
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
+
+[tts.agents.reviewer]
+voice_id = "Chinese (Mandarin)_Gentle_Senior"
+speed = 0.96
 ```
 
 ### TTS Modes
@@ -681,9 +736,9 @@ Switch: `/tts always` or `/tts voice_only`
 
 ---
 
-## Image and File Send-Back
+## Image, File, and Voice Send-Back
 
-When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`.
+When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
 
 **Currently supported platforms:**
 - Feishu
@@ -706,6 +761,7 @@ or:
 These two commands write the same cc-connect instructions. Either one is enough. After that, the agent knows:
 - normal text replies should be returned normally
 - generated attachments should be sent back with `cc-connect send --image/--file`
+- requested voice messages should be sent with `cc-connect send --tts`
 
 If you have run setup before, run it again after upgrading so the instructions are refreshed to the latest version.
 
@@ -717,7 +773,7 @@ Add this to `config.toml` if you want to disable agent-driven attachment send-ba
 attachment_send = "off"
 ```
 
-The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`.
+The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
 
 ### CLI examples
 
@@ -725,11 +781,13 @@ The default is `on`. This switch is independent from the agent's `/mode` and onl
 cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+cc-connect send --tts "Hello from cc-connect"
 ```
 
 Notes:
 - `--image` is for image attachments.
 - `--file` is for any file attachment.
+- `--tts` synthesizes text and sends the generated audio through the active TTS provider.
 - `--message` is optional and sends a text note before the attachments.
 - `--image` and `--file` can both be repeated.
 - Absolute paths are recommended so the command does not depend on the agent's current working directory.
@@ -740,10 +798,11 @@ Notes:
 1. The agent generates a screenshot or chart and should send it directly to the user.
 2. The agent generates a PDF, Markdown export, log bundle, or patch file that should be delivered as an attachment.
 3. The agent wants to send a short status message together with one or more generated files.
+4. The user asks the agent to "send this as voice" without typing a slash command.
 
 ### Important notes
 
-- This command is for attachment delivery, not ordinary text replies.
+- This command is for generated attachment and voice delivery, not ordinary text replies.
 - The files must exist on the local machine where the agent runs.
 - There must be an active session; otherwise the command fails because cc-connect has no chat context to deliver to.
 - Platform-specific file size and file type limits still apply.
@@ -786,6 +845,78 @@ Optional: `--session-mode new-per-run` starts a fresh agent session on each run 
 > "Every day at 6am, summarize GitHub trending"
 
 Claude Code auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
+
+---
+
+## Shell Configuration
+
+By default, cc-connect uses `sh` on Unix and `powershell.exe` on Windows for all shell execution (`/shell` commands, cron exec jobs, hooks, and webhook exec). You can override this to use a different shell.
+
+### Supported Shells
+
+| Shell | Config value | Flag |
+|-------|-------------|------|
+| sh (default on Unix) | `sh` | `-c` |
+| bash | `/bin/bash` | `-c` |
+| zsh | `/bin/zsh` | `-c` |
+| fish | `/bin/fish` | `-c` |
+| cmd (Windows) | `cmd` | `/C` |
+| PowerShell (default on Windows) | `powershell.exe` | `-Command` |
+| PowerShell Core | `pwsh` | `-Command` |
+
+The flag is auto-detected from the shell name — no manual configuration needed.
+
+### Global Configuration
+
+Set `shell` at the top level of `config.toml` to change the default for all projects:
+
+```toml
+shell = "/bin/zsh"
+```
+
+### Per-Project Override
+
+Override the shell for a specific project:
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+```
+
+### Shell Profile
+
+Use `shell_profile` to prepend a setup script to every shell command. This is useful for sourcing your shell profile so that custom functions, aliases, and environment variables are available:
+
+```toml
+shell = "/bin/zsh"
+shell_profile = "source ~/.zshrc"
+```
+
+The shell profile and the user's command are joined with a newline and passed as a single script to the shell, avoiding quoting issues. For example, `/shell echo $MY_VAR` becomes:
+
+```zsh
+source ~/.zshrc
+echo $MY_VAR
+```
+
+`shell_profile` also supports per-project override:
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+shell_profile = "source ~/.config/fish/config.fish"
+```
+
+### Affected Execution Paths
+
+The shell configuration applies to all command execution in cc-connect:
+
+- **`/shell` command** — interactive shell commands from chat
+- **Cron exec jobs** — `[[cron]]` entries with `exec` field
+- **Hooks** — `[[hooks]]` entries with `type = "command"`
+- **Webhook exec** — webhook requests with `exec` field
 
 ---
 

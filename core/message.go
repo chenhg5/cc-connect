@@ -185,6 +185,21 @@ type Message struct {
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
+	// IsPermissionResponse is set by inline-button / card-action paths in
+	// platforms when a synthesized message is forwarded as a permission
+	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,
+	// Feishu onCardAction, QQBot interaction button, bridge card_action).
+	// The engine uses this flag to drop STALE callbacks silently when no
+	// matching pending request exists, instead of letting the literal
+	// "allow"/"deny" string reach the agent prompt stream. Plain text
+	// "allow"/"deny" typed by a real user must NOT set this flag — they
+	// continue to flow through the regular message handler.
+	IsPermissionResponse bool
+	// UserMessageTimeMs is the platform message creation time in Unix milliseconds
+	// when known (e.g. Feishu im.message.message_received create_time). Used to
+	// drop late redeliveries that reuse a new message_id but an older create_time
+	// than a message already processed. Zero means unset (no ordering hint).
+	UserMessageTimeMs int64
 }
 
 // EventType distinguishes different kinds of agent output.

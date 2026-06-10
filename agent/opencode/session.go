@@ -349,6 +349,24 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 		case <-s.ctx.Done():
 			return
 		}
+
+		// When a tool call is rejected (e.g. permission denied in default mode),
+		// opencode exits without generating any follow-up text. Surface the rejection
+		// reason so the engine has something meaningful to send rather than "(空响应)".
+		// This covers the common case where the user has not configured tool permissions
+		// and needs guidance to use mode="yolo" or update opencode settings.
+		if status == "error" && state != nil {
+			errMsg, _ := state["error"].(string)
+			if errMsg != "" {
+				slog.Info("opencodeSession: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
+				errEvt := core.Event{Type: core.EventText, Content: errMsg}
+				select {
+				case s.events <- errEvt:
+				case <-s.ctx.Done():
+					return
+				}
+			}
+		}
 	}
 }
 
