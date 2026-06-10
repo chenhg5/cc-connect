@@ -4,16 +4,24 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const webexBaseURL = "https://webexapis.com/v1"
+
+// maxRetryAfter caps how long we honor a 429 Retry-After header before retrying.
+const maxRetryAfter = 60 * time.Second
+
+// errUnauthorized signals a 401 from the Webex API so callers can stop retrying.
+var errUnauthorized = errors.New("webex: unauthorized (401) — check bot token")
 
 // webexClient abstracts the Webex REST API so tests can stub it.
 type webexClient interface {
@@ -28,16 +36,29 @@ type webexClient interface {
 
 // httpClient is the real webexClient backed by net/http.
 type httpClient struct {
-	token string
-	hc    *http.Client
+	token   string
+	hc      *http.Client
+	baseURL string // Webex REST base; overridable in tests.
 }
 
 func newHTTPClient(token string) *httpClient {
-	return &httpClient{token: token, hc: &http.Client{Timeout: 60 * time.Second}}
+	return &httpClient{token: token, hc: &http.Client{Timeout: 60 * time.Second}, baseURL: webexBaseURL}
 }
 
-func (c *httpClient) do(ctx context.Context, method, url string, body io.Reader, contentType string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+// base returns the configured REST base URL, falling back to the default.
+func (c *httpClient) base() string {
+	if c.baseURL != "" {
+		return c.baseURL
+	}
+	return webexBaseURL
+}
+
+func (c *httpClient) do(ctx context.Context, method, url string, body []byte, contentType string) (*http.Response, error) {
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 	if err != nil {
 		return nil, err
 	}
@@ -48,8 +69,53 @@ func (c *httpClient) do(ctx context.Context, method, url string, body io.Reader,
 	return c.hc.Do(req)
 }
 
+// doWithRetry wraps do to surface 401 as errUnauthorized and to retry once on
+// 429 after honoring the Retry-After header (capped). The returned response (on
+// success) has an unread body the caller must close.
+func (c *httpClient) doWithRetry(ctx context.Context, method, url string, body []byte, contentType, what string) (*http.Response, error) {
+	resp, err := c.do(ctx, method, url, body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		return nil, fmt.Errorf("%s: %w", what, errUnauthorized)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		wait := retryAfter(resp.Header.Get("Retry-After"))
+		resp.Body.Close()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		resp, err = c.do(ctx, method, url, body, contentType)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			return nil, fmt.Errorf("%s: %w", what, errUnauthorized)
+		}
+	}
+	return resp, nil
+}
+
+// retryAfter parses a Retry-After header value (in seconds), capping the wait.
+func retryAfter(v string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || secs < 0 {
+		return 0
+	}
+	d := time.Duration(secs) * time.Second
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	return d
+}
+
 func (c *httpClient) GetMe(ctx context.Context) (*person, error) {
-	resp, err := c.do(ctx, http.MethodGet, webexBaseURL+"/people/me", nil, "")
+	resp, err := c.doWithRetry(ctx, http.MethodGet, c.base()+"/people/me", nil, "", "webex: getMe")
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +131,8 @@ func (c *httpClient) GetMe(ctx context.Context) (*person, error) {
 }
 
 func (c *httpClient) CreateDevice(ctx context.Context) (*device, error) {
-	payload := strings.NewReader(`{"deviceName":"cc-connect","deviceType":"DESKTOP","name":"cc-connect","systemName":"cc-connect","systemVersion":"1.0"}`)
-	resp, err := c.do(ctx, http.MethodPost, "https://wdm-a.wbx2.com/wdm/api/v1/devices", payload, "application/json")
+	payload := []byte(`{"deviceName":"cc-connect","deviceType":"DESKTOP","name":"cc-connect","systemName":"cc-connect","systemVersion":"1.0"}`)
+	resp, err := c.doWithRetry(ctx, http.MethodPost, "https://wdm-a.wbx2.com/wdm/api/v1/devices", payload, "application/json", "webex: createDevice")
 	if err != nil {
 		return nil, err
 	}
@@ -85,16 +151,19 @@ func (c *httpClient) DeleteDevice(ctx context.Context, deviceURL string) error {
 	if deviceURL == "" {
 		return nil
 	}
-	resp, err := c.do(ctx, http.MethodDelete, deviceURL, nil, "")
+	resp, err := c.doWithRetry(ctx, http.MethodDelete, deviceURL, nil, "", "webex: deleteDevice")
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("webex: deleteDevice status %d", resp.StatusCode)
+	}
 	return nil
 }
 
 func (c *httpClient) GetMessage(ctx context.Context, id string) (*message, error) {
-	resp, err := c.do(ctx, http.MethodGet, webexBaseURL+"/messages/"+id, nil, "")
+	resp, err := c.doWithRetry(ctx, http.MethodGet, c.base()+"/messages/"+id, nil, "", "webex: getMessage")
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +179,7 @@ func (c *httpClient) GetMessage(ctx context.Context, id string) (*message, error
 }
 
 func (c *httpClient) DownloadFile(ctx context.Context, url string) (*downloadedFile, error) {
-	resp, err := c.do(ctx, http.MethodGet, url, nil, "")
+	resp, err := c.doWithRetry(ctx, http.MethodGet, url, nil, "", "webex: downloadFile")
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +206,7 @@ func (c *httpClient) PostMessage(ctx context.Context, roomID, parentID, markdown
 		body["parentId"] = parentID
 	}
 	buf, _ := json.Marshal(body)
-	resp, err := c.do(ctx, http.MethodPost, webexBaseURL+"/messages", bytes.NewReader(buf), "application/json")
+	resp, err := c.doWithRetry(ctx, http.MethodPost, c.base()+"/messages", buf, "application/json", "webex: postMessage")
 	if err != nil {
 		return err
 	}
@@ -164,7 +233,7 @@ func (c *httpClient) PostFile(ctx context.Context, roomID string, f *downloadedF
 		return err
 	}
 	w.Close()
-	resp, err := c.do(ctx, http.MethodPost, webexBaseURL+"/messages", &buf, w.FormDataContentType())
+	resp, err := c.doWithRetry(ctx, http.MethodPost, c.base()+"/messages", buf.Bytes(), w.FormDataContentType(), "webex: postFile")
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package webex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -59,6 +60,13 @@ func New(opts map[string]any) (core.Platform, error) {
 
 func (p *Platform) Name() string { return "webex" }
 
+// self returns the bot's own personId under lock.
+func (p *Platform) self() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.selfID
+}
+
 // parseAllowFrom splits and lowercases a comma-separated email list.
 func parseAllowFrom(raw string) []string {
 	raw = strings.TrimSpace(raw)
@@ -82,7 +90,7 @@ func (p *Platform) isAllowed(email string) bool {
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
 	for _, a := range p.allowFrom {
-		if a == email {
+		if a == "*" || a == email {
 			return true
 		}
 	}
@@ -98,8 +106,9 @@ func stripMention(text string) string {
 
 // isMentioned reports whether the bot's selfID appears in mentionedPeople.
 func (p *Platform) isMentioned(m *message) bool {
+	self := p.self()
 	for _, id := range m.MentionedPeople {
-		if id == p.selfID {
+		if id == self {
 			return true
 		}
 	}
@@ -132,7 +141,8 @@ func (p *Platform) buildMessage(ctx context.Context, m *message) *core.Message {
 		ChannelID:  m.RoomID,
 		ChannelKey: m.RoomID,
 		UserID:     m.PersonEmail,
-		UserName:   m.PersonEmail,
+		// Webex message API exposes no display name; use email. A /people lookup could enrich this later.
+		UserName: m.PersonEmail,
 		Content:    content,
 		ReplyCtx:   replyContext{roomID: m.RoomID, messageID: m.ID, personID: m.PersonID},
 	}
@@ -169,8 +179,9 @@ func (p *Platform) isStopping() bool {
 }
 
 const (
-	initialBackoff = time.Second
-	maxBackoff     = 30 * time.Second
+	initialBackoff   = time.Second
+	maxBackoff       = 30 * time.Second
+	stableConnWindow = 10 * time.Second
 )
 
 // Start fetches the bot identity, registers a device, and launches the
@@ -241,12 +252,19 @@ func (p *Platform) connectLoop(ctx context.Context) {
 			return
 		}
 		if err != nil {
-			slog.Warn("webex: connection ended", "error", err, "backoff", backoff)
+			if errors.Is(err, errUnauthorized) {
+				slog.Error("webex: authentication failed, not retrying", "error", core.RedactToken(err.Error(), p.token))
+				if h := p.lifecycle(); h != nil {
+					h.OnPlatformUnavailable(p, err)
+				}
+				return
+			}
+			slog.Warn("webex: connection ended", "error", core.RedactToken(err.Error(), p.token), "backoff", backoff)
 			if h := p.lifecycle(); h != nil {
 				h.OnPlatformUnavailable(p, err)
 			}
 		}
-		if time.Since(started) >= 10*time.Second {
+		if time.Since(started) >= stableConnWindow {
 			backoff = initialBackoff
 		} else if backoff < maxBackoff {
 			backoff *= 2
@@ -276,13 +294,19 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		return fmt.Errorf("create device: %w", err)
 	}
 	p.mu.Lock()
+	prevDevice := p.deviceURL
 	p.deviceURL = dev.URL
 	p.mu.Unlock()
+	if prevDevice != "" && prevDevice != dev.URL {
+		if err := p.client.DeleteDevice(ctx, prevDevice); err != nil {
+			slog.Debug("webex: delete stale device failed", "error", err)
+		}
+	}
 
 	header := map[string][]string{"Authorization": {"Bearer " + p.token}}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, dev.WebSocketURL, header)
 	if err != nil {
-		return fmt.Errorf("dial websocket: %w", err)
+		return fmt.Errorf("dial websocket: %s", core.RedactToken(err.Error(), p.token))
 	}
 	defer conn.Close()
 
@@ -291,9 +315,14 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		h.OnPlatformReady(p)
 	}
 
+	connClosed := make(chan struct{})
+	defer close(connClosed)
 	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-connClosed:
+		}
 	}()
 
 	for {
@@ -318,7 +347,8 @@ func (p *Platform) handleFrame(ctx context.Context, data []byte) {
 	if ev.Resource != "messages" || ev.Event != "created" {
 		return
 	}
-	if ev.Data.PersonID == p.selfID {
+	selfID := p.self()
+	if ev.Data.PersonID == selfID {
 		return
 	}
 	m, err := p.client.GetMessage(ctx, ev.Data.ID)

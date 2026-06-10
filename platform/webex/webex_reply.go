@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -68,6 +69,13 @@ func chunkMarkdown(text string, limit int) []string {
 		}
 		if cut <= 0 {
 			cut = limit
+			// back up to a rune boundary so we never split a multibyte char
+			for cut > 0 && !utf8.RuneStart(rest[cut]) {
+				cut--
+			}
+			if cut == 0 { // pathological: single rune larger than limit; force full limit
+				cut = limit
+			}
 		}
 		out = append(out, rest[:cut])
 		rest = strings.TrimLeft(rest[cut:], "\n")

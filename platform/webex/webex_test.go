@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestNewRequiresToken(t *testing.T) {
@@ -190,6 +191,34 @@ func TestChunkSplitsOnParagraph(t *testing.T) {
 	joined := strings.ReplaceAll(strings.Join(chunks, ""), "\n", "")
 	if !strings.Contains(joined, "aaaa") || !strings.Contains(joined, "cccc") {
 		t.Fatalf("content lost in chunking: %v", chunks)
+	}
+}
+
+func TestIsAllowedWildcard(t *testing.T) {
+	p := &Platform{allowFrom: parseAllowFrom("*")}
+	if !p.isAllowed("anyone@x.com") {
+		t.Fatal("wildcard should allow any email")
+	}
+}
+
+func TestIsAllowedEmptyAllowsAll(t *testing.T) {
+	p := &Platform{}
+	if !p.isAllowed("anyone@x.com") {
+		t.Fatal("empty allowlist should allow all")
+	}
+}
+
+func TestChunkMultibyteNoSplit(t *testing.T) {
+	// 10 CJK chars (3 bytes each = 30 bytes), limit 8 bytes, no newlines
+	text := strings.Repeat("世", 10)
+	chunks := chunkMarkdown(text, 8)
+	for _, c := range chunks {
+		if !utf8.ValidString(c) {
+			t.Fatalf("chunk is not valid UTF-8: %q", c)
+		}
+	}
+	if strings.Join(chunks, "") != text {
+		t.Fatalf("content lost: %q", strings.Join(chunks, ""))
 	}
 }
 
