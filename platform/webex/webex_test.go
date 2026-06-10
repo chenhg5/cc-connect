@@ -2,6 +2,7 @@ package webex
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -170,5 +171,48 @@ func TestBuildMessageNonImageFile(t *testing.T) {
 	}
 	if len(cm.Images) != 0 {
 		t.Fatalf("expected no images, got %d", len(cm.Images))
+	}
+}
+
+func TestChunkUnderLimit(t *testing.T) {
+	chunks := chunkMarkdown("short", 100)
+	if len(chunks) != 1 || chunks[0] != "short" {
+		t.Fatalf("chunks = %v", chunks)
+	}
+}
+
+func TestChunkSplitsOnParagraph(t *testing.T) {
+	text := "aaaa\n\nbbbb\n\ncccc"
+	chunks := chunkMarkdown(text, 6) // forces splits
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d: %v", len(chunks), chunks)
+	}
+	joined := strings.ReplaceAll(strings.Join(chunks, ""), "\n", "")
+	if !strings.Contains(joined, "aaaa") || !strings.Contains(joined, "cccc") {
+		t.Fatalf("content lost in chunking: %v", chunks)
+	}
+}
+
+func TestReplyPostsWithParent(t *testing.T) {
+	stub := &stubClient{}
+	p := &Platform{client: stub}
+	rc := replyContext{roomID: "r1", messageID: "m1"}
+	if err := p.Reply(context.Background(), rc, "hi"); err != nil {
+		t.Fatalf("Reply err: %v", err)
+	}
+	if len(stub.posted) != 1 || stub.posted[0].roomID != "r1" || stub.posted[0].parentID != "m1" {
+		t.Fatalf("posted = %+v", stub.posted)
+	}
+}
+
+func TestSendPostsWithoutParent(t *testing.T) {
+	stub := &stubClient{}
+	p := &Platform{client: stub}
+	rc := replyContext{roomID: "r1", messageID: "m1"}
+	if err := p.Send(context.Background(), rc, "yo"); err != nil {
+		t.Fatalf("Send err: %v", err)
+	}
+	if len(stub.posted) != 1 || stub.posted[0].parentID != "" {
+		t.Fatalf("posted = %+v", stub.posted)
 	}
 }

@@ -176,12 +176,4 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
-func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return core.ErrNotSupported
-}
-
-func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
-	return core.ErrNotSupported
-}
-
 func (p *Platform) Stop() error { return nil }
