@@ -210,10 +210,19 @@ level = "info" # debug, info, warn, error
 # 支持 Telegram、Discord 和飞书。消息会定期编辑，直到最终回复发送。
 
 # [stream_preview]
-# enabled = true            # Enable/disable streaming preview (default: true) / 启用/禁用流式预览（默认 true）
-# interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
-# min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
-# max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+# enabled = true # Enable/disable streaming preview (default: true) / 启用/禁用流式预览（默认 true）
+# interval_ms =1500 # Min ms between updates (default:1500) / 更新最小间隔毫秒数（默认1500）
+# min_delta_chars =30 # Min new chars before sending update (default:30) / 发送更新前最少新增字符数（默认30）
+# max_chars =2000 # Max preview length (default:2000) / 预览最大长度（默认2000）
+# stop_behavior = "discard" # What to do with the preview when /stop interrupts the agent turn (#1295):
+# # "discard" (default) - delete the preview message on /stop
+# # "freeze" - keep the partial preview on /stop so the user can read and quote
+# # it when composing their next instruction. The preview is detached
+# # so the next turn can start a fresh preview without conflict.
+# # /stop 中断 agent turn 时如何处理 preview 消息（#1295）：
+# # "discard"（默认）- 删除 preview 消息（保持旧行为）
+# # "freeze" - 保留部分 preview，用户可在下一条指令中阅读或引用；
+# # 同时与 streaming lifecycle 解绑，下一轮的 preview 不会冲突
 
 # =============================================================================
 # Instant Reply / 即时确认回复

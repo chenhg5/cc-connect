@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+- **`[stream_preview] stop_behavior = "freeze"`**: when the user interrupts an agent turn with `/stop`, the partial streaming preview message is now optionally preserved on the IM side instead of being unconditionally deleted (#1295). Users can read the partial answer and quote it in their next instruction. Add `stop_behavior = "freeze"` under `[stream_preview]`; the default (`"discard"`) preserves the prior behavior. The frozen preview is detached from the streaming lifecycle so the next turn starts a fresh preview without conflict.
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5

@@ -8,13 +8,38 @@ import (
 	"time"
 )
 
+// StopBehavior values control what happens to the streaming preview message
+// when the user interrupts an agent turn with /stop.
+const (
+	// StopBehaviorDiscard deletes the preview message on /stop. This is the
+	// default and preserves the prior behavior.
+	StopBehaviorDiscard = "discard"
+	// StopBehaviorFreeze keeps the preview message on /stop, freezes it at
+	// the last text, and detaches it from the streaming lifecycle so the
+	// next turn can send a fresh message without conflict. Users can read
+	// and quote the frozen preview when composing their next instruction.
+	StopBehaviorFreeze = "freeze"
+)
+
+// StopBehaviorIsValid reports whether v is a known stop_behavior value.
+// Empty string is treated as valid and resolves to the default (discard).
+func StopBehaviorIsValid(v string) bool {
+	switch v {
+	case "", StopBehaviorDiscard, StopBehaviorFreeze:
+		return true
+	default:
+		return false
+	}
+}
+
 // StreamPreviewCfg controls the streaming preview behavior.
 type StreamPreviewCfg struct {
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
-	IntervalMs        int      // minimum ms between updates (default 1500)
-	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
-	MaxChars          int      // max preview length (default 2000)
+	IntervalMs        int      // minimum ms between updates (default1500)
+	MinDeltaChars     int      // minimum new chars before sending an update (default30)
+	MaxChars          int      // max preview length (default2000)
+	StopBehavior      string   // what to do with preview on /stop: "" | "discard" (default) | "freeze"
 }
 
 // DefaultStreamPreviewCfg returns sensible defaults.
@@ -25,6 +50,7 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 		IntervalMs:        1500,
 		MinDeltaChars:     30,
 		MaxChars:          2000,
+		StopBehavior:      StopBehaviorDiscard,
 	}
 }
 
