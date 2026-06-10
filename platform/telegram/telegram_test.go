@@ -239,7 +239,7 @@ func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	p := &Platform{
 		token:      "token",
 		httpClient: &http.Client{},
-		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
+		newBot: func(_ string, _ func(context.Context, *models.Update), _ tgbot.HttpClient) (telegramBot, *models.User, func(context.Context), error) {
 			if attempts.Add(1) == 1 {
 				return nil, nil, nil, errors.New("dial failed")
 			}
@@ -283,7 +283,7 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 	p := &Platform{
 		token:      "token",
 		httpClient: &http.Client{},
-		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
+		newBot: func(_ string, _ func(context.Context, *models.Update), _ tgbot.HttpClient) (telegramBot, *models.User, func(context.Context), error) {
 			if attempts.Add(1) <= 2 {
 				return nil, nil, nil, errors.New("dial failed")
 			}
@@ -379,7 +379,7 @@ func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {
 	p := &Platform{
 		token:      "token",
 		httpClient: &http.Client{},
-		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
+		newBot: func(_ string, _ func(context.Context, *models.Update), _ tgbot.HttpClient) (telegramBot, *models.User, func(context.Context), error) {
 			close(connectStarted)
 			defer close(connectDone)
 			<-releaseConnect
@@ -964,3 +964,55 @@ func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *ht
 		httpClient: server.Client(),
 	}
 }
+
+// TestTelegramHTTPClient_RoutesByPath verifies that getUpdates is routed to the
+// short-timeout poll client while every other Bot API call falls through to the
+// long/no-timeout send client. This is the guard against regressing on issue
+// #539, where a single 90s-timeout client aborted large file uploads.
+func TestTelegramHTTPClient_RoutesByPath(t *testing.T) {
+	type call struct{ poll, send int }
+	var got call
+
+	roundTrip := func(target *int) http.RoundTripper {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			*target++
+			return &http.Response{
+				StatusCode: 200,
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})
+	}
+	c := &telegramHTTPClient{
+		poll: &http.Client{Transport: roundTrip(&got.poll)},
+		send: &http.Client{Transport: roundTrip(&got.send)},
+	}
+
+	paths := []string{
+		"/bot123:abc/getUpdates",   // -> poll
+		"/bot123:abc/sendDocument", // -> send
+		"/bot123:abc/sendMessage",  // -> send
+		"/bot123:abc/sendPhoto",    // -> send
+		"/bot123:abc/getMe",        // -> send
+	}
+	for _, path := range paths {
+		req, err := http.NewRequest(http.MethodPost, "https://api.telegram.org"+path, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if _, err := c.Do(req); err != nil {
+			t.Fatalf("Do(%s): %v", path, err)
+		}
+	}
+	if got.poll != 1 {
+		t.Errorf("poll client invocations = %d, want 1", got.poll)
+	}
+	if got.send != 4 {
+		t.Errorf("send client invocations = %d, want 4", got.send)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
