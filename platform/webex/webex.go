@@ -3,6 +3,7 @@ package webex
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -82,6 +83,34 @@ func (p *Platform) isAllowed(email string) bool {
 		}
 	}
 	return false
+}
+
+var sparkMentionRe = regexp.MustCompile(`(?s)<spark-mention[^>]*>.*?</spark-mention>`)
+
+// stripMention removes Webex <spark-mention> tags and trims the result.
+func stripMention(text string) string {
+	return strings.TrimSpace(sparkMentionRe.ReplaceAllString(text, ""))
+}
+
+// isMentioned reports whether the bot's selfID appears in mentionedPeople.
+func (p *Platform) isMentioned(m *message) bool {
+	for _, id := range m.MentionedPeople {
+		if id == p.selfID {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldProcess applies the gate: allowlist + group-mention requirement.
+func (p *Platform) shouldProcess(m *message) bool {
+	if !p.isAllowed(m.PersonEmail) {
+		return false
+	}
+	if m.RoomType == "group" && !p.isMentioned(m) {
+		return false
+	}
+	return true
 }
 
 func (p *Platform) messageHandler() core.MessageHandler {

@@ -58,3 +58,47 @@ func (s *stubClient) PostFile(_ context.Context, roomID string, f *downloadedFil
 	s.postedFiles = append(s.postedFiles, roomID)
 	return nil
 }
+
+func TestStripMention(t *testing.T) {
+	in := `<spark-mention data-object-type="person" data-object-id="123">bot</spark-mention> hello there`
+	got := stripMention(in)
+	if got != "hello there" {
+		t.Fatalf("got %q, want %q", got, "hello there")
+	}
+}
+
+func TestStripMentionNoTag(t *testing.T) {
+	if got := stripMention("plain text"); got != "plain text" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestShouldProcessGroupRequiresMention(t *testing.T) {
+	p := &Platform{selfID: "bot-id"}
+	// group message that does NOT mention the bot
+	m := &message{RoomType: "group", PersonEmail: "u@x.com", MentionedPeople: []string{"someone-else"}}
+	if p.shouldProcess(m) {
+		t.Fatal("group message without bot mention should be skipped")
+	}
+	// group message that DOES mention the bot
+	m.MentionedPeople = []string{"bot-id"}
+	if !p.shouldProcess(m) {
+		t.Fatal("group message mentioning bot should be processed")
+	}
+}
+
+func TestShouldProcessDirectAlwaysOK(t *testing.T) {
+	p := &Platform{selfID: "bot-id"}
+	m := &message{RoomType: "direct", PersonEmail: "u@x.com"}
+	if !p.shouldProcess(m) {
+		t.Fatal("direct message should be processed")
+	}
+}
+
+func TestShouldProcessDeniedEmail(t *testing.T) {
+	p := &Platform{selfID: "bot-id", allowFrom: []string{"allowed@x.com"}}
+	m := &message{RoomType: "direct", PersonEmail: "stranger@x.com"}
+	if p.shouldProcess(m) {
+		t.Fatal("message from non-allowlisted email should be skipped")
+	}
+}
