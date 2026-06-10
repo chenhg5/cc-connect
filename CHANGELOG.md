@@ -1,6 +1,8 @@
 # Changelog
 
 ### New Features
+- **Codex session filter for `/list` and `/history`**: hide internal/system-generated Codex sessions by default and allow users to extend the ignore list via `[projects.agent.options.session_filter] ignore_summary_prefixes` (#1271). The built-in defaults catch known internal prefixes such as `"You are the final diagnosis layer …"`, `"You are the decision layer …"`, `"You are selecting one best skill …"`, `"You are a senior game backend engineer diagnosing …"`, and `"The following is the Codex agent history whose request action you are assessing …"`. `filter_external_sessions = false` continues to work and is not affected.
+
 - **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.
 
 ### ⚠️ QQ Bot Intent Configuration Change

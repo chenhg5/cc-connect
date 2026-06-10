@@ -1451,6 +1451,23 @@ app_secret = "your-feishu-app-secret"
 # base_url = "https://api.minimax.io/v1"
 # model = "MiniMax-M2.7"
 #
+# # Optional: filter internal/system-generated Codex sessions out of /list
+# # and /history. By default cc-connect hides sessions whose first user
+# # prompt starts with a known internal prefix (e.g. "You are the
+# # decision layer for …" from diagnosis bots, guardian reviews, or
+# # skill-selector prompts). Add more prefixes here to extend the
+# # built-in list. See issue #1271.
+# # 可选：把内部 / 系统生成的 Codex 会话从 /list 和 /history 中过滤掉。
+# # 默认情况下,cc-connect 会隐藏首条用户提示以已知内部前缀开头的会话
+# # (例如诊断机器人、guardian 审核或技能选择器发出的
+# # "You are the decision layer for …" 等)。可以在此处添加更多
+# # 前缀以扩展内置列表。详见 issue #1271。
+# # [projects.agent.options.session_filter]
+# # ignore_summary_prefixes = [
+# #   "[bot-scheduler]",
+# #   "You are the scheduled task runner",
+# # ]
+#
 # [[projects.platforms]]
 # type = "telegram"
 #

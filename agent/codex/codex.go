@@ -41,7 +41,12 @@ type Agent struct {
 	activeIdx       int // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
-	mu              sync.RWMutex
+	// ignoreSummaryPrefixes holds user-configured prefixes from
+	// [projects.agent.options.session_filter] ignore_summary_prefixes.
+	// Sessions whose first user prompt starts with any of these prefixes
+	// are hidden from /list and /history.
+	ignoreSummaryPrefixes []string
+	mu                    sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -91,18 +96,45 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// Parse session_filter.ignore_summary_prefixes (set via
+	// [projects.agent.options.session_filter] in config.toml). Sessions whose
+	// first user prompt starts with any of these prefixes are treated as
+	// internal/system-generated and hidden from /list and /history. See #1271.
+	var ignoreSummaryPrefixes []string
+	if sf, ok := opts["session_filter"].(map[string]any); ok {
+		switch prefixes := sf["ignore_summary_prefixes"].(type) {
+		case []any:
+			for _, p := range prefixes {
+				if s, ok := p.(string); ok {
+					s = strings.TrimSpace(s)
+					if s != "" {
+						ignoreSummaryPrefixes = append(ignoreSummaryPrefixes, s)
+					}
+				}
+			}
+		case []string:
+			for _, s := range prefixes {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					ignoreSummaryPrefixes = append(ignoreSummaryPrefixes, s)
+				}
+			}
+		}
+	}
+
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		cliBin:          cliBin,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
+		workDir:               workDir,
+		model:                 model,
+		reasoningEffort:       normalizeReasoningEffort(reasoningEffort),
+		mode:                  mode,
+		backend:               backend,
+		appServerURL:          appServerURL,
+		codexHome:             strings.TrimSpace(codexHome),
+		cliBin:                cliBin,
+		cliExtraArgs:          cliExtraArgs,
+		configEnv:             configEnv,
+		ignoreSummaryPrefixes: ignoreSummaryPrefixes,
+		activeIdx:             -1,
 	}, nil
 }
 
@@ -405,15 +437,17 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
+	ignorePrefixes := append([]string(nil), a.ignoreSummaryPrefixes...)
 	a.mu.RUnlock()
-	return listCodexSessions(workDir, codexHome)
+	return listCodexSessions(workDir, codexHome, ignorePrefixes)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
+	ignorePrefixes := append([]string(nil), a.ignoreSummaryPrefixes...)
 	a.mu.RUnlock()
-	return getSessionHistory(sessionID, codexHome, limit)
+	return getSessionHistory(sessionID, codexHome, limit, ignorePrefixes)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {

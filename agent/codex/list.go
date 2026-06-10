@@ -30,9 +30,33 @@ func resolveCodexHomeDir(explicit string) string {
 	return filepath.Join(homeDir, ".codex")
 }
 
+// defaultInternalSummaryPrefixes is the built-in ignore list applied on top of
+// any user-configured prefixes. It catches the common internal/system Codex
+// prompts that get persisted as user-role content in the JSONL transcript
+// (diagnosis bots, skill selectors, guardian reviews, etc.) so they don't
+// pollute /list. See #1271.
+var defaultInternalSummaryPrefixes = []string{
+	"You are the final diagnosis layer",
+	"You are the decision layer",
+	"You are selecting one best skill",
+	"You are a senior game backend engineer diagnosing",
+	"The following is the Codex agent history whose request action you are assessing",
+}
+
+// effectiveIgnorePrefixes merges defaults with user-configured prefixes.
+// User-configured entries are appended after the defaults; matching is
+// case-sensitive, anchored at the start of the trimmed prompt text.
+func effectiveIgnorePrefixes(userPrefixes []string) []string {
+	out := make([]string, 0, len(defaultInternalSummaryPrefixes)+len(userPrefixes))
+	out = append(out, defaultInternalSummaryPrefixes...)
+	out = append(out, userPrefixes...)
+	return out
+}
+
 // listCodexSessions scans the codex sessions directory for JSONL transcript
-// files whose cwd matches workDir.
-func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, error) {
+// files whose cwd matches workDir. Sessions whose first user prompt matches
+// any prefix in ignorePrefixes (after the built-in defaults) are hidden.
+func listCodexSessions(workDir, codexHome string, ignorePrefixes []string) ([]core.AgentSessionInfo, error) {
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absWorkDir = workDir
@@ -57,7 +81,7 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 
 	var sessions []core.AgentSessionInfo
 	for _, f := range files {
-		info := parseCodexSessionFile(f, absWorkDir)
+		info := parseCodexSessionFile(f, absWorkDir, ignorePrefixes)
 		if info != nil {
 			patchSessionSource(info.ID, codexHome)
 			sessions = append(sessions, *info)
@@ -72,8 +96,9 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 }
 
 // parseCodexSessionFile reads a Codex JSONL transcript.
-// Returns nil if the session's cwd doesn't match filterCwd.
-func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
+// Returns nil if the session's cwd doesn't match filterCwd, or if the
+// first user prompt matches one of ignorePrefixes (internal/system session).
+func parseCodexSessionFile(path, filterCwd string, ignorePrefixes []string) *core.AgentSessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -88,6 +113,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	var sessionID string
 	var sessionCwd string
 	var summary string
+	var firstUserPrompt string
 	var msgCount int
 	userMsgSeen := 0
 
@@ -131,11 +157,22 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				if item.Role == "user" {
 					userMsgSeen++
 					msgCount++
+					// Track the first user prompt (before filtering) so
+					// we can detect internal/system sessions even when
+					// the first message is the only message.
+					if firstUserPrompt == "" {
+						for _, c := range item.Content {
+							if c.Type == "input_text" && c.Text != "" {
+								firstUserPrompt = c.Text
+								break
+							}
+						}
+					}
 					// The actual user prompt is the last user response_item
 					// (earlier ones are system/AGENTS.md instructions).
 					// Pick the last content block that looks like a real prompt.
 					for _, c := range item.Content {
-						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
+						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text, ignorePrefixes) {
 							summary = c.Text
 						}
 					}
@@ -152,6 +189,19 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	}
 
 	if sessionID == "" {
+		return nil
+	}
+
+	// Filter out internal/system-generated sessions whose first user
+	// prompt matches any configured ignore prefix (built-in defaults +
+	// user-configured). This catches single-prompt internal sessions
+	// (e.g. "You are the decision layer for X") and prompts that match
+	// a user-configured prefix. A session whose first prompt is
+	// internal context but later turns to a real user request will
+	// still be filtered — that matches the issue reporter's request
+	// (#1271) and keeps /list focused on real user activity.
+	prefixes := effectiveIgnorePrefixes(ignorePrefixes)
+	if isInternalSummary(firstUserPrompt, prefixes) {
 		return nil
 	}
 
@@ -185,7 +235,7 @@ func findSessionFile(sessionID, codexHome string) string {
 }
 
 // getSessionHistory reads the JSONL transcript and returns user/assistant messages.
-func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEntry, error) {
+func getSessionHistory(sessionID, codexHome string, limit int, ignorePrefixes []string) ([]core.HistoryEntry, error) {
 	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return nil, fmt.Errorf("session file not found for %s", sessionID)
@@ -197,6 +247,7 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 	}
 	defer f.Close()
 
+	prefixes := effectiveIgnorePrefixes(ignorePrefixes)
 	var entries []core.HistoryEntry
 
 	scanner := bufio.NewScanner(f)
@@ -238,7 +289,7 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 		switch {
 		case item.Role == "user" && len(item.Content) > 0:
 			for _, c := range item.Content {
-				if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
+				if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text, prefixes) {
 					entries = append(entries, core.HistoryEntry{
 						Role: "user", Content: c.Text, Timestamp: ts,
 					})
@@ -304,7 +355,8 @@ func patchSessionSource(sessionID, codexHome string) {
 
 // isUserPrompt returns true if the text looks like an actual user prompt
 // rather than system context (AGENTS.md, environment_context, permissions, etc.)
-func isUserPrompt(text string) bool {
+// or an internal/system prompt template (configured by ignorePrefixes).
+func isUserPrompt(text string, ignorePrefixes []string) bool {
 	t := strings.TrimSpace(text)
 	if t == "" {
 		return false
@@ -317,5 +369,36 @@ func isUserPrompt(text string) bool {
 	if strings.HasPrefix(t, "# AGENTS.md") || strings.HasPrefix(t, "#AGENTS.md") {
 		return false
 	}
+	// Skip internal/system prompt templates (default + user-configured prefixes).
+	// Matching is anchored at the start of the trimmed text, case-sensitive.
+	for _, prefix := range ignorePrefixes {
+		if prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(t, prefix) {
+			return false
+		}
+	}
 	return true
+}
+
+// isInternalSummary returns true if the final session summary (last real user
+// prompt) matches one of the configured internal/system prefixes. Sessions
+// whose summary matches are hidden from /list. A session with no summary
+// (e.g. empty after filtering) is never treated as internal — the caller
+// decides whether to render it.
+func isInternalSummary(summary string, ignorePrefixes []string) bool {
+	t := strings.TrimSpace(summary)
+	if t == "" {
+		return false
+	}
+	for _, prefix := range ignorePrefixes {
+		if prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(t, prefix) {
+			return true
+		}
+	}
+	return false
 }
