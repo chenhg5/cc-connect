@@ -812,7 +812,7 @@ func (a *Agent) GetRunAsEnv() []string {
 // must propagate to per-workspace agent instances created lazily by
 // core.Engine.getOrCreateWorkspaceAgent. Without this snapshot, the engine
 // constructs workspace agents from a fresh opts map and silently drops
-// every claudecode field except mode/model — so cli_path, allowed_tools,
+// every claudecode field except mode/model — so cmd, allowed_tools,
 // and friends would only take effect on the project-level agent.
 //
 // Runtime-only state (providers, sessionEnv, providerProxy, platformPrompt)

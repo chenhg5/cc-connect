@@ -251,7 +251,7 @@ func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 	if opts["model"] != "gpt-4o" {
 		t.Fatalf("model = %v, want gpt-4o", opts["model"])
 	}
-	// cliBin is "copilot" (default) so cli_path should not be set
+	// cmd is "copilot" (default) so cmd should not be set
 	if _, ok := opts["cmd"]; ok {
 		t.Fatal("cmd should not be set for default binary name")
 	}
