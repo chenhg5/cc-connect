@@ -3,6 +3,7 @@ package webex
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -111,6 +112,45 @@ func (p *Platform) shouldProcess(m *message) bool {
 		return false
 	}
 	return true
+}
+
+// buildMessage converts a fetched Webex message into a core.Message,
+// downloading any attachments and stripping group @mentions.
+func (p *Platform) buildMessage(ctx context.Context, m *message) *core.Message {
+	content := m.Text
+	if m.RoomType == "group" {
+		content = stripMention(content)
+	}
+
+	cm := &core.Message{
+		SessionKey: fmt.Sprintf("webex:%s:%s", m.RoomID, m.PersonID),
+		Platform:   "webex",
+		MessageID:  m.ID,
+		ChannelID:  m.RoomID,
+		ChannelKey: m.RoomID,
+		UserID:     m.PersonEmail,
+		UserName:   m.PersonEmail,
+		Content:    content,
+		ReplyCtx:   replyContext{roomID: m.RoomID, messageID: m.ID, personID: m.PersonID},
+	}
+
+	for _, url := range m.Files {
+		f, err := p.client.DownloadFile(ctx, url)
+		if err != nil {
+			slog.Error("webex: download file failed", "error", err)
+			continue
+		}
+		if strings.HasPrefix(f.MimeType, "image/") {
+			cm.Images = append(cm.Images, core.ImageAttachment{
+				MimeType: f.MimeType, Data: f.Data, FileName: f.FileName,
+			})
+		} else {
+			cm.Files = append(cm.Files, core.FileAttachment{
+				MimeType: f.MimeType, Data: f.Data, FileName: f.FileName,
+			})
+		}
+	}
+	return cm
 }
 
 func (p *Platform) messageHandler() core.MessageHandler {

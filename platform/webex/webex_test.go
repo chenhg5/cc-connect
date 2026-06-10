@@ -102,3 +102,73 @@ func TestShouldProcessDeniedEmail(t *testing.T) {
 		t.Fatal("message from non-allowlisted email should be skipped")
 	}
 }
+
+func TestBuildMessageText(t *testing.T) {
+	p := &Platform{selfID: "bot-id", client: &stubClient{}}
+	m := &message{
+		ID: "msg1", RoomID: "room1", RoomType: "direct",
+		Text: "hello", PersonID: "p1", PersonEmail: "u@x.com",
+	}
+	cm := p.buildMessage(context.Background(), m)
+	if cm.Content != "hello" {
+		t.Fatalf("content = %q", cm.Content)
+	}
+	if cm.Platform != "webex" {
+		t.Fatalf("platform = %q", cm.Platform)
+	}
+	if cm.SessionKey != "webex:room1:p1" {
+		t.Fatalf("sessionKey = %q", cm.SessionKey)
+	}
+	rc, ok := cm.ReplyCtx.(replyContext)
+	if !ok || rc.roomID != "room1" || rc.messageID != "msg1" {
+		t.Fatalf("replyCtx = %+v", cm.ReplyCtx)
+	}
+}
+
+func TestBuildMessageGroupStripsMention(t *testing.T) {
+	p := &Platform{selfID: "bot-id", client: &stubClient{}}
+	m := &message{
+		ID: "m", RoomID: "r", RoomType: "group",
+		Text:     `<spark-mention data-object-id="bot-id">bot</spark-mention> do the thing`,
+		PersonID: "p1", PersonEmail: "u@x.com",
+		MentionedPeople: []string{"bot-id"},
+	}
+	cm := p.buildMessage(context.Background(), m)
+	if cm.Content != "do the thing" {
+		t.Fatalf("content = %q", cm.Content)
+	}
+}
+
+func TestBuildMessageImageAttachment(t *testing.T) {
+	stub := &stubClient{file: &downloadedFile{Data: []byte{1, 2, 3}, MimeType: "image/png", FileName: "a.png"}}
+	p := &Platform{selfID: "bot-id", client: stub}
+	m := &message{
+		ID: "m", RoomID: "r", RoomType: "direct",
+		Text: "look", PersonID: "p1", PersonEmail: "u@x.com",
+		Files: []string{"https://webex/contents/1"},
+	}
+	cm := p.buildMessage(context.Background(), m)
+	if len(cm.Images) != 1 || cm.Images[0].MimeType != "image/png" {
+		t.Fatalf("images = %+v", cm.Images)
+	}
+	if len(cm.Files) != 0 {
+		t.Fatalf("expected no non-image files, got %d", len(cm.Files))
+	}
+}
+
+func TestBuildMessageNonImageFile(t *testing.T) {
+	stub := &stubClient{file: &downloadedFile{Data: []byte{1}, MimeType: "application/pdf", FileName: "r.pdf"}}
+	p := &Platform{selfID: "bot-id", client: stub}
+	m := &message{
+		ID: "m", RoomID: "r", RoomType: "direct",
+		PersonID: "p1", PersonEmail: "u@x.com",
+		Files: []string{"https://webex/contents/1"},
+	}
+	cm := p.buildMessage(context.Background(), m)
+	if len(cm.Files) != 1 || cm.Files[0].FileName != "r.pdf" {
+		t.Fatalf("files = %+v", cm.Files)
+	}
+	if len(cm.Images) != 0 {
+		t.Fatalf("expected no images, got %d", len(cm.Images))
+	}
+}
