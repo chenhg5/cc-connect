@@ -2,13 +2,16 @@ package webex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/gorilla/websocket"
 )
 
 func init() {
@@ -165,15 +168,171 @@ func (p *Platform) isStopping() bool {
 	return p.stopping
 }
 
-// NOTE: The following methods are temporary placeholders so *Platform satisfies
-// core.Platform. They are fully implemented in later tasks (Start/Stop in the
-// WebSocket task, Reply/Send in the senders task) and will be replaced there.
+const (
+	initialBackoff = time.Second
+	maxBackoff     = 30 * time.Second
+)
 
+// Start fetches the bot identity, registers a device, and launches the
+// reconnecting WebSocket read loop in the background.
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		return fmt.Errorf("webex: platform stopped")
+	}
 	p.handler = handler
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
 	p.mu.Unlock()
+
+	me, err := p.client.GetMe(ctx)
+	if err != nil {
+		return fmt.Errorf("webex: getMe: %w", err)
+	}
+	p.mu.Lock()
+	p.selfID = me.ID
+	p.mu.Unlock()
+	slog.Info("webex: authenticated", "bot", me.DisplayName)
+
+	go p.connectLoop(ctx)
 	return nil
 }
 
-func (p *Platform) Stop() error { return nil }
+// Stop cancels the read loop and deletes the registered device.
+func (p *Platform) Stop() error {
+	p.mu.Lock()
+	p.stopping = true
+	cancel := p.cancel
+	deviceURL := p.deviceURL
+	p.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if deviceURL != "" {
+		ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+		defer c()
+		if err := p.client.DeleteDevice(ctx, deviceURL); err != nil {
+			slog.Warn("webex: delete device failed", "error", err)
+		}
+	}
+	return nil
+}
+
+// SetLifecycleHandler implements core.AsyncRecoverablePlatform.
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
+
+// connectLoop registers a device, opens the WebSocket, and reconnects with
+// exponential backoff until the context is cancelled.
+func (p *Platform) connectLoop(ctx context.Context) {
+	backoff := initialBackoff
+	for {
+		if ctx.Err() != nil || p.isStopping() {
+			return
+		}
+		started := time.Now()
+		err := p.runConnection(ctx)
+		if ctx.Err() != nil || p.isStopping() {
+			return
+		}
+		if err != nil {
+			slog.Warn("webex: connection ended", "error", err, "backoff", backoff)
+			if h := p.lifecycle(); h != nil {
+				h.OnPlatformUnavailable(p, err)
+			}
+		}
+		if time.Since(started) >= 10*time.Second {
+			backoff = initialBackoff
+		} else if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+}
+
+func (p *Platform) lifecycle() core.PlatformLifecycleHandler {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.lifecycleHandler
+}
+
+// runConnection registers a device, dials the WebSocket, and reads until the
+// connection drops or the context is cancelled.
+func (p *Platform) runConnection(ctx context.Context) error {
+	dev, err := p.client.CreateDevice(ctx)
+	if err != nil {
+		return fmt.Errorf("create device: %w", err)
+	}
+	p.mu.Lock()
+	p.deviceURL = dev.URL
+	p.mu.Unlock()
+
+	header := map[string][]string{"Authorization": {"Bearer " + p.token}}
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, dev.WebSocketURL, header)
+	if err != nil {
+		return fmt.Errorf("dial websocket: %w", err)
+	}
+	defer conn.Close()
+
+	slog.Info("webex: websocket connected")
+	if h := p.lifecycle(); h != nil {
+		h.OnPlatformReady(p)
+	}
+
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
+
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("read websocket: %w", err)
+		}
+		p.handleFrame(ctx, data)
+	}
+}
+
+// handleFrame parses one WebSocket frame and dispatches qualifying messages.
+func (p *Platform) handleFrame(ctx context.Context, data []byte) {
+	var ev wsEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
+		slog.Debug("webex: non-JSON frame", "error", err)
+		return
+	}
+	if ev.Resource != "messages" || ev.Event != "created" {
+		return
+	}
+	if ev.Data.PersonID == p.selfID {
+		return
+	}
+	m, err := p.client.GetMessage(ctx, ev.Data.ID)
+	if err != nil {
+		slog.Error("webex: fetch message failed", "error", err)
+		return
+	}
+	if !p.shouldProcess(m) {
+		slog.Debug("webex: message gated out", "room_type", m.RoomType, "from", m.PersonEmail)
+		return
+	}
+	handler := p.messageHandler()
+	if handler == nil {
+		return
+	}
+	handler(p, p.buildMessage(ctx, m))
+}
