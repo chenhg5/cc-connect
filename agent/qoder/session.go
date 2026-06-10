@@ -34,6 +34,9 @@ type qoderSession struct {
 	wg             sync.WaitGroup
 	alive          atomic.Bool
 	startupWarning string
+
+	textMu            sync.Mutex
+	assistantTextByID map[string]string
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -52,6 +55,8 @@ func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string,
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,
 		cancel:   cancel,
+
+		assistantTextByID: make(map[string]string),
 	}
 	qs.alive.Store(true)
 
@@ -267,33 +272,29 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 		return
 	}
 
-	// qodercli <0.2: uses Status="finished" to indicate final message
-	// qodercli 0.2.x: Status is empty/null, uses StopReason="end_turn"/"tool_use"
-	isFinished := ev.Message.Status == "finished" ||
-		ev.Message.StopReason == "end_turn" ||
-		ev.Message.StopReason == "tool_use"
-	if !isFinished {
-		return
-	}
-
 	var items []contentItem
 	if err := json.Unmarshal(ev.Message.Content, &items); err != nil {
 		return
 	}
 
+	// qodercli <0.2 uses Status="finished" for final messages.
+	// Newer stream-json output can reuse the same message id for thinking,
+	// redacted thinking, partial text, and final text frames.
+	isFinished := ev.Message.Status == "finished" ||
+		ev.Message.StopReason == "end_turn" ||
+		ev.Message.StopReason == "tool_use"
+
 	for _, item := range items {
 		switch item.Type {
 		case "text":
-			if item.Text != "" {
-				evt := core.Event{Type: core.EventText, Content: item.Text}
-				select {
-				case qs.events <- evt:
-				case <-qs.ctx.Done():
-					return
-				}
+			if !qs.emitAssistantText(ev.Message.ID, item.Text) {
+				return
 			}
 
 		case "function":
+			if !isFinished {
+				continue
+			}
 			inputPreview := extractToolPreview(item.Input)
 			evt := core.Event{Type: core.EventToolUse, ToolName: item.Name, ToolInput: inputPreview}
 			select {
@@ -302,6 +303,45 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 				return
 			}
 		}
+	}
+}
+
+func (qs *qoderSession) emitAssistantText(messageID, text string) bool {
+	if text == "" {
+		return true
+	}
+
+	chunk := text
+	if messageID != "" {
+		qs.textMu.Lock()
+		if qs.assistantTextByID == nil {
+			qs.assistantTextByID = make(map[string]string)
+		}
+		prev := qs.assistantTextByID[messageID]
+		switch {
+		case text == prev:
+			qs.textMu.Unlock()
+			return true
+		case prev != "" && strings.HasPrefix(text, prev):
+			chunk = strings.TrimPrefix(text, prev)
+			qs.assistantTextByID[messageID] = text
+		case prev != "":
+			qs.assistantTextByID[messageID] = prev + text
+		default:
+			qs.assistantTextByID[messageID] = text
+		}
+		qs.textMu.Unlock()
+	}
+
+	if chunk == "" {
+		return true
+	}
+	evt := core.Event{Type: core.EventText, Content: chunk}
+	select {
+	case qs.events <- evt:
+		return true
+	case <-qs.ctx.Done():
+		return false
 	}
 }
 

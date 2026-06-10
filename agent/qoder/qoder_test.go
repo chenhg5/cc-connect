@@ -252,25 +252,112 @@ func TestHandleAssistant_ToolUseStopReason(t *testing.T) {
 	}
 }
 
-func TestHandleAssistant_SkipsNonFinished(t *testing.T) {
+func TestHandleAssistant_EmitsNonFinishedText(t *testing.T) {
 	qs := newTestSession()
 	defer qs.cancel()
 
-	// Neither status="finished" nor stop_reason set — should be skipped
+	// Newer qodercli stream-json can emit partial text before the final frame.
 	ev := &streamEvent{
 		Type: "assistant",
 		Message: &streamMessage{
-			Status:  "tool_calling",
-			Content: []byte(`[{"type":"text","text":"should be skipped"}]`),
+			ID:      "msg-partial",
+			Status:  "streaming",
+			Content: []byte(`[{"type":"text","text":"partial"}]`),
 		},
 	}
 	qs.handleEvent(ev)
 
 	select {
 	case got := <-qs.events:
-		t.Errorf("expected no event, got type=%s content=%q", got.Type, got.Content)
+		if got.Type != core.EventText || got.Content != "partial" {
+			t.Errorf("got type=%s content=%q, want EventText/partial", got.Type, got.Content)
+		}
 	default:
-		// ok
+		t.Error("expected a text event but channel was empty")
+	}
+}
+
+func TestHandleAssistant_SkipsThinkingWithoutBlockingSameMessageText(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	thinking := &streamEvent{
+		Type: "assistant",
+		Message: &streamMessage{
+			ID:      "msg-same-id",
+			Content: []byte(`[{"type":"thinking","thinking":"hidden"},{"type":"redacted_thinking","data":"secret"}]`),
+		},
+	}
+	text := &streamEvent{
+		Type: "assistant",
+		Message: &streamMessage{
+			ID:         "msg-same-id",
+			StopReason: "end_turn",
+			Content:    []byte(`[{"type":"text","text":"visible answer"}]`),
+		},
+	}
+
+	qs.handleEvent(thinking)
+	select {
+	case got := <-qs.events:
+		t.Fatalf("expected thinking frames to be skipped, got type=%s content=%q", got.Type, got.Content)
+	default:
+	}
+
+	qs.handleEvent(text)
+	select {
+	case got := <-qs.events:
+		if got.Type != core.EventText || got.Content != "visible answer" {
+			t.Errorf("got type=%s content=%q, want EventText/visible answer", got.Type, got.Content)
+		}
+	default:
+		t.Error("expected text after thinking frames")
+	}
+}
+
+func TestHandleAssistant_DeduplicatesCumulativeTextForSameMessageID(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	events := []*streamEvent{
+		{
+			Type: "assistant",
+			Message: &streamMessage{
+				ID:      "msg-cumulative",
+				Status:  "streaming",
+				Content: []byte(`[{"type":"text","text":"Hello"}]`),
+			},
+		},
+		{
+			Type: "assistant",
+			Message: &streamMessage{
+				ID:      "msg-cumulative",
+				Status:  "streaming",
+				Content: []byte(`[{"type":"text","text":"Hello world"}]`),
+			},
+		},
+		{
+			Type: "assistant",
+			Message: &streamMessage{
+				ID:         "msg-cumulative",
+				StopReason: "end_turn",
+				Content:    []byte(`[{"type":"text","text":"Hello world"}]`),
+			},
+		},
+	}
+	for _, ev := range events {
+		qs.handleEvent(ev)
+	}
+
+	got := drainQoderEvents(qs)
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2: %#v", len(got), got)
+	}
+	if got[0].Type != core.EventText || got[0].Content != "Hello" {
+		t.Errorf("event 0 = %s %q, want EventText Hello", got[0].Type, got[0].Content)
+	}
+	if got[1].Type != core.EventText || got[1].Content != " world" {
+		t.Errorf("event 1 = %s %q, want EventText ' world'", got[1].Type, got[1].Content)
 	}
 }
 
@@ -340,5 +427,17 @@ func TestHandleResult_OldFormatTakesPriority(t *testing.T) {
 		}
 	default:
 		t.Error("expected a result event but channel was empty")
+	}
+}
+
+func drainQoderEvents(qs *qoderSession) []core.Event {
+	var events []core.Event
+	for {
+		select {
+		case ev := <-qs.events:
+			events = append(events, ev)
+		default:
+			return events
+		}
 	}
 }
