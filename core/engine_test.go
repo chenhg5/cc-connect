@@ -14326,3 +14326,63 @@ func TestHandlePendingPermission_StalePermissionCallback_Dropped(t *testing.T) {
 		}
 	})
 }
+
+// --- restartInteractiveSessionWhenIdle tests ---
+
+type closeTrackingAgentSession struct {
+	stubAgentSession
+	closed atomic.Bool
+}
+
+func (s *closeTrackingAgentSession) Close() error {
+	s.closed.Store(true)
+	return nil
+}
+
+func TestRestartInteractiveSessionWhenIdle_DefersWhileTurnInFlight(t *testing.T) {
+	e := newTestEngine()
+	sessionKey := "test:chat:user"
+	as := &closeTrackingAgentSession{}
+	e.interactiveStates[sessionKey] = &interactiveState{agentSession: as}
+
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatalf("expected to lock fresh session")
+	}
+
+	deferred := e.restartInteractiveSessionWhenIdle(e.sessions, sessionKey, sessionKey)
+	if !deferred {
+		t.Fatalf("expected restart to be deferred while turn is in flight")
+	}
+
+	// The in-flight turn must not be killed by the model switch.
+	time.Sleep(100 * time.Millisecond)
+	if as.closed.Load() {
+		t.Fatalf("agent session closed while turn was still in flight")
+	}
+
+	// Turn finishes — the deferred restart should now close the session.
+	session.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for !as.closed.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("agent session was not closed after the turn finished")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRestartInteractiveSessionWhenIdle_RestartsImmediatelyWhenIdle(t *testing.T) {
+	e := newTestEngine()
+	sessionKey := "test:chat:user"
+	as := &closeTrackingAgentSession{}
+	e.interactiveStates[sessionKey] = &interactiveState{agentSession: as}
+
+	deferred := e.restartInteractiveSessionWhenIdle(e.sessions, sessionKey, sessionKey)
+	if deferred {
+		t.Fatalf("expected immediate restart when no turn is in flight")
+	}
+	if !as.closed.Load() {
+		t.Fatalf("agent session should be closed immediately when idle")
+	}
+}

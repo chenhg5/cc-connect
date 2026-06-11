@@ -299,6 +299,7 @@ const (
 	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
+	MsgModelChangedDeferred  MsgKey = "model_changed_deferred"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
 	MsgModelCardSwitching    MsgKey = "model_card_switching"
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
@@ -2207,6 +2208,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
 		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+	},
+	MsgModelChangedDeferred: {
+		LangEnglish:            "Model switched to `%s`. A turn is currently in progress — the current session will restart with the new model right after it finishes.",
+		LangChinese:            "模型已切换为 `%s`。当前有正在进行的回合 — 等它结束后会话将自动以新模型重启。",
+		LangTraditionalChinese: "模型已切換為 `%s`。目前有正在進行的回合 — 等它結束後會話將自動以新模型重啟。",
+		LangJapanese:           "モデルを `%s` に切り替えました。現在処理中のターンが完了した後、新しいモデルでセッションが再起動されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Hay un turno en curso — la sesión se reiniciará con el nuevo modelo justo después de que termine.",
 	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",
