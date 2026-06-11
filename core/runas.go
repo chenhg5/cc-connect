@@ -76,10 +76,21 @@ func currentUsername() string {
 	return u.Username
 }
 
+// RunAsChdirEnv carries the intended working directory across the sudo -i
+// boundary. sudo -i simulates an initial login and runs the command from the
+// target user's HOME, which silently overrides the supervisor's cmd.Dir. The
+// spawned command therefore re-establishes the intended cwd by chdir-ing to
+// this value before exec-ing the real binary. It travels via the environment
+// (not argv) so directories containing spaces or non-ASCII survive sudo's
+// command re-quoting. Callers set it on cmd.Env when SpawnOptions.WorkDir is
+// non-empty; BuildSpawnCommand adds it to the --preserve-env allowlist.
+const RunAsChdirEnv = "CC_RUNAS_CHDIR"
+
 // DefaultEnvAllowlist is the minimal env preserved across the sudo
 // boundary. Deliberately excluded:
 //   - HOME / USER / LOGNAME / SHELL — sudo -i overrides them
-//   - PWD — set by cmd.Dir
+//   - PWD — sudo -i overrides cmd.Dir, so the intended cwd is re-applied
+//     inside the spawn via RunAsChdirEnv (see BuildSpawnCommand)
 //   - PATH — sudo -i builds it from the target user's /etc/profile +
 //     ~/.profile. Preserving the supervisor's PATH would (a) leak
 //     supervisor work directories into the isolated session and
@@ -101,6 +112,11 @@ var DefaultEnvAllowlist = []string{
 type SpawnOptions struct {
 	RunAsUser    string
 	EnvAllowlist []string // extends DefaultEnvAllowlist, not a replacement
+	// WorkDir is the directory the spawned command should run in. Under
+	// sudo -i (IsolationMode) cmd.Dir is ignored because -i chdirs to the
+	// target user's HOME, so when WorkDir is set BuildSpawnCommand wraps the
+	// command to chdir into it via RunAsChdirEnv. Empty = leave cwd to -i.
+	WorkDir string
 }
 
 func (o SpawnOptions) IsolationMode() bool {
@@ -108,9 +124,13 @@ func (o SpawnOptions) IsolationMode() bool {
 }
 
 func (o SpawnOptions) mergedAllowlist() []string {
-	seen := make(map[string]struct{}, len(DefaultEnvAllowlist)+len(o.EnvAllowlist))
+	seen := make(map[string]struct{}, len(DefaultEnvAllowlist)+len(o.EnvAllowlist)+1)
 	for _, v := range DefaultEnvAllowlist {
 		seen[v] = struct{}{}
+	}
+	if o.WorkDir != "" {
+		// The re-chdir wrapper needs this env var to survive --preserve-env.
+		seen[RunAsChdirEnv] = struct{}{}
 	}
 	for _, v := range o.EnvAllowlist {
 		if v == "" {
@@ -141,7 +161,18 @@ func BuildSpawnCommand(ctx context.Context, opts SpawnOptions, name string, args
 		"-iu", opts.RunAsUser,
 		"--preserve-env=" + strings.Join(opts.mergedAllowlist(), ","),
 		"--",
-		name,
+	}
+	if opts.WorkDir != "" {
+		// sudo -i runs the command from the target user's HOME, overriding
+		// cmd.Dir, so the agent would otherwise start in the wrong directory
+		// (e.g. ignoring a multi-workspace binding). Re-establish the intended
+		// cwd inside the spawn. The path travels in $CC_RUNAS_CHDIR (a
+		// preserved env var, set by the caller) rather than argv so paths with
+		// spaces or non-ASCII survive sudo's command re-quoting.
+		sudoArgs = append(sudoArgs,
+			"/bin/sh", "-c", "cd \"$"+RunAsChdirEnv+"\" || exit 1; exec \"$@\"", "sh", name)
+	} else {
+		sudoArgs = append(sudoArgs, name)
 	}
 	sudoArgs = append(sudoArgs, args...)
 	return exec.CommandContext(ctx, "sudo", sudoArgs...)
