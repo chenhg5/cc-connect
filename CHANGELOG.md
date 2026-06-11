@@ -7,6 +7,9 @@
 ### ⚠️ QQ Bot Intent Configuration Change
 The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you previously set a custom `intents` value without this bit, inline keyboard buttons will not work — update your `intents` to include bit 26. If you use the default intents, no action is needed. See `config.example.toml` for the new `intents` option.
 
+### Fixed
+- **Codex app-server process leak on close**: `appServerSession.Close()` now starts the codex process in its own process group and force-kills the group, so child codex processes and helpers no longer survive after a session is closed (#1318).
+
 ## v1.3.3-beta.4 (2026-05-28)
 
 ### New Features
