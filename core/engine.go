@@ -3736,6 +3736,37 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	e.interactiveMu.Unlock()
 }
 
+// settingsChangeIdleWaitCeiling bounds how long a deferred session restart
+// (e.g. after /model) waits for an in-flight turn to finish.
+const settingsChangeIdleWaitCeiling = 30 * time.Minute
+
+// restartInteractiveSessionWhenIdle closes the interactive agent session so
+// the next turn respawns with updated settings (e.g. a new model). Unlike
+// calling cleanupInteractiveState directly, an in-flight turn is not killed:
+// when the session is busy the restart is deferred to a background goroutine
+// that waits for the turn to finish first, so the in-flight response is
+// delivered normally and the new settings apply from the next turn onward.
+// Returns true when the restart was deferred.
+func (e *Engine) restartInteractiveSessionWhenIdle(sessions *SessionManager, sessionKey, interactiveKey string) bool {
+	session := sessions.GetOrCreateActive(sessionKey)
+	if session.TryLock() {
+		session.UnlockWithoutUpdate()
+		e.cleanupInteractiveState(interactiveKey)
+		return false
+	}
+
+	go func() {
+		// Wait for the in-flight turn to release the session lock. If the
+		// ceiling is hit the restart proceeds anyway — equivalent to the
+		// pre-deferral behavior, just much later.
+		if e.waitForSessionLock(session, settingsChangeIdleWaitCeiling) {
+			session.UnlockWithoutUpdate()
+		}
+		e.cleanupInteractiveState(interactiveKey)
+	}()
+	return true
+}
+
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
 	if agentSession == nil {
 		return
@@ -8857,13 +8888,17 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
 		return
 	}
-	e.cleanupInteractiveState(interactiveKey)
+	deferred := e.restartInteractiveSessionWhenIdle(sessions, msg.SessionKey, interactiveKey)
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context
 	// natively without replaying history (no extra token cost).
 	sessions.Save()
 
+	if deferred {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangedDeferred, target))
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
 
@@ -10800,7 +10835,7 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+	e.restartInteractiveSessionWhenIdle(sessions, sessionKey, e.interactiveKeyForSessionKey(sessionKey))
 	if err == nil {
 		sessions.Save()
 	}
