@@ -737,7 +737,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}, nil
 	}
 
-	// cmd: — async command dispatch
+	// cmd: — async command dispatch, with optional in-place card replacement
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
@@ -754,6 +754,30 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			Content:    cmdText,
 			ReplyCtx:   rctx,
 		})
+
+		if ac, ok := event.Event.Action.Value["after_click"].(map[string]any); ok {
+			if title, _ := ac["title"].(string); title != "" {
+				color, _ := ac["color"].(string)
+				if color == "" {
+					color = "green"
+				}
+				cb := core.NewCard().Title(title, color)
+				if md, _ := ac["markdown"].(string); md != "" {
+					cb.Markdown(md)
+				}
+				if linkText, _ := ac["link_text"].(string); linkText != "" {
+					if linkURL, _ := ac["link_url"].(string); linkURL != "" {
+						cb.Divider().Markdown("[" + linkText + "](" + linkURL + ")")
+					}
+				}
+				return &callback.CardActionTriggerResponse{
+					Card: &callback.Card{
+						Type: "raw",
+						Data: renderCardMap(cb.Build(), sessionKey),
+					},
+				}, nil
+			}
+		}
 	}
 
 	return nil, nil
