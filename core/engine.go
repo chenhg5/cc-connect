@@ -2706,8 +2706,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
+			hybridMode := isHybridMode(p)
 			// In quiet mode, still split text segments so they don't merge.
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
+			// In hybrid mode, thinking is routed to the preview (no side message),
+			// so this text-flush pass is unnecessary.
+			if !e.display.ThinkingMessages && !hybridMode && len(textParts) > segmentStart {
 				if sp.canPreview() {
 					sp.freeze()
 					sp.detachPreview()
@@ -2723,27 +2726,37 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = len(textParts)
 			}
 			if e.display.ThinkingMessages && event.Content != "" {
-				// Flush accumulated text segment before thinking display
-				previewActive := sp.canPreview()
-				if len(textParts) > segmentStart {
-					if !previewActive {
-						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
+				if hybridMode {
+					// Hybrid mode: thinking streams into the preview card. The
+					// final message is sent by the engine at EventResult and
+					// contains only the answer text, so thinking and answer
+					// appear in two distinct messages instead of duplicating.
+					if sp.canPreview() {
+						sp.appendText(event.Content)
+					}
+				} else {
+					// Flush accumulated text segment before thinking display
+					previewActive := sp.canPreview()
+					if len(textParts) > segmentStart {
+						if !previewActive {
+							segment := strings.Join(textParts[segmentStart:], "")
+							if segment != "" {
+								for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+									sendWorkspace(p, replyCtx, chunk)
+								}
 							}
 						}
+						segmentStart = len(textParts)
 					}
-					segmentStart = len(textParts)
-				}
-				sp.freeze()
-				if previewActive {
-					sp.detachPreview() // keep frozen preview visible as permanent message
-				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
-				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-					sendWorkspace(p, replyCtx, thinkingMsg)
+					sp.freeze()
+					if previewActive {
+						sp.detachPreview() // keep frozen preview visible as permanent message
+					}
+					preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+					thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
+					if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
+						sendWorkspace(p, replyCtx, thinkingMsg)
+					}
 				}
 			}
 
@@ -2839,7 +2852,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventText:
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
-				if sp.canPreview() {
+				// In hybrid mode, answer text goes to the final message only;
+				// the preview card is reserved for streaming thinking.
+				if sp.canPreview() && !isHybridMode(p) {
 					sp.appendText(event.Content)
 				}
 			}
@@ -3052,7 +3067,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
-			} else if sp.finish(fullResponse) {
+			} else if sp.finish(fullResponse, hasFinalText(textParts, fullResponse)) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
@@ -3260,7 +3275,7 @@ channelClosed:
 					}
 				}
 			}
-		} else if sp.finish(fullResponse) {
+		} else if sp.finish(fullResponse, hasFinalText(textParts, fullResponse)) {
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
 			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -11802,6 +11817,31 @@ func parseSelfReportedCtx(s string) int {
 	}
 	v, _ := strconv.Atoi(m[start:end])
 	return v
+}
+
+// isHybridMode reports whether the platform wants the hybrid finalize flow
+// on Feishu: stream thinking into the preview card, then emit a fresh final
+// message containing only the answer text. When false, the engine falls back
+// to the standard behavior (preview for answer, side messages for thinking).
+func isHybridMode(p Platform) bool {
+	if pref, ok := p.(PreviewSendNewAfterKeep); ok {
+		return pref.ShouldSendNewAfterKeepPreview()
+	}
+	return false
+}
+
+// hasFinalText reports whether the agent produced a text response worth
+// sending as a separate final message. In hybrid mode this is the signal
+// that distinguishes a thinking-only response (no extra final) from one
+// that should follow the preview with a fresh final message.
+func hasFinalText(textParts []string, fullResponse string) bool {
+	if len(textParts) > 0 {
+		return true
+	}
+	// Fall back to fullResponse: if the agent SDK returns the answer only
+	// via EventResult.Content (e.g. textParts is empty because events were
+	// already drained by tool use), still treat a non-empty body as text.
+	return strings.TrimSpace(fullResponse) != ""
 }
 
 func (e *Engine) cmdWeb(p Platform, msg *Message, args []string) {

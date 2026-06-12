@@ -73,6 +73,15 @@ type PreviewFinishPreference interface {
 	KeepPreviewOnFinish() bool
 }
 
+// PreviewSendNewAfterKeep is an optional interface that pairs with
+// PreviewFinishPreference to request a hybrid flow: the preview message is
+// kept (not deleted, not patched) and the engine emits a fresh, separate
+// final message. Useful when in-place edits to the preview do not surface
+// a push notification on the host platform (e.g. Feishu Message.Patch).
+type PreviewSendNewAfterKeep interface {
+	ShouldSendNewAfterKeepPreview() bool
+}
+
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
 	return &streamPreview{
 		cfg:       cfg,
@@ -276,9 +285,19 @@ func (sp *streamPreview) discard() {
 
 // finish is called when the agent response is complete. It cancels any pending
 // timer and optionally cleans up the preview message.
-// Returns true if a preview was active and the final message was sent via preview
-// (so the caller should skip sending the full response separately).
-func (sp *streamPreview) finish(finalText string) bool {
+//
+// hasFinalText indicates whether the agent produced a text response (i.e. at
+// least one EventText delta was seen). In hybrid mode (ShouldSendNewAfterKeep
+// returns true), the preview is detached so the engine can emit a fresh final
+// message — but only when there is a final text to send. When the response
+// was thinking-only (hasFinalText is false), the preview IS the final: the
+// engine must not send a separate "empty response" message.
+//
+// Returns true when the preview is the final and the caller should NOT send
+// the full response separately. Returns false when the caller should send
+// the full response via p.Send (either because no preview was active, or
+// because hybrid mode detached the preview and a fresh final is expected).
+func (sp *streamPreview) finish(finalText string, hasFinalText bool) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
@@ -307,6 +326,24 @@ func (sp *streamPreview) finish(finalText string) bool {
 	keepPreview := false
 	if pref, ok := sp.platform.(PreviewFinishPreference); ok {
 		keepPreview = pref.KeepPreviewOnFinish()
+	}
+	sendNewAfterKeep := false
+	if pref, ok := sp.platform.(PreviewSendNewAfterKeep); ok {
+		sendNewAfterKeep = pref.ShouldSendNewAfterKeepPreview()
+	}
+
+	// Hybrid mode: keep the preview message untouched. If the agent produced
+	// text, detach the handle so the engine emits a fresh final message. If
+	// the response was thinking-only, the preview IS the final message — the
+	// engine must not send a separate "empty response" message.
+	if keepPreview && sendNewAfterKeep {
+		if hasFinalText {
+			slog.Debug("stream preview finish: keeping preview, detaching for fresh send")
+		} else {
+			slog.Debug("stream preview finish: keeping preview as final (thinking-only response)")
+		}
+		sp.previewMsgID = nil
+		return !hasFinalText
 	}
 
 	// If platform wants to delete the preview and send fresh, let it.
