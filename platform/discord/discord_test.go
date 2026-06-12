@@ -511,6 +511,86 @@ func TestSendWithButtons_PreservesMultipleRows(t *testing.T) {
 	}
 }
 
+func TestSendWithButtons_UsesChannelComponents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/channels/ch-1/messages") {
+			t.Fatalf("request path = %q, want channel message", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload["content"] != "approve tool?" {
+			t.Fatalf("content = %#v, want approve tool?", payload["content"])
+		}
+		components, ok := payload["components"].([]any)
+		if !ok || len(components) != 1 {
+			t.Fatalf("components = %#v, want one row", payload["components"])
+		}
+		row := components[0].(map[string]any)["components"].([]any)
+		if row[0].(map[string]any)["custom_id"] != "perm:allow" {
+			t.Fatalf("button = %#v, want perm:allow", row[0])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	p := &Platform{session: newTestDiscordSession(t, server)}
+	err := p.SendWithButtons(context.Background(), replyContext{channelID: "ch-1"}, "approve tool?", [][]core.ButtonOption{{
+		{Text: "Allow", Data: "perm:allow"},
+		{Text: "Deny", Data: "perm:deny"},
+	}})
+	if err != nil {
+		t.Fatalf("SendWithButtons() error = %v", err)
+	}
+}
+
+func TestHandleComponentInteraction_DispatchesPermissionResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	var got *core.Message
+	p := &Platform{
+		session: newTestDiscordSession(t, server),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		ID:        "interaction-1",
+		Token:     "token-1",
+		Type:      discordgo.InteractionMessageComponent,
+		ChannelID: "channel-1",
+		Message:   &discordgo.Message{ID: "message-1", Content: "approve tool?"},
+		Data:      discordgo.MessageComponentInteractionData{CustomID: "perm:allow"},
+	}}
+
+	p.handleComponentInteraction(p.session, interaction, "user-1", "user")
+
+	if got == nil {
+		t.Fatal("permission button did not dispatch a message")
+	}
+	if got.Content != "allow" || !got.IsPermissionResponse {
+		t.Fatalf("message = %#v, want allow permission response", got)
+	}
+	if got.SessionKey != "discord:channel-1:user-1" {
+		t.Fatalf("SessionKey = %q", got.SessionKey)
+	}
+}
+
+func TestDiscordComponentCommandRejectsUnknownPermissionAction(t *testing.T) {
+	if command, isPermission, ok := discordComponentCommand("perm:allow_all"); !ok || !isPermission || command != "allow all" {
+		t.Fatalf("allow-all component = (%q, %v, %v), want (allow all, true, true)", command, isPermission, ok)
+	}
+	if _, _, ok := discordComponentCommand("perm:maybe"); ok {
+		t.Fatal("discordComponentCommand accepted unknown permission action")
+	}
+}
+
 func TestSendFile_SendsChannelAttachment(t *testing.T) {
 	var contentType string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

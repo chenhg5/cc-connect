@@ -58,6 +58,8 @@ func TestNormalizeMode(t *testing.T) {
 }
 
 func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "default", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
@@ -70,7 +72,7 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 }
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
-	args := buildAntigravityArgs("sid-1", true, "plan", "What is 1+1?")
+	args := buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}
@@ -80,49 +82,59 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	if !contains(args, "--sandbox") {
 		t.Fatalf("expected --sandbox in args, got: %v", args)
 	}
+	if !contains(args, "--gemini_dir=/tmp/agy-config") || !contains(args, "--print-timeout=24h") {
+		t.Fatalf("expected isolated Agy config and extended print timeout, got: %v", args)
+	}
 	if contains(args, "-m") || contains(args, "--model") {
 		t.Fatalf("did not expect model flags in args, got: %v", args)
 	}
 }
 
-func TestDefaultModeWarnsRemotePermissionIsUnavailable(t *testing.T) {
+func TestDefaultModeCreatesPermissionBridge(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
-	if got := s.StartupWarning(); !strings.Contains(got, "cannot show approval buttons") {
-		t.Fatalf("StartupWarning() = %q, want remote permission warning", got)
+	if s.permissionBridge == nil {
+		t.Fatal("permissionBridge = nil, want default-mode permission bridge")
+	}
+	if _, err := os.Stat(filepath.Join(s.permissionBridge.AgyConfigDir(), "config", "hooks.json")); err != nil {
+		t.Fatalf("stat Agy hook overlay: %v", err)
 	}
 }
 
-func TestNonDefaultModesDoNotWarnRemotePermissionIsUnavailable(t *testing.T) {
+func TestNonDefaultModesDoNotCreatePermissionBridge(t *testing.T) {
 	for _, mode := range []string{"yolo", "plan"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+
 			s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", mode, "", nil, 0)
 			if err != nil {
 				t.Fatalf("newAntigravitySession: %v", err)
 			}
 			defer func() { _ = s.Close() }()
 
-			if got := s.StartupWarning(); got != "" {
-				t.Fatalf("StartupWarning() = %q, want empty", got)
+			if s.permissionBridge != nil {
+				t.Fatalf("permissionBridge = %v, want nil", s.permissionBridge)
 			}
 		})
 	}
 }
 
-func TestRespondPermissionIsUnsupported(t *testing.T) {
-	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "default", "", nil, 0)
+func TestRespondPermissionRequiresDefaultMode(t *testing.T) {
+	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "plan", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
 	err = s.RespondPermission("req", core.PermissionResult{Behavior: "allow"})
-	if err == nil || !strings.Contains(err.Error(), "does not expose a remote permission response protocol") {
-		t.Fatalf("RespondPermission() error = %v, want unsupported protocol error", err)
+	if err == nil || !strings.Contains(err.Error(), "only available in default mode") {
+		t.Fatalf("RespondPermission() error = %v, want default-mode error", err)
 	}
 }
 

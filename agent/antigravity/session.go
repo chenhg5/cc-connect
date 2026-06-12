@@ -22,24 +22,21 @@ import (
 
 // antigravitySession manages multi-turn conversations with the Antigravity CLI (agy).
 type antigravitySession struct {
-	cmd            string
-	workDir        string
-	model          string
-	mode           string
-	timeout        time.Duration
-	extraEnv       []string
-	events         chan core.Event
-	closeOnce      sync.Once
-	chatID         atomic.Value // stores string
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	alive          atomic.Bool
-	startupWarning string
+	cmd              string
+	workDir          string
+	model            string
+	mode             string
+	timeout          time.Duration
+	extraEnv         []string
+	events           chan core.Event
+	closeOnce        sync.Once
+	chatID           atomic.Value // stores string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	alive            atomic.Bool
+	permissionBridge *agyPermissionBridge
 }
-
-// StartupWarning implements core.StartupWarner.
-func (as *antigravitySession) StartupWarning() string { return as.startupWarning }
 
 func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -58,7 +55,12 @@ func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resum
 	as.alive.Store(true)
 
 	if mode == "default" {
-		as.startupWarning = "Antigravity default mode uses agy --print. Agy does not expose interactive permission requests over this interface, so cc-connect cannot show approval buttons; tool permissions follow Agy's non-interactive policy."
+		bridge, err := newAgyPermissionBridge(sessionCtx, as.events)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("antigravity: initialize permission bridge: %w", err)
+		}
+		as.permissionBridge = bridge
 	}
 
 	if resumeID != "" && resumeID != core.ContinueSession {
@@ -141,7 +143,11 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 		}
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
-	args := buildAntigravityArgs(chatID, isResume, as.mode, fullPrompt)
+	agyConfigDir := ""
+	if as.permissionBridge != nil {
+		agyConfigDir = as.permissionBridge.AgyConfigDir()
+	}
+	args := buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
 	if strings.TrimSpace(as.model) != "" {
 		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
 	}
@@ -169,6 +175,9 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	if len(as.extraEnv) > 0 {
 		env = core.MergeEnv(env, as.extraEnv)
 	}
+	if as.permissionBridge != nil {
+		env = core.MergeEnv(env, as.permissionBridge.Env())
+	}
 	cmd.Env = env
 
 	// Keep stdin disconnected: agy --print consumes piped stdin to EOF before
@@ -195,9 +204,13 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	return nil
 }
 
-func buildAntigravityArgs(chatID string, isResume bool, mode, fullPrompt string) []string {
+func buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
 	args := make([]string, 0, 10)
+	if agyConfigDir != "" {
+		// Antigravity currently names this compatibility flag --gemini_dir.
+		args = append(args, "--gemini_dir="+agyConfigDir, "--print-timeout=24h")
+	}
 	if isResume {
 		args = append(args, "--conversation", chatID)
 	}
@@ -366,11 +379,14 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 	return candidates[0].sessionID
 }
 
-func (as *antigravitySession) RespondPermission(_ string, _ core.PermissionResult) error {
+func (as *antigravitySession) RespondPermission(requestID string, result core.PermissionResult) error {
 	if !as.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
-	return fmt.Errorf("antigravity: agy --print does not expose a remote permission response protocol")
+	if as.permissionBridge == nil {
+		return fmt.Errorf("antigravity: permission responses are only available in default mode")
+	}
+	return as.permissionBridge.RespondPermission(requestID, result)
 }
 
 func (as *antigravitySession) Events() <-chan core.Event {
@@ -389,6 +405,9 @@ func (as *antigravitySession) Alive() bool {
 func (as *antigravitySession) Close() error {
 	as.alive.Store(false)
 	as.cancel()
+	if as.permissionBridge != nil {
+		as.permissionBridge.Close()
+	}
 	done := make(chan struct{})
 	go func() {
 		as.wg.Wait()
