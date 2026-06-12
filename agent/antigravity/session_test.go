@@ -2,10 +2,11 @@ package antigravity
 
 import (
 	"context"
-	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -84,76 +85,87 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	}
 }
 
-func TestUsesInteractivePermission(t *testing.T) {
-	if !usesInteractivePermission("default") {
-		t.Fatal("default mode should use interactive permission stdin")
-	}
-	if usesInteractivePermission("yolo") {
-		t.Fatal("yolo mode should not use interactive permission stdin")
-	}
-	if usesInteractivePermission("plan") {
-		t.Fatal("plan mode should not use interactive permission stdin")
-	}
-}
-
-func TestRespondPermission_WritesTerminalAnswer(t *testing.T) {
+func TestDefaultModeWarnsRemotePermissionIsUnavailable(t *testing.T) {
 	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
-	r, w, err := os.Pipe()
+	if got := s.StartupWarning(); !strings.Contains(got, "cannot show approval buttons") {
+		t.Fatalf("StartupWarning() = %q, want remote permission warning", got)
+	}
+}
+
+func TestNonDefaultModesDoNotWarnRemotePermissionIsUnavailable(t *testing.T) {
+	for _, mode := range []string{"yolo", "plan"} {
+		t.Run(mode, func(t *testing.T) {
+			s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", mode, "", nil, 0)
+			if err != nil {
+				t.Fatalf("newAntigravitySession: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+
+			if got := s.StartupWarning(); got != "" {
+				t.Fatalf("StartupWarning() = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestRespondPermissionIsUnsupported(t *testing.T) {
+	s, err := newAntigravitySession(context.Background(), "echo", "/tmp", "", "default", "", nil, 0)
 	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+		t.Fatalf("newAntigravitySession: %v", err)
 	}
-	defer func() { _ = r.Close() }()
-	defer func() { _ = w.Close() }()
-	s.stdin = w
+	defer func() { _ = s.Close() }()
 
-	s.permReqID.Store("req")
-	if err := s.RespondPermission("req", core.PermissionResult{Behavior: "allow"}); err != nil {
-		t.Fatalf("RespondPermission allow: %v", err)
-	}
-	buf := make([]byte, 8)
-	n, err := r.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("read allow response: %v", err)
-	}
-	if got := string(buf[:n]); got != "y\n" {
-		t.Fatalf("allow response = %q, want %q", got, "y\n")
-	}
-
-	s.permReqID.Store("req")
-	if err := s.RespondPermission("req", core.PermissionResult{Behavior: "deny"}); err != nil {
-		t.Fatalf("RespondPermission deny: %v", err)
-	}
-	n, err = r.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("read deny response: %v", err)
-	}
-	if got := string(buf[:n]); got != "n\n" {
-		t.Fatalf("deny response = %q, want %q", got, "n\n")
+	err = s.RespondPermission("req", core.PermissionResult{Behavior: "allow"})
+	if err == nil || !strings.Contains(err.Error(), "does not expose a remote permission response protocol") {
+		t.Fatalf("RespondPermission() error = %v, want unsupported protocol error", err)
 	}
 }
 
-func TestExtractPermissionPrompt(t *testing.T) {
-	text := "Tool wants to run command. Allow this action? (y/N)"
-	got, ok := extractPermissionPrompt(text)
-	if !ok {
-		t.Fatalf("expected permission prompt to be detected")
-	}
-	if got == "" {
-		t.Fatalf("detected prompt should not be empty")
-	}
-}
+func TestSendDoesNotHoldStdinOpen(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
 
-func TestExtractPermissionPrompt_SplitChunksDetectedInWindow(t *testing.T) {
-	part1 := "Tool wants to run command. Allow this"
-	part2 := " action? (y/N)"
-	got, ok := extractPermissionPrompt(part1 + part2)
-	if !ok || got == "" {
-		t.Fatalf("expected split prompt to be detected, got ok=%v prompt=%q", ok, got)
+	workDir := t.TempDir()
+	cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+	script := "#!/bin/sh\ncat >/dev/null\nprintf 'done\\n'\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile fake agy: %v", err)
+	}
+
+	s, err := newAntigravitySession(context.Background(), cmdPath, workDir, "", "default", "", nil, 2*time.Second)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send("hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	var text strings.Builder
+	for {
+		select {
+		case ev := <-s.Events():
+			switch ev.Type {
+			case core.EventPermissionRequest:
+				t.Fatal("unexpected permission request from unstructured stdout")
+			case core.EventText:
+				text.WriteString(ev.Content)
+			case core.EventResult:
+				if !strings.Contains(text.String(), "done") {
+					t.Fatalf("text = %q, want done", text.String())
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for agy process to receive stdin EOF")
+		}
 	}
 }
 

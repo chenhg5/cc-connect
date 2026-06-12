@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -23,25 +22,24 @@ import (
 
 // antigravitySession manages multi-turn conversations with the Antigravity CLI (agy).
 type antigravitySession struct {
-	cmd       string
-	workDir   string
-	model     string
-	mode      string
-	timeout   time.Duration
-	extraEnv  []string
-	events    chan core.Event
-	stdin     io.WriteCloser
-	stdinMu   sync.Mutex
-	closeOnce sync.Once
-	permReqID atomic.Value // stores string
-	chatID    atomic.Value // stores string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
+	cmd            string
+	workDir        string
+	model          string
+	mode           string
+	timeout        time.Duration
+	extraEnv       []string
+	events         chan core.Event
+	closeOnce      sync.Once
+	chatID         atomic.Value // stores string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
+	startupWarning string
 }
 
-var permissionPromptPattern = regexp.MustCompile(`(?is)(allow|approve|permission).{0,400}(\(y/n\)|\(y\/n\)|\(y\/N\)|\(Y\/n\)|\[y\/n\]|\[y\/N\]|\[Y\/n\]|yes\/no)`)
+// StartupWarning implements core.StartupWarner.
+func (as *antigravitySession) StartupWarning() string { return as.startupWarning }
 
 func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -58,6 +56,10 @@ func newAntigravitySession(ctx context.Context, cmd, workDir, model, mode, resum
 		cancel:   cancel,
 	}
 	as.alive.Store(true)
+
+	if mode == "default" {
+		as.startupWarning = "Antigravity default mode uses agy --print. Agy does not expose interactive permission requests over this interface, so cc-connect cannot show approval buttons; tool permissions follow Agy's non-interactive policy."
+	}
 
 	if resumeID != "" && resumeID != core.ContinueSession {
 		as.chatID.Store(resumeID)
@@ -169,16 +171,11 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	}
 	cmd.Env = env
 
+	// Keep stdin disconnected: agy --print consumes piped stdin to EOF before
+	// processing the prompt, so an open pipe would deadlock the turn.
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("antigravitySession: stdout pipe: %w", err)
-	}
-	var stdin io.WriteCloser
-	if usesInteractivePermission(as.mode) {
-		stdin, err = cmd.StdinPipe()
-		if err != nil {
-			return fmt.Errorf("antigravitySession: stdin pipe: %w", err)
-		}
 	}
 
 	var stderrBuf bytes.Buffer
@@ -187,9 +184,6 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("antigravitySession: start: %w", err)
 	}
-	as.stdinMu.Lock()
-	as.stdin = stdin
-	as.stdinMu.Unlock()
 
 	started = true
 	as.wg.Add(1)
@@ -215,10 +209,6 @@ func buildAntigravityArgs(chatID string, isResume bool, mode, fullPrompt string)
 	}
 	args = append(args, "-p", fullPrompt)
 	return args
-}
-
-func usesInteractivePermission(mode string) bool {
-	return strings.EqualFold(strings.TrimSpace(mode), "default")
 }
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
@@ -276,33 +266,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 
 	reader := bufio.NewReader(stdout)
 	buf := make([]byte, 1024)
-	permWindow := ""
 
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
 			text := string(buf[:n])
-			permWindow += text
-			if len(permWindow) > 4096 {
-				permWindow = permWindow[len(permWindow)-4096:]
-			}
-			if pending, _ := as.permReqID.Load().(string); pending == "" {
-				if prompt, ok := extractPermissionPrompt(permWindow); ok {
-					requestID := fmt.Sprintf("agy-perm-%d", time.Now().UnixNano())
-					as.permReqID.Store(requestID)
-					select {
-					case as.events <- core.Event{
-						Type:         core.EventPermissionRequest,
-						RequestID:    requestID,
-						ToolName:     "terminal_permission",
-						ToolInput:    prompt,
-						ToolInputRaw: map[string]any{"prompt": prompt},
-					}:
-					case <-as.ctx.Done():
-						return
-					}
-				}
-			}
 			select {
 			case as.events <- core.Event{Type: core.EventText, Content: text}:
 			case <-as.ctx.Done():
@@ -398,42 +366,11 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 	return candidates[0].sessionID
 }
 
-func extractPermissionPrompt(text string) (string, bool) {
-	loc := permissionPromptPattern.FindStringIndex(text)
-	if loc == nil {
-		return "", false
-	}
-	prompt := strings.TrimSpace(text[loc[0]:loc[1]])
-	if prompt == "" {
-		return "", false
-	}
-	return prompt, true
-}
-
-func (as *antigravitySession) RespondPermission(requestID string, result core.PermissionResult) error {
+func (as *antigravitySession) RespondPermission(_ string, _ core.PermissionResult) error {
 	if !as.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
-	if pending, _ := as.permReqID.Load().(string); pending != "" && requestID != "" && requestID != pending {
-		return fmt.Errorf("permission request mismatch: got %q, pending %q", requestID, pending)
-	}
-	as.stdinMu.Lock()
-	defer as.stdinMu.Unlock()
-	if as.stdin == nil {
-		return fmt.Errorf("stdin is not available")
-	}
-	// agy permission prompts accept terminal-style responses.
-	// Keep this conservative until agy exposes a structured permission protocol.
-	reply := "y\n"
-	if strings.EqualFold(result.Behavior, "deny") {
-		reply = "n\n"
-	}
-	_, err := io.WriteString(as.stdin, reply)
-	if err != nil {
-		return fmt.Errorf("write permission response: %w", err)
-	}
-	as.permReqID.Store("")
-	return nil
+	return fmt.Errorf("antigravity: agy --print does not expose a remote permission response protocol")
 }
 
 func (as *antigravitySession) Events() <-chan core.Event {
@@ -452,12 +389,6 @@ func (as *antigravitySession) Alive() bool {
 func (as *antigravitySession) Close() error {
 	as.alive.Store(false)
 	as.cancel()
-	as.stdinMu.Lock()
-	if as.stdin != nil {
-		_ = as.stdin.Close()
-		as.stdin = nil
-	}
-	as.stdinMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		as.wg.Wait()
