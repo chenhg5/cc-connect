@@ -30,17 +30,21 @@ type replyContext struct {
 }
 
 type Platform struct {
-	botToken         string
-	appToken         string
-	allowFrom        string
-	sessionScope     string // "user" (default) | "channel" | "thread"
-	client           *slack.Client
-	socket           *socketmode.Client
-	handler          core.MessageHandler
-	cancel           context.CancelFunc
-	channelNameCache map[string]string
-	channelCacheMu   sync.RWMutex
-	userNameCache    sync.Map // userID -> display name
+	botToken                     string
+	appToken                     string
+	allowFrom                    string
+	sessionScope                 string   // "user" (default) | "channel" | "thread"
+	requireMention               bool     // channels reply only when @-mentioned (DMs always pass)
+	threadRequireExplicitMention bool     // if true, disable thread auto-follow (require @ on every msg)
+	botUserID                    string   // our own user id (auth.test), for <@bot> mention detection
+	participatedThreads          sync.Map // key "channel:thread_ts"; threads the bot has replied in
+	client                       *slack.Client
+	socket                       *socketmode.Client
+	handler                      core.MessageHandler
+	cancel                       context.CancelFunc
+	channelNameCache             map[string]string
+	channelCacheMu               sync.RWMutex
+	userNameCache                sync.Map // userID -> display name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -58,12 +62,24 @@ func New(opts map[string]any) (core.Platform, error) {
 			"if your agent runtime is tmux, also set window_per_session=true — " +
 			"without it, concurrent threads share a single pane and their output will interleave")
 	}
+	// require_mention (default true): in channels/groups the bot replies only when
+	// @-mentioned (or in a thread it already joined — see thread auto-follow); DMs
+	// are always answered. Set false to reply to every readable channel message.
+	requireMention := true
+	if v, ok := opts["require_mention"].(bool); ok {
+		requireMention = v
+	}
+	// thread_require_explicit_mention (default false): disables thread auto-follow,
+	// so every channel/thread message needs an explicit @ even after the bot joins.
+	threadRequireExplicitMention, _ := opts["thread_require_explicit_mention"].(bool)
 	return &Platform{
-		botToken:         botToken,
-		appToken:         appToken,
-		allowFrom:        allowFrom,
-		sessionScope:     scope,
-		channelNameCache: make(map[string]string),
+		botToken:                     botToken,
+		appToken:                     appToken,
+		allowFrom:                    allowFrom,
+		sessionScope:                 scope,
+		requireMention:               requireMention,
+		threadRequireExplicitMention: threadRequireExplicitMention,
+		channelNameCache:             make(map[string]string),
 	}, nil
 }
 
@@ -124,6 +140,63 @@ func threadRootTS(threadTS, msgTS string) string {
 	return msgTS
 }
 
+// mentionsSlackBot reports whether text contains an explicit <@BOT> mention of
+// this bot. Slack encodes a user mention as "<@U123ABC>".
+func mentionsSlackBot(text, botUserID string) bool {
+	return botUserID != "" && strings.Contains(text, "<@"+botUserID+">")
+}
+
+// threadParticipationKey identifies a Slack thread for auto-follow tracking.
+func threadParticipationKey(channel, threadTS string) string {
+	return channel + ":" + threadTS
+}
+
+// markThreadParticipated records that the bot is engaged in a thread (it was
+// @-mentioned there, or accepted a message in it), so later non-mention messages
+// in that thread are auto-followed — independent of how the bot replies (Send or
+// the streaming preview, which bypasses Send).
+func (p *Platform) markThreadParticipated(channel, threadTS string) {
+	if channel == "" || threadTS == "" {
+		return
+	}
+	p.participatedThreads.Store(threadParticipationKey(channel, threadTS), struct{}{})
+}
+
+// botInThread reports whether the bot has already replied in the given thread.
+func (p *Platform) botInThread(channel, threadTS string) bool {
+	if threadTS == "" {
+		return false
+	}
+	_, ok := p.participatedThreads.Load(threadParticipationKey(channel, threadTS))
+	return ok
+}
+
+// shouldForwardSlackMessage is the deterministic reply gate for inbound message.*
+// events (NOT app_mention, which is handled separately and is always relevant):
+//   - DMs (channel_type "im") always pass — a DM is 1:1 and addressed to us.
+//   - require_mention off => every channel/group message passes.
+//   - bot user id unknown => fail OPEN (don't mute the bot in every channel).
+//   - explicit <@bot> mention => pass.
+//   - otherwise pass only when autoFollow is set: the message is in a thread the
+//     bot has already replied in (and thread_require_explicit_mention is off), so a
+//     conversation continues in-thread without re-@-ing while unrelated channel
+//     cross-talk stays ignored.
+func shouldForwardSlackMessage(channelType, text, botUserID string, requireMention, autoFollow bool) bool {
+	if channelType == "im" {
+		return true
+	}
+	if !requireMention {
+		return true
+	}
+	if botUserID == "" {
+		return true
+	}
+	if mentionsSlackBot(text, botUserID) {
+		return true
+	}
+	return autoFollow
+}
+
 func (p *Platform) Name() string { return "slack" }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -133,6 +206,16 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		slack.OptionAppLevelToken(p.appToken),
 	)
 	p.socket = socketmode.New(p.client)
+
+	// Resolve our own bot user id so the mention gate can detect <@bot> mentions.
+	// On failure the gate fails open (see shouldForwardSlackMessage) rather than
+	// muting the bot in every channel.
+	if auth, err := p.client.AuthTest(); err != nil {
+		slog.Warn("slack: auth.test failed; mention gate will fail open", "error", err)
+	} else {
+		p.botUserID = auth.UserID
+		slog.Info("slack: resolved bot identity", "bot_user_id", auth.UserID)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
@@ -198,6 +281,8 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 
 				threadTS := threadRootTS(ev.ThreadTimeStamp, ev.TimeStamp)
+				// Engaged in this thread now → later non-mention follow-ups auto-follow.
+				p.markThreadParticipated(ev.Channel, threadTS)
 				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 
 				var shareFiles []slackevents.File
@@ -259,11 +344,24 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				// Deterministic mention gate. In channels/groups the bot replies
+				// only when explicitly @-mentioned, or (auto-follow) when the message
+				// is in a thread the bot has already replied in. DMs always pass;
+				// app_mention events are handled separately above.
+				autoFollow := !p.threadRequireExplicitMention && p.botInThread(ev.Channel, ev.ThreadTimeStamp)
+				if !shouldForwardSlackMessage(ev.ChannelType, ev.Text, p.botUserID, p.requireMention, autoFollow) {
+					slog.Info("slack: skipping channel message (not addressed to bot)",
+						"user", ev.User, "channel", ev.Channel, "thread_ts", ev.ThreadTimeStamp)
+					return
+				}
+
 				// Use the same timestamp the reply will be routed to
 				// (assistantOrThreadTS): thread root in a thread, the message ts
 				// for a top-level channel message, and "" for a top-level DM —
 				// so DMs fall back to the user-scoped key and stay continuous.
 				threadTS := assistantOrThreadTS(ev)
+				// Engaged in this thread now → later non-mention follow-ups auto-follow.
+				p.markThreadParticipated(ev.Channel, threadTS)
 				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 				ts := ev.TimeStamp
 
@@ -685,6 +783,16 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		return func() {}
 	}
 
+	// Native AI status indicator ("is thinking…") via assistant.threads.setStatus
+	// — the hermes/Hopper pattern. Best-effort: if the app lacks the Agents & AI
+	// Apps feature or the scope, it silently no-ops and the emoji reactions below
+	// remain the visible "working" cue.
+	_ = p.client.SetAssistantThreadsStatus(slack.AssistantThreadsSetStatusParameters{
+		ChannelID: rc.channel,
+		ThreadTS:  rc.timestamp,
+		Status:    "is thinking…",
+	})
+
 	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
 	var mu sync.Mutex
 	var added []string
@@ -744,6 +852,12 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() {
 		close(done)
 		wg.Wait()
+		// Clear the "is thinking…" status (also auto-clears on reply / 2-min timeout).
+		_ = p.client.SetAssistantThreadsStatus(slack.AssistantThreadsSetStatusParameters{
+			ChannelID: rc.channel,
+			ThreadTS:  rc.timestamp,
+			Status:    "",
+		})
 		mu.Lock()
 		emojis := make([]string, len(added))
 		copy(emojis, added)
