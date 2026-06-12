@@ -2708,8 +2708,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventThinking:
 			hybridMode := isHybridMode(p)
 			// In quiet mode, still split text segments so they don't merge.
-			// In hybrid mode, thinking is routed to the preview (no side message),
-			// so this text-flush pass is unnecessary.
+			// In hybrid mode, text is buffered for the final fresh message
+			// (sp.appendText is skipped for EventText), so flushing here would
+			// split the answer across multiple messages. Skip the flush.
 			if !e.display.ThinkingMessages && !hybridMode && len(textParts) > segmentStart {
 				if sp.canPreview() {
 					sp.freeze()
@@ -2726,37 +2727,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = len(textParts)
 			}
 			if e.display.ThinkingMessages && event.Content != "" {
-				if hybridMode {
-					// Hybrid mode: thinking streams into the preview card. The
-					// final message is sent by the engine at EventResult and
-					// contains only the answer text, so thinking and answer
-					// appear in two distinct messages instead of duplicating.
-					if sp.canPreview() {
-						sp.appendText(event.Content)
-					}
-				} else {
-					// Flush accumulated text segment before thinking display
-					previewActive := sp.canPreview()
-					if len(textParts) > segmentStart {
-						if !previewActive {
-							segment := strings.Join(textParts[segmentStart:], "")
-							if segment != "" {
-								for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-									sendWorkspace(p, replyCtx, chunk)
-								}
+				// Thinking is always aggregated via the compact progress writer
+				// (cp), never via the stream preview (sp). In hybrid mode the sp
+				// stays cold: cp owns the in-place card, the engine emits a
+				// fresh p.Send at EventResult for the final answer. This avoids
+				// running both sp and cp in parallel (which would produce two
+				// cards on the same message thread).
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
-						segmentStart = len(textParts)
 					}
-					sp.freeze()
-					if previewActive {
-						sp.detachPreview() // keep frozen preview visible as permanent message
-					}
-					preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-					thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
-					if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-						sendWorkspace(p, replyCtx, thinkingMsg)
-					}
+					segmentStart = len(textParts)
+				}
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
+				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
+				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
+					sendWorkspace(p, replyCtx, thinkingMsg)
 				}
 			}
 
@@ -2975,6 +2971,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
+			// Track whether the turn produced any text BEFORE the empty-fill above
+			// rewrote it to "(empty response)". The hybrid-mode guard at p.Send
+			// time uses this to decide whether to suppress the final send.
+			thinkingOnly := strings.TrimSpace(fullResponse) == "" || fullResponse == e.i18n.T(MsgEmptyResponse)
 
 			// Context usage indicator: prefer SDK tokens, fall back to self-reported.
 			sdkPlausible := event.InputTokens >= 100
@@ -3067,6 +3067,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+			} else if isHybridMode(p) && thinkingOnly {
+				// Hybrid mode + thinking-only response: cp's card is the final
+				// answer. Without this guard the engine would fill an empty
+				// fullResponse with "Empty response" and emit a stray side
+				// message. sp.finish is intentionally skipped too (sp never
+				// built a card in hybrid mode).
+				slog.Debug("EventResult: hybrid mode thinking-only, cp card is final (no extra send)", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse, hasFinalText(textParts, fullResponse)) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse))
 			} else {

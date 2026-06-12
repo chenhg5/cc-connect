@@ -325,11 +325,12 @@ func (p *stubCardPlatform) getRefreshedCards() []*Card {
 
 type stubCompactProgressPlatform struct {
 	stubPlatformEngine
-	style          string
-	supportPayload bool
-	previewMu      sync.Mutex
-	previewStarts  []string
-	previewEdits   []string
+	style            string
+	supportPayload   bool
+	useFinalizeAsNew bool
+	previewMu        sync.Mutex
+	previewStarts    []string
+	previewEdits     []string
 }
 
 func (p *stubCompactProgressPlatform) ProgressStyle() string {
@@ -341,6 +342,10 @@ func (p *stubCompactProgressPlatform) ProgressStyle() string {
 
 func (p *stubCompactProgressPlatform) SupportsProgressCardPayload() bool {
 	return p.supportPayload
+}
+
+func (p *stubCompactProgressPlatform) ShouldSendNewAfterKeepPreview() bool {
+	return p.useFinalizeAsNew
 }
 
 func (p *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
@@ -1323,6 +1328,123 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 	if !strings.Contains(edits[0], "echo hi") {
 		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
+	}
+}
+
+// TestProcessInteractiveEvents_HybridModeCardStyleSingleCardPlusFinal verifies
+// that in hybrid finalize mode (card style + finalize_as_new_message), exactly
+// ONE preview card is created (by the compact progress writer) and the engine
+// emits exactly ONE separate final message via p.Send. The stream preview (sp)
+// must NOT create a parallel card — that was the squash's regression.
+func TestProcessInteractiveEvents_HybridModeCardStyleSingleCardPlusFinal(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+		useFinalizeAsNew:   true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-hybrid-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-hybrid-card")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-hybrid-card",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
+	agentSession.events <- Event{Type: EventText, Content: "final answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-hybrid-card", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1 (cp card only, sp must not create a parallel card)", len(starts))
+	}
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("p.Send calls = %d, want 1 (the fresh final message); got %#v", len(sent), sent)
+	}
+	if sent[0] != "final answer" {
+		t.Fatalf("final p.Send should be the assistant answer, got %q", sent[0])
+	}
+}
+
+// TestProcessInteractiveEvents_HybridModeThinkingOnlySuppressesExtraFinal
+// verifies that in hybrid mode a thinking-only response (no EventText) does
+// NOT trigger an extra "Empty response" message. The cp card is the final.
+func TestProcessInteractiveEvents_HybridModeThinkingOnlySuppressesExtraFinal(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+		useFinalizeAsNew:   true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-hybrid-think"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-hybrid-think")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-hybrid-think",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Reasoning..."}
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-hybrid-think", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1 (cp card only)", len(starts))
+	}
+
+	sent := p.getSent()
+	if len(sent) != 0 {
+		t.Fatalf("p.Send calls = %d, want 0 (thinking-only response, cp card is final); got %#v", len(sent), sent)
+	}
+}
+
+// TestProcessInteractiveEvents_HybridModeCompactStyleSingleCardPlusFinal
+// covers the compact progress style (no card payload). Behavior should mirror
+// the card style test: cp owns the single in-place card, sp stays cold.
+func TestProcessInteractiveEvents_HybridModeCompactStyleSingleCardPlusFinal(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "compact",
+		supportPayload:     false,
+		useFinalizeAsNew:   true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-hybrid-compact"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-hybrid-compact")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-hybrid-compact",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "Planning"}
+	agentSession.events <- Event{Type: EventText, Content: "answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-hybrid-compact", time.Now(), nil, nil, state.replyCtx)
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1 (cp card only); got %#v", len(starts), starts)
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "answer" {
+		t.Fatalf("p.Send = %#v, want exactly one [answer]", sent)
 	}
 }
 

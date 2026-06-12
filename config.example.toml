@@ -832,10 +832,15 @@ app_secret = "your-feishu-app-secret"
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # finalize_as_new_message = false  # Keep the streaming preview card AND send a fresh separate final message (default: false).
 #                                   # Useful when in-place card edits do not surface a push notification, e.g. on Feishu.
-#                                   # Only takes effect when enable_feishu_card = true.
+#                                   # Requires progress_style = "card" or "compact" (i.e. the in-place card aggregation must be active)
+#                                   # AND enable_feishu_card = true. In "legacy" mode (default) the compact progress writer is
+#                                   # disabled and intermediate events become N separate messages, so hybrid mode cannot produce
+#                                   # a single card + a final.
 #                                   # 在保留流式预览卡片的同时，另发一条独立的最终消息（默认 false）。
 #                                   # 当飞书原位更新卡片不触发推送通知时很有用。
-#                                   # 仅在 enable_feishu_card = true 时生效。
+#                                   # 需要 progress_style = "card" 或 "compact"（即需要启用原位卡片聚合），并且 enable_feishu_card = true。
+#                                   # 在 "legacy" 模式（默认）下 compact progress writer 处于禁用状态，中间事件会变成 N 条独立消息，
+#                                   # 此时 hybrid 模式无法实现"一张卡 + 一条最终"。
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
