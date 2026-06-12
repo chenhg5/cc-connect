@@ -26,7 +26,7 @@ func init() {
 // Agent drives the Antigravity CLI (agy) in headless mode.
 //
 // Modes (maps to agy approval and sandbox flags):
-//   - "default":   agy print-mode default permission policy
+//   - "default":   ask for each tool through the cc-connect permission bridge
 //   - "yolo":      auto-approve all tools (--dangerously-skip-permissions)
 //   - "plan":      read-only plan mode with terminal sandbox constraints (--sandbox)
 type Agent struct {
@@ -284,7 +284,7 @@ func (a *Agent) GetMode() string {
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Use Agy's default non-interactive print policy", DescZh: "使用 Agy 默认的非交互打印模式权限策略"},
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Ask for approval through cc-connect on each tool use", DescZh: "每次工具调用都通过 cc-connect 请求确认"},
 		{Key: "yolo", Name: "YOLO", NameZh: "全自动", Desc: "Auto-approve all tool calls", DescZh: "自动批准所有工具调用"},
 		{Key: "plan", Name: "Plan", NameZh: "规划模式", Desc: "Read-only plan mode in sandbox", DescZh: "只读沙箱规划模式"},
 	}

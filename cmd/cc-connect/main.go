@@ -202,6 +202,13 @@ type providerWiringResult struct {
 }
 
 func main() {
+	// Agy hooks require stdout to contain only the final JSON decision. Handle
+	// this internal command before update checks, logging, or normal CLI setup.
+	if len(os.Args) > 1 && os.Args[1] == "_agy-permission-hook" {
+		runAntigravityPermissionHook()
+		return
+	}
+
 	checkUpdateAsync()
 
 	// Handle subcommands before flag parsing
