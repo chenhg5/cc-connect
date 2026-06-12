@@ -71,7 +71,7 @@ Your normal text responses are automatically delivered to the user — just repl
 
 ## Available tools
 
-### Send generated images or files back to the user
+### Send generated images, files, or voice messages back to the user
 When you generate a local image or file that should be sent to the user, use:
 
   cc-connect send --image /absolute/path/to/image.png
@@ -80,6 +80,12 @@ When you generate a local image or file that should be sent to the user, use:
 
 You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
 If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
+
+When the user explicitly asks you to send a voice/audio reply, synthesize and send it with:
+
+  cc-connect send --tts "text to speak"
+
+After this command succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
 
 ### Scheduled tasks (cron)
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
@@ -123,6 +129,33 @@ Examples:
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 prompt "Updated daily summary task"
 
+### One-shot timers (timer)
+When the user asks you to do something after a delay (e.g. "两小时后帮我检查PR"),
+use the Bash tool to run:
+
+  cc-connect timer add --delay <duration> --prompt "<task description>"
+
+Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
+Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
+system's local timezone. When the user says "明天早上9点", use local time.
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
+
+Optional flags:
+  --exec <command>          run a shell command directly instead of --prompt
+  --desc <text>             short description
+  --session-mode <mode>     reuse (default) or new-per-run (fresh session each run)
+  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
+  --mute                    suppress all messages (start notification + result)
+
+Examples:
+  cc-connect timer add --delay 2h --prompt "Check PR status" --desc "PR check"
+  cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
+  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+
+You can also list or cancel timers:
+  cc-connect timer list
+  cc-connect timer del <timer-id>
+
 ### Bot-to-bot relay
 When you need to communicate with another bot (e.g. ask another AI agent a question), use:
 
@@ -158,6 +191,22 @@ Use this sparingly; when in doubt, send a brief reply instead.
 // memory/instruction file for relay and cron to work.
 type SystemPromptSupporter interface {
 	HasSystemPromptSupport() bool
+}
+
+// SessionIDValidator is an optional interface for agents that can validate
+// whether a stored session ID actually belongs to the current project's
+// session store. The engine uses this to prevent cross-project session
+// context leakage (issue #599): a stale ID from another project's workspace
+// would otherwise resume the wrong conversation history.
+//
+// Implementations should return false when:
+//   - the session ID is empty
+//   - the session file does not exist under the agent's per-project store
+//   - the agent cannot determine the current project directory
+//
+// The engine treats a false return as "clear the stored ID and start fresh".
+type SessionIDValidator interface {
+	ValidateSessionID(ctx context.Context, sessionID string) bool
 }
 
 // TypingIndicator is an optional interface for platforms that can show a
@@ -536,6 +585,15 @@ type WorkspaceAgentOptionSnapshotter interface {
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {
 	SetLiveMode(mode string) bool
+}
+
+// StartupWarner is an optional interface for agent sessions that need to surface
+// a one-time warning to the IM user at session start (e.g. when a requested
+// permission mode was silently downgraded due to OS constraints). The engine
+// sends the returned message to the IM platform immediately after starting the
+// session. Returns empty string when no warning is needed.
+type StartupWarner interface {
+	StartupWarning() string
 }
 
 // PermissionModeInfo describes a permission mode for display.

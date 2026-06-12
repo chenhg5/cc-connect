@@ -677,13 +677,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		h := p.getHandler()
 		go h(p.dispatchPlatform(), &core.Message{
-			SessionKey: sessionKey,
-			Platform:   p.platformName,
-			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
-			Content:    responseText,
-			ReplyCtx:   rctx,
+			SessionKey:           sessionKey,
+			Platform:             p.platformName,
+			UserID:               userID,
+			UserName:             p.resolveUserName(userID),
+			ChatName:             p.resolveChatName(chatID),
+			Content:              responseText,
+			ReplyCtx:             rctx,
+			IsPermissionResponse: true,
 		})
 
 		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
@@ -2497,7 +2498,15 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		return larkim.FileTypeXls
 	case strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx"):
 		return larkim.FileTypePpt
-	case mimeType == "video/mp4" || strings.HasSuffix(name, ".mp4"):
+	// Feishu's file API only has "mp4" as the video type. We map all common
+	// video MIME types and extensions to FileTypeMp4 so the message renders
+	// as a native video player bubble rather than a generic file download.
+	// Actual playback compatibility (e.g. webm/mkv) depends on the Feishu
+	// client platform; mp4 H.264 has the broadest support.
+	case strings.HasPrefix(mimeType, "video/") ||
+		strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".mov") ||
+		strings.HasSuffix(name, ".avi") || strings.HasSuffix(name, ".m4v") ||
+		strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".webm"):
 		return larkim.FileTypeMp4
 	case mimeType == "audio/ogg" || mimeType == "audio/opus" || mimeType == "application/ogg" || strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".opus"):
 		return larkim.FileTypeOpus

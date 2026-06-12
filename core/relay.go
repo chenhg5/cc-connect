@@ -251,7 +251,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
 
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, chatID, req.Message)
+	response, err := targetEngine.HandleRelay(relayCtx, req.From, req.SessionKey, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
@@ -304,6 +304,8 @@ func normalizeRelayVisibility(mode string) string {
 	case "", RelayVisibilityFull:
 		return RelayVisibilityFull
 	default:
+		slog.Warn("relay: unknown visibility mode, falling back to full", "mode", mode,
+			"valid_values", []string{RelayVisibilityNone, RelayVisibilitySummary, RelayVisibilityFull})
 		return RelayVisibilityFull
 	}
 }

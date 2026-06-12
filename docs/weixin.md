@@ -136,6 +136,38 @@ go build -tags no_weixin ./cmd/cc-connect
 
 ---
 
+## 群聊：`chat_id` 以 `@chatroom` 结尾
+
+个人微信支持群聊。要把机器人绑定到某个群，把 `[[projects.platforms.options]]`
+里的 `chat_id` 写成**群聊 ID**（不是个人用户 ID）。群聊 ID 一定以
+`@chatroom` 结尾，例如 `1234567890@chatroom`。
+
+```toml
+[[projects.platforms]]
+type = "weixin"
+
+[projects.platforms.options]
+token = "ilink_bot_bearer_token"
+chat_id = "your_group_chat_id@chatroom"   # 群聊 ID 以 @chatroom 结尾
+```
+
+**怎么拿到这个群聊 ID：**
+
+1. 启动 cc-connect，并让机器人加入目标群。
+2. 让群里任意已知允许的用户在群里发一条消息。
+3. 看 cc-connect 日志：消息到达时会打印带 `@chatroom` 后缀的
+   `chat_id`，把它原样填到 `chat_id` 即可。
+
+把 `chat_id` 留空就响应机器人所在的所有聊天。填具体值只响应那一个
+群/个人。私聊和群聊都想覆盖时，复制一份 `[[projects.platforms]]`
+块即可（一份 `chat_id` 填群 ID、另一份留空）。
+
+**把机器人加进群：** 个人微信机器人没有"邀请机器人入群"的 API。
+由已经扫码绑定 ilink 的微信号，在群里发起"添加"或把机器人的二维码
+发到群里让其他人扫码。和把普通好友拉进群一样。
+
+---
+
 ## 相关链接
 
 - 仓库内示例配置：[config.example.toml](../config.example.toml)  

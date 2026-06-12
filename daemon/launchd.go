@@ -5,9 +5,11 @@ package daemon
 import (
 	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,8 +54,17 @@ func (m *launchdManager) Install(cfg Config) error {
 	bootoutLaunchdTargets()
 
 	plist := buildPlist(cfg)
-	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+	// 0600: plist may contain captured secret values (config.toml ${ENV}
+	// placeholders and any EnvDiscoverer extension output). User-only
+	// LaunchAgents path; root can still read but that is the user's own
+	// machine boundary. os.WriteFile only applies perm on create, so
+	// Chmod afterwards is required to harden reinstalls of files that
+	// pre-existed at 0644 from earlier cc-connect versions.
+	if err := os.WriteFile(plistPath, []byte(plist), 0600); err != nil {
 		return fmt.Errorf("write plist: %w", err)
+	}
+	if err := os.Chmod(plistPath, 0600); err != nil {
+		return fmt.Errorf("chmod plist: %w", err)
 	}
 
 	domain := preferredLaunchdDomain()
@@ -240,16 +251,62 @@ func bootoutLaunchdTargets() {
 	}
 }
 
+// templateOwnedEnvKeys are keys the plist template renders directly; if
+// they also appear in cfg.EnvExtra the template version wins.
+var templateOwnedEnvKeys = map[string]struct{}{
+	"CC_LOG_FILE":     {},
+	"CC_LOG_MAX_SIZE": {},
+	"PATH":            {},
+}
+
+// renderEnvExtraPlist returns the serialized key/value pairs (without the
+// surrounding <dict> wrapper) for cfg.EnvExtra, sorted by key and with
+// invalid keys / empty values dropped. Both keys and values are XML-escaped.
+func renderEnvExtraPlist(envExtra map[string]string) string {
+	if len(envExtra) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(envExtra))
+	for k := range envExtra {
+		if _, owned := templateOwnedEnvKeys[k]; owned {
+			continue
+		}
+		if !isValidEnvName(k) {
+			slog.Warn("daemon: launchd: dropping invalid env name from EnvExtra",
+				"key", k)
+			continue
+		}
+		if envExtra[k] == "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n",
+			xmlEscape(k), xmlEscape(envExtra[k]))
+	}
+	return b.String()
+}
+
+func xmlEscape(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
 func buildPlist(cfg Config) string {
 	envPATH := cfg.EnvPATH
 	if envPATH == "" {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
+	envExtra := renderEnvExtraPlist(cfg.EnvExtra)
 	// User-supplied paths can legitimately contain XML-special characters
 	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
 	// rejects the plist with a parse error and daemon install fails. The
-	// label is a hard-coded constant so it does not need escaping; LogMaxSize
-	// is an int.
+	// label is a hard-coded constant; LogMaxSize is an int; envExtra is
+	// escaped by renderEnvExtraPlist.
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -282,26 +339,13 @@ func buildPlist(cfg Config) string {
 		<string>%d</string>
 		<key>PATH</key>
 		<string>%s</string>
-	</dict>
+%s	</dict>
 	<key>StandardOutPath</key>
 	<string>/dev/null</string>
 	<key>StandardErrorPath</key>
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, xmlEscape(envPATH))
-}
-
-// xmlEscape escapes the five XML-reserved characters in a string so it can
-// be safely embedded inside a plist <string> element.
-func xmlEscape(s string) string {
-	var b strings.Builder
-	if err := xml.EscapeText(&b, []byte(s)); err != nil {
-		// xml.EscapeText only fails when the underlying writer fails; a
-		// strings.Builder never returns a write error. Fall back to the
-		// raw value defensively rather than panicking.
-		return s
-	}
-	return b.String()
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, xmlEscape(envPATH), envExtra)
 }
 

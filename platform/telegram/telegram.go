@@ -899,15 +899,16 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	}
 
 	p.handler(p, &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "telegram",
-		UserID:     userID,
-		UserName:   userName,
-		ChatName:   chatName,
-		Content:    responseText,
-		MessageID:  strconv.Itoa(msgID),
-		ChannelKey: channelKey,
-		ReplyCtx:   rctx,
+		SessionKey:           sessionKey,
+		Platform:             "telegram",
+		UserID:               userID,
+		UserName:             userName,
+		ChatName:             chatName,
+		Content:              responseText,
+		MessageID:            strconv.Itoa(msgID),
+		ChannelKey:           channelKey,
+		ReplyCtx:             rctx,
+		IsPermissionResponse: true,
 	})
 }
 
@@ -1009,16 +1010,25 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "Reply",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
 			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Handle message too long by splitting and sending as multiple messages
+			slog.Warn("telegram: message too long, splitting into chunks",
+				"method", "Reply",
+				"html_len", len(html),
+			)
+			return p.sendChunked(ctx, bot, rc, html)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
@@ -1047,16 +1057,25 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "Send",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
 			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Handle message too long by splitting and sending as multiple messages
+			slog.Warn("telegram: message too long, splitting into chunks",
+				"method", "Send",
+				"html_len", len(html),
+			)
+			return p.sendChunked(ctx, bot, rc, html)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
@@ -1234,16 +1253,25 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "SendWithButtons",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
 			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Handle message too long: first chunk with buttons, rest without
+			slog.Warn("telegram: message too long, splitting into chunks",
+				"method", "SendWithButtons",
+				"html_len", len(html),
+			)
+			return p.sendChunkedWithButtons(ctx, bot, rc, html, rows)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: sendWithButtons: %w", err)
@@ -1362,12 +1390,24 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending preview as plain text",
 				"method", "SendPreviewStart",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
+			)
+			params.Text = content
+			params.ParseMode = ""
+			sent, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Preview messages shouldn't be chunked; fall back to plain text
+			slog.Warn("telegram: preview too long, sending as plain text",
+				"method", "SendPreviewStart",
+				"html_len", len(html),
+				"content_len", len(content),
 			)
 			params.Text = content
 			params.ParseMode = ""
@@ -1430,6 +1470,71 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("telegram: edit message: %w", err)
 	}
 	slog.Debug("telegram: UpdateMessage HTML success")
+	return nil
+}
+
+// telegramMaxMessageLen is the maximum message length for Telegram.
+// Telegram's limit is 4096 characters for text messages.
+const telegramMaxMessageLen = 4096
+
+// sendChunked splits a message that's too long and sends it as multiple messages.
+// It uses SplitMessageCodeFenceAware to respect code block boundaries.
+func (p *Platform) sendChunked(ctx context.Context, bot telegramBot, rc replyContext, html string) error {
+	chunks := core.SplitMessageCodeFenceAware(html, telegramMaxMessageLen)
+	for i, chunk := range chunks {
+		params := &tgbot.SendMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			Text:            chunk,
+			ParseMode:       models.ParseModeHTML,
+		}
+		if i == 0 && rc.messageID != 0 {
+			params.ReplyParameters = &models.ReplyParameters{MessageID: rc.messageID}
+		}
+		if _, err := bot.SendMessage(ctx, params); err != nil {
+			// If HTML fails, try plain text
+			if strings.Contains(err.Error(), "can't parse") {
+				params.Text = chunk
+				params.ParseMode = ""
+				if _, err2 := bot.SendMessage(ctx, params); err2 != nil {
+					return fmt.Errorf("telegram: send chunk %d: %w", i, err2)
+				}
+			} else {
+				return fmt.Errorf("telegram: send chunk %d: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// sendChunkedWithButtons splits a message that's too long and sends it as multiple messages.
+// The first chunk includes the inline keyboard buttons.
+func (p *Platform) sendChunkedWithButtons(ctx context.Context, bot telegramBot, rc replyContext, html string, rows [][]models.InlineKeyboardButton) error {
+	chunks := core.SplitMessageCodeFenceAware(html, telegramMaxMessageLen)
+	for i, chunk := range chunks {
+		params := &tgbot.SendMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			Text:            chunk,
+			ParseMode:       models.ParseModeHTML,
+		}
+		// Only first chunk gets the buttons
+		if i == 0 {
+			params.ReplyMarkup = &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+		}
+		if _, err := bot.SendMessage(ctx, params); err != nil {
+			// If HTML fails, try plain text
+			if strings.Contains(err.Error(), "can't parse") {
+				params.Text = chunk
+				params.ParseMode = ""
+				if _, err2 := bot.SendMessage(ctx, params); err2 != nil {
+					return fmt.Errorf("telegram: send chunk %d: %w", i, err2)
+				}
+			} else {
+				return fmt.Errorf("telegram: send chunk %d: %w", i, err)
+			}
+		}
+	}
 	return nil
 }
 

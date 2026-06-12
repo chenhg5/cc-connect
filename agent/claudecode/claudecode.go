@@ -52,6 +52,8 @@ type Agent struct {
 	routerAPIKey     string // Claude Code Router API key (optional)
 	systemPrompt     string // Custom system prompt to pass to Claude CLI
 
+	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
+
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
 	platformPrompt string              // platform-specific formatting instructions
@@ -134,6 +136,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
 	systemPrompt, _ := opts["system_prompt"].(string)
+	appendSystemPrompt, _ := opts["append_system_prompt"].(string)
 
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
@@ -228,6 +231,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		routerURL:        routerURL,
 		routerAPIKey:     routerAPIKey,
 		spawnOpts:        spawnOpts,
+
+		appendSystemPrompt: appendSystemPrompt,
 	}, nil
 }
 
@@ -406,6 +411,50 @@ func (a *Agent) SetPlatformPrompt(prompt string) {
 	a.platformPrompt = prompt
 }
 
+// ValidateSessionID reports whether the given session ID exists in this
+// agent's per-project session store (issue #599). It is the agent-side
+// implementation of core.SessionIDValidator: when the engine is about to
+// resume a session whose stored ID was inherited from another project, the
+// engine calls this and — on a false return — clears the ID and starts a
+// fresh session instead of reloading the wrong conversation.
+func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return validateSessionIDInProject(homeDir, workDir, sessionID)
+}
+
+// validateSessionIDInProject checks whether sessionID has a .jsonl file
+// under the per-project directory that Claude Code derives from workDir.
+// Split out from (*Agent).ValidateSessionID so the logic can be unit
+// tested without touching the real $HOME.
+func validateSessionIDInProject(homeDir, workDir, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if homeDir == "" || workDir == "" {
+		return false
+	}
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return false
+	}
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
@@ -436,12 +485,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		"providerCount", len(a.providers))
 	platformPrompt := a.platformPrompt
 	systemPrompt := a.systemPrompt
+	appendSystemPrompt := a.appendSystemPrompt
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

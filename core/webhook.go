@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -305,7 +304,7 @@ func (ws *WebhookServer) executeShell(engine *Engine, req WebhookRequest, event 
 	ctx, cancel := context.WithTimeout(context.Background(), webhookShellTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", req.Exec)
+	cmd := shellExecCommand(ctx, engine.shell, engine.shellFlag, engine.shellProfile, req.Exec)
 	cmd.Dir = workDir
 	output, execErr := cmd.CombinedOutput()
 
