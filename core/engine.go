@@ -79,9 +79,10 @@ const (
 )
 
 const (
-	messageRecallCheckTimeout = 2 * time.Second
-	messageRecallPollInterval = 2 * time.Second
-	recalledStopLockWait      = 2 * time.Second
+	messageRecallCheckTimeout  = 2 * time.Second
+	messageRecallPollInterval  = time.Minute
+	messageRecallProbeCooldown = time.Minute
+	recalledStopLockWait       = 2 * time.Second
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -494,25 +495,28 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession           AgentSession
-	platform               Platform
-	replyCtx               any
-	currentMessageID       string
-	workspaceDir           string
-	agent                  Agent
-	mu                     sync.Mutex
-	stopCh                 chan struct{}
-	stopped                bool
-	pending                *pendingPermission
-	pendingMessages        []queuedMessage // messages queued while session was busy
-	approveAll             bool            // when true, auto-approve all permission requests for this session
-	fromVoice              bool            // true if current turn originated from voice transcription
-	sideText               string
-	deleteMode             *deleteModeState
-	modelSwitch            *modelSwitchState
-	pendingProviderAdd     *pendingProviderAddState
-	lastAutoCompressAt     time.Time
-	lastAutoCompressTokens int
+	agentSession             AgentSession
+	platform                 Platform
+	replyCtx                 any
+	currentMessageID         string
+	lastRecallProbeMessageID string
+	lastRecallProbeAt        time.Time
+	recallProbeInFlight      bool
+	workspaceDir             string
+	agent                    Agent
+	mu                       sync.Mutex
+	stopCh                   chan struct{}
+	stopped                  bool
+	pending                  *pendingPermission
+	pendingMessages          []queuedMessage // messages queued while session was busy
+	approveAll               bool            // when true, auto-approve all permission requests for this session
+	fromVoice                bool            // true if current turn originated from voice transcription
+	sideText                 string
+	deleteMode               *deleteModeState
+	modelSwitch              *modelSwitchState
+	pendingProviderAdd       *pendingProviderAddState
+	lastAutoCompressAt       time.Time
+	lastAutoCompressTokens   int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -2594,15 +2598,36 @@ func (e *Engine) stopCurrentMessageIfRecalled(sessionKey string) bool {
 	platform := state.platform
 	replyCtx := state.replyCtx
 	messageID := state.currentMessageID
-	state.mu.Unlock()
 	if platform == nil || replyCtx == nil || messageID == "" {
+		state.mu.Unlock()
 		return false
 	}
-
 	detector, ok := platform.(MessageRecallDetector)
 	if !ok {
+		state.mu.Unlock()
 		return false
 	}
+	if state.recallProbeInFlight {
+		state.mu.Unlock()
+		return false
+	}
+	now := time.Now()
+	if state.lastRecallProbeMessageID == messageID && now.Sub(state.lastRecallProbeAt) < messageRecallProbeCooldown {
+		state.mu.Unlock()
+		return false
+	}
+	state.recallProbeInFlight = true
+	state.lastRecallProbeMessageID = messageID
+	state.lastRecallProbeAt = now
+	state.mu.Unlock()
+
+	defer func() {
+		state.mu.Lock()
+		if state.currentMessageID == messageID {
+			state.recallProbeInFlight = false
+		}
+		state.mu.Unlock()
+	}()
 
 	ctx, cancel := context.WithTimeout(e.ctx, messageRecallCheckTimeout)
 	defer cancel()
@@ -3587,6 +3612,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	// Update reply context for this turn
 	state.mu.Lock()
+	if state.currentMessageID != msg.MessageID {
+		state.lastRecallProbeMessageID = ""
+		state.lastRecallProbeAt = time.Time{}
+		state.recallProbeInFlight = false
+	}
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
