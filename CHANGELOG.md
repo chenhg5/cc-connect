@@ -4,6 +4,9 @@
 - **`cc-connect cron add --silent`**: expose the `--silent` flag on the cron add CLI so users can suppress the cron start notification when creating a job. The server already accepted `silent` on `/cron/add`; only the CLI side was missing (#858).
 - **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.
 
+### Fixed
+- **macOS/Windows build failure from duplicate `CheckLinger`**: `daemon/linger_other.go` (`//go:build !linux`) redeclared `CheckLinger` together with the per-platform stubs in `daemon/launchd.go` (darwin), `daemon/windows.go` (windows), and `daemon/unsupported.go` (other), so `go build ./...` failed on every non-Linux platform. Deleted `daemon/linger_other.go`; per-platform stubs already cover darwin/windows/other, and `daemon/systemd.go` covers Linux. `make release-all` now succeeds on all target platforms (#1311).
+
 ### ⚠️ QQ Bot Intent Configuration Change
 The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you previously set a custom `intents` value without this bit, inline keyboard buttons will not work — update your `intents` to include bit 26. If you use the default intents, no action is needed. See `config.example.toml` for the new `intents` option.
 
