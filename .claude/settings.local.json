@@ -2,7 +2,30 @@
   "permissions": {
     "allow": [
       "Bash(git add:*)",
-      "Bash(git commit -m ':*)"
+      "Bash(git commit -m ':*)",
+      "Read(//Users/mac/.ssh/**)",
+      "Read(//private/etc/ssh/**)",
+      "Bash(ssh -vT git@github.com)",
+      "Bash(env)",
+      "Bash(git config *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(gofmt -d platform/dingtalk/dingtalk.go platform/dingtalk/dingtalk_test.go)",
+      "Bash(gh pr *)",
+      "WebSearch",
+      "Bash(python3 -m json.tool provider-presets.json)",
+      "Bash(python3 *)",
+      "Bash(head -549 provider-presets.json)",
+      "Bash(mv /tmp/presets_clean.json provider-presets.json)",
+      "Bash(git checkout *)",
+      "Bash(git reset *)",
+      "Bash(git stash *)",
+      "Bash(git pull *)",
+      "Bash(git branch *)",
+      "Bash(gh run *)",
+      "Bash(git rm *)",
+      "Bash(git restore *)"
     ]
   }
 }

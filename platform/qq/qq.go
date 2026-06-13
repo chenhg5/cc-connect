@@ -609,7 +609,7 @@ func (p *Platform) callHTTPAPI(action string, params map[string]any) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("qq: HTTP %s failed: %w", action, err)
 	}
-	defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -709,7 +709,7 @@ func downloadLargeFile(url string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -733,7 +733,7 @@ func downloadFile(url string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

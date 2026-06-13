@@ -248,7 +248,7 @@ access_token = "${UNSET_PLACEHOLDER_THAT_DOES_NOT_EXIST}"
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	os.Unsetenv("UNSET_PLACEHOLDER_THAT_DOES_NOT_EXIST")
+	_ = os.Unsetenv("UNSET_PLACEHOLDER_THAT_DOES_NOT_EXIST")
 
 	cfg := Config{BinaryPath: "/bin/true", WorkDir: workDir}
 	if err := Resolve(&cfg); err != nil {
