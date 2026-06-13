@@ -25,7 +25,8 @@
       "Bash(git branch *)",
       "Bash(gh run *)",
       "Bash(git rm *)",
-      "Bash(git restore *)"
+      "Bash(git restore *)",
+      "Bash(GIT_EDITOR=true git rebase --continue)"
     ]
   }
 }
