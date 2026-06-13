@@ -1265,3 +1265,143 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
 	}
 }
+
+func newTestPlatform(mentionMap map[string]string, resolveMentions bool, members map[string]string) *Platform {
+	p := &Platform{
+		resolveMentions: resolveMentions,
+		mentionMap:      mentionMap,
+	}
+	if members != nil {
+		p.chatMemberCache.Store("oc_test_group", &chatMemberEntry{
+			members:   members,
+			fetchedAt: time.Now(),
+		})
+	}
+	return p
+}
+
+func TestResolveMentions_MentionMapPriority(t *testing.T) {
+	p := newTestPlatform(
+		map[string]string{"BotA": "ou_bot_openid"},
+		true,
+		map[string]string{"BotA": "ou_human_openid"},
+	)
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "Hey @BotA check this")
+	if !strings.Contains(result, `user_id="ou_bot_openid"`) {
+		t.Errorf("expected mentionMap to override group member, got: %s", result)
+	}
+	if strings.Contains(result, "ou_human_openid") {
+		t.Error("should NOT use group member open_id when mentionMap has same key")
+	}
+}
+
+func TestResolveMentions_MergedResolution(t *testing.T) {
+	ctx := context.Background()
+
+	// mentionMap + group members both resolve (different keys)
+	p := newTestPlatform(
+		map[string]string{"BotA": "ou_bot_openid"},
+		true,
+		map[string]string{"Alice": "ou_alice_openid"},
+	)
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "Hey @BotA and @Alice")
+	if !strings.Contains(result, `user_id="ou_bot_openid"`) {
+		t.Error("BotA should resolve via mentionMap")
+	}
+	if !strings.Contains(result, `user_id="ou_alice_openid"`) {
+		t.Error("Alice should resolve via group members")
+	}
+
+	// nil mentionMap: still works with group members only
+	p2 := &Platform{resolveMentions: true}
+	p2.chatMemberCache.Store("oc_test_group", &chatMemberEntry{
+		members:   map[string]string{"Alice": "ou_alice"},
+		fetchedAt: time.Now(),
+	})
+	result2 := p2.resolveMentionsInContent(ctx, "oc_test_group", "@Alice hello")
+	if !strings.Contains(result2, `user_id="ou_alice"`) {
+		t.Error("should still resolve via group members when mentionMap is nil")
+	}
+}
+
+func TestResolveMentions_LongestMatch(t *testing.T) {
+	p := newTestPlatform(
+		map[string]string{"Collector-B": "ou_collectorb"},
+		true,
+		map[string]string{"Collector": "ou_human_collector"},
+	)
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "@Collector-B and @Collector please help")
+	if !strings.Contains(result, `user_id="ou_collectorb"`) {
+		t.Error("Collector-B should resolve via mentionMap")
+	}
+	if !strings.Contains(result, `user_id="ou_human_collector"`) {
+		t.Error("Collector should resolve via group members")
+	}
+}
+
+func TestResolveMentions_Disabled(t *testing.T) {
+	p := &Platform{
+		resolveMentions: false,
+		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
+	}
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test", "@BotA hello")
+	if result != "@BotA hello" {
+		t.Errorf("expected no substitution when disabled, got: %s", result)
+	}
+}
+
+func TestResolveMentions_EdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	// No @ sign: early exit
+	p := &Platform{
+		resolveMentions: true,
+		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
+	}
+	result := p.resolveMentionsInContent(ctx, "oc_test", "No mentions here at all")
+	if result != "No mentions here at all" {
+		t.Errorf("expected unchanged content, got: %s", result)
+	}
+
+	// Unmatched @name: no substitution
+	p2 := newTestPlatform(
+		map[string]string{"BotA": "ou_bot_openid"},
+		true,
+		map[string]string{},
+	)
+	result2 := p2.resolveMentionsInContent(ctx, "oc_test_group", "Hey @Nobody here")
+	if result2 != "Hey @Nobody here" {
+		t.Errorf("expected unchanged content for unmatched mention, got: %s", result2)
+	}
+
+	// Ambiguous member (empty openID): skipped
+	p3 := &Platform{
+		resolveMentions: true,
+		mentionMap:      map[string]string{},
+	}
+	p3.chatMemberCache.Store("oc_test_group", &chatMemberEntry{
+		members:   map[string]string{"Dup": ""},
+		fetchedAt: time.Now(),
+	})
+	result3 := p3.resolveMentionsInContent(ctx, "oc_test_group", "Hey @Dup")
+	if strings.Contains(result3, "<at") {
+		t.Error("should NOT substitute ambiguous member with empty openID")
+	}
+}
+
+func TestResolveMentions_MultipleOccurrences(t *testing.T) {
+	p := newTestPlatform(
+		map[string]string{"BotA": "ou_bot"},
+		true,
+		map[string]string{},
+	)
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "@BotA please help, @BotA is needed")
+	count := strings.Count(result, `user_id="ou_bot"`)
+	if count != 2 {
+		t.Errorf("expected 2 substitutions, got %d. result: %s", count, result)
+	}
+}

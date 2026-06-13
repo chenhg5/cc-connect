@@ -143,6 +143,7 @@ type Platform struct {
 	dedup            *core.MessageDedup
 	botOpenID        string
 	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap       map[string]string // agent name -> open_id (for outbound @ resolution)
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
@@ -247,6 +248,22 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		}
 	}
 
+	// Parse mention_map for outbound bot-to-bot @ resolution.
+	// Maps agent-friendly names (e.g. "Collector-B") to Feishu open_ids,
+	// so that when an agent writes @Collector-B in its reply, cc-connect
+	// converts it to a native Feishu <at> tag that triggers a notification.
+	var mentionMap map[string]string
+	if mentionMapRaw, ok := opts["mention_map"]; ok {
+		if mm, ok := mentionMapRaw.(map[string]any); ok {
+			mentionMap = make(map[string]string, len(mm))
+			for name, id := range mm {
+				if idStr, ok := id.(string); ok && idStr != "" {
+					mentionMap[name] = idStr
+				}
+			}
+		}
+	}
+
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -304,6 +321,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
 		peerBots:                   peerBots,
+		mentionMap:                 mentionMap,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -1586,13 +1604,33 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
 		return content
 	}
+	// Build merged name -> open_id map.
+	// Layer 1: group member display names (existing behavior, lower priority).
+	// Layer 2: mentionMap entries (explicit config, higher priority).
+	merged := make(map[string]string)
+
 	members := p.getChatMembers(ctx, chatID)
-	if len(members) == 0 {
+	for name, openID := range members {
+		if openID != "" {
+			merged[name] = openID
+		}
+	}
+
+	p.mu.RLock()
+	for name, openID := range p.mentionMap {
+		if openID != "" {
+			merged[name] = openID
+		}
+	}
+	p.mu.RUnlock()
+
+	if len(merged) == 0 {
 		return content
 	}
+
 	// Sort names longest-first to avoid partial matches.
-	names := make([]string, 0, len(members))
-	for name := range members {
+	names := make([]string, 0, len(merged))
+	for name := range merged {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
@@ -1604,10 +1642,9 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 		if !strings.Contains(result, pattern) {
 			continue
 		}
-		openID := members[name]
+		openID := merged[name]
 		if openID == "" {
-			slog.Debug(p.tag()+": skipping ambiguous mention", "name", name)
-			continue
+			continue // ambiguous member, skip
 		}
 		var atTag string
 		if useCardFormat {
@@ -1616,7 +1653,6 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 			escapedName := html.EscapeString(name)
 			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
 		}
-		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
@@ -2392,7 +2428,10 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // the interactive card path so the footer can render with text_size:
 // "notation". Falls back to plain Send when the footer is empty.
 func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
-	if strings.TrimSpace(footer) == "" {
+	if strings.TrimSpace(footer) == "" || strings.Contains(content, "<at ") || strings.Contains(content, "@") {
+		if strings.TrimSpace(footer) != "" {
+			content += "\n\n" + footer
+		}
 		return p.Send(ctx, rctx, content)
 	}
 	rc, ok := rctx.(replyContext)
@@ -2643,7 +2682,11 @@ func predictMsgType(content string) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
-	if !containsMarkdown(content) {
+	// Feishu does not generate mention events for <at> tags in card/post
+	// messages sent by bots. Force MsgTypeText when @mentions are present
+	// so Feishu recognizes them and notifies the target bot.
+	hasMention := strings.Contains(content, "<at ") || strings.Contains(content, "@")
+	if !containsMarkdown(content) || hasMention {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
