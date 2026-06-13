@@ -1599,6 +1599,16 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	return nil
 }
 
+// atUserIDRegexp matches @ followed by 4+ digits for DingTalk numeric user IDs.
+//
+// 4+ lower bound rationale:
+//   - DingTalk system-generated userIDs are 12–18 digit pure numbers.
+//   - Admin-set alphanumeric IDs (e.g. "zhangsan") are rendered as the system's
+//     numeric internal ID in webhook callbacks, so this regex only needs digits.
+//   - False-positive risk is low: @<4+digits> is rare in ordinary chat text or
+//     bot output. Version references (e.g. "@2024") are uncommon with an @ prefix.
+//   - Short sample IDs down to 9 digits have been observed in the wild.
+//   - If false positives become a problem, tighten to \d{9,}.
 var atUserIDRegexp = regexp.MustCompile(`@(\d{4,})`)
 
 // extractAtUserIds extracts @userId patterns from content for DingTalk's atUserIds field.
