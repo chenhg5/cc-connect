@@ -55,9 +55,12 @@ ws://<host>:<port>/bridge/ws
 [bridge]
 enabled = true
 port = 9810
+host = "127.0.0.1"        # 可选；留空监听所有网卡。设为 "127.0.0.1"/"::1" 可仅监听本机回环
 path = "/bridge/ws"       # 可选，默认 "/bridge/ws"
 token = "your-secret"     # 认证密钥，必填
 ```
+
+为保持向后兼容，`host` 默认监听所有网卡（同时绑定 IPv4 与 IPv6 通配地址）。当 Bridge 仅供本机适配器使用时，建议设为 `host = "127.0.0.1"`（或 `"::1"`），使该端口不被其他主机访问。
 
 ### 认证
 
