@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -236,18 +237,22 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter       *RateLimiter
-	outgoingRL        *OutgoingRateLimiter
-	streamPreview     StreamPreviewCfg
-	instantReply      InstantReplyCfg
-	references        ReferenceRenderCfg
-	relayManager      *RelayManager
-	eventIdleTimeout  time.Duration
-	maxTurnTime       time.Duration // absolute wall-clock cap per turn (0 = disabled)
-	maxQueuedMessages int
-	dirHistory        *DirHistory
-	baseWorkDir       string
-	projectState      *ProjectStateStore
+	rateLimiter      *RateLimiter
+	outgoingRL       *OutgoingRateLimiter
+	streamPreview    StreamPreviewCfg
+	instantReply     InstantReplyCfg
+	references       ReferenceRenderCfg
+	relayManager     *RelayManager
+	eventIdleTimeout time.Duration
+	maxTurnTime      time.Duration // absolute wall-clock cap per turn (0 = disabled)
+	// agentSessionIdleTimeoutNanos 在单轮正常结束后关闭空闲的 live agent 进程，
+	// 同时保留已保存的 session ID，便于下次继续恢复。
+	agentSessionIdleTimeoutNanos atomic.Int64
+	agentSessionIdleSeq          atomic.Uint64
+	maxQueuedMessages            int
+	dirHistory                   *DirHistory
+	baseWorkDir                  string
+	projectState                 *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -270,8 +275,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -363,6 +368,10 @@ type interactiveState struct {
 	// to confirm it has exited before starting a new foreground turn.
 	unsolicitedCancel context.CancelFunc // nil when no reader is running
 	unsolicitedDone   chan struct{}      // closed when the reader goroutine exits
+
+	// agentSessionIdleCancel 取消当前会话的 idle 关闭计时器。
+	agentSessionIdleCancel context.CancelFunc
+	agentSessionIdleToken  uint64
 
 	// eventsNeedResync is true when buffered events should be drained before
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
@@ -743,6 +752,29 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
+// 小于等于 0 表示禁用。
+func (e *Engine) SetAgentSessionIdleTimeout(d time.Duration) {
+	if d <= 0 {
+		e.agentSessionIdleTimeoutNanos.Store(0)
+		e.cancelAllAgentSessionIdleCloses()
+		return
+	}
+	e.agentSessionIdleTimeoutNanos.Store(int64(d))
+}
+
+func (e *Engine) cancelAllAgentSessionIdleCloses() {
+	e.interactiveMu.Lock()
+	states := make([]*interactiveState, 0, len(e.interactiveStates))
+	for _, state := range e.interactiveStates {
+		states = append(states, state)
+	}
+	e.interactiveMu.Unlock()
+	for _, state := range states {
+		e.cancelAgentSessionIdleClose(state)
+	}
 }
 
 // SetShowContextIndicator controls whether the reply footer's first line
@@ -3413,6 +3445,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
 	}
+	e.cancelAgentSessionIdleClose(state)
 
 	if workspaceDir != "" && e.workspacePool != nil {
 		ws := e.workspacePool.GetOrCreate(workspaceDir)
@@ -3503,6 +3536,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Unlock()
 	if alive {
 		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
+		e.scheduleAgentSessionIdleClose(interactiveKey, state)
 	}
 }
 
@@ -3869,6 +3903,10 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		state.mu.Lock()
 		agentSession = state.agentSession
 		state.agentSession = nil
+		if state.agentSessionIdleCancel != nil {
+			state.agentSessionIdleCancel()
+			state.agentSessionIdleCancel = nil
+		}
 		state.mu.Unlock()
 	}
 	e.interactiveMu.Unlock()
@@ -3911,6 +3949,111 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		return
 	}
 	delete(e.interactiveStates, sessionKey)
+	e.interactiveMu.Unlock()
+}
+
+func (e *Engine) cancelAgentSessionIdleClose(state *interactiveState) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	cancel := state.agentSessionIdleCancel
+	state.agentSessionIdleCancel = nil
+	state.agentSessionIdleToken = 0
+	state.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interactiveState) {
+	if state == nil {
+		return
+	}
+	timeout := time.Duration(e.agentSessionIdleTimeoutNanos.Load())
+	if timeout <= 0 {
+		return
+	}
+
+	e.cancelAgentSessionIdleClose(state)
+	ctx, cancel := context.WithCancel(e.ctx)
+	token := e.agentSessionIdleSeq.Add(1)
+	state.mu.Lock()
+	if state.stopped ||
+		state.agentSession == nil ||
+		!state.agentSession.Alive() ||
+		state.eventsNeedResync ||
+		state.pending != nil ||
+		len(state.pendingMessages) > 0 {
+		state.mu.Unlock()
+		cancel()
+		return
+	}
+	state.agentSessionIdleCancel = cancel
+	state.agentSessionIdleToken = token
+	state.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		e.cleanupInteractiveStateForIdleToken(sessionKey, state, token, timeout)
+	}()
+}
+
+func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected *interactiveState, token uint64, timeout time.Duration) {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	if !ok || state == nil || state != expected {
+		e.interactiveMu.Unlock()
+		return
+	}
+
+	var agentSession AgentSession
+	state.mu.Lock()
+	if state.agentSessionIdleToken != token ||
+		state.agentSession == nil ||
+		!state.agentSession.Alive() ||
+		state.stopped ||
+		state.eventsNeedResync ||
+		state.pending != nil ||
+		len(state.pendingMessages) > 0 {
+		state.mu.Unlock()
+		e.interactiveMu.Unlock()
+		return
+	}
+	agentSession = state.agentSession
+	state.agentSession = nil
+	state.agentSessionIdleCancel = nil
+	state.agentSessionIdleToken = 0
+	state.mu.Unlock()
+	e.interactiveMu.Unlock()
+
+	slog.Info("agent session idle timeout: closing live agent session",
+		"session_key", sessionKey, "timeout", timeout)
+	e.stopUnsolicitedReader(state)
+	state.markStopped()
+
+	state.mu.Lock()
+	pending := state.pending
+	state.pending = nil
+	state.mu.Unlock()
+	if pending != nil {
+		pending.resolve()
+	}
+	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+
+	e.closeAgentSessionWithTimeout(sessionKey, agentSession)
+
+	e.interactiveMu.Lock()
+	if currentState, currentOk := e.interactiveStates[sessionKey]; currentOk && currentState == expected {
+		delete(e.interactiveStates, sessionKey)
+	}
 	e.interactiveMu.Unlock()
 }
 

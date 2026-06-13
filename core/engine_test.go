@@ -6925,6 +6925,143 @@ func TestCleanupCAS_UnconditionalWithoutExpected(t *testing.T) {
 	}
 }
 
+func TestAgentSessionIdleTimeout_ClosesIdleLiveSession(t *testing.T) {
+	e := newTestEngine()
+	e.SetAgentSessionIdleTimeout(20 * time.Millisecond)
+	key := "test:user1"
+	sess := newControllableSession("s1")
+	state := &interactiveState{agentSession: sess, eventsNeedResync: false}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.scheduleAgentSessionIdleClose(key, state)
+
+	select {
+	case <-sess.closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("agent session was not closed after idle timeout")
+	}
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != nil {
+		t.Fatal("expected idle timeout cleanup to remove interactive state")
+	}
+}
+
+func TestAgentSessionIdleTimeout_CancelPreventsClose(t *testing.T) {
+	e := newTestEngine()
+	e.SetAgentSessionIdleTimeout(20 * time.Millisecond)
+	key := "test:user1"
+	sess := newControllableSession("s1")
+	state := &interactiveState{agentSession: sess, eventsNeedResync: false}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.scheduleAgentSessionIdleClose(key, state)
+	e.cancelAgentSessionIdleClose(state)
+
+	select {
+	case <-sess.closed:
+		t.Fatal("agent session closed even though idle close was cancelled")
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != state {
+		t.Fatal("expected interactive state to remain after cancelling idle close")
+	}
+}
+
+func TestAgentSessionIdleTimeout_DisableCancelsScheduledClose(t *testing.T) {
+	e := newTestEngine()
+	e.SetAgentSessionIdleTimeout(20 * time.Millisecond)
+	key := "test:user1"
+	sess := newControllableSession("s1")
+	state := &interactiveState{agentSession: sess, eventsNeedResync: false}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.scheduleAgentSessionIdleClose(key, state)
+	e.SetAgentSessionIdleTimeout(0)
+
+	select {
+	case <-sess.closed:
+		t.Fatal("agent session closed after idle timeout was disabled")
+	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+func TestAgentSessionIdleTimeout_StaleTokenDoesNotCloseSession(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+	sess := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession:           sess,
+		eventsNeedResync:       false,
+		agentSessionIdleToken:  2,
+		agentSessionIdleCancel: func() {},
+	}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.cleanupInteractiveStateForIdleToken(key, state, 1, 20*time.Millisecond)
+
+	select {
+	case <-sess.closed:
+		t.Fatal("stale idle token closed the live agent session")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != state {
+		t.Fatal("expected stale idle token to leave interactive state in place")
+	}
+}
+
+func TestProcessInteractiveMessage_SchedulesAgentSessionIdleCloseAfterCleanTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("done")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetAgentSessionIdleTimeout(20 * time.Millisecond)
+	session := e.sessions.GetOrCreateActive("test:chat:user1")
+
+	go e.processInteractiveMessageWith(p, &Message{
+		Platform:   "test",
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		UserName:   "User One",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}, session, agent, e.sessions, "test:chat:user1", "", "")
+
+	time.Sleep(100 * time.Millisecond)
+
+	if got := session.GetAgentSessionID(); got != "result-session" {
+		t.Fatalf("agent session id = %q, want preserved result-session", got)
+	}
+	e.interactiveMu.Lock()
+	current := e.interactiveStates["test:chat:user1"]
+	e.interactiveMu.Unlock()
+	if current != nil {
+		t.Fatal("expected idle timeout cleanup to remove interactive state after clean turn")
+	}
+}
+
 // TestCleanupCAS_ConcurrentUnconditionalCloseOnce verifies that two concurrent
 // unconditional cleanups for the same key only Close() the agent session once.
 func TestCleanupCAS_ConcurrentUnconditionalCloseOnce(t *testing.T) {

@@ -159,6 +159,18 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
+# Close an idle live agent process after a clean turn while preserving the
+# cc-connect session and saved agent session ID. The next message in the same
+# chat/thread starts a new agent process and resumes the same conversation.
+# This is per chat session/thread, unlike workspace_idle_timeout_mins which
+# reaps an entire workspace. Set to 0 or leave unset to disable.
+# 在单次对话正常完成后，如果该聊天会话/主题长时间没有新消息，则关闭对应的 live agent
+# 进程，但保留 cc-connect 会话和已保存的 agent_session_id。下次同一会话有消息时会
+# 重新启动 agent 进程并续接原会话。这是按会话/主题生效，不同于按 workspace 回收的
+# workspace_idle_timeout_mins。设为 0 或不设置表示禁用。
+# [[projects]]
+# agent_session_idle_timeout_mins = 30
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
