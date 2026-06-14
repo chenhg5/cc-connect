@@ -24,24 +24,25 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir       string
-	model         string
-	effort        string
-	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
-	cliBin        string   // CLI binary, default "codex"
-	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
-	extraEnv      []string
-	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	workDir        string
+	model          string
+	effort         string
+	mode           string
+	baseURL        string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider  string   // Codex model_provider name; passed as -c model_provider=<name>
+	cliBin         string   // CLI binary, default "codex"
+	cliExtraArgs   []string // extra args from cli_path, prepended before exec args
+	extraEnv       []string
+	promptPreamble string
+	events         chan core.Event
+	threadID       atomic.Value // stores string — Codex thread_id
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
+	closeOnce      sync.Once
+	cmdMu          sync.Mutex
+	cmds           map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -63,23 +64,47 @@ var codexRuntimeConfigTimeout = 1500 * time.Millisecond
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string) (*codexSession, error) {
+func buildCodexPromptPreamble(systemPrompt string, appendPrompt string) string {
+	var sections []string
+	if systemPrompt = strings.TrimSpace(systemPrompt); systemPrompt != "" {
+		sections = append(sections, "Project system prompt:\n"+systemPrompt)
+	}
+	if appendPrompt = strings.TrimSpace(appendPrompt); appendPrompt != "" {
+		sections = append(sections, "Additional project instructions:\n"+appendPrompt)
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func prependCodexPromptPreamble(prompt string, preamble string) string {
+	preamble = strings.TrimSpace(preamble)
+	if preamble == "" {
+		return prompt
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble
+	}
+	return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble + "\n\n---\n\nUser message:\n" + prompt
+}
+
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir:       workDir,
-		model:         model,
-		effort:        effort,
-		mode:          mode,
-		baseURL:       baseURL,
-		modelProvider: modelProvider,
-		cliBin:        cliBin,
-		cliExtraArgs:  cliExtraArgs,
-		extraEnv:      extraEnv,
-		events:        make(chan core.Event, 64),
-		ctx:           sessionCtx,
-		cancel:        cancel,
-		cmds:          make(map[*exec.Cmd]struct{}),
+		workDir:        workDir,
+		model:          model,
+		effort:         effort,
+		mode:           mode,
+		baseURL:        baseURL,
+		modelProvider:  modelProvider,
+		cliBin:         cliBin,
+		cliExtraArgs:   cliExtraArgs,
+		extraEnv:       extraEnv,
+		promptPreamble: buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		events:         make(chan core.Event, 64),
+		ctx:            sessionCtx,
+		cancel:         cancel,
+		cmds:           make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -108,6 +133,9 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	}
 
 	isResume := cs.CurrentSessionID() != ""
+	if !isResume {
+		prompt = prependCodexPromptPreamble(prompt, cs.promptPreamble)
+	}
 	args := cs.buildExecArgs(prompt, imagePaths)
 	if len(cs.cliExtraArgs) > 0 {
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
