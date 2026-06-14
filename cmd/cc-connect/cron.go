@@ -626,7 +626,7 @@ Options:
       --prompt <text>        Task prompt (runs through agent)
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
-      --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
+      --session-mode <mode>  new-per-run (default) or reuse — fresh agent session each run unless reusing
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --silent               Suppress cron start notification
       --data-dir <path>      Data directory (default: ~/.cc-connect)
