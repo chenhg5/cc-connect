@@ -557,7 +557,7 @@ func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	if err := cs.Send("Create a Chat issue.", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
