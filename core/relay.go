@@ -241,7 +241,12 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	// Post the forwarded message to the group chat for visibility.
+	// When the caller is in a thread, post visibility messages into the
+	// same thread so group members see the relay exchange in-context.
 	groupSessionKey := platform + ":" + chatID + ":relay"
+	if threadTail, ok := relayThreadRoot(req.SessionKey); ok {
+		groupSessionKey = platform + ":" + chatID + ":" + threadTail
+	}
 	if sourceEngine != nil && visibility != RelayVisibilityNone {
 		label := relayVisibilityRequestLabel(visibility, fromName, toName, req.Message)
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
@@ -346,6 +351,24 @@ func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error
 		return parts[0], parts[2], nil
 	}
 	return parts[0], parts[1], nil
+}
+
+// relayThreadRoot extracts the thread root segment from a session key's third
+// part when it carries a "root:" or "thread:" prefix (as used by the feishu and
+// slack platforms).  Returns (tail, true) when the key targets a thread, or
+// ("", false) when it targets a top-level channel.
+func relayThreadRoot(sessionKey string) (tail string, ok bool) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 3 {
+		return "", false
+	}
+	third := parts[2]
+	for _, pfx := range []string{"root:", "thread:"} {
+		if after, match := strings.CutPrefix(third, pfx); match && after != "" {
+			return third, true
+		}
+	}
+	return "", false
 }
 
 // ── Persistence ─────────────────────────────────────────────
