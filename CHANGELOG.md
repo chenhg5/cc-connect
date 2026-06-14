@@ -4,6 +4,9 @@
 - **`cc-connect cron add --silent`**: expose the `--silent` flag on the cron add CLI so users can suppress the cron start notification when creating a job. The server already accepted `silent` on `/cron/add`; only the CLI side was missing (#858).
 - **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.
 
+### Fixed
+- **Serialize concurrent session file I/O via flock(2)**: when multiple projects share one cc-connect process, parallel reads and writes to the same session state file could interleave and leave a torn JSON file on disk. SessionManager.saveLocked and load now take an exclusive advisory flock on a sidecar `<storePath>.lock` file as a best-effort cross-process guard (the in-process `sm.mu` remains the primary defense). The lock helper is split per platform: `core/session_lock_unix.go` (Linux/Darwin/BSD) uses `unix.Flock`; `core/session_lock_windows.go` is a no-op since Windows file-locking semantics differ (#324).
+
 ### ⚠️ QQ Bot Intent Configuration Change
 The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you previously set a custom `intents` value without this bit, inline keyboard buttons will not work — update your `intents` to include bit 26. If you use the default intents, no action is needed. See `config.example.toml` for the new `intents` option.
 

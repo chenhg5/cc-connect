@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -1081,3 +1082,60 @@ func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
 	}
 }
 
+
+// TestSessionStoreLock is a basic regression test for issue #324: it
+// verifies that SessionManager.saveLocked serializes concurrent
+// writers via flock(2), so two processes writing the same store
+// path cannot leave a torn JSON file on disk.
+func TestSessionStoreLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	sm1.NewSession("u1", "first")
+	sm1.Save()
+
+	// Acquire the lock from outside; sm1's next Save should block
+	// on flock. We give it a short window and then verify the file
+	// remains valid JSON (i.e. not torn).
+	release := acquireStoreLock(path)
+	defer release()
+
+	done := make(chan struct{})
+	go func() {
+		sm1.NewSession("u2", "second")
+		sm1.Save()
+		close(done)
+	}()
+
+	// While the external lock is held, sm1.Save is blocked in flock.
+	select {
+	case <-done:
+		t.Fatal("Save should be blocked while external lock is held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release the external lock; Save should now complete.
+	release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Save did not complete after lock release")
+	}
+
+	// File must be valid JSON (not torn).
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	var snap sessionSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("store is not valid JSON: %v\ncontent: %s", err, data)
+	}
+	if _, ok := snap.Sessions["s1"]; !ok {
+		t.Errorf("expected session s1 to be persisted, got %+v", snap.Sessions)
+	}
+	if _, ok := snap.Sessions["s2"]; !ok {
+		t.Errorf("expected session s2 to be persisted, got %+v", snap.Sessions)
+	}
+}

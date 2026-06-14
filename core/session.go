@@ -602,6 +602,14 @@ func (sm *SessionManager) saveLocked() {
 		return
 	}
 
+	// Acquire exclusive advisory lock to serialize concurrent writers
+	// (multiple projects / goroutines sharing the same storePath).
+	// Failure to obtain the lock is logged but does not abort: the
+	// in-memory sm.mu above is still in effect, so this is a
+	// best-effort defense against cross-process races.
+	releaseLock := acquireStoreLock(sm.storePath)
+	defer releaseLock()
+
 	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
 	snapSessions := make(map[string]*Session, len(sm.sessions))
 	for id, s := range sm.sessions {
@@ -665,6 +673,13 @@ func (sm *SessionManager) saveLocked() {
 }
 
 func (sm *SessionManager) load() {
+	// Acquire shared advisory lock so a concurrent writer cannot
+	// replace the file mid-read. Best-effort: if the lock file
+	// cannot be created the in-memory state is still protected by
+	// the sm.mu taken by callers of load.
+	releaseLock := acquireStoreLock(sm.storePath)
+	defer releaseLock()
+
 	data, err := os.ReadFile(sm.storePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -943,3 +958,8 @@ func (sm *SessionManager) PruneEmptySessions() int {
 	}
 	return removed
 }
+
+// acquireStoreLock is implemented per-platform in session_lock_unix.go
+// (non-Windows: flock(2) advisory lock) and session_lock_windows.go
+// (Windows: best-effort no-op since Windows file locking semantics
+// differ and the in-process sm.mu remains the primary defense).
