@@ -80,7 +80,7 @@ const (
 
 const (
 	messageRecallCheckTimeout  = 2 * time.Second
-	messageRecallPollInterval  = time.Minute
+	messageRecallPollInterval  = 2 * time.Second
 	messageRecallProbeCooldown = time.Minute
 	recalledStopLockWait       = 2 * time.Second
 )
@@ -2609,11 +2609,23 @@ func (e *Engine) stopCurrentMessageIfRecalled(sessionKey string) bool {
 	}
 	if state.recallProbeInFlight {
 		state.mu.Unlock()
+		slog.Debug("message recall fallback probe skipped; probe already in flight",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+		)
 		return false
 	}
 	now := time.Now()
 	if state.lastRecallProbeMessageID == messageID && now.Sub(state.lastRecallProbeAt) < messageRecallProbeCooldown {
+		nextProbeIn := messageRecallProbeCooldown - now.Sub(state.lastRecallProbeAt)
 		state.mu.Unlock()
+		slog.Debug("message recall fallback probe throttled",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+			"next_probe_in", nextProbeIn,
+		)
 		return false
 	}
 	state.recallProbeInFlight = true
