@@ -184,6 +184,7 @@ type Message struct {
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription
+	SilentEmpty  bool                // if true and the agent produces no output, suppress the "(空响应)" fallback
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission

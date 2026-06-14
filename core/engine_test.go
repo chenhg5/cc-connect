@@ -14326,3 +14326,206 @@ func TestHandlePendingPermission_StalePermissionCallback_Dropped(t *testing.T) {
 		}
 	})
 }
+
+// heartbeatReconstructPlatform is a minimal platform stub that supports
+// ReplyContextReconstructor (required by ExecuteHeartbeat) and records
+// every Reply/Send invocation for assertion.
+type heartbeatReconstructPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *heartbeatReconstructPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	return "hb-ctx:" + sessionKey, nil
+}
+
+// TestExecuteHeartbeat_Silent_EmptyResponseSuppressed is a regression
+// test for issue #355: when a heartbeat fires with silent=true and the
+// agent produces no output, the engine must NOT send the localized
+// "(空响应)" / "(empty response)" fallback to the user.
+func TestExecuteHeartbeat_Silent_EmptyResponseSuppressed(t *testing.T) {
+	platform := &heartbeatReconstructPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+
+	// Agent session that returns EventResult with empty content.
+	agentSession := newResultAgentSession("")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	if err := e.ExecuteHeartbeat("test:user-355", "Are you alive?", true); err != nil {
+		t.Fatalf("ExecuteHeartbeat: %v", err)
+	}
+
+	// Wait long enough for the silent-reply path to run. The silent path
+	// should produce zero messages — no "💓 heartbeat" notice and no
+	// empty-response fallback.
+	time.Sleep(500 * time.Millisecond)
+
+	sent := platform.getSent()
+	if len(sent) != 0 {
+		t.Errorf("silent heartbeat with empty agent output should send nothing; got %v", sent)
+	}
+	for _, msg := range sent {
+		if strings.Contains(msg, "空响应") || strings.Contains(strings.ToLower(msg), "empty response") {
+			t.Errorf("silent heartbeat must not send empty-response fallback; got %q", msg)
+		}
+	}
+}
+
+// TestExecuteHeartbeat_NotSilent_EmptyResponseKept ensures the
+// non-silent heartbeat still produces the localized fallback when the
+// agent gives no output, so the fix for #355 is targeted.
+func TestExecuteHeartbeat_NotSilent_EmptyResponseKept(t *testing.T) {
+	platform := &heartbeatReconstructPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+
+	agentSession := newResultAgentSession("")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	if err := e.ExecuteHeartbeat("test:user-355b", "ping", false); err != nil {
+		t.Fatalf("ExecuteHeartbeat: %v", err)
+	}
+
+	// The non-silent path sends a "💓 heartbeat" notice first, then
+	// the fallback if the agent gave no output. Wait for both.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sent := platform.getSent()
+	if len(sent) < 1 || !strings.Contains(sent[0], "heartbeat") {
+		t.Errorf("expected first sent message to contain 'heartbeat', got %v", sent)
+	}
+	var sawEmpty bool
+	for _, msg := range sent[1:] {
+		if strings.Contains(msg, "空响应") || strings.Contains(strings.ToLower(msg), "empty response") {
+			sawEmpty = true
+		}
+	}
+	if !sawEmpty {
+		t.Errorf("non-silent heartbeat with empty agent output should still send empty-response fallback; sent=%v", sent)
+	}
+}
+
+// TestExecuteCronJob_Silent_EmptyResponseSuppressed is a regression
+// test for issue #355: when a cron job runs with Silent=true and the
+// agent produces no output, the engine must NOT send the localized
+// "(空响应)" / "(empty response)" fallback to the user. This mirrors
+// TestExecuteHeartbeat_Silent_EmptyResponseSuppressed so the silent
+// suppression behavior is consistent across heartbeat and cron paths.
+func TestExecuteCronJob_Silent_EmptyResponseSuppressed(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	silentTrue := true
+	job := &CronJob{
+		ID:          "job-silent-empty",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+		Silent:      &silentTrue,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+
+	// Wait long enough for any potential fallback to land. The silent path
+	// should produce zero messages — no start notice (Silent suppresses it)
+	// and no empty-response fallback (SilentEmpty suppresses it).
+	time.Sleep(500 * time.Millisecond)
+
+	sent := platform.getSent()
+	if len(sent) != 0 {
+		t.Errorf("silent cron job with empty agent output should send nothing; got %v", sent)
+	}
+	for _, msg := range sent {
+		if strings.Contains(msg, "空响应") || strings.Contains(strings.ToLower(msg), "empty response") {
+			t.Errorf("silent cron must not send empty-response fallback; got %q", msg)
+		}
+	}
+}
+
+// TestExecuteCronJob_NotSilent_EmptyResponseKept ensures the non-silent
+// cron path still produces the localized fallback when the agent gives
+// no output, so the SilentEmpty fix for #355 is targeted to silent jobs
+// only and does not regress the normal cron behavior.
+func TestExecuteCronJob_NotSilent_EmptyResponseKept(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	// Silent: nil means "use scheduler default", which is false.
+	job := &CronJob{
+		ID:          "job-notsilent-empty",
+		SessionKey:  "discord:channel-1:user-2",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+
+	// Non-silent path: start notice first, then empty-response fallback.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sent := platform.getSent()
+	if len(sent) < 1 || !strings.Contains(sent[0], "Daily summary") {
+		t.Errorf("expected first sent message to contain 'Daily summary' start notice; got %v", sent)
+	}
+	var sawEmpty bool
+	for _, msg := range sent[1:] {
+		if strings.Contains(msg, "空响应") || strings.Contains(strings.ToLower(msg), "empty response") {
+			sawEmpty = true
+		}
+	}
+	if !sawEmpty {
+		t.Errorf("non-silent cron job with empty agent output should send empty-response fallback; sent=%v", sent)
+	}
+}
