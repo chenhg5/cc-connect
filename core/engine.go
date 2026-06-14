@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -3151,34 +3152,142 @@ func buildAskQuestionResponse(originalInput map[string]any, questions []UserQues
 	return result
 }
 
-func isApproveAllResponse(s string) bool {
-	for _, w := range []string{
-		"allow all", "allowall", "approve all", "yes all",
+// permissionTokenSeparator reports whether r is a token boundary for
+// permission keyword matching. It splits on Unicode whitespace plus the
+// punctuation users typically write around an @mention or as filler in
+// a chat reply, including full-width / Chinese variants.
+//
+// `@` is intentionally a separator so `@bot 允许` tokenises to
+// ["bot", "允许"] without the keyword swallowing the mention prefix.
+//
+// We deliberately do not split on every Unicode punctuation rune (e.g. `'`
+// inside contractions) — only the ones that show up in real IM messages
+// — so unrelated words stay intact.
+func permissionTokenSeparator(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	switch r {
+	case '@', '＠',
+		',', '，',
+		'.', '。',
+		'!', '！',
+		'?', '？',
+		':', '：',
+		';', '；',
+		'(', ')', '（', '）',
+		'[', ']', '【', '】',
+		'"', '\'', '“', '”', '‘', '’',
+		'、', '·':
+		return true
+	}
+	return false
+}
+
+// splitPermissionTokens lower-cases s and tokenises it on
+// permissionTokenSeparator boundaries. Returns nil for the empty input
+// so callers can range over it without a length check.
+func splitPermissionTokens(s string) []string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return nil
+	}
+	return strings.FieldsFunc(s, permissionTokenSeparator)
+}
+
+// matchPermissionKeyword reports whether s contains any of the
+// single-token keywords in `keywords`, OR equals any of the
+// multi-token phrases in `phrases` (matched by joining the tokens
+// with a single ASCII space, which canonicalises full-width spacing
+// and adjacent @mentions).
+//
+// Single-token keywords are matched per-token (strict equality on a
+// token boundary) so that "@bot 允许", "允许 @bot", "好的 allow" all
+// match while "禁止允许这种" does NOT (it tokenises to a single
+// 4-character CJK word, no token equals "允许"). Multi-token phrases
+// are matched as a sequence so "@bot 允许 所有" still hits
+// "允许 所有" without falling back to per-token "允许" — this is what
+// keeps `/approve all` distinct from `/allow`.
+func matchPermissionKeyword(s string, phrases []string, keywords []string) bool {
+	tokens := splitPermissionTokens(s)
+	if len(tokens) == 0 {
+		return false
+	}
+	if len(phrases) > 0 {
+		joined := strings.Join(tokens, " ")
+		for _, ph := range phrases {
+			if joined == ph {
+				return true
+			}
+			// Sliding window over tokens to allow extra surrounding
+			// tokens like "@bot allow all please".
+			pTokens := strings.Fields(ph)
+			if len(pTokens) > 1 && len(pTokens) <= len(tokens) {
+				for i := 0; i+len(pTokens) <= len(tokens); i++ {
+					match := true
+					for j, pt := range pTokens {
+						if tokens[i+j] != pt {
+							match = false
+							break
+						}
+					}
+					if match {
+						return true
+					}
+				}
+			}
+		}
+	}
+	for _, tok := range tokens {
+		for _, w := range keywords {
+			if tok == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// approveAllPhrases / approveAllSingleTokens / allowKeywords / denyKeywords
+// are the recognised vocabularies for permission responses. Kept as
+// package-level vars so the test suite can assert the exact lists.
+var (
+	approveAllPhrases = []string{
+		"allow all", "approve all", "yes all",
+	}
+	approveAllSingleTokens = []string{
+		"allowall",
 		"允许所有", "允许全部", "全部允许", "所有允许", "都允许", "全部同意",
-	} {
-		if s == w {
-			return true
-		}
 	}
-	return false
+	allowKeywords = []string{
+		"allow", "yes", "y", "ok", "approve",
+		"允许", "同意", "可以", "好", "好的", "是", "确认",
+	}
+	denyKeywords = []string{
+		"deny", "no", "n", "reject", "cancel",
+		"拒绝", "不允许", "不行", "不", "否", "取消",
+	}
+)
+
+// isApproveAllResponse reports whether s expresses "allow all" intent.
+// Multi-token phrases (e.g. "allow all") are matched first; single-token
+// CJK forms (e.g. "允许所有") are matched per-token so a leading or
+// trailing @mention does not break recognition.
+func isApproveAllResponse(s string) bool {
+	return matchPermissionKeyword(s, approveAllPhrases, approveAllSingleTokens)
 }
 
+// isAllowResponse reports whether s expresses an "allow" intent.
+// Tokenised so that group-chat replies like "@产品经理 允许" still match
+// — see internal task t-20260614-ayc85z.
 func isAllowResponse(s string) bool {
-	for _, w := range []string{"allow", "yes", "y", "ok", "允许", "同意", "可以", "好", "好的", "是", "确认", "approve"} {
-		if s == w {
-			return true
-		}
-	}
-	return false
+	return matchPermissionKeyword(s, nil, allowKeywords)
 }
 
+// isDenyResponse reports whether s expresses a "deny" intent.
+// Tokenised so that group-chat replies like "@产品经理 拒绝" still match.
 func isDenyResponse(s string) bool {
-	for _, w := range []string{"deny", "no", "n", "reject", "拒绝", "不允许", "不行", "不", "否", "取消", "cancel"} {
-		if s == w {
-			return true
-		}
-	}
-	return false
+	return matchPermissionKeyword(s, nil, denyKeywords)
 }
 
 // ──────────────────────────────────────────────────────────────
