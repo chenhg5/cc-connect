@@ -17,11 +17,11 @@ func TestParseDelayOrTime_Relative(t *testing.T) {
 		{"1h30m", false},
 		{"2h30m15s", false},
 		{"500ms", false},
-		{"0s", true},       // zero = not positive
-		{"-1h", true},      // negative
-		{"", true},         // empty
-		{"garbage", true},  // invalid
-		{"2", true},        // bare number
+		{"0s", true},      // zero = not positive
+		{"-1h", true},     // negative
+		{"", true},        // empty
+		{"garbage", true}, // invalid
+		{"2", true},       // bare number
 	}
 
 	for _, tt := range tests {
@@ -460,6 +460,11 @@ func TestValidateTimerJob(t *testing.T) {
 			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Prompt: "test", SessionMode: "new-per-run"},
 			wantErr: false,
 		},
+		{
+			name:    "valid reuse session_mode",
+			job:     &TimerJob{SessionKey: "feishu:chat1:user1", ScheduledAt: now.Add(time.Hour), Prompt: "test", SessionMode: "reuse"},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -472,6 +477,35 @@ func TestValidateTimerJob(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestTimerScheduler_UsesNewSession_Defaults(t *testing.T) {
+	store, err := NewTimerStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := NewTimerScheduler(store)
+
+	job := &TimerJob{SessionMode: ""}
+	if !ts.UsesNewSession(job) {
+		t.Error("built-in new_per_run + job empty: expected UsesNewSession=true")
+	}
+
+	job.SessionMode = "reuse"
+	if ts.UsesNewSession(job) {
+		t.Error("built-in new_per_run + job reuse: expected UsesNewSession=false")
+	}
+
+	ts.SetDefaultSessionMode("reuse")
+	job.SessionMode = ""
+	if ts.UsesNewSession(job) {
+		t.Error("global reuse + job empty: expected UsesNewSession=false")
+	}
+
+	job.SessionMode = "new_per_run"
+	if !ts.UsesNewSession(job) {
+		t.Error("global reuse + job new_per_run: expected UsesNewSession=true")
 	}
 }
 
