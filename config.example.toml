@@ -1085,6 +1085,10 @@ app_secret = "your-feishu-app-secret"
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
+# progress_style = "compact"  # Progress rendering: legacy | compact (default). Telegram has no rich card UI,
+#                             # so "card" is normalized to "compact". Set "legacy" to disable streaming edits.
+#                             # 进度展示：legacy | compact（默认）。Telegram 不支持富卡片，"card" 会被规整为 "compact"。
+#                             # 设为 "legacy" 可关闭流式 edit。
 
 # MAX messenger (uncomment to enable / 取消注释以启用)
 # 1. Create a bot via @MasterBot in MAX, get the access token

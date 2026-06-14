@@ -87,10 +87,15 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
-	progressStyle := "legacy"
+	// Default to "compact" so streaming edits work out of the box (Discord
+	// supports MessageUpdater.UpdateMessage). Users can opt back into the old
+	// "send entire reply at once" behavior with progress_style = "legacy".
+	progressStyle := "compact"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "", "legacy":
+		case "":
+			// keep default
+		case "legacy":
 			progressStyle = "legacy"
 		case "compact", "card":
 			progressStyle = strings.ToLower(strings.TrimSpace(v))
