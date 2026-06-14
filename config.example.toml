@@ -331,8 +331,8 @@ level = "info" # debug, info, warn, error
 # [cron]
 # silent = false             # Suppress "⏰ task name" notification when cron starts (default: false)
 #                            # 静默模式：不发送定时任务开始执行的通知消息（默认 false）
-# session_mode = "reuse"     # Default session mode for all cron jobs: "reuse" (default) or "new_per_run"
-#                            # 定时任务默认会话模式："reuse"（复用活跃会话）或 "new_per_run"（每次新建会话）
+# session_mode = "new_per_run" # Default session mode for cron/timer jobs: "new_per_run" (default) or "reuse"
+#                              # 定时/延时任务默认会话模式："new_per_run"（默认，每次新建会话）或 "reuse"（复用活跃会话）
 
 # =============================================================================
 # Webhook / 外部 Webhook 端点

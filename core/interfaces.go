@@ -136,7 +136,7 @@ When the user asks you to do something on a schedule (e.g. "每天早上6点帮�
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do NOT need to specify --project or --session-key.
 
 Optional flags:
-  --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
+  --session-mode <mode>     new-per-run (default; fresh session each trigger) or reuse
   --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
   --exec <command>          run a shell command directly instead of --prompt
 
@@ -189,7 +189,7 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
 Optional flags:
   --exec <command>          run a shell command directly instead of --prompt
   --desc <text>             short description
-  --session-mode <mode>     reuse (default) or new-per-run (fresh session each run)
+  --session-mode <mode>     new-per-run (default; fresh session each run) or reuse
   --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
   --mute                    suppress all messages (start notification + result)
 
