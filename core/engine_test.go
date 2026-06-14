@@ -13273,6 +13273,7 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 		SessionKey:  "discord:channel-1:user-1",
 		Prompt:      "summarize activity",
 		Description: "Daily summary",
+		SessionMode: "reuse",
 	}
 	if err := store.Add(job); err != nil {
 		t.Fatalf("store.Add() error = %v", err)

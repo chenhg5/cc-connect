@@ -114,7 +114,6 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 	}
 }
 
-
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
 	if job.Mute {
@@ -670,21 +669,33 @@ func TestCronScheduler_AddJob_EmptySessionKey(t *testing.T) {
 }
 
 func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCronStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := NewCronScheduler(store)
-	job := &CronJob{
-		ID: "n1", Project: "p", SessionKey: "test:1:1",
-		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "new-per-run",
-	}
-	if err := cs.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-	if job.SessionMode != "new_per_run" {
-		t.Errorf("SessionMode = %q, want new_per_run", job.SessionMode)
+	for _, tt := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "new per run alias", in: "new-per-run", want: "new_per_run"},
+		{name: "reuse explicit", in: "REUSE", want: "reuse"},
+		{name: "empty inherits scheduler default", in: "", want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs := NewCronScheduler(store)
+			job := &CronJob{
+				ID: "n1", Project: "p", SessionKey: "test:1:1",
+				CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: tt.in,
+			}
+			if err := cs.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			if job.SessionMode != tt.want {
+				t.Errorf("SessionMode = %q, want %q", job.SessionMode, tt.want)
+			}
+		})
 	}
 }
 
@@ -696,30 +707,30 @@ func TestCronScheduler_UsesNewSession_GlobalDefault(t *testing.T) {
 	}
 	cs := NewCronScheduler(store)
 
-	// Test 1: global default is "new_per_run", job has no session_mode set
-	cs.SetDefaultSessionMode("new_per_run")
+	// Built-in default is "new_per_run", so legacy jobs with no per-job
+	// session_mode no longer block behind the active chat session.
 	job := &CronJob{SessionMode: ""}
 	if !cs.UsesNewSession(job) {
-		t.Error("global new_per_run + job empty: expected UsesNewSession=true")
+		t.Error("built-in new_per_run + job empty: expected UsesNewSession=true")
 	}
 
-	// Test 2: per-job "reuse" overrides global "new_per_run"
+	// Per-job "reuse" overrides the built-in "new_per_run" default.
 	job.SessionMode = "reuse"
 	if cs.UsesNewSession(job) {
-		t.Error("global new_per_run + job reuse: expected UsesNewSession=false")
+		t.Error("built-in new_per_run + job reuse: expected UsesNewSession=false")
 	}
 
-	// Test 3: per-job "new_per_run" overrides global default (reuse)
-	cs.SetDefaultSessionMode("")
-	job.SessionMode = "new_per_run"
-	if !cs.UsesNewSession(job) {
-		t.Error("global reuse + job new_per_run: expected UsesNewSession=true")
-	}
-
-	// Test 4: both global and job are default (reuse)
+	// A global "reuse" setting restores old reuse-by-default behavior.
+	cs.SetDefaultSessionMode("reuse")
 	job.SessionMode = ""
 	if cs.UsesNewSession(job) {
 		t.Error("global reuse + job empty: expected UsesNewSession=false")
+	}
+
+	// Per-job "new_per_run" overrides global reuse.
+	job.SessionMode = "new_per_run"
+	if !cs.UsesNewSession(job) {
+		t.Error("global reuse + job new_per_run: expected UsesNewSession=true")
 	}
 }
 
