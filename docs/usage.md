@@ -839,7 +839,7 @@ cc-connect cron exec <job-id>
 cc-connect cron del <job-id>
 ```
 
-Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
+By default, prompt cron jobs start a fresh agent session on each run so they do not block behind an active chat turn. Use `--session-mode reuse` to share the active session. `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
 
 ### Natural Language (Claude Code)
 

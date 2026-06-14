@@ -139,7 +139,7 @@ type Config struct {
 // CronConfig controls cron job behavior.
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
-	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+	SessionMode string `toml:"session_mode"` // default session mode: "new_per_run" (default) or "reuse"
 }
 
 // QueueConfig controls the per-session message queue.
