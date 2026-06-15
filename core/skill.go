@@ -140,9 +140,6 @@ func shouldDescendIntoSkillPath(path string, entry os.DirEntry) bool {
 	if entry.IsDir() {
 		return true
 	}
-	if entry.Type()&os.ModeSymlink == 0 {
-		return false
-	}
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
