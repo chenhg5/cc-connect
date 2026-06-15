@@ -256,6 +256,9 @@ func (s *piSession) Send(msg string, images []core.ImageAttachment, files []core
 // reads all output events, and sends them to the events channel.
 func (s *piSession) sendJSON(prompt string) error {
 	args := append(append([]string{}, s.extraArgs...), "--mode", "json", "-p", prompt)
+	if sid := s.CurrentSessionID(); sid != "" {
+		args = append(args, "--session-id", sid)
+	}
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
