@@ -649,6 +649,20 @@ func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string
 	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
 }
 
+func waitRefreshedCards(t *testing.T, p *stubCardPlatform, min int) []*Card {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		refreshed := p.getRefreshedCards()
+		if len(refreshed) >= min {
+			return refreshed
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d refreshed cards", min)
+	return nil
+}
+
 type stubProviderAgent struct {
 	stubAgent
 	providers []ProviderConfig
@@ -4141,10 +4155,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -4176,10 +4187,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}
 	// Wait for async deletion to complete.
 	waitDeleteModePhase(t, e, msg.SessionKey, "result")
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	resultText := pushedCard.RenderText()
 	if !strings.Contains(resultText, "Session deleted: One") {
@@ -4281,10 +4289,8 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
-	if len(p.getRefreshedCards()) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
-	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
+	refreshed := waitRefreshedCards(t, p, 1)
+	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
 		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
 	}
@@ -4357,10 +4363,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected pushed result card via RefreshCard")
-	}
+	refreshed := waitRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
