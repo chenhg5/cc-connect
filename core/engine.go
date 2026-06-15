@@ -2716,6 +2716,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	// Ensure an interactiveState entry exists before taking the session lock.
+	// Without this, concurrent messages can observe the session as busy during
+	// startup but still find no state to queue into.
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
@@ -2749,11 +2753,6 @@ sessionLocked:
 	// reset_on_idle_mins is not defeated by heartbeats or unsolicited agent
 	// output running between user messages (#1115).
 	session.TouchUserActivity()
-
-	// Ensure an interactiveState entry exists before launching the async
-	// processor so messages arriving during session startup can be queued
-	// instead of dropped (issue #565).
-	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
@@ -2836,11 +2835,17 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
-	e.interactiveMu.Unlock()
-
 	if !hasState || state == nil {
+		e.interactiveMu.Unlock()
 		return false
 	}
+	// Keep interactiveMu until state.mu is held. Otherwise a starting session can
+	// replace a placeholder state between lookup and queue append, losing the
+	// queued message before adoptPendingFromPlaceholder sees it.
+	state.mu.Lock()
+	e.interactiveMu.Unlock()
+	defer state.mu.Unlock()
+
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
 	if state.agentSession != nil && !state.agentSession.Alive() {
@@ -2852,16 +2857,13 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// current turn, causing the event loop to hang waiting for a second
 	// EventResult that never arrives. Instead, the event loop sends the
 	// message after the current turn's EventResult is received.
-	state.mu.Lock()
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
-		state.mu.Unlock()
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
 		return true
 	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
-		state.mu.Unlock()
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true // handled: queue-full reply sent
 	}
@@ -2881,7 +2883,6 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		userMessageTimeMs: msg.UserMessageTimeMs,
 	})
 	queueDepth := len(state.pendingMessages)
-	state.mu.Unlock()
 
 	slog.Debug("user message accepted into queue",
 		"session", msg.SessionKey,
