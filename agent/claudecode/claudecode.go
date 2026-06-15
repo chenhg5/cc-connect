@@ -119,6 +119,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	workDir = normalizeWorkDir(workDir)
 	cliBin := "claude"
 	var cliExtraArgs []string
 	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
@@ -278,6 +279,7 @@ func (a *Agent) CLIBinaryName() string  { return a.cliBin }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
+	dir = normalizeWorkDir(dir)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.workDir = dir

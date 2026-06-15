@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -285,6 +286,108 @@ func TestAgent_SetWorkDir(t *testing.T) {
 	a.SetWorkDir("/tmp/test")
 	if got := a.GetWorkDir(); got != "/tmp/test" {
 		t.Errorf("GetWorkDir() = %q, want %q", got, "/tmp/test")
+	}
+}
+
+func TestNormalizeWorkDir(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty path is unchanged",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "trailing forward slash is stripped",
+			input:    "/home/user/project/",
+			expected: "/home/user/project",
+		},
+		{
+			name:     "trailing backslash is stripped (Windows path)",
+			input:    `D:\foo\bar\`,
+			expected: `D:\foo\bar`,
+		},
+		{
+			name:     "lowercase Windows drive letter is uppercased",
+			input:    `d:\foo\bar`,
+			expected: `D:\foo\bar`,
+		},
+		{
+			name:     "uppercase Windows drive letter is preserved",
+			input:    `D:\foo\bar`,
+			expected: `D:\foo\bar`,
+		},
+		{
+			name:     "drive letter case plus trailing slash",
+			input:    `d:\foo\bar\`,
+			expected: `D:\foo\bar`,
+		},
+		{
+			name:     "dot segments are collapsed",
+			input:    "/home/user/./project/../project",
+			expected: "/home/user/project",
+		},
+		{
+			name:     "Unix path with mixed trailing separators",
+			input:    "/home/user/project///",
+			expected: "/home/user/project",
+		},
+		{
+			name:     "NFC Unicode path is unchanged",
+			input:    "/home/user/Documents/项目文件夹",
+			expected: "/home/user/Documents/项目文件夹",
+		},
+		{
+			name:     "NFD Unicode path is normalized to NFC",
+			input:    "/home/user/Documents/ünicode", // u + combining diaeresis = NFD
+			expected: "/home/user/Documents/ünicode",      // precomposed ü = NFC
+		},
+		{
+			name:     "root path is preserved",
+			input:    "/",
+			expected: string(filepath.Separator) + "",
+		},
+		{
+			name:     "drive-only root is uppercased but kept",
+			input:    "d:",
+			expected: "D:",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWorkDir(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeWorkDir(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestNormalizeWorkDir_DriveLetterEncodesToSameKey verifies that
+// d:\Foo\bar\ and D:\Foo\bar\ both encode to the same Claude Code project
+// key, which is the root cause described in issue #1040.
+func TestNormalizeWorkDir_DriveLetterEncodesToSameKey(t *testing.T) {
+	upperKey := encodeClaudeProjectKey(normalizeWorkDir(`D:\Foo\bar`))
+	lowerKey := encodeClaudeProjectKey(normalizeWorkDir(`d:\Foo\bar\`))
+	if upperKey != lowerKey {
+		t.Errorf("drive-letter case produced different project keys: %q vs %q", upperKey, lowerKey)
+	}
+}
+
+// TestNormalizeWorkDir_TrailingSlashEncodesToSameKey verifies that
+// D:\Foo\bar and D:\Foo\bar\ both encode to the same Claude Code project
+// key (no trailing dash), as expected by desktop Claude Code.
+func TestNormalizeWorkDir_TrailingSlashEncodesToSameKey(t *testing.T) {
+	noSlashKey := encodeClaudeProjectKey(normalizeWorkDir(`D:\Foo\bar`))
+	withSlashKey := encodeClaudeProjectKey(normalizeWorkDir(`D:\Foo\bar\`))
+	if noSlashKey != withSlashKey {
+		t.Errorf("trailing-slash variants produced different project keys: %q vs %q", noSlashKey, withSlashKey)
+	}
+	if strings.HasSuffix(noSlashKey, "-") {
+		t.Errorf("normalized key %q has trailing dash, expected none", noSlashKey)
 	}
 }
 
