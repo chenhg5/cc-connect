@@ -674,6 +674,8 @@ level = "info" # debug, info, warn, error
 # [projects.platforms.options]
 # bot_token = "xoxb-..."
 # app_token = "xapp-..."
+# require_mention = true                   # channels reply only when @-mentioned (DMs always); default true
+# thread_require_explicit_mention = false  # require @ on every msg even in joined threads; default false (auto-follow)
 
 # =============================================================================
 # Project 1 / 项目 1

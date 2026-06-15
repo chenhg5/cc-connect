@@ -173,6 +173,8 @@ type = "slack"
 [projects.platforms.options]
 bot_token = "xoxb-xxxxxxx..."
 app_token = "xapp-xxxxxxx..."
+# require_mention = true                   # default true; see "Reply Gating" below
+# thread_require_explicit_mention = false  # default false; see "Reply Gating" below
 ```
 
 ### Token Reference
@@ -181,6 +183,20 @@ app_token = "xapp-xxxxxxx..."
 |-------|--------|---------|
 | Bot Token | `xoxb-` | Bot API authentication |
 | App Token | `xapp-` | Socket Mode connection |
+
+### Reply Gating (channels)
+
+By default the bot replies in a channel only when it is **@-mentioned** — ordinary
+channel chatter between other people is ignored. Two options tune this:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `require_mention` | `true` | Channel/group messages must explicitly `@`-mention the bot. DMs are always answered. Set `false` to make the bot respond to every message in channels it can read. |
+| `thread_require_explicit_mention` | `false` | Once the bot has replied in a thread it **auto-follows** that thread — later messages there need no new `@`. Set `true` to require an explicit `@` on every message, even inside threads the bot already joined. |
+
+> If your Slack app subscribes to `message.channels` (not just `app_mention`),
+> `require_mention` is what stops the bot from replying to unrelated channel
+> messages.
 
 ---
 
@@ -218,7 +234,10 @@ level=INFO msg="cc-connect is running" projects=1
 
 1. Add the bot to a channel (`/invite @cc_connect`)
 2. @mention the bot: `@cc_connect help me analyze the code`
-3. The bot will respond
+3. The bot replies in a thread. Follow-up messages in that thread need no new
+   @mention — the bot auto-follows threads it has joined (disable with
+   `thread_require_explicit_mention = true`). Channel messages that don't mention
+   the bot are ignored (see [Reply Gating](#reply-gating-channels)).
 
 ---
 
