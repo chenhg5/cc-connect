@@ -277,7 +277,7 @@ func TestHandleAssistant_EmitsNonFinishedText(t *testing.T) {
 	}
 }
 
-func TestHandleAssistant_SkipsThinkingWithoutBlockingSameMessageText(t *testing.T) {
+func TestHandleAssistant_ThinkingDoesNotBlockTextOnSameID(t *testing.T) {
 	qs := newTestSession()
 	defer qs.cancel()
 
@@ -358,6 +358,34 @@ func TestHandleAssistant_DeduplicatesCumulativeTextForSameMessageID(t *testing.T
 	}
 	if got[1].Type != core.EventText || got[1].Content != " world" {
 		t.Errorf("event 1 = %s %q, want EventText ' world'", got[1].Type, got[1].Content)
+	}
+}
+
+func TestEmitAssistantTextBoundsDedupCache(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	for i := 0; i < maxAssistantTextCacheEntries+1; i++ {
+		if !qs.emitAssistantText(fmt.Sprintf("msg-%d", i), "chunk") {
+			t.Fatalf("emitAssistantText(%d) returned false", i)
+		}
+		select {
+		case <-qs.events:
+		default:
+			t.Fatalf("expected emitted chunk for message %d", i)
+		}
+	}
+
+	qs.textMu.Lock()
+	defer qs.textMu.Unlock()
+	if got := len(qs.assistantTextByID); got != maxAssistantTextCacheEntries {
+		t.Fatalf("assistantTextByID len = %d, want %d", got, maxAssistantTextCacheEntries)
+	}
+	if _, ok := qs.assistantTextByID["msg-0"]; ok {
+		t.Fatal("oldest cached message id was not evicted")
+	}
+	if _, ok := qs.assistantTextByID[fmt.Sprintf("msg-%d", maxAssistantTextCacheEntries)]; !ok {
+		t.Fatal("newest cached message id was not retained")
 	}
 }
 

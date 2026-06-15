@@ -35,9 +35,12 @@ type qoderSession struct {
 	alive          atomic.Bool
 	startupWarning string
 
-	textMu            sync.Mutex
-	assistantTextByID map[string]string
+	textMu             sync.Mutex
+	assistantTextByID  map[string]string
+	assistantTextOrder []string
 }
+
+const maxAssistantTextCacheEntries = 1024
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
 // when the session was started under degraded conditions (e.g. yolo mode
@@ -324,11 +327,13 @@ func (qs *qoderSession) emitAssistantText(messageID, text string) bool {
 			return true
 		case prev != "" && strings.HasPrefix(text, prev):
 			chunk = strings.TrimPrefix(text, prev)
-			qs.assistantTextByID[messageID] = text
+			qs.setAssistantTextLocked(messageID, text)
 		case prev != "":
-			qs.assistantTextByID[messageID] = prev + text
+			// qoder occasionally sends a standalone fragment after cumulative
+			// frames; emit only the new fragment and remember the joined text.
+			qs.setAssistantTextLocked(messageID, prev+text)
 		default:
-			qs.assistantTextByID[messageID] = text
+			qs.setAssistantTextLocked(messageID, text)
 		}
 		qs.textMu.Unlock()
 	}
@@ -343,6 +348,19 @@ func (qs *qoderSession) emitAssistantText(messageID, text string) bool {
 	case <-qs.ctx.Done():
 		return false
 	}
+}
+
+func (qs *qoderSession) setAssistantTextLocked(messageID, text string) {
+	if _, ok := qs.assistantTextByID[messageID]; !ok {
+		qs.assistantTextOrder = append(qs.assistantTextOrder, messageID)
+		if len(qs.assistantTextOrder) > maxAssistantTextCacheEntries {
+			evictID := qs.assistantTextOrder[0]
+			copy(qs.assistantTextOrder, qs.assistantTextOrder[1:])
+			qs.assistantTextOrder = qs.assistantTextOrder[:len(qs.assistantTextOrder)-1]
+			delete(qs.assistantTextByID, evictID)
+		}
+	}
+	qs.assistantTextByID[messageID] = text
 }
 
 func (qs *qoderSession) handleResult(ev *streamEvent) {
