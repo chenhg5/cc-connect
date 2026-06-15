@@ -3,6 +3,7 @@ package dingtalk
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -973,6 +974,139 @@ func TestOnRawMessage_PictureMsgTypeNotDroppedAsEmptyText(t *testing.T) {
 	if handlerCalledWithEmptyContent {
 		t.Error("msgtype=picture: handler called with empty content (image was silently dropped as text)")
 	}
+}
+
+func TestOnRawMessage_FileMsgTypeNotDroppedAsEmptyText(t *testing.T) {
+	// Regression test for #981 (file branch): DingTalk sends msgtype="file" for
+	// PDF/txt/doc attachments. Before this fix the message fell through to the
+	// text handler with empty Content and no Files attached, so the engine
+	// silently dropped the user message — agent would later reply "I did not
+	// receive a file". After the fix the message is routed to
+	// handleFileMessage, which downloads via the same messageFiles/download
+	// endpoint as images and produces a core.FileAttachment.
+	var handlerCalledWithEmptyContent bool
+
+	func() {
+		defer func() { _ = recover() }() // handleFileMessage panics on nil httpClient — that's OK
+		p := &Platform{
+			handler: func(_ core.Platform, msg *core.Message) {
+				if msg.Content == "" && len(msg.Files) == 0 && len(msg.Images) == 0 {
+					handlerCalledWithEmptyContent = true
+				}
+			},
+		}
+		p.onRawMessage(`{
+			"msgtype": "file",
+			"msgId": "msg-file-1",
+			"conversationType": "1",
+			"conversationId": "conv-1",
+			"conversationTitle": "test",
+			"senderStaffId": "user-1",
+			"senderNick": "Alice",
+			"sessionWebhook": "https://example.invalid/webhook",
+			"content": {"downloadCode": "some-code", "fileName": "report.txt", "fileSize": 1234}
+		}`)
+	}()
+
+	if handlerCalledWithEmptyContent {
+		t.Error("msgtype=file: handler called with empty content + no files (file was silently dropped as text)")
+	}
+}
+
+func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
+	// Mocks the messageFiles/download flow end-to-end and asserts:
+	//   1. handleFileMessage parses downloadCode + fileName from content
+	//   2. it issues the access-token + download-URL + GET file chain
+	//   3. the dispatched core.Message carries Files[0] with name + bytes
+	const fileBody = "hello dingtalk file"
+	const fileName = "spec.md"
+
+	// Mock the file's actual content download (separate HTTP server).
+	fileSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown")
+		_, _ = w.Write([]byte(fileBody))
+	}))
+	defer fileSrv.Close()
+
+	rt := &dingtalkFileDownloadRT{
+		accessToken: "tok-files",
+		downloadURL: fileSrv.URL,
+	}
+
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "file",
+		"msgId": "msg-file-2",
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"conversationTitle": "test",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {"downloadCode": "dc-xyz", "fileName": "` + fileName + `", "fileSize": 19}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if len(msg.Files) != 1 {
+			t.Fatalf("Files len = %d, want 1", len(msg.Files))
+		}
+		f := msg.Files[0]
+		if f.FileName != fileName {
+			t.Errorf("FileName = %q, want %q", f.FileName, fileName)
+		}
+		if string(f.Data) != fileBody {
+			t.Errorf("file bytes = %q, want %q", f.Data, fileBody)
+		}
+		if f.MimeType != "text/markdown" {
+			t.Errorf("MimeType = %q, want %q", f.MimeType, "text/markdown")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked with file message")
+	}
+}
+
+// dingtalkFileDownloadRT mocks /v1.0/oauth2/accessToken and
+// /v1.0/robot/messageFiles/download. The latter returns downloadURL pointing
+// to a test server that serves the actual file body. Used by
+// TestHandleFileMessage_BuildsFileAttachmentWithName.
+type dingtalkFileDownloadRT struct {
+	accessToken string
+	downloadURL string
+}
+
+func (f *dingtalkFileDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch req.URL.Path {
+	case "/v1.0/oauth2/accessToken":
+		body := fmt.Sprintf(`{"accessToken":%q,"expireIn":7200}`, f.accessToken)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	case "/v1.0/robot/messageFiles/download":
+		body := fmt.Sprintf(`{"downloadUrl":%q}`, f.downloadURL)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	// Forward non-DingTalk-API requests to the default transport so the test
+	// can serve actual file bytes from an httptest.Server.
+	return http.DefaultTransport.RoundTrip(req)
 }
 
 func TestGetAccessToken_ZeroExpireIn_FallsBackToDefault(t *testing.T) {
