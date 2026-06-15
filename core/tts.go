@@ -383,6 +383,13 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		if chunk.BaseResp.StatusCode != 0 {
 			return nil, "", fmt.Errorf("minimax tts API error %d: %s", chunk.BaseResp.StatusCode, chunk.BaseResp.StatusMsg)
 		}
+		// MiniMax T2A v2 stream protocol: status=1 carries incremental audio
+		// chunks; the final status=2 chunk re-sends the full audio as a
+		// trailer for non-stream clients. Appending the trailer doubles the
+		// audio length and makes the spoken text play twice, so skip it.
+		if chunk.Data.Status == 2 {
+			break
+		}
 		if chunk.Data.Audio != "" {
 			audioBytes, err := hex.DecodeString(chunk.Data.Audio)
 			if err != nil {
