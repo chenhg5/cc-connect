@@ -76,32 +76,88 @@ func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
 	}
 }
 
-func TestParseSendArgs_AudioAndVideoAttachments(t *testing.T) {
+// TestParseSendArgs_AudioPopulatesAudios is the regression for
+// t-20260615-cqjbk1: --audio and --video must NOT land in req.Files
+// (which would route them through SendFile and skip
+// AudioSender / VideoSender). They each get their own slice.
+func TestParseSendArgs_AudioPopulatesAudios(t *testing.T) {
 	dir := t.TempDir()
 	audioPath := filepath.Join(dir, "voice.opus")
-	videoPath := filepath.Join(dir, "demo.mp4")
 	if err := os.WriteFile(audioPath, []byte("opus"), 0o644); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
+
+	req, _, err := parseSendArgs([]string{"--audio", audioPath})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if len(req.Files) != 0 {
+		t.Fatalf("req.Files len = %d, want 0 (audio must NOT be appended into Files)", len(req.Files))
+	}
+	if len(req.Audios) != 1 {
+		t.Fatalf("req.Audios len = %d, want 1", len(req.Audios))
+	}
+	if req.Audios[0].FileName != "voice.opus" {
+		t.Fatalf("audio filename = %q, want voice.opus", req.Audios[0].FileName)
+	}
+	if string(req.Audios[0].Data) != "opus" {
+		t.Fatalf("audio data = %q, want %q", req.Audios[0].Data, "opus")
+	}
+}
+
+func TestParseSendArgs_VideoPopulatesVideos(t *testing.T) {
+	dir := t.TempDir()
+	videoPath := filepath.Join(dir, "demo.mp4")
 	if err := os.WriteFile(videoPath, []byte("mp4"), 0o644); err != nil {
 		t.Fatalf("write video: %v", err)
 	}
 
-	req, _, err := parseSendArgs([]string{"--audio", audioPath, "--video", videoPath})
+	req, _, err := parseSendArgs([]string{"--video", videoPath})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
-	if len(req.Images) != 0 {
-		t.Fatalf("images len = %d, want 0", len(req.Images))
+	if len(req.Files) != 0 {
+		t.Fatalf("req.Files len = %d, want 0 (video must NOT be appended into Files)", len(req.Files))
 	}
-	if len(req.Files) != 2 {
-		t.Fatalf("files len = %d, want 2", len(req.Files))
+	if len(req.Videos) != 1 {
+		t.Fatalf("req.Videos len = %d, want 1", len(req.Videos))
 	}
-	if req.Files[0].FileName != "voice.opus" {
-		t.Fatalf("audio filename = %q, want voice.opus", req.Files[0].FileName)
+	if req.Videos[0].FileName != "demo.mp4" {
+		t.Fatalf("video filename = %q, want demo.mp4", req.Videos[0].FileName)
 	}
-	if req.Files[1].FileName != "demo.mp4" {
-		t.Fatalf("video filename = %q, want demo.mp4", req.Files[1].FileName)
+}
+
+func TestParseSendArgs_AudioVideoFileMixed_StaySeparate(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "voice.opus")
+	videoPath := filepath.Join(dir, "demo.mp4")
+	docPath := filepath.Join(dir, "notes.md")
+	for _, f := range [][2]string{
+		{audioPath, "opus"},
+		{videoPath, "mp4"},
+		{docPath, "hello"},
+	} {
+		if err := os.WriteFile(f[0], []byte(f[1]), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f[0], err)
+		}
+	}
+
+	req, _, err := parseSendArgs([]string{
+		"--audio", audioPath,
+		"--video", videoPath,
+		"--file", docPath,
+	})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if len(req.Audios) != 1 || req.Audios[0].FileName != "voice.opus" {
+		t.Fatalf("req.Audios = %#v", req.Audios)
+	}
+	if len(req.Videos) != 1 || req.Videos[0].FileName != "demo.mp4" {
+		t.Fatalf("req.Videos = %#v", req.Videos)
+	}
+	if len(req.Files) != 1 || req.Files[0].FileName != "notes.md" {
+		t.Fatalf("req.Files = %#v (only the --file should land here)", req.Files)
 	}
 }
 

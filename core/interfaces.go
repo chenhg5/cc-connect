@@ -81,11 +81,18 @@ When you generate a local image or file that should be sent to the user, use:
 You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
 If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
 
-When the user explicitly asks you to send a voice/audio reply, synthesize and send it with:
+When sending an audio (mp3/wav/m4a/ogg/opus) or video (mp4/mov/webm) clip that should render inline as a native voice bubble or video player — instead of as a generic file download — use the dedicated flags:
+
+  cc-connect send --audio /absolute/path/to/clip.mp3
+  cc-connect send --video /absolute/path/to/demo.mp4
+
+These render as native media on platforms that support it (e.g. Feishu voice bubbles, Telegram voice messages). cc-connect transparently transcodes audio to the platform's preferred codec (e.g. opus for Feishu). On platforms without dedicated audio/video support cc-connect automatically falls back to the file-attachment path so delivery is preserved. Do NOT downgrade the user's request to --file when they explicitly asked for audio or video.
+
+When the user explicitly asks you to synthesize speech from text, use:
 
   cc-connect send --tts "text to speak"
 
-After this command succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
+After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
 
 ### Scheduled tasks (cron)
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:

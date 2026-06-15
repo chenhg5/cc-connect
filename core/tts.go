@@ -61,8 +61,26 @@ func (c *TTSCfg) SetTTSMode(mode string) {
 }
 
 // AudioSender is implemented by platforms that support sending voice/audio messages.
+//
+// `format` is the lowercase short format hint extracted from the filename
+// extension or MIME type (e.g. "mp3", "ogg", "opus", "m4a"). Platforms
+// that need a specific codec (Feishu requires opus) are expected to
+// transcode internally; format is only an input hint.
 type AudioSender interface {
 	SendAudio(ctx context.Context, replyCtx any, audio []byte, format string) error
+}
+
+// VideoSender is implemented by platforms that can render a native
+// inline video bubble for an outbound clip rather than a generic file
+// download. Engine code falls back to FileSender when a platform does
+// not implement this interface.
+//
+// `format` is the lowercase short format hint (e.g. "mp4", "mov",
+// "webm"). Implementations are free to transcode to the platform's
+// preferred codec; on Feishu mp4/H.264 has the broadest playback
+// support so non-mp4 inputs may render with reduced compatibility.
+type VideoSender interface {
+	SendVideo(ctx context.Context, replyCtx any, video []byte, format string, fileName string) error
 }
 
 // ──────────────────────────────────────────────────────────────

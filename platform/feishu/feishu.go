@@ -4350,7 +4350,82 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return fmt.Errorf("%s: build audio message: %w", p.tag(), err)
 	}
 
+	// Diagnostic for QA-reported intermittent "audio rendered as file" in
+	// P2P reply mode (see internal task t-20260615-cqjbk1). Tracking the
+	// API path lets operators correlate Feishu client renders to whether
+	// we used Reply (in-thread) or Create (new message) when issues
+	// recur. The Reply path has historically had narrower MsgType
+	// support on some Feishu desktop client versions.
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		slog.Debug(p.tag()+": SendAudio using Reply API",
+			"file_key", fileKey, "msg_id", rc.messageID, "format", format)
+	} else {
+		slog.Debug(p.tag()+": SendAudio using Create API",
+			"file_key", fileKey, "chat_id", rc.chatID, "format", format)
+	}
+
 	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeAudio, audioContent)
+}
+
+// SendVideo uploads video bytes to Feishu and sends a native video
+// (MsgTypeMedia) message. Implements core.VideoSender.
+//
+// Feishu's File API only recognises "mp4" as the video file_type, so
+// every input is uploaded under that label. Actual playback depends on
+// the Feishu client (mp4 H.264 has the broadest support); other
+// containers like webm / mkv typically still upload but may render as
+// a download tile on some clients. The fallback path to SendFile in
+// engine.go preserves at least delivery when this happens.
+func (p *Platform) SendVideo(ctx context.Context, rctx any, video []byte, format string, fileName string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: SendVideo: invalid reply context type %T", p.tag(), rctx)
+	}
+	if fileName == "" {
+		if format != "" {
+			fileName = "video." + format
+		} else {
+			fileName = "video.mp4"
+		}
+	}
+
+	var uploadResp *larkim.CreateFileResp
+	if err := p.withTransientRetry(ctx, "upload video", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "upload video", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewCreateFileReqBuilder().
+				Body(larkim.NewCreateFileReqBodyBuilder().
+					FileType(larkim.FileTypeMp4).
+					FileName(fileName).
+					File(bytes.NewReader(video)).
+					Build()).
+				Build()
+			var err error
+			uploadResp, err = client.Im.File.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: upload video: %w", p.tag(), err)
+			}
+			if !uploadResp.Success() {
+				return fmt.Errorf("%s: upload video code=%d msg=%s", p.tag(), uploadResp.Code, uploadResp.Msg)
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
+		return fmt.Errorf("%s: upload video: no file_key returned", p.tag())
+	}
+	fileKey := *uploadResp.Data.FileKey
+
+	slog.Debug(p.tag()+": video uploaded", "file_key", fileKey, "format", format, "size", len(video))
+
+	mediaMsg := larkim.MessageMedia{FileKey: fileKey}
+	mediaContent, err := mediaMsg.String()
+	if err != nil {
+		return fmt.Errorf("%s: build video message: %w", p.tag(), err)
+	}
+
+	return p.sendMediaMessage(ctx, rc, larkim.MsgTypeMedia, mediaContent)
 }
 
 type postElement struct {
