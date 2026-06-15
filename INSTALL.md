@@ -86,6 +86,10 @@ npm install -g @iflow-ai/iflow-cli
 
 # Qoder CLI
 curl -fsSL https://qoder.com/install | bash
+
+# Kiro CLI
+# Follow Kiro's official installer, then authenticate with:
+kiro-cli login --use-device-flow
 ```
 
 For **Cursor Agent** and **OpenCode**, follow their official install docs:
@@ -101,6 +105,7 @@ gemini --version
 iflow --version
 opencode --version
 qodercli --version
+kiro-cli --version
 ```
 
 ## Step 3: Create config.toml
@@ -143,7 +148,7 @@ level = "info"  # debug, info, warn, error
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or "codex", "cursor", "gemini", "qoder", "opencode", "iflow"
+type = "claudecode"  # or "codex", "cursor", "gemini", "qoder", "kiro", "opencode", "iflow"
 
 [projects.agent.options]
 work_dir = "/absolute/path/to/your/project"
@@ -160,6 +165,13 @@ mode = "default"
 # --- Qoder CLI mode options ---
 # "default", "yolo"
 # model = "auto"  # "auto", "ultimate", "performance", "efficient", "lite"
+
+# --- Kiro CLI mode options ---
+# "default", "yolo" (passes --trust-all-tools)
+# model = "auto"  # optional: omit or set "auto" to use Kiro CLI's default
+# agent = "default"  # optional Kiro agent profile
+# agent_engine = "v2"  # optional: "v1", "v2", or "kas"
+# kas_mode = "vibe"  # optional when agent_engine = "kas": "vibe" or "spec"
 
 # --- iFlow CLI mode options ---
 # "default", "auto-edit", "plan", "yolo"
@@ -498,13 +510,14 @@ cc-connect supports scheduled tasks (cron jobs). You can always create them via 
 
 **Claude Code** handles this automatically via `--append-system-prompt` — no extra setup needed.
 
-**For Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, or iFlow CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
+**For Codex, Cursor Agent, Qoder CLI, Kiro CLI, Gemini CLI, OpenCode, or iFlow CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
 
 | Agent | File to create/edit |
 |-------|-------------------|
 | Codex | `AGENTS.md` |
 | Cursor Agent | `.cursorrules` |
 | Qoder CLI | `AGENTS.md` |
+| Kiro CLI | `AGENTS.md` |
 | Gemini CLI | `GEMINI.md` |
 | OpenCode | `OPENCODE.md` |
 | iFlow CLI | `IFLOW.md` |
@@ -654,7 +667,26 @@ type = "telegram"
 [projects.platforms.options]
 token = "xxx"
 
-# Sixth project — using iFlow CLI
+# Sixth project — using Kiro CLI
+[[projects]]
+name = "my-kiro-project"
+
+[projects.agent]
+type = "kiro"
+
+[projects.agent.options]
+work_dir = "/path/to/kiro-project"
+mode = "default"    # "default" | "yolo"
+# model = "auto"
+# agent = "default"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "xxx"
+
+# Seventh project — using iFlow CLI
 [[projects]]
 name = "my-iflow-project"
 
@@ -785,6 +817,7 @@ The following additional features are available:
 - **Cursor Agent**: Cursor Agent CLI integration (`agent --print --output-format stream-json`)
 - **Gemini CLI**: Google Gemini CLI integration (`gemini -p --output-format stream-json`)
 - **Qoder CLI**: Qoder CLI integration (`qodercli -p -f stream-json`)
+- **Kiro CLI**: Kiro CLI integration (`kiro-cli chat --no-interactive`)
 - **OpenCode**: OpenCode CLI integration (`opencode run --format json`)
 - **iFlow CLI**: iFlow CLI integration (`iflow -i -r -o`)
 - **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.

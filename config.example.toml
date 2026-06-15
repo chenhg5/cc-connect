@@ -1547,6 +1547,47 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project 6: Using Kiro CLI / 项目 6：使用 Kiro CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: install Kiro CLI, then authenticate with `kiro-cli login --use-device-flow`
+# 需要安装 Kiro CLI，然后运行 `kiro-cli login --use-device-flow` 完成认证
+# Kiro CLI uses `kiro-cli chat --no-interactive` under the hood.
+# Kiro CLI 底层使用 `kiro-cli chat --no-interactive` 命令。
+#
+# [[projects]]
+# name = "my-kiro-project"
+#
+# [projects.agent]
+# type = "kiro"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"  # "default" | "yolo"
+#
+# Mode options / 模式说明:
+# - "default": Kiro CLI default tool trust behavior / 使用 Kiro CLI 默认工具信任策略
+# - "yolo":    Trust all tools (--trust-all-tools) / 信任全部工具
+#
+# Optional: specify a model / 可选：指定模型
+# model = "auto"
+#
+# Optional: choose a Kiro agent profile / 可选：指定 Kiro agent profile
+# agent = "default"
+#
+# Optional: select Kiro agent engine / 可选：指定 Kiro agent engine
+# agent_engine = "v2"  # "v1" | "v2" | "kas"
+# kas_mode = "vibe"    # when agent_engine = "kas": "vibe" | "spec"
+#
+# Optional: trust only specific tools instead of all tools / 可选：只信任指定工具
+# trust_tools = "shell,read,write"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: Using tmux / 使用 tmux (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: tmux — https://github.com/tmux/tmux
@@ -1593,7 +1634,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
+# Project 7: Using OpenCode / 项目 7：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
 # 需要安装：OpenCode CLI
@@ -1783,7 +1824,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
+# Project 8: Using iFlow CLI / 项目 8：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli
 # 需要安装：npm install -g @iflow-ai/iflow-cli

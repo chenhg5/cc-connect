@@ -1458,7 +1458,7 @@ func printUsage() {
  \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s%s
 
   Bridge your messaging platforms to local AI coding agents.
-  Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
+  Supports: Claude Code, Codex, Cursor, Gemini CLI, Kiro CLI, Qoder CLI, OpenCode
   Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
   GitHub:  https://github.com/chenhg5/cc-connect
