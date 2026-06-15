@@ -180,16 +180,22 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 </p>
 
 
-## 🆕 v1.3.0 更新了什么
+## 🆕 v1.3.3-beta.5 更新了什么
 
-- **🌐 Web 管理后台（推荐）** — 内置全功能可视化管理界面，**无需额外依赖**。支持项目增删改查、服务商管理、会话监控、定时任务编辑，还可以**直接在浏览器里和 Agent 对话**。支持 5 种语言 (en/zh/zh-TW/ja/es)。建议通过 Web UI 管理 cc-connect，无需手动编辑 `config.toml`。运行 `cc-connect web` 配置并打开管理后台，然后运行 `cc-connect` 启动服务。
-- **生命周期事件钩子** — 新增 `[[hooks]]` 配置，支持在消息收发、会话开始/结束、定时任务触发、权限请求、错误等事件时触发 Shell 命令或 HTTP Webhook。默认异步，失败不阻塞。
-- **技能管理** — 新增 `/skills` 页面，支持本地技能浏览和推荐预设。
-- **全局服务商管理** — 在 Web UI 中添加/编辑/删除 Provider，支持从 cc-switch 配置导入。
-- **个人微信** — 用 **微信个人号（ilink 长轮询）** 和本地 Agent 对话；支持扫码 `weixin setup`、CDN 收发图片/文件，**无需公网 IP**。*[接入说明 → `docs/weixin.md`](docs/weixin.md)*
-- **微博私信** — 通过 **微博私信** 与 Agent 对话，WebSocket 连接，无需公网 IP，支持流式文本回复。
-- **飞书增强** — 自动解析 `@成员` 提及、多级回复链识别、完成 Emoji 反应。
-- **新增 Agent** — 支持 Kimi CLI 和 Pi agent。
+- **新增 Agent** — 接入 Google Antigravity (`agy`) 和 GitHub Copilot CLI，均为一等公民 agent (#1123, #865)。
+- **原生文件附件** — QQ (OneBot) 文件收发 (#323)、企业微信 WebSocket 模式 `SendFile` (#1199)、飞书原生音频/视频附件 (#1202)。
+- **钉钉 reaction emoji + @mention CLI** — 支持 reaction emoji 回应；通过 `cc-connect send --at-users` / `--at-all` 精准 @ 用户 (#1213, #1188)。
+- **QQ Bot 内联键盘** — 通过新增的 `INTERACTION_CREATE` 意图，授权请求现在渲染为可点击按钮 (#1131)。_需要 `intents` 包含 bit 26。_
+- **Slack + tmux 按 thread 隔离 session** — 每个 session 独立 tmux 窗口 (#1179)。
+- **`/timer`** — 一次性延时任务 (#1012)。
+- **`/cancel`** — 中断并重置当前会话 (#957)。
+- **Agent 主动 TTS 输出** — agent 可直接向聊天发送 TTS 音频 (#1230)。
+- **可配置 shell 与 shell profile** — 用于 `exec` (#870)。
+- **Pi `ContextUsageReporter`** — 在回复 footer 中显示 token 统计 (#1235)。
+
+⚠️ **本次 beta 行为变更**：Telegram / Discord `progress_style` 默认值改为 `compact`；钉钉 `msgtype=file` 入站消息现在会送达 agent（之前是静默丢弃）；引擎权限关键字匹配现在容忍前后 `@mention`。完整 74 PR / 28 位贡献者的列表见 `CHANGELOG.md`。
+
+延续保留的早前亮点：内置 Web 管理后台（`cc-connect web`，可视化管理项目/服务商/会话/定时任务，浏览器内直接和 agent 对话）；`[[hooks]]` 生命周期事件钩子；微信个人号 (ilink)；微博私信；多 agent 群聊互通。
 
 
 ## 🧩 平台能力一览

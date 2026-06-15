@@ -180,16 +180,22 @@ MiniMax-M3 pushes the frontier of coding and agentic AI, with a 1M-token context
 </p>
 
 
-## 🆕 What’s New in v1.3.0
+## 🆕 What’s New in v1.3.3-beta.5
 
-- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
-- **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
-- **Skill Management** — New `/skills` page with local skill browser and recommended presets.
-- **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
-- **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
-- **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
-- **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
-- **New Agents** — Kimi CLI and Pi agent support added.
+- **New agents** — Google Antigravity (`agy`) and GitHub Copilot CLI added as first-class agents (#1123, #865).
+- **Native file attachments** — QQ (OneBot) file send & receive (#323), WeCom `SendFile` in WebSocket mode (#1199), Feishu audio + video as native media (#1202).
+- **DingTalk reaction emoji + `@`-mention CLI** — react to messages, and target specific users from `cc-connect send --at-users` / `--at-all` (#1213, #1188).
+- **QQ Bot inline keyboards** — permission requests render as clickable buttons via the new `INTERACTION_CREATE` intent (#1131). _Requires bit 26 in your `intents` value._
+- **Slack + tmux per-thread session scope** with per-session tmux windows (#1179).
+- **`/timer`** — one-shot delayed task system (#1012).
+- **`/cancel`** — interrupt and reset the current session (#957).
+- **Agent-driven TTS send** — agents can emit TTS audio output to chat (#1230).
+- **Configurable shell + shell profile** for `exec` (#870).
+- **Pi `ContextUsageReporter`** — token stats in the reply footer (#1235).
+
+⚠️ **Behavior changes** in this beta: Telegram/Discord `progress_style` now defaults to `compact`; DingTalk `msgtype=file` inbound messages now reach the agent (previously dropped); engine permission keyword matching tolerates leading/trailing `@mention`. See `CHANGELOG.md` for the full list of 74 PRs from 28 contributors.
+
+Earlier highlights (still relevant): Web admin UI for managing projects/providers/sessions/cron with built-in chat (`cc-connect web`); lifecycle event hooks via `[[hooks]]`; personal WeChat through Weixin ilink; Weibo DM; multi-agent relay in a single group chat.
 
 
 ## 🧩 Platform feature snapshot
