@@ -1,5 +1,72 @@
 # Changelog
 
+## v1.3.3 (2026-06-15)
+
+First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5
+line (≈ 235 PRs since v1.3.2) plus 7 post-beta.5 fixes. See `changelogs/v1.3.3.md` for
+the full themed summary; per-beta details remain in the beta sections below.
+
+### Highlights
+- **New agents**: Devin CLI, Google Antigravity (`agy`), GitHub Copilot — all first
+  class. Hardened coverage for Cursor, OpenCode, Qoder, Kimi, Pi.
+- **Platform expansion**: QQ Bot inline keyboards + file send/receive (OneBot), WeCom
+  `SendFile` (WebSocket), Feishu audio + video native media, Slack Assistant API, MAX
+  webhook delivery, DingTalk @mentions / richText / image / file inbound, WPS Xiezuo
+  (金山协作), broader Weibo DM.
+- **Long-running turn hardening**: new `max_turn_time_mins` wall-clock cap with
+  soft-stop + force-kill + auto-resume — long bash / test commands can no longer lock
+  a session indefinitely.
+- **Core commands**: `/timer`, `/cancel`, `/ps` (replaces `/btw`), `cron add --silent`,
+  agent-driven TTS.
+- **Multi-user / permissions**: reply-to-unauthorized-IM-senders, @mention-tolerant
+  permission keywords (`@Bot/permit` ≡ `/permit`), Bridge requires token when enabled.
+- **Observability**: blackbox testing framework (P0/P1/P2 + config-switch matrix), CUJ
+  test framework, agent-resume regression suite, Pi context-usage reporter.
+- **Provider ecosystem**: NekoCode, VisionCoder, AIHubMix, MiniMax M3 presets; Claude
+  Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks; Codex
+  `request_user_input` app-server events; configurable shell + shell profile.
+
+### Post-beta.5 fixes (delta from beta.5)
+- **qoder**: emit streaming text without dropping final result (#1290)
+- **weixin**: use `ilink_user_id` in `getConfigReq` for typing ticket (#1308)
+- **daemon**: remove redundant `linger_other.go` that breaks non-linux builds (#1314)
+- **wps-xiezuo**: preserve newlines in outbound messages — fixes unreadable `/status`
+  (#1361)
+- **core**: `/switch` no longer loses history; persist user msgs immediately; add CUJ
+  test framework (#1348)
+- **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
+- **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
+
+### ⚠️ Behavior Changes (carried forward from the beta cycle)
+All behavior changes from beta.1 → beta.5 remain in effect for v1.3.3. **Most likely
+to affect existing configs:**
+- `progress_style` default for Telegram & Discord is now `compact` (was `legacy`). Set
+  `progress_style = "legacy"` to revert. (#1354)
+- QQ Bot default `intents` now include `INTERACTION_CREATE` (bit 26). Custom `intents`
+  must include `1<<26` for inline keyboard buttons.
+- DingTalk `msgtype=file` inbound now reaches the agent (#1357).
+- Engine permission keyword matching is @mention-tolerant: `@Bot/permit` ≡ `/permit`
+  (#1358).
+- `reset_on_idle_mins` default is now 30 minutes (#494). Set to `0` to disable.
+- Bridge with no `[bridge].token` configured will refuse to start (#408).
+
+### Breaking Changes
+**None.** Fully additive release.
+
+### Upgrade
+```bash
+npm i -g cc-connect@1.3.3
+# or
+go install github.com/chenhg5/cc-connect/cmd/cc-connect@v1.3.3
+```
+
+Coming from a `v1.3.3-beta.*`: this is a small fix-only upgrade. No config change
+required.
+
+Coming from `v1.3.2`: review the Behavior Changes above before upgrading.
+
+---
+
 ## v1.3.3-beta.5 (2026-06-15)
 
 Large beta with 74 PRs from 28 contributors. New agents (Google Antigravity `agy`, GitHub Copilot), QQ

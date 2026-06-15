@@ -1951,8 +1951,10 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Wait for all turns to finish.
-	deadline := time.After(5 * time.Second)
+	// Wait for all turns to finish. Generous deadline so this stays green
+	// when the whole core package is run with `-race -parallel=N` on
+	// constrained CI hosts; the in-isolation run finishes < 2s.
+	deadline := time.After(30 * time.Second)
 	for {
 		histA := e.sessions.GetOrCreateActive("platA:userA").GetHistory(0)
 		histB := e.sessions.GetOrCreateActive("platB:userB").GetHistory(0)

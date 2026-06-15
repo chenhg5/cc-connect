@@ -180,22 +180,21 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 </p>
 
 
-## 🆕 v1.3.3-beta.5 更新了什么
+## 🆕 v1.3.3 更新了什么
 
-- **新增 Agent** — 接入 Google Antigravity (`agy`) 和 GitHub Copilot CLI，均为一等公民 agent (#1123, #865)。
-- **原生文件附件** — QQ (OneBot) 文件收发 (#323)、企业微信 WebSocket 模式 `SendFile` (#1199)、飞书原生音频/视频附件 (#1202)。
-- **钉钉 reaction emoji + @mention CLI** — 支持 reaction emoji 回应；通过 `cc-connect send --at-users` / `--at-all` 精准 @ 用户 (#1213, #1188)。
-- **QQ Bot 内联键盘** — 通过新增的 `INTERACTION_CREATE` 意图，授权请求现在渲染为可点击按钮 (#1131)。_需要 `intents` 包含 bit 26。_
-- **Slack + tmux 按 thread 隔离 session** — 每个 session 独立 tmux 窗口 (#1179)。
-- **`/timer`** — 一次性延时任务 (#1012)。
-- **`/cancel`** — 中断并重置当前会话 (#957)。
-- **Agent 主动 TTS 输出** — agent 可直接向聊天发送 TTS 音频 (#1230)。
-- **可配置 shell 与 shell profile** — 用于 `exec` (#870)。
-- **Pi `ContextUsageReporter`** — 在回复 footer 中显示 token 统计 (#1235)。
+1.3.3 系列首个正式版 —— 把 beta.1 → beta.5（自 v1.3.2 起约 235 个 PR）与 7 个 post-beta 修复一并稳定下来。亮点：
 
-⚠️ **本次 beta 行为变更**：Telegram / Discord `progress_style` 默认值改为 `compact`；钉钉 `msgtype=file` 入站消息现在会送达 agent（之前是静默丢弃）；引擎权限关键字匹配现在容忍前后 `@mention`。完整 74 PR / 28 位贡献者的列表见 `CHANGELOG.md`。
+- **新增 Agent** — Devin CLI、Google Antigravity (`agy`)、GitHub Copilot CLI 均为一等公民 agent (#672, #1123, #865)；Cursor / OpenCode / Qoder / Kimi / Pi 覆盖大幅加强。
+- **平台能力扩展** — QQ (OneBot) 文件收发 (#323)、QQ Bot 内联键盘 (#1131)、企业微信 WebSocket `SendFile` (#1199)、飞书原生音视频附件 (#1202)、Slack Assistant API (#844)、MAX webhook 投递模式 (#818)、钉钉 @mention / richText / 图片 / 文件入站 (#1188, #828, #1357)、微博私信能力扩充、WPS 协作（金山协作）。
+- **长任务保护** — 新增 `max_turn_time_mins` 绝对墙钟上限，软停 + 强杀 + 下一条消息自动 `--resume`，避免长跑的 bash / test 命令把 session 永久锁住 (#1091)。
+- **新核心命令** — `/timer`（一次性延时任务）、`/cancel`（中断当前 turn）、`/ps`（替代 `/btw`，`/btw` 保留为别名）、`cron add --silent`、agent 主动 TTS 输出。
+- **多用户 / 权限** — 可选「回复未授权 IM 发件人」、`@Bot/permit` ≡ `/permit` 关键字匹配、Bridge 启用时必须配置 token。
+- **Provider 生态** — 新增 NekoCode、VisionCoder、AIHubMix、MiniMax M3 预设；Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks；Codex `request_user_input` app-server 事件；可配置 `shell` 与 shell profile。
+- **可观测性** — Blackbox 测试框架（P0/P1/P2 + config-switch 矩阵）、CUJ 测试框架、codex/opencode/kimi 的 provider-resume 回归套件、Pi 在 reply footer 输出 context 用量。
 
-延续保留的早前亮点：内置 Web 管理后台（`cc-connect web`，可视化管理项目/服务商/会话/定时任务，浏览器内直接和 agent 对话）；`[[hooks]]` 生命周期事件钩子；微信个人号 (ilink)；微博私信；多 agent 群聊互通。
+⚠️ **行为变更（可能需要改配置）**：Telegram / Discord `progress_style` 默认值改为 `compact`（设回 `legacy` 可还原）；QQ Bot 默认 `intents` 现在包含 `INTERACTION_CREATE`，若自定义 `intents` 需手动包含 `1<<26`；钉钉 `msgtype=file` 入站现在送达 agent；引擎权限关键字容忍 @mention；`reset_on_idle_mins` 默认值改为 30 分钟；Bridge 未配置 token 时拒绝启动。完整主题汇总见 `changelogs/v1.3.3.md`。
+
+无任何破坏性变更（No breaking changes）。从任意 v1.3.3-beta.\* 升级到 v1.3.3 是 fix-only 的小升级。
 
 
 ## 🧩 平台能力一览
