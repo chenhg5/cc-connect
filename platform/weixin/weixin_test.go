@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -184,6 +185,20 @@ func TestGetConfig_RejectsNonZeroRet(t *testing.T) {
 	}
 	if out.Ret != -1 {
 		t.Fatalf("expected ret -1, got %d", out.Ret)
+	}
+}
+
+func TestGetConfigReq_JSONFieldName(t *testing.T) {
+	req := getConfigReq{
+		UserID:   "test_user",
+		BaseInfo: baseInfo{ChannelVersion: "1.0"},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"ilink_user_id"`) {
+		t.Fatalf("expected ilink_user_id in JSON, got: %s", string(data))
 	}
 }
 
