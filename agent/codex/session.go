@@ -197,16 +197,32 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	// As of codex-cli 0.137 `--full-auto` is no longer accepted; use the
 	// canonical `--sandbox <mode>` form together with `-c approval_policy=...`.
 	//
+	// CAVEAT: `codex exec resume` does NOT accept the `--sandbox <mode>` flag
+	// (only `codex exec` does). Both subcommands accept `-c key=value` config
+	// overrides though, so on resume we express sandbox via `-c sandbox_mode=...`
+	// instead. Without this, every resume would fail with:
+	//   error: unexpected argument '--sandbox' found
+	// — and the user would silently lose their session on every cc-connect
+	// restart / idle reset.
+	//
 	// For real interactive approvals (suggest semantics), users must opt into
 	// the `app_server` backend, which handles execCommandApproval /
 	// applyPatchApproval / permissionsApproval over JSON-RPC.
 	switch cs.mode {
 	case "auto-edit", "full-auto":
-		args = append(args, "--sandbox", "workspace-write", "-c", `approval_policy="never"`)
+		if isResume {
+			args = append(args, "-c", `sandbox_mode="workspace-write"`, "-c", `approval_policy="never"`)
+		} else {
+			args = append(args, "--sandbox", "workspace-write", "-c", `approval_policy="never"`)
+		}
 	case "yolo":
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	default: // "suggest"
-		args = append(args, "--sandbox", "read-only", "-c", `approval_policy="never"`)
+		if isResume {
+			args = append(args, "-c", `sandbox_mode="read-only"`, "-c", `approval_policy="never"`)
+		} else {
+			args = append(args, "--sandbox", "read-only", "-c", `approval_policy="never"`)
+		}
 	}
 
 	if cs.model != "" {
