@@ -987,7 +987,7 @@ func TestOnRawMessage_FileMsgTypeNotDroppedAsEmptyText(t *testing.T) {
 	var handlerCalledWithEmptyContent bool
 
 	func() {
-		defer func() { recover() }() // handleFileMessage panics on nil httpClient — that's OK
+		defer func() { _ = recover() }() // handleFileMessage panics on nil httpClient — that's OK
 		p := &Platform{
 			handler: func(_ core.Platform, msg *core.Message) {
 				if msg.Content == "" && len(msg.Files) == 0 && len(msg.Images) == 0 {
