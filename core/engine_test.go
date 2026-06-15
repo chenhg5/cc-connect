@@ -14440,3 +14440,223 @@ func TestHandlePendingPermission_StalePermissionCallback_Dropped(t *testing.T) {
 		}
 	})
 }
+
+// ─── Permission keyword tokenization (t-20260614-ayc85z) ────────────────
+// Group-chat platforms (wecom in particular) require the user to
+// @mention the bot for the message to reach cc-connect, so permission
+// replies arrive as "@bot 允许" / "允许 @bot" / etc. rather than the
+// bare keyword. The matchers must tolerate the surrounding mention
+// without losing word-boundary discipline (e.g. must NOT match
+// "禁止允许这种" — the keyword is embedded inside another CJK word).
+
+func TestIsAllowResponse_WithLeadingMention(t *testing.T) {
+	cases := []string{
+		"@产品经理 允许",
+		"@bot 允许",
+		"@bot allow",
+		"@bot ok",
+		"@产品经理 同意",
+	}
+	for _, s := range cases {
+		if !isAllowResponse(strings.ToLower(s)) {
+			t.Errorf("isAllowResponse(%q) = false, want true", s)
+		}
+	}
+}
+
+func TestIsAllowResponse_WithTrailingMention(t *testing.T) {
+	cases := []string{
+		"允许 @产品经理",
+		"allow @bot",
+		"好的 @bot",
+		"yes @bot",
+	}
+	for _, s := range cases {
+		if !isAllowResponse(strings.ToLower(s)) {
+			t.Errorf("isAllowResponse(%q) = false, want true", s)
+		}
+	}
+}
+
+func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
+	cases := []string{
+		"@a @b 允许",
+		"@a allow @b",
+		"hey @bot 好的, @user2",
+	}
+	for _, s := range cases {
+		if !isAllowResponse(strings.ToLower(s)) {
+			t.Errorf("isAllowResponse(%q) = false, want true", s)
+		}
+	}
+}
+
+// TestIsAllowResponse_NotInsideOtherWord locks the false-positive
+// boundary: a keyword embedded inside a longer CJK string must NOT
+// match. This is what distinguishes token-level matching from naive
+// substring contains.
+func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
+	cases := []string{
+		"禁止允许这种",
+		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事", // long sentence, no token equals "允许"
+		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
+		"hello world",
+		"",
+	}
+	for _, s := range cases {
+		if isAllowResponse(strings.ToLower(s)) {
+			t.Errorf("isAllowResponse(%q) = true, want false (no token equals an allow keyword)", s)
+		}
+	}
+}
+
+func TestIsDenyResponse_WithMention(t *testing.T) {
+	cases := []string{
+		"@产品经理 拒绝",
+		"@bot deny",
+		"拒绝 @bot",
+		"@bot reject",
+		"@bot 不允许",
+		"@bot cancel",
+	}
+	for _, s := range cases {
+		if !isDenyResponse(strings.ToLower(s)) {
+			t.Errorf("isDenyResponse(%q) = false, want true", s)
+		}
+	}
+
+	negatives := []string{
+		"拒绝症患者",       // embedded — must not match
+		"我们都不应该 hello", // unrelated
+	}
+	for _, s := range negatives {
+		if isDenyResponse(strings.ToLower(s)) {
+			t.Errorf("isDenyResponse(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestIsApproveAllResponse_MultiWordWithMention(t *testing.T) {
+	cases := []string{
+		"@bot 允许所有",
+		"@bot allow all",
+		"allow all @bot",
+		"@产品经理 允许全部",
+		"hey please allow all things @bot", // sliding-window phrase match
+		"全部允许",
+	}
+	for _, s := range cases {
+		if !isApproveAllResponse(strings.ToLower(s)) {
+			t.Errorf("isApproveAllResponse(%q) = false, want true", s)
+		}
+	}
+
+	// Single allow keyword alone must not be approve-all.
+	negatives := []string{
+		"@bot 允许",
+		"allow",
+		"yes",
+		"",
+	}
+	for _, s := range negatives {
+		if isApproveAllResponse(strings.ToLower(s)) {
+			t.Errorf("isApproveAllResponse(%q) = true, want false (single allow is not approve-all)", s)
+		}
+	}
+}
+
+// TestHandlePendingPermission_AllowWithMention is the integration
+// regression for the wecom group bug: a real Bash permission request is
+// pending, and the user replies with "@产品经理 允许" exactly as wecom
+// delivers it. Before the fix this fell through to the "still waiting"
+// branch and the agent never advanced.
+func TestHandlePendingPermission_AllowWithMention(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	iKey := "wecom:group:user1"
+	pending := &pendingPermission{
+		RequestID: "req-bash-1",
+		ToolName:  "Bash",
+		ToolInput: map[string]any{"command": "cat /etc/passwd"},
+		Resolved:  make(chan struct{}),
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending:      pending,
+	}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{
+		SessionKey: "wecom:group:user1",
+		UserID:     "user1",
+		Content:    "@产品经理 允许",
+		ReplyCtx:   "ctx",
+	}
+	if !e.handlePendingPermission(p, msg, "@产品经理 允许", iKey) {
+		t.Fatal("handlePendingPermission returned false, want true")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", rec.calls)
+	}
+	if rec.lastID != "req-bash-1" {
+		t.Fatalf("RespondPermission id = %q, want req-bash-1", rec.lastID)
+	}
+	if rec.lastResult.Behavior != "allow" {
+		t.Fatalf("RespondPermission behavior = %q, want allow", rec.lastResult.Behavior)
+	}
+}
+
+// TestHandlePendingPermission_ApproveAllWithMention covers the same
+// path for the approve-all phrase — must beat the per-token allow
+// match because handlePendingPermission checks isApproveAllResponse
+// first.
+func TestHandlePendingPermission_ApproveAllWithMention(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	iKey := "wecom:group:user2"
+	pending := &pendingPermission{
+		RequestID: "req-bash-2",
+		ToolName:  "Bash",
+		ToolInput: map[string]any{"command": "rm -rf /tmp/x"},
+		Resolved:  make(chan struct{}),
+	}
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending:      pending,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{
+		SessionKey: "wecom:group:user2",
+		UserID:     "user2",
+		Content:    "@产品经理 允许所有",
+		ReplyCtx:   "ctx",
+	}
+	if !e.handlePendingPermission(p, msg, "@产品经理 允许所有", iKey) {
+		t.Fatal("handlePendingPermission returned false, want true")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", rec.calls)
+	}
+	if rec.lastResult.Behavior != "allow" {
+		t.Fatalf("RespondPermission behavior = %q, want allow", rec.lastResult.Behavior)
+	}
+	state.mu.Lock()
+	approveAll := state.approveAll
+	state.mu.Unlock()
+	if !approveAll {
+		t.Fatal("state.approveAll = false, want true (approve-all must persist for follow-up tools)")
+	}
+}
