@@ -650,7 +650,8 @@ func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
 
 func TestNew_LegacyProgressStyleDoesNotEnableProgressInterfaces(t *testing.T) {
 	pAny, err := New(map[string]any{
-		"token": "discord-token",
+		"token":          "discord-token",
+		"progress_style": "legacy",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -660,6 +661,27 @@ func TestNew_LegacyProgressStyleDoesNotEnableProgressInterfaces(t *testing.T) {
 	}
 	if _, ok := pAny.(core.ProgressCardPayloadSupport); ok {
 		t.Fatalf("legacy discord platform should not implement ProgressCardPayloadSupport, got %T", pAny)
+	}
+}
+
+// TestNew_DefaultProgressStyleIsCompact verifies that omitting progress_style
+// opts in to streaming edits (compact). Before this change, the default was
+// "legacy" which meant Discord would silently fall through to one big final
+// p.Send for long replies — see release-gate note 2026-06-14 §"Telegram 同样
+// 无默认流式". Discord behaves identically to Telegram on this code path.
+func TestNew_DefaultProgressStyleIsCompact(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token": "discord-token",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	sp, ok := pAny.(core.ProgressStyleProvider)
+	if !ok {
+		t.Fatalf("default discord platform should implement ProgressStyleProvider, got %T", pAny)
+	}
+	if got := sp.ProgressStyle(); got != "compact" {
+		t.Fatalf("default ProgressStyle() = %q, want %q", got, "compact")
 	}
 }
 
@@ -701,7 +723,8 @@ func TestDispatchMessage_UsesWrappedProgressPlatformForHandler(t *testing.T) {
 
 func TestDispatchMessage_LegacyPlatformFallsBackToBasePlatform(t *testing.T) {
 	pAny, err := New(map[string]any{
-		"token": "discord-token",
+		"token":          "discord-token",
+		"progress_style": "legacy",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

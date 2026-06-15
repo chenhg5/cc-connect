@@ -110,6 +110,7 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	enableReactions       bool
+	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
 
 	mu                  sync.RWMutex
@@ -162,10 +163,54 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
+
+	// Default to "compact" so streaming edits work out of the box. Telegram has
+	// no rich card UI, so "card" is normalized to "compact". Users can opt out
+	// via progress_style = "legacy" to restore the old "send full text once"
+	// behavior.
+	progressStyle := "compact"
+	if v, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "":
+			// keep default
+		case "legacy":
+			progressStyle = "legacy"
+		case "compact", "card":
+			progressStyle = "compact"
+		default:
+			return nil, fmt.Errorf("telegram: invalid progress_style %q (want legacy, compact, or card)", v)
+		}
+	}
+
+	return &Platform{
+		token:                 token,
+		allowFrom:             allowFrom,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel,
+		enableReactions:       enableReactions,
+		progressStyle:         progressStyle,
+		httpClient:            httpClient,
+	}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
+
+// ProgressStyle reports the streaming-progress style for this platform.
+//
+// Telegram supports MessageUpdater.UpdateMessage, so we default to "compact"
+// to enable progressive edits of long agent responses. Without this, the
+// engine falls back to legacy mode and sends the entire reply (which can be
+// 30k+ characters) in one final p.Send — users perceive it as "spinner spins
+// for minutes, then a wall of text appears".
+//
+// To restore the old single-send behavior set progress_style = "legacy" in
+// the platform options.
+func (p *Platform) ProgressStyle() string {
+	if p == nil || p.progressStyle == "" {
+		return "compact"
+	}
+	return p.progressStyle
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
