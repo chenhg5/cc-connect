@@ -188,11 +188,25 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = []string{"exec", "--skip-git-repo-check"}
 	}
 
+	// Mode → sandbox + approval mapping.
+	//
+	// `codex exec` (this backend) has no approval IPC, so approval_policy must
+	// always be "never" — otherwise the CLI blocks waiting for a TTY response
+	// that never arrives. Sandbox tier is what actually enforces safety here.
+	//
+	// As of codex-cli 0.137 `--full-auto` is no longer accepted; use the
+	// canonical `--sandbox <mode>` form together with `-c approval_policy=...`.
+	//
+	// For real interactive approvals (suggest semantics), users must opt into
+	// the `app_server` backend, which handles execCommandApproval /
+	// applyPatchApproval / permissionsApproval over JSON-RPC.
 	switch cs.mode {
 	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
+		args = append(args, "--sandbox", "workspace-write", "-c", `approval_policy="never"`)
 	case "yolo":
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	default: // "suggest"
+		args = append(args, "--sandbox", "read-only", "-c", `approval_policy="never"`)
 	}
 
 	if cs.model != "" {
