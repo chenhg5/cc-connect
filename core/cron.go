@@ -71,6 +71,8 @@ func (j *CronJob) UsesNewSessionPerRun() bool {
 	return NormalizeCronSessionMode(j.SessionMode) == "new_per_run"
 }
 
+// defaultScheduledSessionMode is the built-in default for scheduled cron and
+// timer jobs. It can be overridden globally by scheduler config or per job.
 const defaultScheduledSessionMode = "new_per_run"
 
 // NormalizeCronSessionMode maps CLI/API aliases to canonical values ("", "reuse", "new_per_run").
