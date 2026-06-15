@@ -57,6 +57,7 @@ Add the following to `config.toml`:
 [management]
 enabled = true
 port = 9820
+host = "127.0.0.1"
 token = "mgmt-secret"
 ```
 
@@ -64,9 +65,12 @@ token = "mgmt-secret"
 |----------|---------|-----------|--------------------------------------------------|
 | `enabled`| boolean | `false`   | Enable the Management API server                 |
 | `port`   | integer | `9820`    | TCP port to listen on                            |
+| `host`   | string  | `""`      | Bind address; empty binds all interfaces. Set `"127.0.0.1"` or `"::1"` to restrict to loopback |
 | `token`  | string  | (required)| Shared secret for authentication                 |
 
 When `enabled` is `false`, the Management API is not started. The token should be a strong, random string (e.g. 32+ characters).
+
+`host` defaults to all interfaces for backward compatibility. When cc-connect runs behind a reverse proxy on the same machine, set `host = "127.0.0.1"` (or `"::1"`) so the API is not reachable from other hosts even if a firewall rule is missing. Note that an empty `host` binds both IPv4 and IPv6 wildcard addresses.
 
 ### 2.2 Base URL
 

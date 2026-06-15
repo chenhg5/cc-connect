@@ -351,6 +351,7 @@ level = "info" # debug, info, warn, error
 # [bridge]
 # enabled = true
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
+# host = "127.0.0.1"                  # Bind address; empty = all interfaces (default). Use "127.0.0.1" or "::1" to restrict to loopback when behind a reverse proxy / 绑定地址；留空=所有网卡（默认）。置于反向代理之后时可设为 "127.0.0.1" 或 "::1" 只监听本机
 # token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
 
@@ -366,6 +367,7 @@ level = "info" # debug, info, warn, error
 # [management]
 # enabled = true
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
+# host = "127.0.0.1"                    # Bind address; empty = all interfaces (default). Use "127.0.0.1" or "::1" to restrict to loopback when behind a reverse proxy / 绑定地址；留空=所有网卡（默认）。置于反向代理之后时可设为 "127.0.0.1" 或 "::1" 只监听本机
 # token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 

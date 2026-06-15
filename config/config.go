@@ -153,6 +153,7 @@ type WebhookConfig struct {
 type BridgeConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
+	Host        string   `toml:"host,omitempty"`         // bind address; empty = all interfaces (e.g. "127.0.0.1" or "::1" to restrict to loopback)
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
@@ -173,6 +174,7 @@ type HookConfig struct {
 type ManagementConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
+	Host        string   `toml:"host,omitempty"`         // bind address; empty = all interfaces (e.g. "127.0.0.1" or "::1" to restrict to loopback)
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }

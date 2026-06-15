@@ -57,6 +57,7 @@ cc-connect 管理 API 是基于 HTTP 的 REST API，供外部应用（Web 控制
 [management]
 enabled = true
 port = 9820
+host = "127.0.0.1"
 token = "mgmt-secret"
 ```
 
@@ -64,9 +65,12 @@ token = "mgmt-secret"
 |------------|---------|----------|-------------------------------------------|
 | `enabled`  | boolean | `false`  | 是否启用管理 API 服务                     |
 | `port`     | integer | `9820`   | 监听 TCP 端口                             |
+| `host`     | string  | `""`     | 绑定地址；留空监听所有网卡。设为 `"127.0.0.1"` 或 `"::1"` 可仅监听本机回环 |
 | `token`    | string  | (必填)   | 认证用共享密钥                            |
 
 当 `enabled` 为 `false` 时，管理 API 不会启动。令牌应为强随机字符串（建议 32 字符以上）。
+
+为保持向后兼容，`host` 默认监听所有网卡。当 cc-connect 与反向代理部署在同一台机器上时，建议设为 `host = "127.0.0.1"`（或 `"::1"`），这样即使防火墙规则缺失，该 API 也不会被其他主机访问到。注意：`host` 留空会同时绑定 IPv4 与 IPv6 通配地址。
 
 ### 2.2 基础 URL
 

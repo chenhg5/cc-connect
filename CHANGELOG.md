@@ -3,6 +3,7 @@
 ### New Features
 - **`cc-connect cron add --silent`**: expose the `--silent` flag on the cron add CLI so users can suppress the cron start notification when creating a job. The server already accepted `silent` on `/cron/add`; only the CLI side was missing (#858).
 - **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.
+- **`host` bind address**: new optional `host` field for `[bridge]` and `[management]` — bind the HTTP servers to a specific address (e.g. `127.0.0.1` or `::1`) instead of all interfaces. Empty (default) preserves the previous all-interfaces behavior. Useful when running behind a same-host reverse proxy (#1334).
 
 ### ⚠️ QQ Bot Intent Configuration Change
 The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you previously set a custom `intents` value without this bit, inline keyboard buttons will not work — update your `intents` to include bit 26. If you use the default intents, no action is needed. See `config.example.toml` for the new `intents` option.

@@ -55,9 +55,12 @@ The port and path are configured in `config.toml`:
 [bridge]
 enabled = true
 port = 9810
+host = "127.0.0.1"        # optional; empty = all interfaces. Set "127.0.0.1"/"::1" to restrict to loopback
 path = "/bridge/ws"       # optional, default "/bridge/ws"
 token = "your-secret"     # required for authentication
 ```
+
+`host` defaults to all interfaces (binding both IPv4 and IPv6 wildcard) for backward compatibility. When the bridge is only consumed by adapters on the same machine, set `host = "127.0.0.1"` (or `"::1"`) so the port is not reachable from other hosts.
 
 ### Authentication
 

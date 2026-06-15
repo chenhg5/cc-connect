@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -36,6 +37,7 @@ type ProjectSettingsUpdate struct {
 // (web dashboards, TUI clients, GUI desktop apps, Mac tray apps, etc.).
 type ManagementServer struct {
 	port        int
+	host        string // bind address; empty = all interfaces
 	token       string
 	corsOrigins []string
 	server      *http.Server
@@ -81,6 +83,13 @@ func NewManagementServer(port int, token string, corsOrigins []string) *Manageme
 		engines:     make(map[string]*Engine),
 		startedAt:   time.Now(),
 	}
+}
+
+// SetHost sets the bind address for the server. An empty string (the default)
+// binds to all interfaces, preserving the previous behavior. Must be called
+// before Start.
+func (m *ManagementServer) SetHost(host string) {
+	m.host = host
 }
 
 func (m *ManagementServer) RegisterEngine(name string, e *Engine) {
@@ -200,7 +209,7 @@ func (m *ManagementServer) Start() {
 	handler := m.buildHandler(mux)
 
 	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
+		Addr:    net.JoinHostPort(m.host, strconv.Itoa(m.port)),
 		Handler: handler,
 	}
 	go func() {
