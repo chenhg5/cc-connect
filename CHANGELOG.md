@@ -42,6 +42,8 @@ the full themed summary; per-beta details remain in the beta sections below.
   test framework (#1348)
 - **core**: queued FIFO drains no longer drop earlier queued messages as stale just
   because a later queued message has a higher `create_time` (#1286)
+- **core**: make `/history` entry truncation configurable via
+  `[display].history_max_len`, defaulting to 1000; `0` disables truncation (#1291)
 - **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
 - **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
 

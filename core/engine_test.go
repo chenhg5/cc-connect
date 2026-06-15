@@ -12535,6 +12535,9 @@ func TestTruncateHistoryEntry(t *testing.T) {
 	if got := truncateHistoryEntry("你好世界", 2); got != "你好..." {
 		t.Fatalf("truncateHistoryEntry unicode = %q, want %q", got, "你好...")
 	}
+	if got := truncateHistoryEntry("👨‍👩‍👧 中文", 2); got != "👨‍..." || !utf8.ValidString(got) {
+		t.Fatalf("truncateHistoryEntry emoji = %q, want valid UTF-8 %q", got, "👨‍...")
+	}
 	if got := truncateHistoryEntry("abcdef", 0); got != "abcdef" {
 		t.Fatalf("truncateHistoryEntry disabled = %q, want original", got)
 	}
