@@ -20,7 +20,7 @@ func init() {
 	core.RegisterAgent("pi", New)
 }
 
-// Agent drives the pi coding agent CLI (`pi --mode json --no-input`).
+// Agent drives the pi coding agent CLI.
 type Agent struct {
 	cmd          string   // path to pi binary
 	cliExtraArgs []string // extra args from cmd after the binary name
@@ -29,6 +29,7 @@ type Agent struct {
 	model        string
 	mode         string // "default" | "yolo"
 	thinking     string // reasoning effort: off, minimal, low, medium, high, xhigh
+	rpc          bool   // true = --mode rpc (persistent, extension_ui); false = --mode json (one-shot, default)
 	sessionEnv   []string
 	mu           sync.Mutex
 }
@@ -41,6 +42,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	thinking, _ := opts["thinking"].(string)
+	rpc, _ := opts["rpc"].(bool)
 
 	cmd, extraArgs := core.ParseCmdOpts(opts, "pi")
 
@@ -62,6 +65,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:      workDir,
 		model:        model,
 		mode:         mode,
+		thinking:     thinking,
+		rpc:          rpc,
 	}, nil
 }
 
@@ -114,8 +119,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	rpc := a.rpc
 	a.mu.Unlock()
-	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, sessionID, extraEnv)
+	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, rpc, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
