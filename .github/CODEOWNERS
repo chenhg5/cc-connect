@@ -1,0 +1,53 @@
+# CODEOWNERS for cc-connect.
+#
+# GitHub uses this file to auto-request reviews from listed owners
+# whenever a PR touches the matching paths.
+#
+# Project owner / default reviewer.
+*                                   @chenhg5
+
+# ---------------------------------------------------------------------------
+# Critical paths — changes here should be reviewed with extra care because
+# regressions in these files have historically caused user-visible bugs
+# (e.g. cmdSwitch wiping /history) that escaped per-function unit coverage.
+#
+# Reviewers touching these files should also run the Critical User Journey
+# tests locally:
+#
+#     go test ./core/ -run TestCUJ
+#
+# and confirm the corresponding CUJ test was updated (or a new CUJ added)
+# if user-visible behavior changes. See AGENTS.md → "Critical User
+# Journeys (CUJ)" for details.
+# ---------------------------------------------------------------------------
+
+# Engine core: message routing, command handling, interactive state.
+/core/engine.go                     @chenhg5
+/core/engine_test.go                @chenhg5
+
+# Session manager: persistence, history, agent_session_id binding.
+/core/session.go                    @chenhg5
+/core/session_test.go               @chenhg5
+
+# Scheduled task implementations.
+/core/cron.go                       @chenhg5
+/core/cron_test.go                  @chenhg5
+/core/timer.go                      @chenhg5
+/core/timer_test.go                 @chenhg5
+
+# Permission flow + bridge that talks to the agent.
+/core/bridge.go                     @chenhg5
+/core/interfaces.go                 @chenhg5
+
+# i18n strings — user-facing copy must be reviewed for clarity and
+# all-language consistency.
+/core/i18n.go                       @chenhg5
+
+# CUJ test framework itself — guards against regressions in the
+# tests that guard against regressions.
+/core/cuj_test.go                   @chenhg5
+
+# Build / CI / project policy.
+/AGENTS.md                          @chenhg5
+/.github/                           @chenhg5
+/Makefile                           @chenhg5

@@ -147,9 +147,16 @@ All user-facing strings must go through `core/i18n.go`:
 
 ### Requirements
 
-- All new features must include unit tests
-- All bug fixes should include a regression test
-- Tests must pass before committing: `go test ./...`
+- All new features must include unit tests.
+- **All bug fixes MUST include a regression test in the same PR.** A bug
+  fix PR without a test that fails on the pre-fix code and passes on the
+  fixed code will not be merged. Name regression tests so the bug is
+  searchable later, e.g. `TestSwitchToAgentSession_PreservesHistory` for
+  the cmdSwitch history-loss bug.
+- Tests must pass before committing: `go test ./...`.
+- Changes that touch a Critical User Journey (CUJ) — see
+  `core/cuj_test.go` — should explicitly run `go test ./core/ -run TestCUJ`
+  before opening the PR.
 
 ### Running Tests
 
@@ -163,15 +170,46 @@ go test ./core/ -v
 # Run specific test
 go test ./core/ -run TestHandlePendingPermission -v
 
+# Run Critical User Journey tests (recommended for any core/engine.go or
+# core/session.go change)
+go test ./core/ -run TestCUJ -v
+
 # With race detector (CI)
 go test -race ./...
 ```
 
 ### Test Patterns
 
-- Use stub types for `Platform` and `Agent` in core tests (see `core/engine_test.go`)
-- Test card rendering by inspecting the returned `*Card` struct, not JSON
-- For agent session tests, simulate event streams via channels
+- Use stub types for `Platform` and `Agent` in core tests (see `core/engine_test.go`).
+- Test card rendering by inspecting the returned `*Card` struct, not JSON.
+- For agent session tests, simulate event streams via channels.
+- **For multi-step user behavior, add a CUJ test in `core/cuj_test.go`.**
+  CUJ tests assert what a USER sees on the platform side across multiple
+  actions (e.g. "create s1 → chat → /new s2 → /switch s1 → /history
+  must show s1's content"). They exist because per-function unit tests
+  can all pass while a user journey is still broken — the `/switch
+  loses history` bug shipped in exactly that scenario despite full
+  unit coverage of every individual function involved.
+
+### Critical User Journeys (CUJ)
+
+A CUJ test is a USER-perspective end-to-end scenario, not a developer-
+perspective unit test. The current inventory of CUJs and their coverage
+status lives in:
+
+`projects/cc-connect/agents/qa-cursor/release-gate/CUJ-INVENTORY.md`
+(in the spaceship agency workspace; the registered authoritative copy).
+
+Rules for adding/updating CUJ tests in `core/cuj_test.go`:
+
+1. Name: `TestCUJ_<group><id>_<short_camel_case>` (e.g. `TestCUJ_B3_SwitchPreservesHistory`).
+2. Use real `SessionManager` + real `Engine`; mock only external boundaries (`Platform` sender, `Agent` process).
+3. Drive the engine via `ReceiveMessage` — the same entrypoint platforms use, so engine/platform wiring is also covered.
+4. Assert what the USER sees via `p.getSent()`, not internal struct fields.
+5. ≥3 user actions per CUJ. A single-action assertion belongs in a unit test, not a CUJ.
+
+When a user-reported bug maps to an existing CUJ, add a sub-case to that
+CUJ rather than creating a new one.
 
 ## Selective Compilation
 
@@ -211,9 +249,11 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_copilot`, `no_cursor`
 
 1. **Build passes**: `go build ./...`
 2. **Tests pass**: `go test ./...`
-3. **No new hardcoded platform/agent names in core**: grep for platform names in `core/*.go`
-4. **i18n complete**: all new user-facing strings have translations for all languages
-5. **No secrets in code**: no API keys, tokens, or credentials in source files
+3. **CUJ tests pass** (for any change in `core/engine.go`, `core/session.go`, `core/cron.go`, `core/timer.go`, or command handlers): `go test ./core/ -run TestCUJ`
+4. **Bug fix has a regression test**: a new test in this PR that fails on the pre-fix code and passes on the fix.
+5. **No new hardcoded platform/agent names in core**: grep for platform names in `core/*.go`.
+6. **i18n complete**: all new user-facing strings have translations for all languages.
+7. **No secrets in code**: no API keys, tokens, or credentials in source files.
 
 ## Adding a New Platform
 

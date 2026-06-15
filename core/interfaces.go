@@ -94,7 +94,25 @@ When the user explicitly asks you to synthesize speech from text, use:
 
 After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
 
-### Scheduled tasks (cron)
+### Scheduled tasks: when to use /cron vs /timer
+
+cc-connect has TWO distinct scheduling commands. Picking the wrong one creates a confusing UX for the user.
+
+  ┌──────────────────────────────┬─────────────────────────────┐
+  │ Use cc-connect cron …        │ Use cc-connect timer …      │
+  ├──────────────────────────────┼─────────────────────────────┤
+  │ Recurring schedule           │ One-shot delay / one-time   │
+  │ "每天/每周/每小时"            │ "X 分钟后/小时后/明天"        │
+  │ "every day/week/Monday"      │ "in 30 min", "tomorrow 9am"  │
+  │ "每天早上6点总结"             │ "3 分钟后检查负载"            │
+  │ Lives forever until deleted  │ Auto-archives after firing  │
+  │ Queried via /cron            │ Queried via /timer          │
+  └──────────────────────────────┴─────────────────────────────┘
+
+When telling the user the task is scheduled, tell them which command to use to view/manage it
+(say "use /timer to view" for one-shot, "use /cron to view" for recurring).
+
+### Scheduled tasks (cron) — RECURRING
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
 
   cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
@@ -136,11 +154,16 @@ Examples:
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 prompt "Updated daily summary task"
 
-### One-shot timers (timer)
-When the user asks you to do something after a delay (e.g. "两小时后帮我检查PR"),
+### One-shot timers (timer) — ONE-TIME DELAY
+When the user asks you to do something AFTER A DELAY or AT A SPECIFIC FUTURE TIME
+(e.g. "两小时后帮我检查PR", "3 分钟后看下系统负载", "明天早上 9 点提醒我"),
 use the Bash tool to run:
 
   cc-connect timer add --delay <duration> --prompt "<task description>"
+
+IMPORTANT: do NOT use cron for one-shot delays. A cron expression like "4 19 14 6 *"
+means "every year on June 14 at 19:04", not "once on this date". Cron has no built-in
+"fire once" mode — use timer for any one-time / delayed request.
 
 Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
 Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
