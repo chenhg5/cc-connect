@@ -189,10 +189,17 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		return req, "", err
 	}
 	req.Images = images
-	req.Files = append(files, audioFiles...)
-	req.Files = append(req.Files, videoFiles...)
+	// Keep audio / video clips on dedicated fields. Routing them through
+	// req.Files would force the engine to dispatch them via FileSender —
+	// that loses the native voice-bubble / video-bubble path on platforms
+	// that implement AudioSender / VideoSender (e.g. Feishu's ffmpeg
+	// transcode for mp3 → opus). See cc-connect internal task
+	// t-20260615-cqjbk1.
+	req.Files = files
+	req.Audios = audioFiles
+	req.Videos = videoFiles
 
-	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 {
+	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
 		return req, "", fmt.Errorf("message, tts text, or attachment is required")
 	}
 

@@ -10309,6 +10309,119 @@ func (e *Engine) SendTTSToSession(sessionKey, text string) error {
 	return e.synthesizeAndSendTTS(p, replyCtx, text)
 }
 
+// SendAudiosToSession routes outbound audio attachments to the
+// platform's AudioSender (native voice bubble + transcoding) when
+// supported, falling back to FileSender otherwise. Used by
+// `cc-connect send --audio`. Mirrors SendToSessionWithAttachments for
+// audio-typed clips so they don't get dispatched as generic files.
+func (e *Engine) SendAudiosToSession(sessionKey string, audios []FileAttachment) error {
+	if len(audios) == 0 {
+		return nil
+	}
+	_, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, true)
+	if err != nil {
+		return err
+	}
+	if !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	audioSender, audioOK := p.(AudioSender)
+	fileSender, fileOK := p.(FileSender)
+	if !audioOK && !fileOK {
+		return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+	}
+
+	for _, a := range audios {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
+		format := audioFormatHint(a)
+		if audioOK {
+			if err := audioSender.SendAudio(e.ctx, replyCtx, a.Data, format); err != nil {
+				return err
+			}
+			continue
+		}
+		// Fallback: platform has no AudioSender. Send as a plain file so
+		// the user still receives the clip — but warn so operators know
+		// the native voice bubble was unavailable.
+		slog.Warn("send: platform has no AudioSender, falling back to SendFile",
+			"platform", p.Name(), "file_name", a.FileName, "format", format)
+		if err := fileSender.SendFile(e.ctx, replyCtx, a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendVideosToSession routes outbound video attachments to the
+// platform's VideoSender (native video bubble) when supported, falling
+// back to FileSender otherwise. Used by `cc-connect send --video`.
+func (e *Engine) SendVideosToSession(sessionKey string, videos []FileAttachment) error {
+	if len(videos) == 0 {
+		return nil
+	}
+	_, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, true)
+	if err != nil {
+		return err
+	}
+	if !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	videoSender, videoOK := p.(VideoSender)
+	fileSender, fileOK := p.(FileSender)
+	if !videoOK && !fileOK {
+		return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+	}
+
+	for _, v := range videos {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
+		format := videoFormatHint(v)
+		if videoOK {
+			if err := videoSender.SendVideo(e.ctx, replyCtx, v.Data, format, v.FileName); err != nil {
+				return err
+			}
+			continue
+		}
+		slog.Warn("send: platform has no VideoSender, falling back to SendFile",
+			"platform", p.Name(), "file_name", v.FileName, "format", format)
+		if err := fileSender.SendFile(e.ctx, replyCtx, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// audioFormatHint extracts the short format hint (e.g. "mp3", "opus")
+// from a FileAttachment. Filename extension wins over MIME type because
+// the CLI-uploaded name is more reliable than detected MIME (raw
+// audio bytes often sniff to application/octet-stream).
+func audioFormatHint(a FileAttachment) string {
+	if ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(a.FileName), ".")); ext != "" {
+		return ext
+	}
+	if a.MimeType != "" {
+		// "audio/mpeg" -> "mpeg"; "audio/ogg; codecs=opus" -> "ogg"
+		mt := strings.ToLower(a.MimeType)
+		if i := strings.Index(mt, ";"); i >= 0 {
+			mt = mt[:i]
+		}
+		if i := strings.Index(mt, "/"); i >= 0 {
+			return strings.TrimSpace(mt[i+1:])
+		}
+	}
+	return ""
+}
+
+// videoFormatHint mirrors audioFormatHint for video clips.
+func videoFormatHint(v FileAttachment) string {
+	return audioFormatHint(v)
+}
+
 func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments bool) (*interactiveState, Platform, any, error) {
 	e.interactiveMu.Lock()
 

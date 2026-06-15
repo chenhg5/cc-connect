@@ -30,6 +30,14 @@ type APIServer struct {
 }
 
 // SendRequest is the JSON body for POST /send.
+//
+// Audios and Videos are kept separate from Files so the engine can
+// dispatch them to AudioSender / VideoSender (native voice / video
+// bubble) instead of FileSender (generic file download). The fields
+// reuse FileAttachment as the wire format because audio/video clips
+// are byte blobs with a name + mime — the dedicated typing happens at
+// the dispatch layer in engine.go. See cc-connect internal task
+// t-20260615-cqjbk1.
 type SendRequest struct {
 	Project    string            `json:"project"`
 	SessionKey string            `json:"session_key"`
@@ -37,6 +45,8 @@ type SendRequest struct {
 	TTSText    string            `json:"tts_text,omitempty"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+	Audios     []FileAttachment  `json:"audios,omitempty"`
+	Videos     []FileAttachment  `json:"videos,omitempty"`
 	AtUsers    []string          `json:"at_users,omitempty"`
 	AtAll      bool              `json:"at_all,omitempty"`
 }
@@ -157,7 +167,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 {
+	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
 		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
 		return
 	}
@@ -190,6 +200,20 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if req.Message != "" || len(req.Images) > 0 || len(req.Files) > 0 {
 		if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files, req.AtUsers, req.AtAll); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if len(req.Audios) > 0 {
+		if err := engine.SendAudiosToSession(req.SessionKey, req.Audios); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if len(req.Videos) > 0 {
+		if err := engine.SendVideosToSession(req.SessionKey, req.Videos); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

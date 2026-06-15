@@ -311,6 +311,7 @@ var (
 	_ PreviewCleaner            = (*BridgePlatform)(nil)
 	_ TypingIndicator           = (*BridgePlatform)(nil)
 	_ AudioSender               = (*BridgePlatform)(nil)
+	_ VideoSender               = (*BridgePlatform)(nil)
 	_ ImageSender               = (*BridgePlatform)(nil)
 	_ FileSender                = (*BridgePlatform)(nil)
 	_ CardNavigable             = (*BridgePlatform)(nil)
@@ -621,6 +622,25 @@ func (bp *BridgePlatform) SendAudio(ctx context.Context, replyCtx any, audio []b
 		"reply_ctx":   rc.ReplyCtx,
 		"data":        base64.StdEncoding.EncodeToString(audio),
 		"format":      format,
+	})
+}
+
+func (bp *BridgePlatform) SendVideo(ctx context.Context, replyCtx any, video []byte, format string, fileName string) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["video"] {
+		return ErrNotSupported
+	}
+	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+		"type":        "video",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"data":        base64.StdEncoding.EncodeToString(video),
+		"format":      format,
+		"file_name":   fileName,
 	})
 }
 
