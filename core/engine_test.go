@@ -6640,6 +6640,62 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 	}
 }
 
+// TestHandlePendingPermission_CronFallback verifies that the fallback path
+// in handlePendingPermission can locate a pending permission stored under a
+// cron composite key ("sessionKey#cron:sid") when the callback uses the
+// plain sessionKey.
+func TestHandlePendingPermission_CronFallback(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	cronKey := "test:chat:user1#cron:sid123"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[cronKey] = &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "req-1",
+			ToolInput: map[string]any{"path": "/tmp/x"},
+			Resolved:  make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	// Callback uses only the plain sessionKey, not the composite cron key
+	msg := &Message{SessionKey: "test:chat:user1", ReplyCtx: "ctx"}
+
+	if !e.handlePendingPermission(p, msg, "allow", "") {
+		t.Fatal("expected pending permission to be handled via cron fallback")
+	}
+
+	// Verify the cron state was updated, not some other state
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[cronKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected cron interactive state to remain")
+	}
+	state.mu.Lock()
+	hasPending := state.pending != nil
+	state.mu.Unlock()
+	if hasPending {
+		t.Fatal("expected pending permission to be cleared")
+	}
+
+	if rec.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", rec.calls)
+	}
+	if rec.lastID != "req-1" {
+		t.Fatalf("RespondPermission id = %q, want %q", rec.lastID, "req-1")
+	}
+	if rec.lastResult.Behavior != "allow" {
+		t.Fatalf("RespondPermission behavior = %q, want %q", rec.lastResult.Behavior, "allow")
+	}
+}
+
 // ──────────────────────────────────────────────────────────────
 // Session routing / cleanup CAS tests
 // ──────────────────────────────────────────────────────────────

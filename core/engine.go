@@ -2993,10 +2993,34 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	if iKey == "" {
 		iKey = e.interactiveKeyForSessionKey(msg.SessionKey)
 	}
-	e.interactiveMu.Lock()
-	state, ok := e.interactiveStates[iKey]
-	e.interactiveMu.Unlock()
-	if !ok || state == nil {
+
+	state, pending := e.lookupPending(iKey)
+
+	if state == nil || pending == nil {
+		// Fallback: cron new-per-run sessions use composite keys like
+		// "key#cron:sid" which won't match the plain sessionKey from
+		// platform permission button callbacks.
+		e.interactiveMu.Lock()
+		prefix := iKey + "#cron:"
+		var cronKeys []string
+		for k := range e.interactiveStates {
+			if strings.HasPrefix(k, prefix) {
+				cronKeys = append(cronKeys, k)
+			}
+		}
+		e.interactiveMu.Unlock()
+		// If multiple cron runs coexist for the same session, pick
+		// the first with a pending permission. In practice only one
+		// cron run per session should be in the pending state at a
+		// time, so this loop is bounded and deterministic for the
+		// expected case.
+		for _, k := range cronKeys {
+			state, pending = e.lookupPending(k)
+			if state != nil && pending != nil {
+				goto found
+			}
+		}
+
 		// Stale platform-callback permission click (e.g. user tapped an old
 		// "Allow"/"Deny" button after the session was reset, the bot was
 		// restarted, or the card message ID was redelivered). Drop silently so
@@ -3011,18 +3035,7 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		}
 		return false
 	}
-
-	state.mu.Lock()
-	pending := state.pending
-	state.mu.Unlock()
-	if pending == nil {
-		if msg.IsPermissionResponse {
-			slog.Debug("dropping stale permission callback (no pending request)",
-				"session", msg.SessionKey, "content", content)
-			return true
-		}
-		return false
-	}
+found:
 
 	// AskUserQuestion: interpret user response as an answer, not a permission decision
 	if len(pending.Questions) > 0 {
@@ -3116,6 +3129,22 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 	pending.resolve()
 
 	return true
+}
+
+// lookupPending returns the interactive state and its pending permission for
+// the given key, or nil/nil if the state is absent or has no pending. Caller
+// must NOT hold interactiveMu.
+func (e *Engine) lookupPending(iKey string) (*interactiveState, *pendingPermission) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return nil, nil
+	}
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	return state, pending
 }
 
 // resolveAskQuestionAnswer converts user input into answer text.
