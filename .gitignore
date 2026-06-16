@@ -2,7 +2,7 @@
 # Binary outputs
 # ============================================================================
 /cc-connect
-cc-connect.bak-*
+cc-connect-*
 *.exe
 *.exe~
 *.dll

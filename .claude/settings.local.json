@@ -9,10 +9,13 @@
       "Bash(env)",
       "Bash(git config *)",
       "Bash(go build *)",
+      "Bash(go get *)",
+      "Bash(go mod *)",
       "Bash(go test *)",
       "Bash(go vet *)",
       "Bash(gofmt -d platform/dingtalk/dingtalk.go platform/dingtalk/dingtalk_test.go)",
       "Bash(gh pr *)",
+      "Bash(gh run *)",
       "WebSearch",
       "Bash(python3 -m json.tool provider-presets.json)",
       "Bash(python3 *)",
@@ -23,10 +26,22 @@
       "Bash(git stash *)",
       "Bash(git pull *)",
       "Bash(git branch *)",
-      "Bash(gh run *)",
       "Bash(git rm *)",
       "Bash(git restore *)",
-      "Bash(GIT_EDITOR=true git rebase --continue)"
+      "Bash(git rebase *)",
+      "Bash(GIT_EDITOR=true git rebase *)",
+      "Bash(GIT_EDITOR=true git rebase --continue)",
+      "Bash(EDITOR=true git rebase *)",
+      "Bash(EDITOR=true git diff --cached)",
+      "Bash(GOPROXY=direct go get -u ./...)",
+      "Bash(GOPROXY=https://goproxy.cn,direct go build ./...)",
+      "Bash(GOPROXY=https://goproxy.cn,direct go mod *)",
+      "Bash(GOPROXY=https://goproxy.cn,direct go test ./...)",
+      "Bash(GOPROXY=https://goproxy.cn,direct go test *)",
+      "Bash(ssh -T -p 22 git@github.com)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -o ProxyCommand=none\" git fetch origin)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -o ProxyCommand='nc %h %p'\" git fetch origin)",
+      "Bash(GOPROXY=direct go build *)"
     ]
   }
 }
