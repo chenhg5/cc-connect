@@ -99,6 +99,7 @@ level = "info" # debug, info, warn, error
 
 # [display]
 # mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+# card_mode = "legacy"      # Card rendering: "legacy" (default) or "rich" (Feishu Card 2.0)
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
