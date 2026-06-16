@@ -15,17 +15,19 @@ import (
 )
 
 const (
-	DefaultLogMaxSize = 10 * 1024 * 1024 // 10 MB
-	ServiceName       = "cc-connect"
+	DefaultLogMaxSize    = 10 * 1024 * 1024 // 10 MB
+	DefaultLogMaxBackups = 3                // active + .1 + .2 + .3
+	ServiceName          = "cc-connect"
 )
 
 type Config struct {
-	BinaryPath string
-	WorkDir    string
-	LogFile    string
-	LogMaxSize int64
-	EnvPATH    string            // capture user's PATH so agents are accessible
-	EnvExtra   map[string]string // selected environment variables needed by the service runtime
+	BinaryPath        string
+	WorkDir           string
+	LogFile           string
+	LogMaxSize        int64
+	LogMaxBackups     int
+	EnvPATH           string            // capture user's PATH so agents are accessible
+	EnvExtra          map[string]string // selected environment variables needed by the service runtime
 	// NoCaptureSecrets, when true, restricts the install-time env capture
 	// to proxy-related variables only and skips both the config.toml ${ENV}
 	// placeholder scan and any extension discoverers registered via
@@ -72,11 +74,12 @@ func DefaultDataDir() string {
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {
-	LogFile     string `json:"log_file"`
-	LogMaxSize  int64  `json:"log_max_size"`
-	WorkDir     string `json:"work_dir"`
-	BinaryPath  string `json:"binary_path"`
-	InstalledAt string `json:"installed_at"`
+	LogFile      string `json:"log_file"`
+	LogMaxSize   int64  `json:"log_max_size"`
+	LogMaxBackups int   `json:"log_max_backups"`
+	WorkDir      string `json:"work_dir"`
+	BinaryPath   string `json:"binary_path"`
+	InstalledAt  string `json:"installed_at"`
 }
 
 func metaPath() string {
@@ -138,6 +141,9 @@ func Resolve(cfg *Config) error {
 	}
 	if cfg.LogMaxSize <= 0 {
 		cfg.LogMaxSize = DefaultLogMaxSize
+	}
+	if cfg.LogMaxBackups < 1 {
+		cfg.LogMaxBackups = DefaultLogMaxBackups
 	}
 	if cfg.EnvPATH == "" {
 		cfg.EnvPATH = os.Getenv("PATH")

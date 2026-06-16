@@ -109,6 +109,61 @@ func preScanLogMaxSizeFlag(args []string) string {
 	return ""
 }
 
+// logBackupsSource describes where the resolved max-backups count came
+// from, mirroring logSizeSource so operators can audit the active value
+// from the startup log line alone.
+type logBackupsSource string
+
+const (
+	logBackupsSourceFlag    logBackupsSource = "flag"
+	logBackupsSourceEnv     logBackupsSource = "env"
+	logBackupsSourceDefault logBackupsSource = "default"
+)
+
+// resolveLogMaxBackups picks the effective number of rotated log backups
+// to retain, with the same priority order as resolveLogMaxSize: explicit
+// flag value > CC_LOG_MAX_BACKUPS env var > built-in default. Returns
+// the count and which source won. Invalid inputs are logged to stderr
+// and the value is ignored so a typo never silently downgrades to "0".
+func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogBackups(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+		} else {
+			return n, logBackupsSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
+		n, err := daemon.ParseLogBackups(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+		} else {
+			return n, logBackupsSourceEnv
+		}
+	}
+	return daemon.DefaultLogMaxBackups, logBackupsSourceDefault
+}
+
+// preScanLogMaxBackupsFlag returns the value passed via --log-max-backups
+// before flag.Parse() runs, mirroring preScanLogMaxSizeFlag. Returns ""
+// if the flag is absent.
+func preScanLogMaxBackupsFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-backups" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-backups=") {
+			return strings.TrimPrefix(a, "--log-max-backups=")
+		}
+	}
+	return ""
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -185,8 +240,9 @@ func main() {
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
 		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
-		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s)\n", logFile, maxSize, maxSizeSrc)
-		w, err := daemon.NewRotatingWriter(logFile, maxSize)
+		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
+		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
 			os.Exit(1)
@@ -202,6 +258,7 @@ func main() {
 	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	logMaxSizeFlag := flag.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
+	logMaxBackupsFlag := flag.Int("log-max-backups", 0, "number of rotated log files to retain (.log.1 .. .log.N); overrides CC_LOG_MAX_BACKUPS env var (default: 3)")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -214,6 +271,9 @@ func main() {
 		if _, err := daemon.ParseLogSize(*logMaxSizeFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", *logMaxSizeFlag, err)
 		}
+	}
+	if *logMaxBackupsFlag < 0 {
+		fmt.Fprintf(os.Stderr, "warning: --log-max-backups=%d must be >= 0 (0 means use env/default)\n", *logMaxBackupsFlag)
 	}
 
 	if *showVersion {
