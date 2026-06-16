@@ -186,6 +186,7 @@ const (
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
+	MsgPlanApprovalPrompt        MsgKey = "plan_approval_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
 	MsgApproveAllRevoked         MsgKey = "approve_all_revoked"
@@ -843,6 +844,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ **權限請求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回覆 **允許** / **拒絕** / **允許所有**（本次會話不再提醒）。",
 		LangJapanese:           "⚠️ **権限リクエスト**\n\nエージェントが **%s** を使用しようとしています:\n\n```\n%s\n```\n\n**allow** / **deny** / **allow all**（このセッション中は全て自動許可）で返信してください。",
 		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente quiere usar **%s**:\n\n```\n%s\n```\n\nResponda **allow** / **deny** / **allow all** (omitir futuras solicitudes en esta sesión).",
+	},
+	MsgPlanApprovalPrompt: {
+		LangEnglish:            "📋 **Plan — your approval needed**\n\n%s\n\n———\nReply **allow** to proceed, or **deny** to revise. (A long plan may arrive as several messages.)",
+		LangChinese:            "📋 **计划 — 需要你确认**\n\n%s\n\n———\n回复 **允许** 开始执行，或 **拒绝** 让其修改。（计划较长时可能分成多条消息发出。）",
+		LangTraditionalChinese: "📋 **計畫 — 需要你確認**\n\n%s\n\n———\n回覆 **允許** 開始執行，或 **拒絕** 讓其修改。（計畫較長時可能分成多條訊息發出。）",
+		LangJapanese:           "📋 **プラン — 承認が必要です**\n\n%s\n\n———\n**allow** で実行、**deny** で修正を依頼してください。",
+		LangSpanish:            "📋 **Plan — se requiere tu aprobación**\n\n%s\n\n———\nResponde **allow** para continuar o **deny** para revisar. (Un plan largo puede llegar en varios mensajes.)",
 	},
 	MsgPermissionAllowed: {
 		LangEnglish:            "✅ Allowed, continuing...",

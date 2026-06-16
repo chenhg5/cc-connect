@@ -4947,6 +4947,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+			} else if isExitPlanMode {
+				// Render the plan as markdown (no code fence, no truncation) so its
+				// headers/lists/bold display properly. event.ToolInput is the plan
+				// text itself (see summarizeInput), not raw JSON.
+				prompt := fmt.Sprintf(e.i18n.T(MsgPlanApprovalPrompt), event.ToolInput)
+				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, event.ToolInput)
 			} else {
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
