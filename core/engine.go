@@ -4972,16 +4972,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// --- StreamingCard path ---
 			if streamCard != nil && !streamCard.Failed() {
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
-				// Build final card content with full response
-				finalContent := buildCardContent(cardThinkingText, cardToolCalls, fullResponse)
+				// Silent reply: never render the NO_REPLY marker into the card.
+				// cardAnswerText holds only the text streamed BEFORE the marker
+				// (empty for a bare NO_REPLY, since silentHold suppresses card
+				// writes while the segment is still a NO_REPLY prefix). Finalize
+				// with that instead of fullResponse so the card resolves to Done
+				// without leaking the marker, and skip the fallback send that
+				// would otherwise post the suppressed marker verbatim.
+				cardBody := fullResponse
+				if isSilent {
+					cardBody = strings.TrimRight(cardAnswerText.String(), " \t\r\n")
+				}
+				finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
-					// Fallback: send the response as a normal message
-					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
+					// Fallback: send the response as a normal message — but never
+					// for a silent reply, which has no deliverable content.
+					if !isSilent {
+						for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+								return
+							}
 						}
 					}
+				}
+				if isSilent {
+					slog.Info("silent reply suppressed", "session", session.ID)
 				}
 			} else if isSilent {
 				// Silent reply: drop any in-flight preview and skip all send paths.
