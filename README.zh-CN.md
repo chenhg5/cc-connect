@@ -211,15 +211,15 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 
 † **QQ（NapCat / OneBot）** — 非官方自建桥接，体验依赖你的 NapCat 与网络环境。
 
-| 能力 | 飞书 | WPS 协作 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | 微博 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 |
-|------|:----:|:--------:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:----:|:--------------------------:|:---:|:------------:|
-| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
-| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 图片与文件 | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| 语音 / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
-| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| 能力 | 飞书 | WPS 协作 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | 微博 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 | Matrix |
+|------|:----:|:--------:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:----:|:--------------------------:|:---:|:------------:|:-----:|
+| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ | ⚠️ |
+| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 图片与文件 | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 语音 / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ | ❌ |
+| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 
 > **企业微信：** Webhook 模式需要**公网 URL**；长连接等模式多数**不需要**。  
 > **语音行：** 多数平台要在 `config.toml` 里配置 `[speech]` / TTS 等，表中为经验性归纳。  
@@ -232,7 +232,7 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 **10+ 大 AI Agent** — Claude Code、Codex、Cursor Agent、Kimi CLI、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI、Pi、Devin、Copilot，还可通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents) 接入更多 Agent。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
-**12 大聊天平台** — 飞书、WPS 协作、钉钉、Slack、Telegram、Discord、企业微信、微博、LINE、QQ、QQ 官方机器人，以及 **微信个人号（ilink）**。大部分平台**无需公网 IP**。
+**13 大聊天平台** — 飞书、WPS 协作、钉钉、Slack、Telegram、Discord、企业微信、微博、LINE、QQ、QQ 官方机器人、Matrix，以及 **微信个人号（ilink）**。大部分平台**无需公网 IP**。
 
 ### 🔄 多 Agent 编排
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
@@ -380,6 +380,7 @@ cc-connect update --pre     # 含预发布版本
 | Platform | 微信个人号（ilink） | ✅— HTTP 长轮询 — 无需公网 IP |
 | Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
 | Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
+| Platform | Matrix | ✅ Long Polling (/sync) — 无需公网 IP |
 
 
 ## 📖 平台接入指南
@@ -396,6 +397,7 @@ cc-connect update --pre     # 含预发布版本
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
 | 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink） | 不需要 |
 | QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
+| Matrix | [docs/matrix.md](docs/matrix.md) | /sync（长轮询） | 不需要 |
 
 
 ## 🎯 核心功能
