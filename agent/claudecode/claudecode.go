@@ -51,7 +51,6 @@ type Agent struct {
 	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey     string // Claude Code Router API key (optional)
 	systemPrompt     string // Custom system prompt to pass to Claude CLI
-	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
 
@@ -139,17 +138,6 @@ func New(opts map[string]any) (core.Agent, error) {
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendSystemPrompt, _ := opts["append_system_prompt"].(string)
 
-	var pluginDirs []string
-	if dir, ok := opts["plugin_dir"].(string); ok && dir != "" {
-		pluginDirs = []string{dir}
-	} else if dirs, ok := opts["plugin_dir"].([]any); ok {
-		for _, d := range dirs {
-			if s, ok := d.(string); ok && s != "" {
-				pluginDirs = append(pluginDirs, s)
-			}
-		}
-	}
-
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
 		for _, t := range tools {
@@ -235,7 +223,6 @@ func New(opts map[string]any) (core.Agent, error) {
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
 		systemPrompt:     systemPrompt,
-		pluginDirs:       pluginDirs,
 		allowedTools:     allowedTools,
 		disallowedTools:  disallowedTools,
 		maxContextTokens: maxContextTokens,
@@ -480,8 +467,6 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	effort := a.reasoningEffort
 	workDir := a.workDir
 	mode := a.mode
-	pluginDirs := make([]string, len(a.pluginDirs))
-	copy(pluginDirs, a.pluginDirs)
 	extraEnv := a.runtimeEnvLocked()
 
 	activeIdx := a.activeIdx
@@ -506,7 +491,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -847,9 +832,6 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.routerAPIKey != "" {
 		opts["router_api_key"] = a.routerAPIKey
-	}
-	if len(a.pluginDirs) > 0 {
-		opts["plugin_dir"] = stringsToAny(a.pluginDirs)
 	}
 	return opts
 }

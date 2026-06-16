@@ -90,7 +90,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -131,11 +131,6 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 	if len(disallowedTools) > 0 {
 		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
-	}
-
-	// Load plugins from specified directories.
-	for _, dir := range pluginDirs {
-		innerArgs = append(innerArgs, "--plugin-dir", dir)
 	}
 
 	// Handle custom system prompt (replaces Claude's default system prompt).
