@@ -192,6 +192,11 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		allArgs = append(allArgs, innerArgs...)
 		allArgs = append(allArgs, outerArgs...)
 	}
+	// Under run_as_user isolation, sudo -i ignores cmd.Dir (it chdirs to the
+	// target user's HOME), so the workspace must be re-applied inside the
+	// spawn. WorkDir tells BuildSpawnCommand to wrap the command with a chdir;
+	// the path itself is passed through RunAsChdirEnv below.
+	spawnOpts.WorkDir = workDir
 	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, cliBin, allArgs...)
 	cmd.Dir = workDir
 	// Put the child into its own process group so Close() can terminate the
@@ -213,6 +218,14 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// hook itself without this env var, so the real work happens only
 	// once.
 	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
+	// Carry the intended working directory across the sudo -i boundary so the
+	// re-chdir wrapper in BuildSpawnCommand can restore it (sudo -i would
+	// otherwise leave the agent in the target user's HOME). Only meaningful
+	// under isolation; FilterEnvForSpawn keeps it because mergedAllowlist
+	// includes RunAsChdirEnv whenever WorkDir is set.
+	if spawnOpts.IsolationMode() && workDir != "" {
+		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
+	}
 	// When run_as_user is set, strip the supervisor's environment down to
 	// the allowlist before passing it to sudo. sudo --preserve-env also
 	// enforces this, but filtering here makes the cc-connect spawn argv
