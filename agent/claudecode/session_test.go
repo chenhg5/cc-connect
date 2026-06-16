@@ -42,6 +42,73 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	if evt.OutputTokens != 2000 {
 		t.Errorf("OutputTokens = %d, want 2000", evt.OutputTokens)
 	}
+	if !evt.Done {
+		t.Errorf("regular result event Done = false, want true")
+	}
+}
+
+// TestHandleResultCompactionSubtypeIsNotTerminal is a regression test for
+// issue #481: Claude Code's mid-turn context compaction emits a
+// `type:"result"` event with `subtype:"compact"` (newer CLI) or
+// `subtype:"compaction"` (older CLI). The engine must keep the turn
+// running, so the emitted EventResult must have Done=false.
+func TestHandleResultCompactionSubtypeIsNotTerminal(t *testing.T) {
+	cases := []string{"compact", "compaction"}
+	for _, subtype := range cases {
+		t.Run(subtype, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cs := &claudeSession{
+				events: make(chan core.Event, 4),
+				ctx:    ctx,
+			}
+			cs.sessionID.Store("test-session")
+			cs.alive.Store(true)
+
+			cs.handleResult(map[string]any{
+				"type":       "result",
+				"subtype":    subtype,
+				"isCompact":  true,
+				"session_id": "test-session",
+			})
+
+			select {
+			case evt := <-cs.events:
+				if evt.Type != core.EventResult {
+					t.Fatalf("event type = %q, want %q", evt.Type, core.EventResult)
+				}
+				if evt.Done {
+					t.Errorf("compaction result Done = true, want false (turn must continue)")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for EventResult")
+			}
+		})
+	}
+}
+
+// TestIsCompactionResult covers both accepted subtype spellings and the
+// negative case (regular result with no subtype).
+func TestIsCompactionResult(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want bool
+	}{
+		{"nil_subtype", map[string]any{"type": "result"}, false},
+		{"empty_subtype", map[string]any{"type": "result", "subtype": ""}, false},
+		{"success_subtype", map[string]any{"type": "result", "subtype": "success"}, false},
+		{"compact_subtype", map[string]any{"type": "result", "subtype": "compact"}, true},
+		{"compaction_subtype", map[string]any{"type": "result", "subtype": "compaction"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCompactionResult(tc.raw); got != tc.want {
+				t.Errorf("isCompactionResult(%v) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestHandleAssistantCapturesPerSubCallUsage verifies the split-source policy

@@ -4998,6 +4998,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			// Non-terminal result events (e.g. mid-turn compaction: Claude
+			// Code's auto-context-compact emits type:"result" with
+			// subtype:"compact"/"compaction" and Done=false) must not trigger
+			// turn-completion side effects. Skip them so the outer loop
+			// continues to read subsequent tool calls and assistant messages
+			// for the same turn. See PR #1272 / issue #481.
+			if !event.Done {
+				slog.Debug("EventResult: non-terminal result event, continuing event loop",
+					"session", session.ID,
+					"input_tokens", event.InputTokens,
+					"output_tokens", event.OutputTokens,
+					"metadata", event.Metadata,
+				)
+				continue
+			}
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id

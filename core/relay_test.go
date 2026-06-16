@@ -102,7 +102,7 @@ func runRelayVisibilityScenario(t *testing.T, visibility string) (resp string, s
 		done <- relayResult{err: err}
 	}()
 
-	targetSession.events <- Event{Type: EventResult, Content: "target says long answer"}
+	targetSession.events <- Event{Type: EventResult, Content: "target says long answer", Done: true}
 
 	select {
 	case got := <-done:
@@ -184,7 +184,7 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	// goroutine. We need two events: one to unblock HandleRelay, and one
 	// EventResult for the drain goroutine to close the session cleanly.
 	session.events <- Event{Type: EventThinking, Content: "still working"}
-	session.events <- Event{Type: EventResult, Content: "done"}
+	session.events <- Event{Type: EventResult, Content: "done", Done: true}
 
 	got := <-done
 	if got.err != nil {
@@ -223,7 +223,7 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	// One event to unblock HandleRelay's for-range, one for the drain goroutine.
 	session.events <- Event{Type: EventThinking, Content: "still working"}
-	session.events <- Event{Type: EventResult, Content: "done"}
+	session.events <- Event{Type: EventResult, Content: "done", Done: true}
 
 	got := <-done
 	if got.resp != "" {
@@ -285,7 +285,7 @@ func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
 	}()
 
 	// The fresh session should receive the message and respond.
-	freshSession.events <- Event{Type: EventResult, Content: "recovered", SessionID: "fresh-session"}
+	freshSession.events <- Event{Type: EventResult, Content: "recovered", SessionID: "fresh-session", Done: true}
 
 	got := <-done
 	if got != "recovered" {

@@ -396,7 +396,32 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
+	default:
+		// Unknown event types are not silently dropped — they are logged
+		// at debug level with the full payload so future diagnosis of
+		// new Claude Code event shapes (e.g. compaction, hook events)
+		// is possible from the log stream. Compaction events are
+		// recognized in handleResult via their `result` subtype rather
+		// than the top-level event type.
+		slog.Debug("claudeSession: unrecognized event type", "type", eventType, "raw", raw)
 	}
+}
+
+// isCompactionResult reports whether a `type:"result"` event is actually
+// a mid-turn compaction notification. Claude Code uses the value
+// `compact` in newer CLI versions and `compaction` in older ones; we
+// accept both to be safe across CLI rollouts (issue #481).
+func isCompactionResult(raw map[string]any) bool {
+	return resultSubtype(raw) == "compact" || resultSubtype(raw) == "compaction"
+}
+
+// resultSubtype extracts the optional `subtype` field from a result
+// event payload. Empty string when missing.
+func resultSubtype(raw map[string]any) string {
+	if s, ok := raw["subtype"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
@@ -556,6 +581,17 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 
+	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
+	// or `subtype:"compaction"`. They are NOT turn completion — the CLI
+	// is mid-task and will continue streaming subsequent tool calls and
+	// assistant messages after the compaction step. Treating these as
+	// Done=true would make the engine's processInteractiveEvents return
+	// early and drop the rest of the turn (issue #481).
+	isCompaction := isCompactionResult(raw)
+	if isCompaction {
+		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
+	}
+
 	// Aggregated usage across all sub-calls in this turn — used for billing-
 	// style reporting in the EventResult event (slog turn-complete log etc.).
 	// We do NOT pull input/cache values into cs.lastUsage from here:
@@ -586,7 +622,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		Type:                     core.EventResult,
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
-		Done:                     true,
+		Done:                     !isCompaction,
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
