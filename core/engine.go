@@ -3555,10 +3555,8 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
 	// preamble for why run_as_user has to survive this copy.
 	if _, ok := opts["run_as_user"]; !ok {
-		if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
-			if u := ma.GetRunAsUser(); u != "" {
-				opts["run_as_user"] = u
-			}
+		if u := e.runAsUser(); u != "" {
+			opts["run_as_user"] = u
 		}
 	}
 	if _, ok := opts["run_as_env"]; !ok {
@@ -15489,7 +15487,28 @@ func (e *Engine) lookupEffectiveWorkspaceBinding(channelKey string) (*WorkspaceB
 		return nil, "", false
 	}
 
+	// When run_as_user isolation is active, the workspace lives in the target
+	// user's space (typically under their HOME, set to mode 0700 by `sudo -i`).
+	// The supervisor process runs as a different user, so os.Stat here would
+	// hit EACCES on the target user's private path and we'd wrongly conclude
+	// the directory is "missing" — then Unbind() it, permanently dropping a
+	// perfectly valid binding. The agent that actually uses the workspace runs
+	// as the target user and can access it fine, so skip the supervisor-side
+	// existence check entirely under isolation and trust the binding.
+	if e.runAsUser() != "" {
+		return b, bindingKey, true
+	}
+
 	if _, err := os.Stat(b.Workspace); err != nil {
+		// Only a genuine "does not exist" justifies dropping the binding. A
+		// permission error (or any other transient stat failure) must NOT
+		// unbind: the directory may well exist but be inaccessible to the
+		// supervisor. Treating those as "missing" silently loses user bindings.
+		if !os.IsNotExist(err) {
+			slog.Warn("bound workspace stat failed; keeping binding (not treating as missing)",
+				"workspace", b.Workspace, "channel_key", channelKey, "binding_scope", bindingKey, "err", err)
+			return b, bindingKey, true
+		}
 		slog.Warn("bound workspace directory missing",
 			"workspace", b.Workspace, "channel_key", channelKey, "binding_scope", bindingKey)
 		if bindingKey != sharedWorkspaceBindingsKey {
@@ -15499,6 +15518,16 @@ func (e *Engine) lookupEffectiveWorkspaceBinding(channelKey string) (*WorkspaceB
 	}
 
 	return b, bindingKey, true
+}
+
+// runAsUser returns the configured run_as_user for the engine's agent, or ""
+// if OS-level user isolation is not active. Mirrors the capability probe used
+// when copying isolation settings to per-workspace agents (getOrCreateWorkspaceAgent).
+func (e *Engine) runAsUser() string {
+	if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
+		return ma.GetRunAsUser()
+	}
+	return ""
 }
 
 // resolveWorkspace resolves a channel to a workspace directory.
