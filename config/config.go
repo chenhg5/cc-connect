@@ -187,7 +187,7 @@ const (
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
-	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	CardMode             *string `toml:"card_mode"`              // legacy rich-card compatibility switch; Feishu/Lark message style uses platform feishu_message
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
@@ -585,6 +585,57 @@ type PlatformConfig struct {
 	Options map[string]any `toml:"options"`
 }
 
+const (
+	FeishuMessageTypePlain = "plain"
+	FeishuMessageTypeCard1 = "card1"
+	FeishuMessageTypeCard2 = "card2"
+
+	FeishuProgressStyleLegacy  = "legacy"
+	FeishuProgressStyleCompact = "compact"
+	FeishuProgressStyleCard    = "card"
+
+	FeishuCard2PrintStrategyFast  = "fast"
+	FeishuCard2PrintStrategyDelay = "delay"
+)
+
+// FeishuMessageConfig is the normalized reply rendering configuration for
+// Feishu/Lark platforms. It is stored under
+// [projects.platforms.options.feishu_message].
+type FeishuMessageConfig struct {
+	Type  string            `toml:"type,omitempty" json:"type"`
+	Card1 FeishuCard1Config `toml:"card1,omitempty" json:"card1"`
+	Card2 FeishuCard2Config `toml:"card2,omitempty" json:"card2"`
+}
+
+type FeishuCard1Config struct {
+	ProgressStyle string `toml:"progress_style,omitempty" json:"progress_style"`
+}
+
+type FeishuCard2Config struct {
+	PanelExpanded          bool   `toml:"panel_expanded" json:"panel_expanded"`
+	StreamingPanelExpanded bool   `toml:"streaming_panel_expanded" json:"streaming_panel_expanded"`
+	PrintStrategy          string `toml:"print_strategy" json:"print_strategy"`
+	FlushIntervalMs        int    `toml:"flush_interval_ms" json:"flush_interval_ms"`
+	MaxToolSteps           int    `toml:"max_tool_steps" json:"max_tool_steps"`
+	MaxReasoningRounds     int    `toml:"max_reasoning_rounds" json:"max_reasoning_rounds"`
+	ShowReasoning          bool   `toml:"show_reasoning" json:"show_reasoning"`
+}
+
+type FeishuMessageUpdate struct {
+	PlatformIndex         int
+	InteractiveCardEnable *bool
+	Config                *FeishuMessageConfig
+}
+
+type FeishuMessageResult struct {
+	ProjectName           string              `json:"project_name"`
+	PlatformIndex         int                 `json:"platform_index"`
+	PlatformType          string              `json:"platform_type"`
+	InteractiveCardEnable bool                `json:"interactive_card_enable"`
+	Config                FeishuMessageConfig `json:"config"`
+	RestartRequired       bool                `json:"restart_required,omitempty"`
+}
+
 // AliasConfig maps a trigger string to a command (e.g. "帮助" → "/help").
 type AliasConfig struct {
 	Name    string `toml:"name"`    // trigger text (e.g. "帮助")
@@ -942,8 +993,9 @@ func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile
 	}
 }
 
-// EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
-// or "legacy" (default plain messages). Per-project overrides global.
+// EffectiveCardMode returns the legacy rich-card rendering mode for projects
+// that still use the global display switch. Feishu/Lark message style is
+// controlled by each platform's feishu_message options instead.
 func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	var projDisp *DisplayConfig
 	if proj != nil {
@@ -960,6 +1012,104 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 		}
 	}
 	return "legacy"
+}
+
+func DefaultFeishuMessageConfig() FeishuMessageConfig {
+	return FeishuMessageConfig{
+		Type: FeishuMessageTypeCard1,
+		Card1: FeishuCard1Config{
+			ProgressStyle: FeishuProgressStyleLegacy,
+		},
+		Card2: DefaultFeishuCard2Config(),
+	}
+}
+
+func DefaultFeishuCard2Config() FeishuCard2Config {
+	return FeishuCard2Config{
+		PanelExpanded:          false,
+		StreamingPanelExpanded: false,
+		PrintStrategy:          FeishuCard2PrintStrategyDelay,
+		FlushIntervalMs:        100,
+		MaxToolSteps:           20,
+		MaxReasoningRounds:     20,
+		ShowReasoning:          true,
+	}
+}
+
+// EffectiveFeishuMessageConfig normalizes the new feishu_message block and
+// legacy progress_style into a single runtime configuration. Legacy
+// [display].card_mode is intentionally not a Card 2.0 source.
+func EffectiveFeishuMessageConfig(options map[string]any) FeishuMessageConfig {
+	cfg := DefaultFeishuMessageConfig()
+	if options == nil {
+		return cfg
+	}
+	if legacy := strings.ToLower(strings.TrimSpace(stringOption(options["progress_style"]))); legacy != "" {
+		cfg.Card1.ProgressStyle = legacy
+	}
+	if raw, ok := options["feishu_message"]; ok {
+		mergeFeishuMessageConfig(&cfg, raw)
+	}
+	if cfg.Type == "" {
+		cfg.Type = FeishuMessageTypeCard1
+	}
+	if cfg.Card1.ProgressStyle == "" {
+		cfg.Card1.ProgressStyle = FeishuProgressStyleLegacy
+	}
+	if cfg.Card2.PrintStrategy == "" {
+		cfg.Card2.PrintStrategy = FeishuCard2PrintStrategyDelay
+	}
+	if cfg.Card2.FlushIntervalMs <= 0 {
+		cfg.Card2.FlushIntervalMs = 100
+	}
+	cfg.Card2.FlushIntervalMs = clampInt(cfg.Card2.FlushIntervalMs, 70, 2000)
+	if cfg.Card2.MaxToolSteps <= 0 {
+		cfg.Card2.MaxToolSteps = 20
+	}
+	cfg.Card2.MaxToolSteps = clampInt(cfg.Card2.MaxToolSteps, 1, 100)
+	if cfg.Card2.MaxReasoningRounds <= 0 {
+		cfg.Card2.MaxReasoningRounds = 20
+	}
+	cfg.Card2.MaxReasoningRounds = clampInt(cfg.Card2.MaxReasoningRounds, 1, 100)
+	return cfg
+}
+
+func mergeFeishuMessageConfig(cfg *FeishuMessageConfig, raw any) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if t := strings.ToLower(strings.TrimSpace(stringOption(m["type"]))); t != "" {
+		cfg.Type = t
+	}
+	if card1, ok := m["card1"].(map[string]any); ok {
+		if style := strings.ToLower(strings.TrimSpace(stringOption(card1["progress_style"]))); style != "" {
+			cfg.Card1.ProgressStyle = style
+		}
+	}
+	if card2, ok := m["card2"].(map[string]any); ok {
+		if v, ok := boolOption(card2["panel_expanded"]); ok {
+			cfg.Card2.PanelExpanded = v
+		}
+		if v, ok := boolOption(card2["streaming_panel_expanded"]); ok {
+			cfg.Card2.StreamingPanelExpanded = v
+		}
+		if strategy := strings.ToLower(strings.TrimSpace(stringOption(card2["print_strategy"]))); strategy != "" {
+			cfg.Card2.PrintStrategy = strategy
+		}
+		if v, ok := intOption(card2["flush_interval_ms"]); ok {
+			cfg.Card2.FlushIntervalMs = v
+		}
+		if v, ok := intOption(card2["max_tool_steps"]); ok {
+			cfg.Card2.MaxToolSteps = v
+		}
+		if v, ok := intOption(card2["max_reasoning_rounds"]); ok {
+			cfg.Card2.MaxReasoningRounds = v
+		}
+		if v, ok := boolOption(card2["show_reasoning"]); ok {
+			cfg.Card2.ShowReasoning = v
+		}
+	}
 }
 
 // validatePermissive is like validate but skips the "at least one platform"
@@ -1007,6 +1157,12 @@ func (c *Config) validateInternal(permissive bool) error {
 		for j, p := range proj.Platforms {
 			if p.Type == "" {
 				return fmt.Errorf("config: %s.platforms[%d].type is required", prefix, j)
+			}
+			ptype := strings.ToLower(strings.TrimSpace(p.Type))
+			if ptype == "feishu" || ptype == "lark" {
+				if err := validateFeishuMessageConfig(fmt.Sprintf("%s.platforms[%d].options", prefix, j), p.Options); err != nil {
+					return err
+				}
 			}
 		}
 		if proj.Mode == "multi-workspace" {
@@ -1058,6 +1214,84 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 		}
 	}
 	return nil
+}
+
+func validateFeishuMessageConfig(prefix string, options map[string]any) error {
+	if options == nil {
+		return nil
+	}
+	raw, ok := options["feishu_message"]
+	if !ok {
+		if style := strings.ToLower(strings.TrimSpace(stringOption(options["progress_style"]))); style != "" && !isValidFeishuProgressStyle(style) {
+			return fmt.Errorf("config: %s.progress_style must be \"legacy\", \"compact\", or \"card\"", prefix)
+		}
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("config: %s.feishu_message must be a table", prefix)
+	}
+	if t := strings.ToLower(strings.TrimSpace(stringOption(m["type"]))); t != "" {
+		switch t {
+		case FeishuMessageTypePlain, FeishuMessageTypeCard1, FeishuMessageTypeCard2:
+		default:
+			return fmt.Errorf("config: %s.feishu_message.type must be \"plain\", \"card1\", or \"card2\"", prefix)
+		}
+	}
+	if card1, ok := m["card1"].(map[string]any); ok {
+		if style := strings.ToLower(strings.TrimSpace(stringOption(card1["progress_style"]))); style != "" && !isValidFeishuProgressStyle(style) {
+			return fmt.Errorf("config: %s.feishu_message.card1.progress_style must be \"legacy\", \"compact\", or \"card\"", prefix)
+		}
+	}
+	if card2, ok := m["card2"].(map[string]any); ok {
+		if strategy := strings.ToLower(strings.TrimSpace(stringOption(card2["print_strategy"]))); strategy != "" {
+			switch strategy {
+			case FeishuCard2PrintStrategyFast, FeishuCard2PrintStrategyDelay:
+			default:
+				return fmt.Errorf("config: %s.feishu_message.card2.print_strategy must be \"fast\" or \"delay\"", prefix)
+			}
+		}
+		for key, label := range map[string]string{
+			"flush_interval_ms":    "flush_interval_ms",
+			"max_tool_steps":       "max_tool_steps",
+			"max_reasoning_rounds": "max_reasoning_rounds",
+		} {
+			if v, ok := intOption(card2[key]); ok && v <= 0 {
+				return fmt.Errorf("config: %s.feishu_message.card2.%s must be > 0", prefix, label)
+			}
+		}
+		if v, ok := intOption(card2["flush_interval_ms"]); ok && (v < 70 || v > 2000) {
+			return fmt.Errorf("config: %s.feishu_message.card2.flush_interval_ms must be between 70 and 2000", prefix)
+		}
+		for _, key := range []string{"max_tool_steps", "max_reasoning_rounds"} {
+			if v, ok := intOption(card2[key]); ok && (v < 1 || v > 100) {
+				return fmt.Errorf("config: %s.feishu_message.card2.%s must be between 1 and 100", prefix, key)
+			}
+		}
+	}
+	if style := strings.ToLower(strings.TrimSpace(stringOption(options["progress_style"]))); style != "" && !isValidFeishuProgressStyle(style) {
+		return fmt.Errorf("config: %s.progress_style must be \"legacy\", \"compact\", or \"card\"", prefix)
+	}
+	return nil
+}
+
+func isValidFeishuProgressStyle(style string) bool {
+	switch style {
+	case FeishuProgressStyleLegacy, FeishuProgressStyleCompact, FeishuProgressStyleCard:
+		return true
+	default:
+		return false
+	}
+}
+
+func clampInt(v, minVal, maxVal int) int {
+	if v < minVal {
+		return minVal
+	}
+	if v > maxVal {
+		return maxVal
+	}
+	return v
 }
 
 var supportedReferenceAgents = map[string]struct{}{
@@ -2131,6 +2365,249 @@ func stringOption(v any) string {
 	return ""
 }
 
+func boolOption(v any) (bool, bool) {
+	b, ok := v.(bool)
+	return b, ok
+}
+
+func intOption(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
+func GetFeishuMessageConfig(projectName string, platformIndex int) (*FeishuMessageResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	projectIdx, absIdx, err := findFeishuPlatform(cfg, projectName, platformIndex)
+	if err != nil {
+		return nil, err
+	}
+	platform := cfg.Projects[projectIdx].Platforms[absIdx]
+	enabled := true
+	if v, ok := boolOption(platform.Options["enable_feishu_card"]); ok {
+		enabled = v
+	}
+	return &FeishuMessageResult{
+		ProjectName:           projectName,
+		PlatformIndex:         absIdx,
+		PlatformType:          platform.Type,
+		InteractiveCardEnable: enabled,
+		Config:                EffectiveFeishuMessageConfig(platform.Options),
+	}, nil
+}
+
+func SaveFeishuMessageConfig(projectName string, update FeishuMessageUpdate) (*FeishuMessageResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.validatePermissive(); err != nil {
+		return nil, err
+	}
+	projectIdx, absIdx, err := findFeishuPlatform(cfg, projectName, update.PlatformIndex)
+	if err != nil {
+		return nil, err
+	}
+	platform := &cfg.Projects[projectIdx].Platforms[absIdx]
+	if platform.Options == nil {
+		platform.Options = map[string]any{}
+	}
+	restartRequired := false
+	currentEnabled := true
+	if v, ok := boolOption(platform.Options["enable_feishu_card"]); ok {
+		currentEnabled = v
+	}
+	if update.InteractiveCardEnable != nil && *update.InteractiveCardEnable != currentEnabled {
+		restartRequired = true
+	}
+	normalized := EffectiveFeishuMessageConfig(platform.Options)
+	if update.Config != nil {
+		normalized = normalizeFeishuMessageConfig(*update.Config)
+	}
+	raw := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines, hadTrailing := splitConfigLines(raw)
+	lines, err = patchRawFeishuMessageConfig(lines, projectIdx, absIdx, update.InteractiveCardEnable, update.Config, normalized)
+	if err != nil {
+		return nil, err
+	}
+	if update.InteractiveCardEnable != nil {
+		currentEnabled = *update.InteractiveCardEnable
+	}
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+	return &FeishuMessageResult{
+		ProjectName:           projectName,
+		PlatformIndex:         absIdx,
+		PlatformType:          platform.Type,
+		InteractiveCardEnable: currentEnabled,
+		Config:                normalized,
+		RestartRequired:       restartRequired,
+	}, nil
+}
+
+func normalizeFeishuMessageConfig(in FeishuMessageConfig) FeishuMessageConfig {
+	base := DefaultFeishuMessageConfig()
+	if in.Type != "" {
+		base.Type = strings.ToLower(strings.TrimSpace(in.Type))
+	}
+	switch base.Type {
+	case FeishuMessageTypePlain, FeishuMessageTypeCard1, FeishuMessageTypeCard2:
+	default:
+		base.Type = FeishuMessageTypeCard1
+	}
+	if in.Card1.ProgressStyle != "" {
+		base.Card1.ProgressStyle = strings.ToLower(strings.TrimSpace(in.Card1.ProgressStyle))
+	}
+	if !isValidFeishuProgressStyle(base.Card1.ProgressStyle) {
+		base.Card1.ProgressStyle = FeishuProgressStyleLegacy
+	}
+	if in.Card2.PrintStrategy != "" {
+		base.Card2.PrintStrategy = strings.ToLower(strings.TrimSpace(in.Card2.PrintStrategy))
+	}
+	if base.Card2.PrintStrategy != FeishuCard2PrintStrategyFast && base.Card2.PrintStrategy != FeishuCard2PrintStrategyDelay {
+		base.Card2.PrintStrategy = FeishuCard2PrintStrategyDelay
+	}
+	base.Card2.PanelExpanded = in.Card2.PanelExpanded
+	base.Card2.StreamingPanelExpanded = in.Card2.StreamingPanelExpanded
+	if in.Card2.FlushIntervalMs > 0 {
+		base.Card2.FlushIntervalMs = in.Card2.FlushIntervalMs
+	}
+	base.Card2.FlushIntervalMs = clampInt(base.Card2.FlushIntervalMs, 70, 2000)
+	if in.Card2.MaxToolSteps > 0 {
+		base.Card2.MaxToolSteps = in.Card2.MaxToolSteps
+	}
+	base.Card2.MaxToolSteps = clampInt(base.Card2.MaxToolSteps, 1, 100)
+	if in.Card2.MaxReasoningRounds > 0 {
+		base.Card2.MaxReasoningRounds = in.Card2.MaxReasoningRounds
+	}
+	base.Card2.MaxReasoningRounds = clampInt(base.Card2.MaxReasoningRounds, 1, 100)
+	base.Card2.ShowReasoning = in.Card2.ShowReasoning
+	return base
+}
+
+func feishuMessageConfigToMap(cfg FeishuMessageConfig) map[string]any {
+	return map[string]any{
+		"type": cfg.Type,
+		"card1": map[string]any{
+			"progress_style": cfg.Card1.ProgressStyle,
+		},
+		"card2": map[string]any{
+			"panel_expanded":           cfg.Card2.PanelExpanded,
+			"streaming_panel_expanded": cfg.Card2.StreamingPanelExpanded,
+			"print_strategy":           cfg.Card2.PrintStrategy,
+			"flush_interval_ms":        cfg.Card2.FlushIntervalMs,
+			"max_tool_steps":           cfg.Card2.MaxToolSteps,
+			"max_reasoning_rounds":     cfg.Card2.MaxReasoningRounds,
+			"show_reasoning":           cfg.Card2.ShowReasoning,
+		},
+	}
+}
+
+func findFeishuPlatform(cfg *Config, projectName string, platformIndex int) (int, int, error) {
+	if strings.TrimSpace(projectName) == "" {
+		return -1, -1, fmt.Errorf("project name is required")
+	}
+	if platformIndex < 0 {
+		return -1, -1, fmt.Errorf("platform index must be >= 0")
+	}
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return -1, -1, fmt.Errorf("project %q not found", projectName)
+	}
+	if platformIndex >= len(cfg.Projects[projectIdx].Platforms) {
+		return -1, -1, fmt.Errorf("platform index %d out of range: project %q has %d platform(s)", platformIndex, projectName, len(cfg.Projects[projectIdx].Platforms))
+	}
+	t := strings.ToLower(strings.TrimSpace(cfg.Projects[projectIdx].Platforms[platformIndex].Type))
+	if t != "feishu" && t != "lark" {
+		return -1, -1, fmt.Errorf("platform index %d in project %q is %q, not feishu/lark", platformIndex, projectName, cfg.Projects[projectIdx].Platforms[platformIndex].Type)
+	}
+	return projectIdx, platformIndex, nil
+}
+
+func patchRawFeishuMessageConfig(lines []string, projectIdx, platformIdx int, interactive *bool, update *FeishuMessageConfig, normalized FeishuMessageConfig) ([]string, error) {
+	spans := buildRawProjectSpans(lines)
+	if projectIdx < 0 || projectIdx >= len(spans) {
+		return nil, fmt.Errorf("project located in parsed config but not raw file")
+	}
+	if platformIdx < 0 || platformIdx >= len(spans[projectIdx].platforms) {
+		return nil, fmt.Errorf("feishu/lark platform located in parsed config but not raw file")
+	}
+
+	reloadSpan := func() rawPlatformSpan {
+		spans = buildRawProjectSpans(lines)
+		return spans[projectIdx].platforms[platformIdx]
+	}
+	span := spans[projectIdx].platforms[platformIdx]
+	if span.optionsStart < 0 {
+		insertAt := span.end + 1
+		block := make([]string, 0, 3)
+		if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+			block = append(block, "")
+		}
+		block = append(block, "[projects.platforms.options]")
+		lines = insertLines(lines, insertAt, block)
+		span = reloadSpan()
+	}
+
+	if interactive != nil {
+		lines = upsertTomlRawKey(lines, span.optionsStart+1, span.optionsEnd, "enable_feishu_card", strconv.FormatBool(*interactive))
+		span = reloadSpan()
+	}
+	if update == nil {
+		return lines, nil
+	}
+
+	// Keep the legacy progress_style mirror so older cc-connect binaries still
+	// interpret a Web-saved Card 1.0 configuration correctly.
+	if normalized.Type == FeishuMessageTypeCard1 {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "progress_style", normalized.Card1.ProgressStyle)
+		span = reloadSpan()
+	}
+
+	lines = upsertTomlSubtableStringKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message]", "type", normalized.Type)
+	lines = upsertTomlSubtableStringKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card1]", "progress_style", normalized.Card1.ProgressStyle)
+	lines = upsertTomlSubtableRawKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "panel_expanded", strconv.FormatBool(normalized.Card2.PanelExpanded))
+	lines = upsertTomlSubtableRawKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "streaming_panel_expanded", strconv.FormatBool(normalized.Card2.StreamingPanelExpanded))
+	lines = upsertTomlSubtableStringKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "print_strategy", normalized.Card2.PrintStrategy)
+	lines = upsertTomlSubtableRawKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "flush_interval_ms", strconv.Itoa(normalized.Card2.FlushIntervalMs))
+	lines = upsertTomlSubtableRawKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "max_tool_steps", strconv.Itoa(normalized.Card2.MaxToolSteps))
+	lines = upsertTomlSubtableRawKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "max_reasoning_rounds", strconv.Itoa(normalized.Card2.MaxReasoningRounds))
+	lines = upsertTomlSubtableRawKey(lines, projectIdx, platformIdx, "[projects.platforms.options.feishu_message.card2]", "show_reasoning", strconv.FormatBool(normalized.Card2.ShowReasoning))
+	return lines, nil
+}
+
 func mergeAllowFromValue(current, userID string) string {
 	current = strings.TrimSpace(current)
 	userID = strings.TrimSpace(userID)
@@ -2990,6 +3467,54 @@ func upsertTomlRawKey(lines []string, start, end int, key, rawValue string) []st
 	return insertLines(lines, insertAt, []string{fmt.Sprintf("%s = %s", key, rawValue)})
 }
 
+func upsertTomlSubtableStringKey(lines []string, projectIdx, platformIdx int, header, key, value string) []string {
+	start, end, lines := ensureTomlSubtable(lines, projectIdx, platformIdx, header)
+	return upsertTomlStringKey(lines, start+1, end, key, value)
+}
+
+func upsertTomlSubtableRawKey(lines []string, projectIdx, platformIdx int, header, key, rawValue string) []string {
+	start, end, lines := ensureTomlSubtable(lines, projectIdx, platformIdx, header)
+	return upsertTomlRawKey(lines, start+1, end, key, rawValue)
+}
+
+func ensureTomlSubtable(lines []string, projectIdx, platformIdx int, header string) (int, int, []string) {
+	if start, end, ok := findTomlSubtable(lines, projectIdx, platformIdx, header); ok {
+		return start, end, lines
+	}
+	spans := buildRawProjectSpans(lines)
+	span := spans[projectIdx].platforms[platformIdx]
+	insertAt := span.end + 1
+	block := []string{header}
+	if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+		block = append([]string{""}, block...)
+	}
+	lines = insertLines(lines, insertAt, block)
+	start, end, _ := findTomlSubtable(lines, projectIdx, platformIdx, header)
+	return start, end, lines
+}
+
+func findTomlSubtable(lines []string, projectIdx, platformIdx int, header string) (int, int, bool) {
+	spans := buildRawProjectSpans(lines)
+	if projectIdx < 0 || projectIdx >= len(spans) || platformIdx < 0 || platformIdx >= len(spans[projectIdx].platforms) {
+		return -1, -1, false
+	}
+	span := spans[projectIdx].platforms[platformIdx]
+	for i := span.start + 1; i <= span.end && i < len(lines); i++ {
+		if !matchTableHeader(lines[i], header) {
+			continue
+		}
+		end := span.end
+		for j := i + 1; j <= span.end && j < len(lines); j++ {
+			if isAnyTableHeader(lines[j]) {
+				end = j - 1
+				break
+			}
+		}
+		return i, end, true
+	}
+	return -1, -1, false
+}
+
 func quoteTomlString(value string) string {
 	return strconv.Quote(value)
 }
@@ -3219,10 +3744,19 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {
-			pc := map[string]any{"type": plat.Type}
+			pc := map[string]any{"type": plat.Type, "index": j}
 			if plat.Options != nil {
 				if af, ok := plat.Options["allow_from"].(string); ok {
 					pc["allow_from"] = af
+				}
+				ptype := strings.ToLower(strings.TrimSpace(plat.Type))
+				if ptype == "feishu" || ptype == "lark" {
+					enabled := true
+					if v, ok := boolOption(plat.Options["enable_feishu_card"]); ok {
+						enabled = v
+					}
+					pc["enable_feishu_card"] = enabled
+					pc["feishu_message"] = EffectiveFeishuMessageConfig(plat.Options)
 				}
 			}
 			platConfigs[j] = pc

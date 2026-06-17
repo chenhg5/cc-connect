@@ -1153,6 +1153,23 @@ func main() {
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
 		mgmtSrv.SetSaveProviderRefs(config.SaveProviderRefs)
+		mgmtSrv.SetGetMessageRenderSettings(func(projectName string, platformIndex int) (any, error) {
+			return config.GetFeishuMessageConfig(projectName, platformIndex)
+		})
+		mgmtSrv.SetSaveMessageRenderSettings(func(projectName string, platformIndex int, updates map[string]any) (any, any, bool, error) {
+			u := config.FeishuMessageUpdate{PlatformIndex: platformIndex}
+			if v, ok := updates["enable_feishu_card"].(bool); ok {
+				u.InteractiveCardEnable = &v
+			}
+			if cfg, ok := parseFeishuMessageUpdate(updates); ok {
+				u.Config = &cfg
+			}
+			result, err := config.SaveFeishuMessageConfig(projectName, u)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			return result, result.Config, result.RestartRequired, nil
+		})
 		mgmtSrv.SetConfigFilePath(configPath)
 		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
 		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
@@ -1849,6 +1866,46 @@ func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
 	if starter, ok := agent.(initialModelRefreshStarter); ok {
 		starter.StartInitialModelRefresh()
 	}
+}
+
+func parseFeishuMessageUpdate(updates map[string]any) (config.FeishuMessageConfig, bool) {
+	cfg := config.DefaultFeishuMessageConfig()
+	touched := false
+	if v, ok := updates["type"].(string); ok {
+		cfg.Type = strings.ToLower(strings.TrimSpace(v))
+		touched = true
+	}
+	if raw, ok := updates["card1"].(map[string]any); ok {
+		touched = true
+		if v, ok := raw["progress_style"].(string); ok {
+			cfg.Card1.ProgressStyle = strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+	if raw, ok := updates["card2"].(map[string]any); ok {
+		touched = true
+		if v, ok := raw["panel_expanded"].(bool); ok {
+			cfg.Card2.PanelExpanded = v
+		}
+		if v, ok := raw["streaming_panel_expanded"].(bool); ok {
+			cfg.Card2.StreamingPanelExpanded = v
+		}
+		if v, ok := raw["print_strategy"].(string); ok {
+			cfg.Card2.PrintStrategy = strings.ToLower(strings.TrimSpace(v))
+		}
+		if v, ok := raw["flush_interval_ms"].(float64); ok {
+			cfg.Card2.FlushIntervalMs = int(v)
+		}
+		if v, ok := raw["max_tool_steps"].(float64); ok {
+			cfg.Card2.MaxToolSteps = int(v)
+		}
+		if v, ok := raw["max_reasoning_rounds"].(float64); ok {
+			cfg.Card2.MaxReasoningRounds = int(v)
+		}
+		if v, ok := raw["show_reasoning"].(bool); ok {
+			cfg.Card2.ShowReasoning = v
+		}
+	}
+	return cfg, touched
 }
 
 func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {

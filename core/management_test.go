@@ -78,6 +78,15 @@ type mgmtResponse struct {
 	Error string          `json:"error,omitempty"`
 }
 
+type managementRenderPlatform struct {
+	stubPlatformEngine
+	hotConfig any
+}
+
+func (p *managementRenderPlatform) UpdateMessageRenderConfig(config any) {
+	p.hotConfig = config
+}
+
 func mgmtGet(t *testing.T, url, token string) mgmtResponse {
 	t.Helper()
 	req, _ := http.NewRequest("GET", url, nil)
@@ -246,6 +255,74 @@ func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
 	}
 	if data.Bridge.Token != "bridge-secret" {
 		t.Fatalf("expected bridge token, got %q", data.Bridge.Token)
+	}
+}
+
+func TestMgmt_PlatformMessageRenderGet(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt.SetGetMessageRenderSettings(func(projectName string, platformIndex int) (any, error) {
+		if projectName != "test-project" || platformIndex != 1 {
+			t.Fatalf("callback args = %q/%d, want test-project/1", projectName, platformIndex)
+		}
+		return map[string]any{
+			"project_name":             projectName,
+			"platform_index":           platformIndex,
+			"interactive_card_enable":  true,
+			"config":                   map[string]any{"type": "card2"},
+			"unexpected_future_field":  "kept",
+			"restart_required_ignored": false,
+		}, nil
+	})
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/platforms/1/message-render", "tok")
+	if !r.OK {
+		t.Fatalf("message render GET failed: %s", r.Error)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if data["platform_index"] != float64(1) || data["interactive_card_enable"] != true {
+		t.Fatalf("unexpected response: %#v", data)
+	}
+}
+
+func TestMgmt_PlatformMessageRenderPatchHotAppliesConfig(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	p := &managementRenderPlatform{stubPlatformEngine: stubPlatformEngine{n: "platform"}}
+	e.platforms = []Platform{p}
+	mgmt.SetSaveMessageRenderSettings(func(projectName string, platformIndex int, updates map[string]any) (any, any, bool, error) {
+		if projectName != "test-project" || platformIndex != 0 {
+			t.Fatalf("callback args = %q/%d, want test-project/0", projectName, platformIndex)
+		}
+		if updates["type"] != "card2" {
+			t.Fatalf("updates[type] = %#v, want card2", updates["type"])
+		}
+		hot := map[string]any{"type": "card2"}
+		return map[string]any{
+			"project_name":     projectName,
+			"platform_index":   platformIndex,
+			"config":           hot,
+			"restart_required": true,
+		}, hot, true, nil
+	})
+
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project/platforms/0/message-render", "tok", map[string]any{
+		"type": "card2",
+	})
+	if !r.OK {
+		t.Fatalf("message render PATCH failed: %s", r.Error)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if data["restart_required"] != true {
+		t.Fatalf("restart_required = %#v, want true", data["restart_required"])
+	}
+	hot, ok := p.hotConfig.(map[string]any)
+	if !ok || hot["type"] != "card2" {
+		t.Fatalf("hotConfig = %#v, want card2 map", p.hotConfig)
 	}
 }
 

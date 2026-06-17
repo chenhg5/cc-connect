@@ -49,16 +49,18 @@ type ManagementServer struct {
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
 
-	setupFeishuSave      func(req FeishuSetupSaveRequest) error
-	setupWeixinSave      func(req WeixinSetupSaveRequest) error
-	addPlatformToProject func(projectName, platType string, opts map[string]any, workDir, agentType string) error
-	removeProject        func(projectName string) error
-	saveProjectSettings  func(projectName string, update ProjectSettingsUpdate) error
-	getProjectConfig     func(projectName string) map[string]any
-	saveProviderRefs     func(projectName string, refs []string) error
-	configFilePath       string
-	getGlobalSettings    func() map[string]any
-	saveGlobalSettings   func(map[string]any) error
+	setupFeishuSave           func(req FeishuSetupSaveRequest) error
+	setupWeixinSave           func(req WeixinSetupSaveRequest) error
+	addPlatformToProject      func(projectName, platType string, opts map[string]any, workDir, agentType string) error
+	removeProject             func(projectName string) error
+	saveProjectSettings       func(projectName string, update ProjectSettingsUpdate) error
+	getProjectConfig          func(projectName string) map[string]any
+	saveProviderRefs          func(projectName string, refs []string) error
+	getMessageRenderSettings  func(projectName string, platformIndex int) (any, error)
+	saveMessageRenderSettings func(projectName string, platformIndex int, updates map[string]any) (result any, hotConfig any, restartRequired bool, err error)
+	configFilePath            string
+	getGlobalSettings         func() map[string]any
+	saveGlobalSettings        func(map[string]any) error
 
 	// Global provider callbacks (set by cmd/cc-connect)
 	listGlobalProviders  func() ([]GlobalProviderInfo, error)
@@ -124,6 +126,14 @@ func (m *ManagementServer) SetSaveProviderRefs(fn func(string, []string) error) 
 	m.saveProviderRefs = fn
 }
 
+func (m *ManagementServer) SetGetMessageRenderSettings(fn func(string, int) (any, error)) {
+	m.getMessageRenderSettings = fn
+}
+
+func (m *ManagementServer) SetSaveMessageRenderSettings(fn func(string, int, map[string]any) (any, any, bool, error)) {
+	m.saveMessageRenderSettings = fn
+}
+
 func (m *ManagementServer) SetGetGlobalSettings(fn func() map[string]any) {
 	m.getGlobalSettings = fn
 }
@@ -145,10 +155,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -631,8 +641,65 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectHeartbeat(w, r, projName, rest)
 	case "users":
 		m.handleProjectUsers(w, r, engine)
+	case "platforms":
+		m.handleProjectPlatformRoutes(w, r, projName, engine, rest)
 	default:
 		mgmtError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (m *ManagementServer) handleProjectPlatformRoutes(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "message-render" {
+		mgmtError(w, http.StatusNotFound, "not found")
+		return
+	}
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil || idx < 0 {
+		mgmtError(w, http.StatusBadRequest, "invalid platform index")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if m.getMessageRenderSettings == nil {
+			mgmtError(w, http.StatusServiceUnavailable, "message render settings not available")
+			return
+		}
+		result, err := m.getMessageRenderSettings(projName, idx)
+		if err != nil {
+			mgmtError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		mgmtJSON(w, http.StatusOK, result)
+	case http.MethodPatch:
+		if m.saveMessageRenderSettings == nil {
+			mgmtError(w, http.StatusServiceUnavailable, "message render settings save not available")
+			return
+		}
+		var updates map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		result, hotConfig, restartRequired, err := m.saveMessageRenderSettings(projName, idx, updates)
+		if err != nil {
+			mgmtError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if idx < len(e.platforms) {
+			if updater, ok := e.platforms[idx].(MessageRenderConfigUpdater); ok {
+				updater.UpdateMessageRenderConfig(hotConfig)
+			}
+		}
+		resp := map[string]any{
+			"settings": result,
+		}
+		if restartRequired {
+			resp["restart_required"] = true
+		}
+		mgmtJSON(w, http.StatusOK, resp)
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
 	}
 }
 
@@ -1905,10 +1972,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

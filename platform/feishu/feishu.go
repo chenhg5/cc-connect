@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -119,6 +120,7 @@ type Platform struct {
 	appID                      string
 	appSecret                  string
 	progressStyle              string
+	feishuMessage              config.FeishuMessageConfig
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
@@ -247,16 +249,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		}
 	}
 
-	progressStyle := "legacy"
-	if v, ok := opts["progress_style"].(string); ok {
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "", "legacy":
-			progressStyle = "legacy"
-		case "compact", "card":
-			progressStyle = strings.ToLower(strings.TrimSpace(v))
-		default:
-			return nil, fmt.Errorf("%s: invalid progress_style %q (want legacy, compact, or card)", name, v)
-		}
+	feishuMessage := config.EffectiveFeishuMessageConfig(opts)
+	progressStyle := feishuMessage.Card1.ProgressStyle
+	if !isValidProgressStyle(progressStyle) {
+		return nil, fmt.Errorf("%s: invalid progress_style %q (want legacy, compact, or card)", name, progressStyle)
 	}
 	useInteractiveCard := true
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
@@ -285,6 +281,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appID:                      appID,
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
+		feishuMessage:              feishuMessage,
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
@@ -316,7 +313,46 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 
 func (p *Platform) Name() string { return p.platformName }
 
-func (p *Platform) ProgressStyle() string { return p.progressStyle }
+func (p *Platform) ProgressStyle() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.feishuMessage.Type == config.FeishuMessageTypePlain {
+		return config.FeishuProgressStyleLegacy
+	}
+	return p.progressStyle
+}
+
+func (p *Platform) messageType() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.feishuMessage.Type
+}
+
+func (p *Platform) RichCardEnabled() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.useInteractiveCard && p.feishuMessage.Type == config.FeishuMessageTypeCard2
+}
+
+func (p *Platform) UpdateMessageRenderConfig(v any) {
+	cfg, ok := v.(config.FeishuMessageConfig)
+	if !ok {
+		return
+	}
+	p.mu.Lock()
+	p.feishuMessage = cfg
+	p.progressStyle = cfg.Card1.ProgressStyle
+	p.mu.Unlock()
+}
+
+func isValidProgressStyle(style string) bool {
+	switch style {
+	case config.FeishuProgressStyleLegacy, config.FeishuProgressStyleCompact, config.FeishuProgressStyleCard:
+		return true
+	default:
+		return false
+	}
+}
 
 func (p *Platform) SupportsProgressCardPayload() bool { return true }
 
@@ -2361,7 +2397,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := p.buildReplyContent(content)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -2383,7 +2419,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := p.buildReplyContent(content)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
@@ -2394,6 +2430,9 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
 	if strings.TrimSpace(footer) == "" {
 		return p.Send(ctx, rctx, content)
+	}
+	if p.messageType() == config.FeishuMessageTypePlain {
+		return p.Send(ctx, rctx, strings.TrimSpace(content+"\n\n"+footer))
 	}
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -2655,6 +2694,17 @@ func buildReplyContent(content string) (msgType string, body string) {
 		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
 	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+}
+
+func (p *Platform) buildReplyContent(content string) (msgType string, body string) {
+	if isCardJSON(content) {
+		return larkim.MsgTypeInteractive, content
+	}
+	if p.messageType() == config.FeishuMessageTypePlain {
+		b, _ := json.Marshal(map[string]string{"text": content})
+		return larkim.MsgTypeText, string(b)
+	}
+	return buildReplyContent(content)
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
@@ -5079,6 +5129,11 @@ func extractToolDetailFromSummary(text string, desc toolDescriptor) string {
 		if line == "" {
 			continue
 		}
+		if desc.Sanitizer == toolSanitizerCommand {
+			if command := extractPowerShellCommandPayload(line); command != "" {
+				return command
+			}
+		}
 		if desc.Sanitizer == toolSanitizerURL {
 			if urlText := extractFirstURL(line); urlText != "" {
 				return urlText
@@ -5201,9 +5256,22 @@ func sanitizeURLText(value string) string {
 }
 
 func sanitizeCommandLike(value string) string {
+	value = strings.TrimSpace(value)
+	if command := extractPowerShellCommandPayload(value); command != "" {
+		return redactInlineSecrets(command)
+	}
 	value = strings.TrimSpace(stripToolDisplayQuotes(value))
 	value = regexp.MustCompile(`(?i)^(?:command|script|description)\s+`).ReplaceAllString(value, "")
 	return redactInlineSecrets(value)
+}
+
+func extractPowerShellCommandPayload(value string) string {
+	value = strings.TrimSpace(value)
+	re := regexp.MustCompile(`(?i)\b(?:pwsh|powershell)(?:\.exe)?["']?\s+-(?:Command|c)\s+(.+)$`)
+	if match := re.FindStringSubmatch(value); len(match) == 2 {
+		return strings.TrimSpace(stripToolDisplayQuotes(match[1]))
+	}
+	return ""
 }
 
 func redactInlineSecrets(value string) string {
@@ -5744,7 +5812,11 @@ func richStepDisplayName(step core.ToolStep) string {
 	if step.Kind == core.ToolStepKindThinking {
 		return "Thinking"
 	}
-	return buildToolDisplay(step.Name, step.Summary).Title
+	display := buildToolDisplay(step.Name, step.Summary)
+	if display.Title == "Run command" {
+		return "Terminal"
+	}
+	return display.Title
 }
 
 func richStepBody(step core.ToolStep) string {
@@ -5779,6 +5851,137 @@ func richStepBody(step core.ToolStep) string {
 		lines = append(lines, result)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func richStepStatusLabel(step core.ToolStep) (label, color string) {
+	if step.Success != nil {
+		if *step.Success {
+			return "Succeeded", "green"
+		}
+		return "Failed", "red"
+	}
+	switch strings.ToLower(strings.TrimSpace(step.Status)) {
+	case "completed", "success", "succeeded", "ok":
+		return "Succeeded", "green"
+	case "failed", "error", "cancelled", "canceled":
+		return "Failed", "red"
+	case "in_progress", "running":
+		return "Running", "orange-300"
+	default:
+		if step.Done {
+			return "Done", "green"
+		}
+		return "Running", "orange-300"
+	}
+}
+
+func richToolElapsedLabel(elapsed time.Duration) string {
+	if elapsed <= 0 {
+		return ""
+	}
+	if elapsed < time.Second {
+		return fmt.Sprintf("%d ms", elapsed.Milliseconds())
+	}
+	return fmt.Sprintf("%.1f s", elapsed.Seconds())
+}
+
+func richToolDetail(step core.ToolStep) string {
+	display := buildToolDisplay(step.Name, step.Summary)
+	detail := display.Detail
+	if display.Title == "Run command" {
+		detail = simplifyShellCommand(detail)
+	}
+	return strings.TrimSpace(detail)
+}
+
+func simplifyShellCommand(command string) string {
+	command = strings.TrimSpace(stripToolDisplayQuotes(command))
+	if command == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`(?i)(?:^|\s)-(?:Command|c)\s+(.+)$`)
+	if match := re.FindStringSubmatch(command); len(match) == 2 {
+		command = strings.TrimSpace(stripToolDisplayQuotes(match[1]))
+	}
+	command = strings.ReplaceAll(command, "\\\\", "\\")
+	return redactInlineSecrets(command)
+}
+
+func richToolResultSummary(step core.ToolStep) string {
+	result := strings.TrimSpace(step.Result)
+	if result == "" {
+		return ""
+	}
+	success := step.Success != nil && *step.Success
+	if step.Success == nil && strings.EqualFold(strings.TrimSpace(step.Status), "completed") {
+		success = true
+	}
+	if success && shouldHideSuccessfulToolResult(result) {
+		return ""
+	}
+	result = stripHTMLLikeToolNoise(result)
+	if result == "" {
+		return ""
+	}
+	const maxResultRunes = 180
+	runes := []rune(result)
+	if len(runes) > maxResultRunes {
+		return string(runes[:maxResultRunes]) + "..."
+	}
+	return result
+}
+
+func shouldHideSuccessfulToolResult(result string) bool {
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" {
+		return true
+	}
+	if len([]rune(trimmed)) > 120 {
+		return true
+	}
+	if strings.Count(trimmed, "\n") >= 3 {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "<p ") || strings.Contains(lower, "<a ") || strings.Contains(lower, "<img ") || strings.Contains(lower, "<div ") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return true
+	}
+	return false
+}
+
+func stripHTMLLikeToolNoise(result string) string {
+	lines := strings.Split(strings.ReplaceAll(result, "\r\n", "\n"), "\n")
+	out := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "<p ") || strings.HasPrefix(lower, "</p") ||
+			strings.HasPrefix(lower, "<a ") || strings.HasPrefix(lower, "</a") ||
+			strings.HasPrefix(lower, "<img ") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func escapeLarkMD(value string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		"`", "\\`",
+		"*", "\\*",
+		"_", "\\_",
+		"{", "\\{",
+		"}", "\\}",
+		"[", "\\[",
+		"]", "\\]",
+		"<", "\\<",
+		">", "\\>",
+	)
+	return replacer.Replace(value)
 }
 
 // isCardJSON returns true if content looks like a complete Feishu card JSON
@@ -5874,6 +6077,72 @@ func richStepElement(step core.ToolStep) map[string]any {
 	return elem
 }
 
+func richExecutionStepElements(step core.ToolStep) []map[string]any {
+	if step.Kind == core.ToolStepKindThinking {
+		return []map[string]any{{
+			"tag": "div",
+			"icon": map[string]any{
+				"tag":   "standard_icon",
+				"token": reasoningToolIcon,
+				"color": "grey",
+			},
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    strings.TrimSpace(step.Summary),
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		}}
+	}
+	display := buildToolDisplay(step.Name, step.Summary)
+	title := richStepDisplayName(step)
+	if elapsed := richToolElapsedLabel(step.Elapsed); elapsed != "" {
+		title = fmt.Sprintf("%s (%s)", title, elapsed)
+	}
+	status, statusColor := richStepStatusLabel(step)
+	titleContent := fmt.Sprintf("**%s**", escapeLarkMD(title))
+	if step.Done || strings.TrimSpace(step.Status) != "" || step.Success != nil {
+		titleContent += fmt.Sprintf(" · <font color='%s'>%s</font>", statusColor, status)
+	}
+	elements := []map[string]any{{
+		"tag": "div",
+		"icon": map[string]any{
+			"tag":   "standard_icon",
+			"token": display.IconToken,
+			"color": "grey",
+		},
+		"text": map[string]any{
+			"tag":       "lark_md",
+			"content":   titleContent,
+			"text_size": "notation",
+		},
+	}}
+	if detail := richToolDetail(step); detail != "" {
+		elements = append(elements, map[string]any{
+			"tag":    "div",
+			"margin": "0px 0px 0px 22px",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    detail,
+				"text_size":  "notation",
+				"text_color": "grey",
+			},
+		})
+	}
+	if result := richToolResultSummary(step); result != "" {
+		elements = append(elements, map[string]any{
+			"tag":    "div",
+			"margin": "0px 0px 0px 22px",
+			"text": map[string]any{
+				"tag":       "lark_md",
+				"content":   result,
+				"text_size": "notation",
+			},
+		})
+	}
+	return elements
+}
+
 func richPlaceholderElement(text string) map[string]any {
 	return map[string]any{
 		"tag": "div",
@@ -5922,13 +6191,163 @@ func buildRichPanel(title string, expanded bool, elements []map[string]any) map[
 	}
 }
 
+func buildExecutionPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+	titleEl := map[string]any{
+		"tag":        "plain_text",
+		"content":    title,
+		"text_color": "grey",
+		"text_size":  "notation",
+	}
+	header := map[string]any{
+		"title":               titleEl,
+		"vertical_align":      "center",
+		"icon_position":       "right",
+		"icon_expanded_angle": -180,
+		"icon": map[string]any{
+			"tag":   "standard_icon",
+			"token": "down-small-ccm_outlined",
+			"size":  "16px 16px",
+			"color": "grey",
+		},
+	}
+	return map[string]any{
+		"tag":      "collapsible_panel",
+		"expanded": expanded,
+		"header":   header,
+		"border": map[string]any{
+			"color":         "grey",
+			"corner_radius": "5px",
+		},
+		"vertical_spacing": "4px",
+		"padding":          "8px 8px 8px 8px",
+		"elements":         elements,
+	}
+}
+
+func buildExecutionPanels(steps []core.ToolStep, streaming bool, card2 config.FeishuCard2Config) []map[string]any {
+	filtered, toolCount, hidden := richExecutionPanelSteps(steps, card2)
+	if len(filtered) == 0 {
+		return nil
+	}
+	expanded := card2.PanelExpanded
+	if streaming {
+		expanded = card2.StreamingPanelExpanded
+	}
+	elements := make([]map[string]any, 0, len(filtered)+1)
+	if hidden > 0 {
+		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... %d earlier steps hidden", hidden)))
+	}
+	for _, step := range filtered {
+		elements = append(elements, richExecutionStepElements(step)...)
+	}
+	title := fmt.Sprintf("🛠️ 工具执行 · %d 步", toolCount)
+	return []map[string]any{buildExecutionPanel(title, expanded, elements)}
+}
+
+func richExecutionPanelSteps(steps []core.ToolStep, card2 config.FeishuCard2Config) ([]core.ToolStep, int, int) {
+	if card2.MaxToolSteps <= 0 {
+		card2.MaxToolSteps = 20
+	}
+	if card2.MaxReasoningRounds <= 0 {
+		card2.MaxReasoningRounds = 20
+	}
+	toolTotal := 0
+	toolSeen := 0
+	reasoningSeen := 0
+	hidden := 0
+	reversed := make([]core.ToolStep, 0, len(steps))
+	for i := len(steps) - 1; i >= 0; i-- {
+		step := steps[i]
+		if step.Kind == core.ToolStepKindThinking {
+			if !card2.ShowReasoning {
+				continue
+			}
+			if reasoningSeen >= card2.MaxReasoningRounds {
+				hidden++
+				continue
+			}
+			reasoningSeen++
+			reversed = append(reversed, step)
+			continue
+		}
+		toolTotal++
+		if toolSeen >= card2.MaxToolSteps {
+			hidden++
+			continue
+		}
+		toolSeen++
+		reversed = append(reversed, step)
+	}
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	return reversed, toolTotal, hidden
+}
+
+func richStreamingConfig(card2 config.FeishuCard2Config) map[string]any {
+	strategy := card2.PrintStrategy
+	if strategy != config.FeishuCard2PrintStrategyFast && strategy != config.FeishuCard2PrintStrategyDelay {
+		strategy = config.FeishuCard2PrintStrategyDelay
+	}
+	frequency := card2.FlushIntervalMs
+	if frequency <= 0 {
+		frequency = 100
+	}
+	if frequency < 70 {
+		frequency = 70
+	}
+	if frequency > 2000 {
+		frequency = 2000
+	}
+	return map[string]any{
+		"print_strategy": strategy,
+		"print_frequency_ms": map[string]any{
+			"default": frequency,
+		},
+		"print_step": map[string]any{
+			"default": 1,
+		},
+	}
+}
+
 const maxRichCardJSONBytes = 28000
 
-// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
-// reasoning/tool panels, streaming markdown body, status-colored header, and a
-// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
+// buildRichCard renders the legacy Card 2.0 helper used by existing tests and
+// fallback paths: reasoning/tools split panels plus status-colored header.
 func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+	b, err := buildLegacyRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+	if err != nil {
+		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
+		return buildCardJSONWithStatus(markdown, status)
+	}
+	if len(b) <= maxRichCardJSONBytes {
+		return string(b)
+	}
+	for _, limit := range []struct {
+		perLane int
+		textLen int
+	}{
+		{perLane: 10, textLen: 180},
+		{perLane: 6, textLen: 120},
+		{perLane: 3, textLen: 80},
+	} {
+		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
+		compact, err := buildLegacyRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		if err == nil && len(compact) <= maxRichCardJSONBytes {
+			return string(compact)
+		}
+	}
+	fallbackMarkdown := markdown
+	if strings.TrimSpace(fallbackMarkdown) == "" {
+		fallbackMarkdown = compactRichFallbackMarkdown(steps)
+	}
+	return buildCardJSONWithStatus(fallbackMarkdown, status)
+}
+
+// buildRichCardWithConfig renders a Card 2.0 single-card turn with a unified
+// execution panel and a pre-composed multi-line statusFooter.
+func buildRichCardWithConfig(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, card2 config.FeishuCard2Config) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter, card2)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
 		return buildCardJSONWithStatus(markdown, status)
@@ -5950,7 +6369,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		{perLane: 3, textLen: 80},
 	} {
 		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
-		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter, card2)
 		if err == nil && len(compact) <= maxRichCardJSONBytes {
 			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
 				"original_size", len(b),
@@ -5970,7 +6389,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	return buildCardJSONWithStatus(fallbackMarkdown, status)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
+func buildLegacyRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
 	panelMaps := make([]map[string]any, 0, 2)
 	if len(reasoningSteps) > 0 {
@@ -5990,6 +6409,65 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 	if len(panelMaps) == 0 && streaming {
 		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
 	}
+	markdownMap := map[string]any{
+		"tag":        "markdown",
+		"element_id": richCardMainTextElementID,
+		"content":    sanitizeCardMarkdownForCard(markdown),
+	}
+	var footerElements []map[string]any
+	if statusFooter != "" {
+		for _, line := range strings.Split(statusFooter, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			footerElements = append(footerElements, map[string]any{
+				"tag":       "markdown",
+				"content":   sanitizeCardMarkdownForCard(line),
+				"text_size": "notation",
+			})
+		}
+	}
+	var elements []map[string]any
+	if len(panelMaps) > 0 {
+		elements = append(elements, panelMaps...)
+	}
+	elements = append(elements, markdownMap)
+	if len(footerElements) > 0 {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, footerElements...)
+	}
+	headerTemplate := "blue"
+	headerTitle := pickThinkingVerb()
+	switch status {
+	case core.CardStatusDone:
+		headerTemplate = "green"
+		headerTitle = "Done"
+	case core.CardStatusError:
+		headerTemplate = "red"
+		headerTitle = "Error"
+	case core.CardStatusThinking, core.CardStatusWorking:
+		headerTemplate = "blue"
+		headerTitle = pickThinkingVerb()
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"streaming_mode":             streaming,
+			"update_multi":               true,
+			"enable_forward_interaction": true,
+		},
+		"header": map[string]any{
+			"template": headerTemplate,
+			"title":    map[string]any{"tag": "plain_text", "content": headerTitle},
+		},
+		"body": map[string]any{"elements": elements},
+	}
+	return json.Marshal(card)
+}
+
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, card2 config.FeishuCard2Config) ([]byte, error) {
+	panelMaps := buildExecutionPanels(steps, streaming, card2)
 
 	markdownMap := map[string]any{
 		"tag":        "markdown",
@@ -6009,10 +6487,9 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 				continue
 			}
 			footerElements = append(footerElements, map[string]any{
-				"tag":        "markdown",
-				"content":    sanitizeCardMarkdownForCard(line),
-				"text_size":  "notation",
-				"text_color": "grey",
+				"tag":       "markdown",
+				"content":   sanitizeCardMarkdownForCard(line),
+				"text_size": "notation",
 			})
 		}
 	}
@@ -6030,31 +6507,13 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 		elements = append(elements, footerElements...)
 	}
 
-	// Header template color follows status.
-	headerTemplate := "blue"
-	headerTitle := pickThinkingVerb()
-	switch status {
-	case core.CardStatusDone:
-		headerTemplate = "green"
-		headerTitle = "Done"
-	case core.CardStatusError:
-		headerTemplate = "red"
-		headerTitle = "Error"
-	case core.CardStatusThinking, core.CardStatusWorking:
-		headerTemplate = "blue"
-		headerTitle = pickThinkingVerb()
-	}
-
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
 			"streaming_mode":             streaming,
+			"streaming_config":           richStreamingConfig(card2),
 			"update_multi":               true,
 			"enable_forward_interaction": true,
-		},
-		"header": map[string]any{
-			"template": headerTemplate,
-			"title":    map[string]any{"tag": "plain_text", "content": headerTitle},
 		},
 		"body": map[string]any{"elements": elements},
 	}
@@ -6154,7 +6613,10 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
 // splits it back into one dim notation block per line.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	p.mu.RLock()
+	card2 := p.feishuMessage.Card2
+	p.mu.RUnlock()
+	return buildRichCardWithConfig(status, steps, markdown, streaming, statusFooter, card2)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

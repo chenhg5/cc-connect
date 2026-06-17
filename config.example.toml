@@ -975,8 +975,8 @@ type = "feishu"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
-# enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
-#                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
+# enable_feishu_card = true  # Enable Feishu interactive-card actions (default: true); changing this may require restart.
+#                              # 启用飞书交互卡片操作能力（默认 true）；修改后可能需要重启。
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
@@ -995,10 +995,25 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
-# progress_style = "legacy" # Progress rendering style: legacy | compact | card
-#                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# progress_style = "legacy" # Deprecated compatibility: maps to feishu_message.card1.progress_style.
+#                           # 旧配置兼容项：会映射到 feishu_message.card1.progress_style。
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
+
+# [projects.platforms.options.feishu_message]
+# type = "card1" # plain | card1 | card2
+#
+# [projects.platforms.options.feishu_message.card1]
+# progress_style = "legacy" # legacy | compact | card
+#
+# [projects.platforms.options.feishu_message.card2]
+# panel_expanded = false
+# streaming_panel_expanded = false
+# print_strategy = "delay" # fast | delay
+# flush_interval_ms = 100  # 70..2000
+# max_tool_steps = 20      # 1..100
+# max_reasoning_rounds = 20 # 1..100
+# show_reasoning = true
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
@@ -1025,7 +1040,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
-# progress_style = "legacy"  # legacy | compact | card
+# progress_style = "legacy"  # Deprecated compatibility: maps to feishu_message.card1.progress_style.
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用

@@ -3,10 +3,20 @@ import { useTranslation } from 'react-i18next';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plug, Heart, Settings, Layers, Zap, Pause, Play,
-  Trash2, Plus, Check, Clock, ExternalLink, Link2,
+  Trash2, Plus, Clock, ExternalLink, Link2,
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
-import { getProject, updateProject, deleteProject, listAgentTypes, type ProjectDetail as ProjectDetailType } from '@/api/projects';
+import {
+  getProject,
+  updateProject,
+  deleteProject,
+  listAgentTypes,
+  updateFeishuMessageSettings,
+  type FeishuMessageConfig,
+  type FeishuMessageSettingsUpdate,
+  type FeishuMessageType,
+  type ProjectDetail as ProjectDetailType,
+} from '@/api/projects';
 import { listProviders, addProvider, removeProvider, activateProvider, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
@@ -30,8 +40,38 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: strin
 ];
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
+const isFeishuPlatform = (type: string) => type === 'feishu' || type === 'lark';
+
+const defaultFeishuMessageConfig = (): FeishuMessageConfig => ({
+  type: 'card1',
+  card1: { progress_style: 'legacy' },
+  card2: {
+    panel_expanded: false,
+    streaming_panel_expanded: false,
+    print_strategy: 'delay',
+    flush_interval_ms: 100,
+    max_tool_steps: 20,
+    max_reasoning_rounds: 20,
+    show_reasoning: true,
+  },
+});
 
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
+
+function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2">
+      <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{label}</label>
+      <button
+        type="button"
+        onClick={onChange}
+        className={cn('w-10 h-6 rounded-full transition-colors shrink-0', checked ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+      >
+        <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', checked ? 'translate-x-4' : 'translate-x-0')} />
+      </button>
+    </div>
+  );
+}
 
 export default function ProjectDetail() {
   const { t } = useTranslation();
@@ -54,6 +94,10 @@ export default function ProjectDetail() {
   const [replyFooter, setReplyFooter] = useState(true);
   const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
+  const [feishuMessages, setFeishuMessages] = useState<Record<number, FeishuMessageConfig>>({});
+  const [feishuCardEnabled, setFeishuCardEnabled] = useState<Record<number, boolean>>({});
+  const [savingFeishuIndex, setSavingFeishuIndex] = useState<number | null>(null);
+  const [feishuSaveNotice, setFeishuSaveNotice] = useState<Record<number, { type: 'success' | 'warning' | 'error'; message: string }>>({});
   const [saving, setSaving] = useState(false);
 
   // Agent type
@@ -78,6 +122,8 @@ export default function ProjectDetail() {
   const [showAddPlatform, setShowAddPlatform] = useState(false);
   const [addPlatType, setAddPlatType] = useState('');
   const [showRestartModal, setShowRestartModal] = useState(false);
+  const [restartHint, setRestartHint] = useState<string | null>(null);
+  const [saveResultModal, setSaveResultModal] = useState<{ title: string; message: string } | null>(null);
 
   // Delete project
   const navigate = useNavigate();
@@ -142,10 +188,19 @@ export default function ProjectDetail() {
         setInjectSender(proj.value.inject_sender === true);
         setProviderRefs(proj.value.provider_refs || []);
         const afMap: Record<string, string> = {};
+        const msgMap: Record<number, FeishuMessageConfig> = {};
+        const cardEnabledMap: Record<number, boolean> = {};
         proj.value.platform_configs?.forEach(pc => {
           if (pc.allow_from !== undefined) afMap[pc.type] = pc.allow_from;
+          if (isFeishuPlatform(pc.type)) {
+            const idx = pc.index ?? 0;
+            msgMap[idx] = pc.feishu_message || defaultFeishuMessageConfig();
+            cardEnabledMap[idx] = pc.enable_feishu_card !== false;
+          }
         });
         setPlatformAllowFrom(afMap);
+        setFeishuMessages(msgMap);
+        setFeishuCardEnabled(cardEnabledMap);
       }
       if (provs.status === 'fulfilled') {
         setProviders(provs.value.providers || []);
@@ -192,12 +247,74 @@ export default function ProjectDetail() {
         platform_allow_from: platformAllowFrom,
       });
       if (res && (res as any).restart_required) {
+        setRestartHint(t('setup.restartHintGeneric'));
         setShowRestartModal(true);
         return;
       }
       await fetchAll();
     } finally {
       setSaving(false);
+    }
+  };
+
+  const clearFeishuNotice = (platformIndex: number) => {
+    setFeishuSaveNotice(prev => {
+      if (!prev[platformIndex]) return prev;
+      const next = { ...prev };
+      delete next[platformIndex];
+      return next;
+    });
+  };
+
+  const updateFeishuMessage = (platformIndex: number, patch: (current: FeishuMessageConfig) => FeishuMessageConfig) => {
+    clearFeishuNotice(platformIndex);
+    setFeishuMessages(prev => ({
+      ...prev,
+      [platformIndex]: patch(prev[platformIndex] || defaultFeishuMessageConfig()),
+    }));
+  };
+
+  const handleSaveFeishuMessage = async (platformIndex: number) => {
+    if (!name) return;
+    const cfg = feishuMessages[platformIndex] || defaultFeishuMessageConfig();
+    const body: FeishuMessageSettingsUpdate = {
+      ...cfg,
+      enable_feishu_card: feishuCardEnabled[platformIndex] !== false,
+    };
+    setSavingFeishuIndex(platformIndex);
+    try {
+      const res = await updateFeishuMessageSettings(name, platformIndex, body);
+      if (res?.settings?.config) {
+        setFeishuMessages(prev => ({ ...prev, [platformIndex]: res.settings.config }));
+        setFeishuCardEnabled(prev => ({ ...prev, [platformIndex]: res.settings.interactive_card_enable }));
+      }
+      const restartRequired = res?.restart_required || res?.settings?.restart_required;
+      if (restartRequired) {
+        setRestartHint(t('projects.feishuMessageSavedRestartRequired'));
+        setShowRestartModal(true);
+      } else {
+        setSaveResultModal({
+          title: t('common.success'),
+          message: t('projects.feishuMessageSavedApplied'),
+        });
+      }
+      await fetchAll();
+      setFeishuSaveNotice(prev => ({
+        ...prev,
+        [platformIndex]: {
+          type: restartRequired ? 'warning' : 'success',
+          message: restartRequired
+            ? t('projects.feishuMessageSavedRestartRequired')
+            : t('projects.feishuMessageSavedApplied'),
+        },
+      }));
+    } catch (e: any) {
+      setFeishuSaveNotice(prev => ({
+        ...prev,
+        [platformIndex]: { type: 'error', message: e?.message || String(e) },
+      }));
+    } finally {
+      setSavingFeishuIndex(null);
     }
   };
 
@@ -222,6 +339,109 @@ export default function ProjectDetail() {
     { key: 'heartbeat', icon: Heart },
     { key: 'settings', icon: Settings },
   ];
+
+  const renderFeishuMessageSettings = (pc: NonNullable<ProjectDetailType['platform_configs']>[number]) => {
+    const platformIndex = pc.index ?? 0;
+    const cfg = feishuMessages[platformIndex] || pc.feishu_message || defaultFeishuMessageConfig();
+    const notice = feishuSaveNotice[platformIndex];
+    const setType = (type: FeishuMessageType) => updateFeishuMessage(platformIndex, current => ({ ...current, type }));
+    const updateCard1 = (progress_style: FeishuMessageConfig['card1']['progress_style']) =>
+      updateFeishuMessage(platformIndex, current => ({ ...current, card1: { ...current.card1, progress_style } }));
+    const updateCard2 = <K extends keyof FeishuMessageConfig['card2']>(key: K, value: FeishuMessageConfig['card2'][K]) =>
+      updateFeishuMessage(platformIndex, current => ({ ...current, card2: { ...current.card2, [key]: value } }));
+    const selectClass = 'w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50';
+
+    return (
+      <div key={`${pc.type}-${platformIndex}`} className="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-gray-900 dark:text-white">{pc.type} #{platformIndex}</div>
+            <p className="text-[11px] text-gray-400 mt-0.5">{t('projects.feishuInteractiveCardEnable')}</p>
+          </div>
+          <button
+            onClick={() => {
+              clearFeishuNotice(platformIndex);
+              setFeishuCardEnabled(prev => ({ ...prev, [platformIndex]: !(prev[platformIndex] !== false) }));
+            }}
+            className={cn('w-10 h-6 rounded-full transition-colors shrink-0', feishuCardEnabled[platformIndex] !== false ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+          >
+            <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', feishuCardEnabled[platformIndex] !== false ? 'translate-x-4' : 'translate-x-0')} />
+          </button>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+            {t('projects.feishuMessageType')}
+          </label>
+          <select value={cfg.type} onChange={(e) => setType(e.target.value as FeishuMessageType)} className={selectClass}>
+            <option value="plain">{t('projects.feishuMessagePlain')}</option>
+            <option value="card1">Card 1.0</option>
+            <option value="card2">Card 2.0</option>
+          </select>
+        </div>
+
+        {cfg.type === 'card1' && (
+          <div>
+            <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+              {t('projects.feishuCard1ProgressStyle')}
+            </label>
+            <select value={cfg.card1.progress_style} onChange={(e) => updateCard1(e.target.value as FeishuMessageConfig['card1']['progress_style'])} className={selectClass}>
+              <option value="legacy">legacy</option>
+              <option value="compact">compact</option>
+              <option value="card">card</option>
+            </select>
+          </div>
+        )}
+
+        {cfg.type === 'card2' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <ToggleField
+              label={t('projects.feishuCard2PanelExpanded')}
+              checked={cfg.card2.panel_expanded}
+              onChange={() => updateCard2('panel_expanded', !cfg.card2.panel_expanded)}
+            />
+            <ToggleField
+              label={t('projects.feishuCard2StreamingPanelExpanded')}
+              checked={cfg.card2.streaming_panel_expanded}
+              onChange={() => updateCard2('streaming_panel_expanded', !cfg.card2.streaming_panel_expanded)}
+            />
+            <ToggleField
+              label={t('projects.feishuCard2ShowReasoning')}
+              checked={cfg.card2.show_reasoning}
+              onChange={() => updateCard2('show_reasoning', !cfg.card2.show_reasoning)}
+            />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                {t('projects.feishuCard2PrintStrategy')}
+              </label>
+              <select value={cfg.card2.print_strategy} onChange={(e) => updateCard2('print_strategy', e.target.value as FeishuMessageConfig['card2']['print_strategy'])} className={selectClass}>
+                <option value="delay">delay</option>
+                <option value="fast">fast</option>
+              </select>
+            </div>
+            <Input label={t('projects.feishuCard2FlushInterval')} type="number" min={70} max={2000} value={cfg.card2.flush_interval_ms} onChange={(e) => updateCard2('flush_interval_ms', Number(e.target.value))} />
+            <Input label={t('projects.feishuCard2MaxToolSteps')} type="number" min={1} max={100} value={cfg.card2.max_tool_steps} onChange={(e) => updateCard2('max_tool_steps', Number(e.target.value))} />
+            <Input label={t('projects.feishuCard2MaxReasoningRounds')} type="number" min={1} max={100} value={cfg.card2.max_reasoning_rounds} onChange={(e) => updateCard2('max_reasoning_rounds', Number(e.target.value))} />
+          </div>
+        )}
+
+        <div className="flex items-center justify-between gap-3">
+          {notice && notice.type === 'error' ? (
+            <p
+              aria-live="polite"
+              className="text-xs text-red-500"
+            >
+              {notice.message}
+            </p>
+          ) : (
+            <span />
+          )}
+          <Button size="sm" loading={savingFeishuIndex === platformIndex} onClick={() => handleSaveFeishuMessage(platformIndex)}>
+            {savingFeishuIndex === platformIndex ? t('common.saving') : t('common.save')}
+          </Button>
+        </div>
+      </div>
+    );
+  };
 
   if (loading && !project) {
     return <div className="flex items-center justify-center h-64 text-gray-400 animate-pulse">Loading...</div>;
@@ -487,6 +707,18 @@ export default function ProjectDetail() {
 
       {tab === 'settings' && project && (
         <div className="space-y-4">
+        {project.platform_configs?.some(pc => isFeishuPlatform(pc.type)) && (
+        <Card>
+          <div className="mb-4">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{t('projects.feishuMessageSettings')}</h3>
+            <p className="text-[11px] text-gray-400 mt-1">{t('projects.feishuMessageHint')}</p>
+          </div>
+          <div className="space-y-3 max-w-2xl">
+            {project.platform_configs.filter(pc => isFeishuPlatform(pc.type)).map(renderFeishuMessageSettings)}
+          </div>
+        </Card>
+        )}
+
         {/* Agent settings */}
         <Card>
           <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('projects.agentSettings', 'Agent')}</h3>
@@ -671,6 +903,7 @@ export default function ProjectDetail() {
             projectName={name!}
             onComplete={() => {
               setShowAddPlatform(false);
+              setRestartHint(null);
               setShowRestartModal(true);
             }}
             onCancel={() => setAddPlatType('')}
@@ -681,6 +914,7 @@ export default function ProjectDetail() {
             projectName={name!}
             onComplete={() => {
               setShowAddPlatform(false);
+              setRestartHint(null);
               setShowRestartModal(true);
             }}
             onCancel={() => setAddPlatType('')}
@@ -699,7 +933,7 @@ export default function ProjectDetail() {
       <Modal open={showRestartModal} onClose={() => setShowRestartModal(false)} title={t('setup.restartRequired', 'Restart required')}>
         <div className="space-y-4 py-2">
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            {t('setup.restartHint', 'Restart the service for the new platform to take effect.')}
+            {restartHint || t('setup.restartHint', 'Restart the service for the new platform to take effect.')}
           </p>
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={() => { setShowRestartModal(false); setTimeout(fetchAll, 300); }}>
@@ -707,6 +941,23 @@ export default function ProjectDetail() {
             </Button>
             <Button onClick={async () => { await restartSystem(); setShowRestartModal(false); await waitForService(8000); await fetchAll(); }}>
               {t('setup.restartNow', 'Restart now')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={!!saveResultModal}
+        onClose={() => setSaveResultModal(null)}
+        title={saveResultModal?.title || t('common.success')}
+      >
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {saveResultModal?.message}
+          </p>
+          <div className="flex justify-end">
+            <Button onClick={() => setSaveResultModal(null)}>
+              {t('common.confirm')}
             </Button>
           </div>
         </div>

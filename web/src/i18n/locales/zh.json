@@ -57,7 +57,22 @@
       "providers": "服务商",
       "heartbeat": "心跳",
       "settings": "设置"
-    }
+    },
+    "feishuMessageSettings": "飞书消息显示",
+    "feishuMessageHint": "选择纯文本、Card 1.0 或 Card 2.0，并配置对应参数。",
+    "feishuMessageType": "消息类型",
+    "feishuMessagePlain": "纯文本",
+    "feishuCard1ProgressStyle": "Card 1.0 进度样式",
+    "feishuCard2PanelExpanded": "完成后展开面板",
+    "feishuCard2StreamingPanelExpanded": "流式期间展开面板",
+    "feishuCard2ShowReasoning": "显示 reasoning",
+    "feishuCard2PrintStrategy": "打印策略",
+    "feishuCard2FlushInterval": "刷新间隔（毫秒）",
+    "feishuCard2MaxToolSteps": "最大工具步骤数",
+    "feishuCard2MaxReasoningRounds": "最大 reasoning 轮数",
+    "feishuInteractiveCardEnable": "交互卡片操作能力",
+    "feishuMessageSavedApplied": "修改保存生效。",
+    "feishuMessageSavedRestartRequired": "保存成功，重启 cc-connect 后生效。"
   },
   "sessions": {
     "title": "会话",
@@ -211,6 +226,7 @@
     "savingConfig": "正在保存配置...",
     "completed": "平台连接成功！",
     "restartHint": "重启服务后新平台才会生效。",
+    "restartHintGeneric": "重启服务后配置才会生效。",
     "restartRequired": "需要重启",
     "restartNow": "立即重启",
     "restarting": "正在重启服务...",
