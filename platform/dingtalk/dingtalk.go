@@ -298,6 +298,13 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 			slog.Debug("dingtalk: richText message with no extractable text", "msg_id", data.MsgId)
 			return
 		}
+		// Recover quote/reply info for richText messages (same as text path below).
+		// The SDK's BotCallbackDataTextModel only has Content; we parse the raw
+		// "text" object via richTextContent to recover isReplyMsg / repliedMsg.
+		if richText != nil && richText.IsReplyMsg && richText.RepliedMsg != nil {
+			slog.Debug("dingtalk: reply message detected in richText", "msgType", richText.RepliedMsg.MsgType)
+			text = p.formatReplyContent(richText, text)
+		}
 		msg := &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "dingtalk",
