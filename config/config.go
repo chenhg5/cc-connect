@@ -2511,24 +2511,6 @@ func normalizeFeishuMessageConfig(in FeishuMessageConfig) FeishuMessageConfig {
 	return base
 }
 
-func feishuMessageConfigToMap(cfg FeishuMessageConfig) map[string]any {
-	return map[string]any{
-		"type": cfg.Type,
-		"card1": map[string]any{
-			"progress_style": cfg.Card1.ProgressStyle,
-		},
-		"card2": map[string]any{
-			"panel_expanded":           cfg.Card2.PanelExpanded,
-			"streaming_panel_expanded": cfg.Card2.StreamingPanelExpanded,
-			"print_strategy":           cfg.Card2.PrintStrategy,
-			"flush_interval_ms":        cfg.Card2.FlushIntervalMs,
-			"max_tool_steps":           cfg.Card2.MaxToolSteps,
-			"max_reasoning_rounds":     cfg.Card2.MaxReasoningRounds,
-			"show_reasoning":           cfg.Card2.ShowReasoning,
-		},
-	}
-}
-
 func findFeishuPlatform(cfg *Config, projectName string, platformIndex int) (int, int, error) {
 	if strings.TrimSpace(projectName) == "" {
 		return -1, -1, fmt.Errorf("project name is required")

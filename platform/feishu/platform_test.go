@@ -134,17 +134,17 @@ func TestBuildReplyContent_PlainMessageTypeDoesNotUseInteractiveCard(t *testing.
 	if !ok {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
-	msgType, body := ip.Platform.buildReplyContent("**bold**\n\n```go\nfmt.Println(1)\n```")
+	msgType, body := ip.buildReplyContent("**bold**\n\n```go\nfmt.Println(1)\n```")
 	if msgType != larkim.MsgTypeText {
 		t.Fatalf("msgType = %q, want text", msgType)
 	}
 	if strings.Contains(body, `"schema":"2.0"`) {
 		t.Fatalf("plain message body should not contain card JSON: %s", body)
 	}
-	if ip.Platform.ProgressStyle() != config.FeishuProgressStyleLegacy {
-		t.Fatalf("plain message ProgressStyle() = %q, want legacy", ip.Platform.ProgressStyle())
+	if ip.ProgressStyle() != config.FeishuProgressStyleLegacy {
+		t.Fatalf("plain message ProgressStyle() = %q, want legacy", ip.ProgressStyle())
 	}
-	if ip.Platform.RichCardEnabled() {
+	if ip.RichCardEnabled() {
 		t.Fatal("plain message RichCardEnabled() = true, want false")
 	}
 }
@@ -169,7 +169,7 @@ func TestBuildReplyContent_RawCardJSONStaysInteractive(t *testing.T) {
 		Summary: "pwd",
 		Done:    true,
 	}}, "final answer", false, "", config.DefaultFeishuCard2Config())
-	msgType, body := ip.Platform.buildReplyContent(cardJSON)
+	msgType, body := ip.buildReplyContent(cardJSON)
 	if msgType != larkim.MsgTypeInteractive {
 		t.Fatalf("msgType = %q, want interactive", msgType)
 	}
