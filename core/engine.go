@@ -30,6 +30,13 @@ const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
+// defaultPendingRestartTimeout is how long the post-restart notify
+// dispatcher waits for the target platform to reach ready before
+// dropping the notify with a warning. 10s covers the typical 2-3s
+// Telegram connect window with margin and is short enough that a stuck
+// platform does not block startup logging indefinitely.
+const defaultPendingRestartTimeout = 10 * time.Second
+
 // previewText truncates s to maxRunes runes for safe inclusion in debug logs.
 // Truncation uses runes (not bytes) so multi-byte characters render cleanly.
 // Newlines are replaced with literal "\n" to keep each log entry on one line.
@@ -124,35 +131,167 @@ func ConsumeRestartNotify(dataDir string) *RestartRequest {
 }
 
 // SendRestartNotification sends a "restart successful" message to the
-// platform/session that initiated the restart.
+// platform/session that initiated the restart. For async-recoverable
+// platforms that may not be ready yet at startup, the call is queued
+// and dispatched on the first OnPlatformReady for the matching platform
+// (see issue #1383).
 func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
-	for _, p := range e.platforms {
-		if p.Name() != platformName {
-			continue
-		}
-		rc, ok := p.(ReplyContextReconstructor)
-		if !ok {
-			slog.Debug("restart notify: platform does not support ReconstructReplyCtx", "platform", platformName)
-			return
-		}
-		rctx, err := rc.ReconstructReplyCtx(sessionKey)
-		if err != nil {
-			slog.Debug("restart notify: reconstruct failed", "error", err)
-			return
-		}
-		text := e.i18n.T(MsgRestartSuccess)
-		if CurrentVersion != "" {
-			text += fmt.Sprintf(" (%s)", CurrentVersion)
-		}
-		if err := e.waitOutgoing(p); err != nil {
-			slog.Debug("restart notify: outgoing wait cancelled or limited", "platform", platformName, "error", err)
-			return
-		}
-		if err := p.Send(e.ctx, rctx, text); err != nil {
-			slog.Debug("restart notify: send failed", "error", err)
-		}
+	req := &RestartRequest{Platform: platformName, SessionKey: sessionKey}
+	e.SetPendingRestartNotify(req)
+}
+
+// SetPendingRestartNotify queues a restart notification for dispatch
+// when the target platform becomes ready. Replaces any previously queued
+// notify. If the target platform is already ready, the notify is
+// dispatched on a background goroutine with retry on send failure.
+func (e *Engine) SetPendingRestartNotify(req *RestartRequest) {
+	if req == nil {
 		return
 	}
+	e.pendingRestartMu.Lock()
+	e.pendingRestartNotify = req
+	e.pendingRestartFiredCh = make(chan struct{})
+	firedCh := e.pendingRestartFiredCh
+	e.pendingRestartMu.Unlock()
+
+	// If the target platform is already ready, fire the dispatch on a
+	// goroutine so the caller (main startup) is not blocked. If not yet
+	// ready, OnPlatformReady will pick it up. A safety goroutine drops
+	// the notify after a timeout if the platform never reaches ready.
+	go e.runPendingRestartNotify(req, firedCh)
+}
+
+// ConsumePendingRestartNotify returns the currently queued notify (if any)
+// and clears it. Used by tests.
+func (e *Engine) ConsumePendingRestartNotify() *RestartRequest {
+	e.pendingRestartMu.Lock()
+	defer e.pendingRestartMu.Unlock()
+	req := e.pendingRestartNotify
+	e.pendingRestartNotify = nil
+	return req
+}
+
+// SetPendingRestartTimeout overrides the safety timeout used by
+// runPendingRestartNotify. Production code uses defaultPendingRestartTimeout
+// (10s); tests use this to exercise the timeout path quickly.
+func (e *Engine) SetPendingRestartTimeout(d time.Duration) {
+	e.pendingRestartTimeout = d
+}
+
+// runPendingRestartNotify dispatches the notify for a platform that is
+// already ready, with bounded retry on transient send failure. The fired
+// channel is closed when the notify is fully resolved (success, exhausted
+// retries, or platform dropped from engine). This is called from
+// SetPendingRestartNotify on a background goroutine and from
+// onPlatformReady (also on a goroutine).
+func (e *Engine) runPendingRestartNotify(req *RestartRequest, firedCh chan struct{}) {
+	defer close(firedCh)
+
+	// Wait briefly for the platform to reach ready if it's not already.
+	// Upper bound: matches the typical Telegram 2-3 s connect window
+	// with margin (see defaultPendingRestartTimeout), and short enough
+	// that a stuck platform does not block startup logging forever.
+	timeout := e.pendingRestartTimeout
+	if timeout <= 0 {
+		timeout = defaultPendingRestartTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		e.pendingRestartMu.Lock()
+		stillQueued := e.pendingRestartNotify == req
+		e.pendingRestartMu.Unlock()
+		if !stillQueued {
+			return
+		}
+		if e.lookupReadyPlatform(req.Platform) != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			slog.Warn("restart notify: target platform did not reach ready in time, dropping",
+				"platform", req.Platform, "session", req.SessionKey, "timeout", timeout)
+			e.clearPendingRestart(req)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if err := e.dispatchRestartNotify(req); err != nil {
+		slog.Warn("restart notify: dispatch failed after retries",
+			"platform", req.Platform, "session", req.SessionKey, "error", err)
+	}
+	e.clearPendingRestart(req)
+}
+
+// lookupReadyPlatform returns the platform with the given name if it has
+// reached ready state, otherwise nil.
+func (e *Engine) lookupReadyPlatform(platformName string) Platform {
+	e.platformLifecycleMu.Lock()
+	defer e.platformLifecycleMu.Unlock()
+	for p, ready := range e.platformReady {
+		if ready && p.Name() == platformName {
+			return p
+		}
+	}
+	return nil
+}
+
+// clearPendingRestart removes the queued notify if it is still the same
+// request (avoids clearing a newer notify that replaced this one).
+func (e *Engine) clearPendingRestart(req *RestartRequest) {
+	e.pendingRestartMu.Lock()
+	if e.pendingRestartNotify == req {
+		e.pendingRestartNotify = nil
+	}
+	e.pendingRestartMu.Unlock()
+}
+
+// dispatchRestartNotify sends the notify to the target platform with up
+// to 3 attempts (initial + 2 retries) on transient failure. The
+// platform must already be ready when this is called.
+func (e *Engine) dispatchRestartNotify(req *RestartRequest) error {
+	p := e.lookupReadyPlatform(req.Platform)
+	if p == nil {
+		return fmt.Errorf("platform %q not ready", req.Platform)
+	}
+	rc, ok := p.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support ReconstructReplyCtx", req.Platform)
+	}
+	rctx, err := rc.ReconstructReplyCtx(req.SessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply ctx: %w", err)
+	}
+	text := e.i18n.T(MsgRestartSuccess)
+	if CurrentVersion != "" {
+		text += fmt.Sprintf(" (%s)", CurrentVersion)
+	}
+
+	backoffs := []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond}
+	var lastErr error
+	for attempt, wait := range backoffs {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		if err := e.waitOutgoing(p); err != nil {
+			lastErr = fmt.Errorf("wait outgoing: %w", err)
+			slog.Warn("restart notify: wait outgoing failed",
+				"platform", req.Platform, "attempt", attempt+1, "error", err)
+			continue
+		}
+		if err := p.Send(e.ctx, rctx, text); err != nil {
+			lastErr = err
+			slog.Warn("restart notify: send failed, will retry",
+				"platform", req.Platform, "session", req.SessionKey,
+				"attempt", attempt+1, "max_attempts", len(backoffs), "error", err)
+			continue
+		}
+		if attempt > 0 {
+			slog.Info("restart notify: send succeeded after retry",
+				"platform", req.Platform, "session", req.SessionKey, "attempt", attempt+1)
+		}
+		return nil
+	}
+	return lastErr
 }
 
 // RestartCh is signaled when /restart is invoked. main listens on it
@@ -270,8 +409,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -299,6 +438,20 @@ type Engine struct {
 	stopping            bool
 	replyFooterMu       sync.Mutex
 	replyFooterUsage    replyFooterUsageCache
+
+	// pendingRestartNotify is queued at startup if a /restart was consumed
+	// from the run/restart_notify file. It is dispatched on the first
+	// OnPlatformReady for the matching platform name, so async platforms
+	// (Telegram, Weixin, Matrix, Discord) have a chance to actually connect
+	// before the post-restart message is sent. See issue #1383.
+	pendingRestartMu      sync.Mutex
+	pendingRestartNotify  *RestartRequest
+	pendingRestartFiredCh chan struct{} // closed when the notify is dispatched (success or exhausted)
+
+	// pendingRestartTimeout is how long the dispatcher waits for the
+	// target platform to reach ready before dropping the notify with a
+	// warning. Default 10s; tests may override.
+	pendingRestartTimeout time.Duration
 
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
@@ -566,6 +719,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		showWorkdirIndicator:  true,
 		shell:                 defaultShell(),
 		shellFlag:             defaultShellFlag(),
+		pendingRestartTimeout: defaultPendingRestartTimeout,
 	}
 
 	if ag != nil {
