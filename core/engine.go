@@ -3437,6 +3437,29 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
+	// Auto-switch to vision model for messages with images.
+	// When the primary model does not support vision (e.g. mimo-v2.5-pro),
+	// temporarily switch to the vision model (e.g. mimo-v2.5), which requires
+	// killing the current session (same as /model command).
+	var visionOriginalModel string
+	visionSwitched := false
+	if len(msg.Images) > 0 {
+		if vs, ok := agent.(VisionModelSwitcher); ok {
+			vm := vs.GetVisionModel()
+			if vm != "" {
+				if ms, ok := agent.(ModelSwitcher); ok && ms.GetModel() != vm {
+					visionOriginalModel = ms.GetModel()
+					ms.SetModel(vm)
+					e.cleanupInteractiveState(interactiveKey)
+					sessions.Save()
+					visionSwitched = true
+					slog.Info("auto-switched to vision model for image message",
+						"from", visionOriginalModel, "to", vm, "session", msg.SessionKey)
+				}
+			}
+		}
+	}
+
 	sendStart := time.Now()
 	state.mu.Lock()
 	state.currentMessageID = msg.MessageID
@@ -3457,6 +3480,17 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
+
+	// Restore original model after vision turn completes.
+	if visionSwitched && visionOriginalModel != "" {
+		if ms, ok := agent.(ModelSwitcher); ok {
+			ms.SetModel(visionOriginalModel)
+			e.cleanupInteractiveState(interactiveKey)
+			sessions.Save()
+			slog.Info("restored original model after vision turn",
+				"model", visionOriginalModel, "session", msg.SessionKey)
+		}
+	}
 
 	// Guard against a narrow race: a message may have been queued between
 	// processInteractiveEvents observing an empty queue and returning here

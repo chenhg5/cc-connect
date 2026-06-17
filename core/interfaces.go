@@ -464,6 +464,15 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// VisionModelSwitcher is an optional interface for agents that support
+// a fallback model for messages containing images. When the primary model
+// does not support vision (e.g. mimo-v2.5-pro), the engine can temporarily
+// switch to the vision model (e.g. mimo-v2.5) for image messages.
+type VisionModelSwitcher interface {
+	GetVisionModel() string
+	SetVisionModel(model string)
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {

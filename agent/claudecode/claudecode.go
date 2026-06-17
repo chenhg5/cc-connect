@@ -40,6 +40,7 @@ type Agent struct {
 	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
+	visionModel      string // fallback model for messages with images (e.g. "mimo-v2.5")
 	reasoningEffort  string // "low" | "medium" | "high" | "max"
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools     []string
@@ -132,6 +133,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
+	visionModel, _ := opts["vision_model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
@@ -220,6 +222,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:     cliExtraArgs,
 		cliArgsFlag:      cliArgsFlag,
 		model:            model,
+		visionModel:      visionModel,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
 		systemPrompt:     systemPrompt,
@@ -301,6 +304,19 @@ func (a *Agent) GetModel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+}
+
+func (a *Agent) GetVisionModel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.visionModel
+}
+
+func (a *Agent) SetVisionModel(model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.visionModel = model
+	slog.Info("claudecode: vision model changed", "vision_model", model)
 }
 
 func (a *Agent) SetReasoningEffort(effort string) {
