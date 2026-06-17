@@ -1441,3 +1441,49 @@ func TestCardTitleFromContent_UsedInReplyPayload(t *testing.T) {
 		t.Fatal("timed out waiting for reply payload")
 	}
 }
+
+// TestOnRawMessage_RichTextWithReplyEnrichesContent verifies that the fix for
+// richText messages (which previously skipped quote/reply detection) now
+// calls formatReplyContent and prepends the quoted text.
+func TestOnRawMessage_RichTextWithReplyEnrichesContent(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-reply-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "please check this"}
+			]
+		},
+		"text": {
+			"content": "please check this",
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "text",
+				"content": {
+					"text": "what about the bug?"
+				}
+			}
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText reply message")
+	}
+	expected := "引用: \"what about the bug?\"\n\nplease check this"
+	if got.Content != expected {
+		t.Errorf("message content = %q, want %q", got.Content, expected)
+	}
+}
