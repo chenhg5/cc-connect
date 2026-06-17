@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -6824,6 +6824,26 @@ func (s *controllableAgentSession) Close() error {
 	return nil
 }
 
+func waitForInteractiveStateRemoved(t *testing.T, e *Engine, key string) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		e.interactiveMu.Lock()
+		current := e.interactiveStates[key]
+		e.interactiveMu.Unlock()
+		if current == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("expected idle timeout cleanup to remove interactive state")
+		case <-ticker.C:
+		}
+	}
+}
+
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession    AgentSession
@@ -6944,12 +6964,7 @@ func TestAgentSessionIdleTimeout_ClosesIdleLiveSession(t *testing.T) {
 		t.Fatal("agent session was not closed after idle timeout")
 	}
 
-	e.interactiveMu.Lock()
-	current := e.interactiveStates[key]
-	e.interactiveMu.Unlock()
-	if current != nil {
-		t.Fatal("expected idle timeout cleanup to remove interactive state")
-	}
+	waitForInteractiveStateRemoved(t, e, key)
 }
 
 func TestAgentSessionIdleTimeout_CancelPreventsClose(t *testing.T) {
@@ -14924,8 +14939,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -14953,7 +14968,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {

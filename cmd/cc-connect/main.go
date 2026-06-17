@@ -1702,6 +1702,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 			engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
 		}
 	} else {
+		// A reload may remove this option after timers were scheduled; reset
+		// explicitly so those stale idle-close timers cannot fire later.
 		engine.SetAgentSessionIdleTimeout(0)
 	}
 
