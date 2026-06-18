@@ -26,16 +26,20 @@ type message struct {
 	Files           []string `json:"files"`
 }
 
-// wsEvent is the message envelope delivered over the WebSocket.
+// wsEvent is the Mercury "conversation.activity" envelope delivered over the
+// Webex Device WebSocket. The message body in the frame is end-to-end
+// encrypted, so we use the activity ID to fetch the decrypted message via REST.
 type wsEvent struct {
-	Resource string `json:"resource"` // "messages"
-	Event    string `json:"event"`    // "created"
-	Data     struct {
-		ID          string `json:"id"`       // message ID
-		RoomID      string `json:"roomId"`
-		RoomType    string `json:"roomType"`
-		PersonID    string `json:"personId"` // actor
-		PersonEmail string `json:"personEmail"`
+	Data struct {
+		EventType string `json:"eventType"`
+		Activity  struct {
+			ID    string `json:"id"`
+			Verb  string `json:"verb"`
+			Actor struct {
+				ID           string `json:"id"`
+				EmailAddress string `json:"emailAddress"`
+			} `json:"actor"`
+		} `json:"activity"`
 	} `json:"data"`
 }
 

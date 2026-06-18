@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestNewRequiresToken(t *testing.T) {
@@ -244,4 +246,24 @@ func TestSendPostsWithoutParent(t *testing.T) {
 	if len(stub.posted) != 1 || stub.posted[0].parentID != "" {
 		t.Fatalf("posted = %+v", stub.posted)
 	}
+}
+
+func TestActivityIDToMessageID(t *testing.T) {
+	got := activityIDToMessageID("766bc5a0-6b31-11f1-9a28-4325af6c06a3")
+	want := "Y2lzY29zcGFyazovL3VzL01FU1NBR0UvNzY2YmM1YTAtNmIzMS0xMWYxLTlhMjgtNDMyNWFmNmMwNmEz"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if activityIDToMessageID("") != "" {
+		t.Fatal("empty activity id should yield empty message id")
+	}
+}
+
+func TestHandleFrameIgnoresNonActivity(t *testing.T) {
+	// A conversation.highlight frame must not trigger a GetMessage call.
+	stub := &stubClient{}
+	p := &Platform{client: stub, selfEmail: "bot@webex.bot"}
+	p.handler = func(_ core.Platform, _ *core.Message) { t.Fatal("should not dispatch") }
+	p.handleFrame(context.Background(), []byte(`{"data":{"eventType":"conversation.highlight"}}`))
+	// no panic, no dispatch = pass
 }

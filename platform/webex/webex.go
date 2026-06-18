@@ -2,6 +2,7 @@ package webex
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ type Platform struct {
 	cancel           context.CancelFunc
 	stopping         bool
 	selfID           string // bot's own personId
+	selfEmail        string // bot's own email (Mercury actor uses email)
 	deviceURL        string // for cleanup on Stop()
 }
 
@@ -65,6 +67,13 @@ func (p *Platform) self() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.selfID
+}
+
+// selfEmailAddr returns the bot's own email under lock.
+func (p *Platform) selfEmailAddr() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.selfEmail
 }
 
 // parseAllowFrom splits and lowercases a comma-separated email list.
@@ -203,6 +212,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 	p.mu.Lock()
 	p.selfID = me.ID
+	if len(me.Emails) > 0 {
+		p.selfEmail = me.Emails[0]
+	}
 	p.mu.Unlock()
 	slog.Info("webex: authenticated", "bot", me.DisplayName)
 
@@ -337,21 +349,27 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	}
 }
 
-// handleFrame parses one WebSocket frame and dispatches qualifying messages.
+// handleFrame parses one Mercury WebSocket frame and dispatches qualifying
+// messages. The frame body is encrypted, so we fetch the decrypted message
+// via REST using the activity ID.
 func (p *Platform) handleFrame(ctx context.Context, data []byte) {
 	var ev wsEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
 		slog.Debug("webex: non-JSON frame", "error", err)
 		return
 	}
-	if ev.Resource != "messages" || ev.Event != "created" {
+	if ev.Data.EventType != "conversation.activity" || ev.Data.Activity.Verb != "post" {
 		return
 	}
-	selfID := p.self()
-	if ev.Data.PersonID == selfID {
+	// Skip our own messages (actor email matches the bot).
+	if self := p.selfEmailAddr(); self != "" && strings.EqualFold(ev.Data.Activity.Actor.EmailAddress, self) {
 		return
 	}
-	m, err := p.client.GetMessage(ctx, ev.Data.ID)
+	msgID := activityIDToMessageID(ev.Data.Activity.ID)
+	if msgID == "" {
+		return
+	}
+	m, err := p.client.GetMessage(ctx, msgID)
 	if err != nil {
 		slog.Error("webex: fetch message failed", "error", err)
 		return
@@ -365,4 +383,14 @@ func (p *Platform) handleFrame(ctx context.Context, data []byte) {
 		return
 	}
 	handler(p, p.buildMessage(ctx, m))
+}
+
+// activityIDToMessageID converts a Mercury activity UUID into the public Webex
+// message ID (base64 of the ciscospark://us/MESSAGE/{uuid} URI) accepted by
+// GET /v1/messages/{id}.
+func activityIDToMessageID(activityID string) string {
+	if activityID == "" {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString([]byte("ciscospark://us/MESSAGE/" + activityID))
 }

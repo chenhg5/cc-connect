@@ -131,7 +131,9 @@ func (c *httpClient) GetMe(ctx context.Context) (*person, error) {
 }
 
 func (c *httpClient) CreateDevice(ctx context.Context) (*device, error) {
-	payload := []byte(`{"deviceName":"cc-connect","deviceType":"DESKTOP","name":"cc-connect","systemName":"cc-connect","systemVersion":"1.0"}`)
+	// The WDM device endpoint requires name + model + localizedModel; omitting
+	// model returns HTTP 400 "Missing Model". Verified against the live API.
+	payload := []byte(`{"deviceName":"cc-connect","name":"cc-connect","model":"cc-connect","localizedModel":"cc-connect","systemName":"cc-connect","systemVersion":"1.0","deviceType":"DESKTOP"}`)
 	resp, err := c.doWithRetry(ctx, http.MethodPost, "https://wdm-a.wbx2.com/wdm/api/v1/devices", payload, "application/json", "webex: createDevice")
 	if err != nil {
 		return nil, err
