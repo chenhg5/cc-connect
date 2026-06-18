@@ -136,3 +136,15 @@ func TestAgyPermissionBridgeRejectsInvalidBehavior(t *testing.T) {
 		t.Fatal("RespondPermission() error = nil, want invalid behavior error")
 	}
 }
+
+func TestBridgeTokenEqualRequiresMatchingLength(t *testing.T) {
+	if !bridgeTokenEqual("same-length-token", "same-length-token") {
+		t.Fatal("bridgeTokenEqual() = false, want true")
+	}
+	if bridgeTokenEqual("short", "same-length-token") {
+		t.Fatal("bridgeTokenEqual() = true for length mismatch, want false")
+	}
+	if bridgeTokenEqual("same-length-tokem", "same-length-token") {
+		t.Fatal("bridgeTokenEqual() = true for same-length mismatch, want false")
+	}
+}

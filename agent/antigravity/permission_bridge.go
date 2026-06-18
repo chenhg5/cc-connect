@@ -188,6 +188,13 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func bridgeTokenEqual(got, want string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 func (b *agyPermissionBridge) Env() []string {
 	return []string{
 		antigravityhook.EnvAddress + "=" + b.address,
@@ -225,7 +232,7 @@ func (b *agyPermissionBridge) handleConnection(conn net.Conn) {
 		b.writeResponse(conn, antigravityhook.BridgeResponse{Decision: "deny", Reason: "invalid cc-connect permission bridge request"})
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(request.Token), []byte(b.token)) != 1 {
+	if !bridgeTokenEqual(request.Token, b.token) {
 		b.writeResponse(conn, antigravityhook.BridgeResponse{Decision: "deny", Reason: "cc-connect permission bridge authentication failed"})
 		return
 	}
