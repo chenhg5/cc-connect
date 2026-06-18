@@ -705,6 +705,7 @@ cc-connect send --tts "你好"
 - `--image` 和 `--file` 都可以重复多次。
 - 建议使用绝对路径，避免 Agent 当前工作目录变化导致找不到文件。
 - 如果设置了 `attachment_send = "off"`，图片/文件回传会被拒绝，但普通文本回复仍然正常。
+- 每个附件默认上限 **50 MiB**。可在 config.toml 用 `max_attachment_size_mb`（单位 MiB）调整，或用环境变量 `CC_MAX_ATTACHMENT_SIZE`（单位：字节）按次覆盖。
 
 ### 典型场景
 
@@ -718,7 +719,7 @@ cc-connect send --tts "你好"
 - 这个命令是给“附件和语音回传”用的，不要拿它代替普通文本回复。
 - 只能发送本机上 Agent 可访问到的文件。
 - 必须存在活跃会话；如果当前项目没有活动聊天上下文，命令会失败。
-- 平台本身仍可能有文件大小或文件类型限制。
+- 平台本身仍可能有文件大小或文件类型限制（此外 cc-connect 自身还有 `max_attachment_size_mb` 限制）。
 
 ---
 
