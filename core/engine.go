@@ -2755,6 +2755,12 @@ sessionLocked:
 	// reset_on_idle_mins is not defeated by heartbeats or unsolicited agent
 	// output running between user messages (#1115).
 	session.TouchUserActivity()
+
+	// Ensure an interactiveState entry exists before launching the async
+	// processor so messages arriving during session startup can be queued
+	// instead of dropped (issue #565). This is still needed after idle auto-
+	// reset because cleanupInteractiveState may remove the early placeholder.
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
