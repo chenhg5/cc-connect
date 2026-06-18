@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,11 @@ var (
 	commit    = "none"
 	buildTime = "unknown"
 )
+
+// globalAPIServer holds the running API server so the config-reload path can
+// re-apply hot-reloadable settings (e.g. max attachment size) without threading
+// it through the engine's reload closure. nil when the API server is disabled.
+var globalAPIServer *core.APIServer
 
 // defaultResetOnIdleMins is applied when a project does not set
 // reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
@@ -162,6 +168,27 @@ func preScanLogMaxBackupsFlag(args []string) string {
 		}
 	}
 	return ""
+}
+
+// resolveMaxAttachmentSize returns the per-attachment size limit in bytes for
+// the /send API. Priority: CC_MAX_ATTACHMENT_SIZE_MB env var (MiB) >
+// config max_attachment_size_mb > core.DefaultMaxAttachmentSize. The env var
+// intentionally uses the same MiB unit as the config field so the two knobs
+// cannot silently disagree by a factor of 1<<20. A malformed or non-positive
+// env value is ignored (falling through to config/default) rather than being
+// fatal — the same lenient posture as resolveLogMaxSize, which also warns so
+// a typo never silently downgrades the setting.
+func resolveMaxAttachmentSize(cfg *config.Config) int64 {
+	if v := strings.TrimSpace(os.Getenv("CC_MAX_ATTACHMENT_SIZE_MB")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n << 20
+		}
+		fmt.Fprintf(os.Stderr, "warning: ignoring CC_MAX_ATTACHMENT_SIZE_MB=%q: must be a positive integer (MiB)\n", v)
+	}
+	if cfg != nil && cfg.MaxAttachmentSizeMB > 0 {
+		return int64(cfg.MaxAttachmentSizeMB) << 20
+	}
+	return core.DefaultMaxAttachmentSize
 }
 
 type initialModelRefreshStarter interface {
@@ -1235,6 +1262,9 @@ func main() {
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
+		globalAPIServer = apiSrv
+		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+
 		relayMgr := core.NewRelayManager(cfg.DataDir)
 		if cfg.Relay.TimeoutSecs != nil {
 			secs := *cfg.Relay.TimeoutSecs
@@ -1632,6 +1662,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	result := &core.ConfigReloadResult{}
+
+	// Re-apply process-global hot-reloadable settings.
+	if globalAPIServer != nil {
+		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+	}
 
 	// Find the matching project
 	var proj *config.ProjectConfig
