@@ -13,7 +13,9 @@ const (
 	EnvAddress = "CC_CONNECT_AGY_PERMISSION_ADDR"
 	EnvToken   = "CC_CONNECT_AGY_PERMISSION_TOKEN"
 
-	maxHookInput = 4 << 20
+	maxHookInput          = 4 << 20
+	bridgeDialTimeout     = 5 * time.Second
+	bridgeResponseTimeout = 24 * time.Hour
 )
 
 type BridgeRequest struct {
@@ -43,12 +45,14 @@ func Relay(in io.Reader, out io.Writer, address, token string) error {
 		return fmt.Errorf("hook input is not valid JSON")
 	}
 
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	conn, err := net.DialTimeout("tcp", address, bridgeDialTimeout)
 	if err != nil {
 		return fmt.Errorf("connect permission bridge: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(24 * time.Hour))
+	// The listener is started before agy runs this hook, so dial failures should
+	// fail closed quickly. After connect, wait much longer for a human response.
+	_ = conn.SetDeadline(time.Now().Add(bridgeResponseTimeout))
 
 	if err := json.NewEncoder(conn).Encode(BridgeRequest{Token: token, HookInput: input}); err != nil {
 		return fmt.Errorf("send permission request: %w", err)
