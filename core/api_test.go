@@ -317,3 +317,48 @@ func TestHandleCronExec_ProjectMissingIsBadRequest(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestSendBodyLimit_DefaultAndOverride(t *testing.T) {
+	// Zero-value APIServer (no SetMaxAttachmentSize call) falls back to the
+	// default and sizes the body for one base64-expanded attachment + envelope.
+	got := (&APIServer{}).sendBodyLimit()
+	want := DefaultMaxAttachmentSize*4/3 + sendBodyEnvelope
+	if got != want {
+		t.Fatalf("default sendBodyLimit = %d, want %d", got, want)
+	}
+
+	// A configured limit scales the body limit proportionally.
+	api := &APIServer{}
+	api.SetMaxAttachmentSize(100 << 20) // 100 MiB
+	got = api.sendBodyLimit()
+	want = (100<<20)*4/3 + sendBodyEnvelope
+	if got != want {
+		t.Fatalf("overridden sendBodyLimit = %d, want %d", got, want)
+	}
+
+	// Non-positive values are a no-op: the previously configured limit is kept
+	// (callers always pass a positive, resolved value; this just guards typos).
+	api.SetMaxAttachmentSize(0)
+	if got, want := api.sendBodyLimit(), (100<<20)*4/3+sendBodyEnvelope; got != want {
+		t.Fatalf("sendBodyLimit after zero override = %d, want %d (100 MiB retained)", got, want)
+	}
+}
+
+// TestSetMaxAttachmentSize_ConcurrentSafe exercises the reload-vs-request race
+// window: SetMaxAttachmentSize (config reload goroutine) mutates the limit
+// while handleSend's sendBodyLimit reads it. Run with -race to catch the
+// unsynchronised access this guards against.
+func TestSetMaxAttachmentSize_ConcurrentSafe(t *testing.T) {
+	api := &APIServer{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 300; i++ {
+			api.SetMaxAttachmentSize(int64(50+i%10) << 20)
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		_ = api.sendBodyLimit()
+	}
+	<-done
+}

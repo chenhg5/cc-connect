@@ -47,6 +47,17 @@
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
 
+# Maximum size of a single attachment (in MiB) for `cc-connect send
+# --file/--image/--audio/--video` and the /send API. Default: 50 (i.e. 50 MiB).
+# Set 0 to keep the default. Raise it to send larger files; the /send request
+# body limit scales with this value to fit base64-encoded attachments.
+# Can also be overridden per-invocation with the CC_MAX_ATTACHMENT_SIZE env var
+# (raw bytes).
+# `cc-connect send` 单个附件的最大大小（单位 MiB）。默认 50（即 50 MiB），设 0 保持默认。
+# 调大可发送更大文件；/send 请求体上限会随之按 base64 膨胀自动放大。
+# 也可用环境变量 CC_MAX_ATTACHMENT_SIZE（单位：字节）按次覆盖。
+# max_attachment_size_mb = 50
+
 [log]
 level = "info" # debug, info, warn, error
 
