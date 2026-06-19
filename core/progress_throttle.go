@@ -343,8 +343,10 @@ func (r *cardRegistry) persistCard(c *cardState) {
 }
 
 // LoadPersistedCards reads persisted cards from dir, skips entries whose mtime
-// is older than 24 hours, and repopulates the registry. The returned slice is a
-// snapshot of the loaded cards.
+// is older than 24 hours, and repopulates the registry. Loaded cards are
+// marked pending so the next ticker tick pushes any content that was persisted
+// but not yet flushed to the platform (recovery from mid-window kill).
+// The returned slice is a snapshot of the loaded cards.
 func (r *cardRegistry) LoadPersistedCards() []*cardState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -381,6 +383,7 @@ func (r *cardRegistry) LoadPersistedCards() []*cardState {
 			messageID: snap.MessageID,
 			content:   snap.Content,
 			state:     snap.State,
+			pending:   true,
 		}
 		r.cards[snap.MessageID] = c
 		loaded = append(loaded, c)

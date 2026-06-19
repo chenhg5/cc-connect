@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,35 @@ func (u *testMessageUpdater) snapshot() []testMessageUpdate {
 	out := make([]testMessageUpdate, len(u.updates))
 	copy(out, u.updates)
 	return out
+}
+
+// callsForHandle returns the number of successful UpdateMessage calls that
+// were made with the given handle (replyCtx). It is safe for concurrent use.
+func (u *testMessageUpdater) callsForHandle(h any) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for _, update := range u.updates {
+		if update.handle == h {
+			n++
+		}
+	}
+	return n
+}
+
+// setSeqErrs replaces the queued error sequence with the given slice.
+// It is safe for concurrent use.
+func (u *testMessageUpdater) setSeqErrs(errs []error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.seqErrs = errs
+}
+
+// UpdateCard satisfies the CardUpdater interface by delegating to
+// UpdateMessage. This lets the same fake updater be passed to APIs that
+// require CardUpdater (e.g. RegisterCard).
+func (u *testMessageUpdater) UpdateCard(ctx context.Context, handle any, _ string, content string, _ ProgressCardState) error {
+	return u.UpdateMessage(ctx, handle, content)
 }
 
 func TestRegistryUpdateAndFinalize(t *testing.T) {
@@ -404,5 +434,243 @@ func TestTickerHandlesPatchErrors(t *testing.T) {
 	r.tick()
 	if n := len(updater.snapshot()); n != 1 {
 		t.Fatalf("non-retriable error should not be retried, successes = %d, want 1", n)
+	}
+}
+
+// TestTickerBatching verifies that:
+//   - 3 cards each updated 100 times in a tight loop result in <= 1 PATCH per
+//     window per card across 3 ticker windows (i.e. <= 3 total PATCHes per
+//     card in 3 windows)
+//   - updates to different cards are flushed independently — there is no
+//     cross-card coupling
+func TestTickerBatching(t *testing.T) {
+	r := NewCardRegistry(t.TempDir())
+	r.dir = "" // disable atomic file persistence — it would dominate wall time for 300 burst updates
+
+	const interval = 50 * time.Millisecond
+	updater := &testMessageUpdater{}
+	r.StartTicker(updater, interval)
+
+	type cardSpec struct {
+		msgID  string
+		handle string
+	}
+	cards := []cardSpec{
+		{"m1", "h1"},
+		{"m2", "h2"},
+		{"m3", "h3"},
+	}
+
+	// Each card is burst-updated 100 times (different content each time).
+	// The expectation is: at most one PATCH per window per card, so across
+	// 3 windows we should see at most 3 PATCHes per card.
+	for _, c := range cards {
+		for i := 0; i < 100; i++ {
+			content := fmt.Sprintf("%s-v%d", c.msgID, i)
+			if err := r.UpdateCard(c.msgID, c.handle, content, ProgressCardStateRunning, nil); err != nil {
+				t.Fatalf("UpdateCard %s failed: %v", c.msgID, err)
+			}
+		}
+	}
+
+	time.Sleep(3 * interval)
+	r.StopTicker()
+
+	for _, c := range cards {
+		got := updater.callsForHandle(c.handle)
+		if got > 3 {
+			t.Errorf("PATCH calls for %s in 3 windows = %d, want <= 3 (one per window)", c.msgID, got)
+		}
+		if got < 1 {
+			t.Errorf("PATCH calls for %s = %d, want >= 1 (initial burst should push at least once)", c.msgID, got)
+		}
+	}
+
+	// Cross-card isolation: each card should have been PATCHed via its own
+	// handle. If updates from one card bled into another's PATCH, the
+	// per-handle count would not match what we expect.
+	snapshot := updater.snapshot()
+	seenHandles := make(map[any]bool)
+	for _, update := range snapshot {
+		seenHandles[update.handle] = true
+	}
+	for _, c := range cards {
+		if !seenHandles[c.handle] {
+			t.Errorf("card %s (handle=%q) never received a PATCH — cross-card isolation broken", c.msgID, c.handle)
+		}
+	}
+
+	// And no card should have content from another card's last update —
+	// that would indicate writes interleaved across cards during a batch.
+	for _, update := range snapshot {
+		var owner string
+		for _, c := range cards {
+			if update.handle == c.handle {
+				owner = c.msgID
+				break
+			}
+		}
+		if owner == "" {
+			t.Errorf("PATCH delivered to unknown handle %v (content=%q)", update.handle, update.content)
+			continue
+		}
+		if !strings.HasPrefix(update.content, owner+"-") {
+			t.Errorf("handle %v (card %s) received content %q which belongs to a different card", update.handle, owner, update.content)
+		}
+	}
+}
+
+// TestTickerContentDiff verifies that content that has not changed does not
+// generate any PATCH calls. Two scenarios are covered:
+//  1. RegisterCard marks the card as already-pushed; subsequent ticks produce
+//     no PATCHes because the card never becomes dirty.
+//  2. A successful PATCH followed by a burst of UpdateCard calls with the
+//     same content produces no additional PATCHes — the throttler recognizes
+//     "content already pushed".
+func TestTickerContentDiff(t *testing.T) {
+	r := NewCardRegistry(t.TempDir())
+
+	const interval = 50 * time.Millisecond
+	updater := &testMessageUpdater{}
+	r.StartTicker(updater, interval)
+
+	// Scenario 1: RegisterCard signals "already pushed" — ticker must not push.
+	if err := r.RegisterCard("m1", "h1", "v1", updater); err != nil {
+		t.Fatalf("RegisterCard failed: %v", err)
+	}
+
+	time.Sleep(5 * interval)
+
+	if got := updater.callsForHandle("h1"); got != 0 {
+		t.Errorf("PATCH calls for m1 (RegisterCard, no updates) = %d, want 0", got)
+	}
+
+	r.StopTicker()
+
+	// Scenario 2: drive a successful PATCH, then issue many UpdateCard calls
+	// with the same content. The throttler must recognize that the content
+	// was already pushed and skip subsequent ticks entirely.
+	r2 := NewCardRegistry(t.TempDir())
+	defer r2.Stop()
+	updater2 := &testMessageUpdater{}
+	r2.StartTicker(updater2, interval)
+
+	if err := r2.UpdateCard("m2", "h2", "stable", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+
+	// Wait for the first tick to drain the initial PATCH.
+	time.Sleep(2 * interval)
+	if got := updater2.callsForHandle("h2"); got != 1 {
+		t.Fatalf("after initial PATCH, calls = %d, want 1", got)
+	}
+
+	// Now burst 50 identical updates — content does not change, so no PATCH.
+	for i := 0; i < 50; i++ {
+		if err := r2.UpdateCard("m2", "h2", "stable", ProgressCardStateRunning, nil); err != nil {
+			t.Fatalf("UpdateCard %d failed: %v", i, err)
+		}
+	}
+
+	time.Sleep(3 * interval)
+
+	if got := updater2.callsForHandle("h2"); got != 1 {
+		t.Errorf("PATCH calls for m2 with unchanged content = %d, want 1 (only the initial push)", got)
+	}
+}
+
+// TestTickerPatchErrors verifies the ticker's behavior when PATCH calls fail
+// with HTTP 429 (Too Many Requests) and 5xx (server error) responses:
+//
+//   - the registry must not panic
+//   - the dirty state must NOT be lost (so the next tick will retry)
+//   - once the upstream recovers, the PATCH must succeed and the dirty state
+//     must be cleared
+//
+// All of the codes "429", "500", "502", "503", "504" are classified as
+// retriable by isRetriablePatchError — the test exercises all of them.
+func TestTickerPatchErrors(t *testing.T) {
+	r := NewCardRegistry(t.TempDir())
+	defer r.Stop()
+
+	retriableErrs := []error{
+		errors.New("HTTP 429 too many requests"),
+		errors.New("HTTP 500 internal server error"),
+		errors.New("HTTP 502 bad gateway"),
+		errors.New("HTTP 503 service unavailable"),
+		errors.New("HTTP 504 gateway timeout"),
+	}
+
+	updater := &testMessageUpdater{seqErrs: append([]error{}, retriableErrs...)}
+	const interval = 50 * time.Millisecond
+	r.StartTicker(updater, interval)
+
+	if err := r.UpdateCard("m1", "h1", "v1", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+
+	// Tick once per retriable error. None of these should panic, and none
+	// should mark the card as pushed (lastPushedContent must stay empty,
+	// pending must stay true so the dirty state is preserved).
+	for i, wantErr := range retriableErrs {
+		r.tick()
+
+		// After a retriable failure the snapshot must remain empty.
+		if got := len(updater.snapshot()); got != 0 {
+			t.Fatalf("after retriable error %d (%v), successful PATCHes = %d, want 0", i, wantErr, got)
+		}
+
+		// The card is still registered, content is still "v1", and it
+		// must NOT be marked as finalized or pushed.
+		card := r.lookup("m1")
+		if card == nil {
+			t.Fatalf("after error %d, card disappeared (panic suspected)", i)
+		}
+		if card.content != "v1" {
+			t.Fatalf("after retriable error %d, card.content = %q, want %q (dirty state must not be lost)", i, card.content, "v1")
+		}
+		if card.finalized {
+			t.Fatalf("after retriable error %d, card marked finalized (should only happen on success)", i)
+		}
+	}
+
+	// All 5 errors exhausted but the registry is still healthy and dirty.
+	if got := len(updater.snapshot()); got != 0 {
+		t.Fatalf("after all retriable errors, successful PATCHes = %d, want 0", got)
+	}
+	if card := r.lookup("m1"); card == nil || card.content != "v1" {
+		t.Fatalf("dirty state lost after retriable errors: %+v", card)
+	}
+
+	// Now simulate the upstream recovering: clear the error queue and tick
+	// again. The PATCH must succeed and the dirty state must be cleared.
+	updater.setSeqErrs(nil)
+	r.tick()
+
+	snapshot := updater.snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("after recovery tick, successful PATCHes = %d, want 1", len(snapshot))
+	}
+	if snapshot[0].content != "v1" {
+		t.Errorf("recovered PATCH content = %q, want %q", snapshot[0].content, "v1")
+	}
+	if snapshot[0].handle != "h1" {
+		t.Errorf("recovered PATCH handle = %v, want %q", snapshot[0].handle, "h1")
+	}
+
+	// Subsequent ticks must NOT re-PATCH — the dirty state was cleared.
+	r.tick()
+	r.tick()
+	if got := len(updater.snapshot()); got != 1 {
+		t.Errorf("after recovery, extra ticks generated %d new PATCHes, want 0", got-1)
+	}
+
+	// And the registry remains usable: a new update must still flush.
+	if err := r.UpdateCard("m1", "h1", "v2", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard v2 failed: %v", err)
+	}
+	time.Sleep(2 * interval)
+	if got := len(updater.snapshot()); got != 2 {
+		t.Errorf("after new update v2, total PATCHes = %d, want 2 (recovery + v2)", got)
 	}
 }
