@@ -320,7 +320,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial websocket: %s", core.RedactToken(err.Error(), p.token))
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	slog.Info("webex: websocket connected")
 	if h := p.lifecycle(); h != nil {

@@ -78,12 +78,12 @@ func (c *httpClient) doWithRetry(ctx context.Context, method, url string, body [
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%s: %w", what, errUnauthorized)
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		wait := retryAfter(resp.Header.Get("Retry-After"))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -94,7 +94,7 @@ func (c *httpClient) doWithRetry(ctx context.Context, method, url string, body [
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusUnauthorized {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("%s: %w", what, errUnauthorized)
 		}
 	}
@@ -119,7 +119,7 @@ func (c *httpClient) GetMe(ctx context.Context) (*person, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("webex: getMe status %d", resp.StatusCode)
 	}
@@ -138,7 +138,7 @@ func (c *httpClient) CreateDevice(ctx context.Context) (*device, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("webex: createDevice status %d", resp.StatusCode)
 	}
@@ -157,7 +157,7 @@ func (c *httpClient) DeleteDevice(ctx context.Context, deviceURL string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("webex: deleteDevice status %d", resp.StatusCode)
 	}
@@ -169,7 +169,7 @@ func (c *httpClient) GetMessage(ctx context.Context, id string) (*message, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("webex: getMessage status %d", resp.StatusCode)
 	}
@@ -185,7 +185,7 @@ func (c *httpClient) DownloadFile(ctx context.Context, url string) (*downloadedF
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("webex: downloadFile status %d", resp.StatusCode)
 	}
@@ -212,7 +212,7 @@ func (c *httpClient) PostMessage(ctx context.Context, roomID, parentID, markdown
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("webex: postMessage status %d", resp.StatusCode)
 	}
@@ -234,12 +234,14 @@ func (c *httpClient) PostFile(ctx context.Context, roomID string, f *downloadedF
 	if _, err := part.Write(f.Data); err != nil {
 		return err
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		return err
+	}
 	resp, err := c.doWithRetry(ctx, http.MethodPost, c.base()+"/messages", buf.Bytes(), w.FormDataContentType(), "webex: postFile")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("webex: postFile status %d", resp.StatusCode)
 	}
