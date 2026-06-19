@@ -267,3 +267,40 @@ func TestHandleFrameIgnoresNonActivity(t *testing.T) {
 	p.handleFrame(context.Background(), []byte(`{"data":{"eventType":"conversation.highlight"}}`))
 	// no panic, no dispatch = pass
 }
+
+// activityFrame builds a minimal conversation.activity frame JSON for the given verb.
+func activityFrame(verb string) []byte {
+	return []byte(`{"data":{"eventType":"conversation.activity","activity":{` +
+		`"id":"766bc5a0-6b31-11f1-9a28-4325af6c06a3","verb":"` + verb + `",` +
+		`"actor":{"emailAddress":"user@x.com"}}}}`)
+}
+
+func TestHandleFramePostDispatches(t *testing.T) {
+	stub := &stubClient{msg: &message{ID: "m", RoomID: "r", RoomType: "direct", Text: "hi", PersonID: "p", PersonEmail: "user@x.com"}}
+	p := &Platform{client: stub, selfEmail: "bot@webex.bot"}
+	dispatched := false
+	p.handler = func(_ core.Platform, _ *core.Message) { dispatched = true }
+	p.handleFrame(context.Background(), activityFrame("post"))
+	if !dispatched {
+		t.Fatal("post verb should dispatch")
+	}
+}
+
+func TestHandleFrameShareDispatches(t *testing.T) {
+	stub := &stubClient{msg: &message{ID: "m", RoomID: "r", RoomType: "direct", Text: "", PersonID: "p", PersonEmail: "user@x.com"}}
+	p := &Platform{client: stub, selfEmail: "bot@webex.bot"}
+	dispatched := false
+	p.handler = func(_ core.Platform, _ *core.Message) { dispatched = true }
+	p.handleFrame(context.Background(), activityFrame("share"))
+	if !dispatched {
+		t.Fatal("share verb (file upload) should dispatch")
+	}
+}
+
+func TestHandleFrameUpdateIgnored(t *testing.T) {
+	// "update" is a re-notification (e.g. malware scan complete) and must not dispatch.
+	stub := &stubClient{msg: &message{ID: "m", RoomID: "r", RoomType: "direct", PersonEmail: "user@x.com"}}
+	p := &Platform{client: stub, selfEmail: "bot@webex.bot"}
+	p.handler = func(_ core.Platform, _ *core.Message) { t.Fatal("update verb should not dispatch") }
+	p.handleFrame(context.Background(), activityFrame("update"))
+}

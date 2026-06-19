@@ -358,7 +358,13 @@ func (p *Platform) handleFrame(ctx context.Context, data []byte) {
 		slog.Debug("webex: non-JSON frame", "error", err)
 		return
 	}
-	if ev.Data.EventType != "conversation.activity" || ev.Data.Activity.Verb != "post" {
+	// "post" = text message, "share" = file/image upload. Other verbs (e.g.
+	// "update" for malware-scan completion, "delete") are re-notifications we
+	// must ignore to avoid double-processing.
+	if ev.Data.EventType != "conversation.activity" {
+		return
+	}
+	if ev.Data.Activity.Verb != "post" && ev.Data.Activity.Verb != "share" {
 		return
 	}
 	// Skip our own messages (actor email matches the bot).
