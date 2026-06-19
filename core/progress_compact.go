@@ -387,7 +387,7 @@ func normalizeProgressAgentLabel(name string) string {
 		return "Agent"
 	case "codex":
 		return "Codex"
-	case "claudecode", "claude-code", "cc":
+	case `claudecode`, "claude-code", "cc":
 		return "CC"
 	case "gemini":
 		return "Gemini"

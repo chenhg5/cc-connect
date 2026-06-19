@@ -1828,10 +1828,12 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 				BaseURL: src.BaseURL,
 				Model:   src.Model,
 			}
-			if src.AppType == "claude" {
-				gp.AgentTypes = []string{"claudecode"}
-			} else if src.AppType == "codex" {
-				gp.AgentTypes = []string{"codex"}
+			appTypeToAgents := map[string][]string{
+				"claude": {`claudecode`},
+				"codex":  {"codex"},
+			}
+			if agents, ok := appTypeToAgents[src.AppType]; ok {
+				gp.AgentTypes = agents
 			}
 			if err := m.addGlobalProvider(gp); err != nil {
 				skipped = append(skipped, name)

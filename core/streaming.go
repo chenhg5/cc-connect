@@ -11,7 +11,7 @@ import (
 // StreamPreviewCfg controls the streaming preview behavior.
 type StreamPreviewCfg struct {
 	Enabled           bool     // global toggle
-	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
+	DisabledPlatforms []string // platforms where streaming preview is disabled (values are platform registration names)
 	IntervalMs        int      // minimum ms between updates (default 1500)
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)

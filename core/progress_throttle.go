@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +25,7 @@ type persistedCardSnapshot struct {
 	MessageID string            `json:"message_id"`
 	Content   string            `json:"content"`
 	State     ProgressCardState `json:"state"`
+	Finalized bool              `json:"finalized"`
 	UpdatedAt time.Time         `json:"updated_at"`
 }
 
@@ -44,6 +44,11 @@ type cardState struct {
 	mu sync.RWMutex
 }
 
+// DefaultMaxContentBytes is the default upper bound for a single card's
+// content string. It prevents accidental OOM from multi-megabyte payloads while
+// still leaving headroom above the 1 MiB verification threshold.
+const DefaultMaxContentBytes = 8 * 1024 * 1024
+
 // cardRegistry persists the latest state of progress cards to disk and
 // throttles platform updates via a background ticker.
 type cardRegistry struct {
@@ -58,6 +63,9 @@ type cardRegistry struct {
 	wg       sync.WaitGroup
 	updater  CardUpdater
 	interval time.Duration
+
+	maxContentBytes int64
+	i18n            *I18n
 }
 
 // NewCardRegistry creates a new in-memory card registry and starts a background
@@ -65,15 +73,55 @@ type cardRegistry struct {
 // Callers can override the updater and interval via StartTicker.
 func NewCardRegistry(dir string) *cardRegistry {
 	r := &cardRegistry{
-		dir:      dir,
-		cards:    make(map[string]*cardState),
-		interval: 100 * time.Millisecond,
+		dir:             dir,
+		cards:           make(map[string]*cardState),
+		interval:        100 * time.Millisecond,
+		maxContentBytes: DefaultMaxContentBytes,
 	}
 	r.stopCh = make(chan struct{})
 	r.ticker = time.NewTicker(r.interval)
 	r.wg.Add(1)
 	go r.loop(r.ticker, r.stopCh)
 	return r
+}
+
+// SetMaxContentBytes configures the maximum allowed length of card content.
+// A non-positive value disables the limit. The change applies to all subsequent
+// UpdateCard and RegisterCard calls.
+func (r *cardRegistry) SetMaxContentBytes(n int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxContentBytes = n
+}
+
+// SetI18n sets the internationalization helper used for user-facing error
+// messages. A nil value falls back to English defaults.
+func (r *cardRegistry) SetI18n(i *I18n) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.i18n = i
+}
+
+var defaultCardRegistryI18n = NewI18n(LangEnglish)
+
+func (r *cardRegistry) t(key MsgKey) string {
+	r.mu.RLock()
+	i := r.i18n
+	r.mu.RUnlock()
+	if i != nil {
+		return i.T(key)
+	}
+	return defaultCardRegistryI18n.T(key)
+}
+
+func (r *cardRegistry) tf(key MsgKey, args ...interface{}) string {
+	r.mu.RLock()
+	i := r.i18n
+	r.mu.RUnlock()
+	if i != nil {
+		return i.Tf(key, args...)
+	}
+	return defaultCardRegistryI18n.Tf(key, args...)
 }
 
 // StartTicker starts a background ticker that scans the registry every interval
@@ -187,7 +235,7 @@ func (r *cardRegistry) tick() {
 				c.pending = false
 				c.mu.Unlock()
 			}
-			slog.Warn("card registry: patch failed", "messageID", c.messageID, "state", state, "error", err)
+			slog.Error("card registry: patch failed", "messageID", c.messageID, "state", state, "error", err)
 			continue
 		}
 
@@ -199,15 +247,31 @@ func (r *cardRegistry) tick() {
 	}
 }
 
+func (r *cardRegistry) checkContentSize(content string) error {
+	r.mu.RLock()
+	limit := r.maxContentBytes
+	r.mu.RUnlock()
+	if limit <= 0 {
+		return nil
+	}
+	if int64(len(content)) > limit {
+		return errors.New(r.tf(MsgCardContentTooLarge, len(content), limit))
+	}
+	return nil
+}
+
 // UpdateCard stores the latest card content and state. If the card has already
 // been finalized and the new state is not final, it returns an error.
 func (r *cardRegistry) UpdateCard(messageID string, handle any, content string, state ProgressCardState, updater CardUpdater) error {
 	if messageID == "" {
-		return errors.New("messageID is required")
+		return errors.New(r.t(MsgCardMessageIDRequired))
 	}
 	cleanID := sanitizeMessageID(messageID)
 	if cleanID == "" {
-		return fmt.Errorf("invalid messageID: %s", messageID)
+		return errors.New(r.tf(MsgCardMessageIDInvalid, messageID))
+	}
+	if err := r.checkContentSize(content); err != nil {
+		return err
 	}
 
 	r.mu.Lock()
@@ -221,7 +285,7 @@ func (r *cardRegistry) UpdateCard(messageID string, handle any, content string, 
 	c.mu.Lock()
 	if c.finalized && !isFinalProgressCardState(state) {
 		c.mu.Unlock()
-		return fmt.Errorf("card %s is already finalized", cleanID)
+		return errors.New(r.tf(MsgCardAlreadyFinalized, cleanID))
 	}
 	c.handle = handle
 	c.content = content
@@ -251,14 +315,17 @@ func (a *cardUpdaterFromMessageUpdater) UpdateCard(ctx context.Context, handle a
 // handle and content.
 func (r *cardRegistry) RegisterCard(messageID string, handle any, content string, updater CardUpdater) error {
 	if messageID == "" {
-		return errors.New("messageID is required")
+		return errors.New(r.t(MsgCardMessageIDRequired))
 	}
 	cleanID := sanitizeMessageID(messageID)
 	if cleanID == "" {
-		return fmt.Errorf("invalid messageID: %s", messageID)
+		return errors.New(r.tf(MsgCardMessageIDInvalid, messageID))
 	}
 	if updater == nil {
-		return errors.New("updater is required")
+		return errors.New(r.t(MsgCardUpdaterRequired))
+	}
+	if err := r.checkContentSize(content); err != nil {
+		return err
 	}
 
 	r.mu.Lock()
@@ -274,6 +341,7 @@ func (r *cardRegistry) RegisterCard(messageID string, handle any, content string
 	c.content = content
 	c.updater = updater
 	// Content was already pushed by the caller; do not schedule a redundant flush.
+	c.lastPushedContent = content
 	c.pending = false
 	c.mu.Unlock()
 
@@ -284,11 +352,11 @@ func (r *cardRegistry) RegisterCard(messageID string, handle any, content string
 // Finalize marks a card as finalized. The card must have been previously registered.
 func (r *cardRegistry) Finalize(messageID string, state ProgressCardState) error {
 	if messageID == "" {
-		return errors.New("messageID is required")
+		return errors.New(r.t(MsgCardMessageIDRequired))
 	}
 	cleanID := sanitizeMessageID(messageID)
 	if cleanID == "" {
-		return fmt.Errorf("invalid messageID: %s", messageID)
+		return errors.New(r.tf(MsgCardMessageIDInvalid, messageID))
 	}
 
 	r.mu.Lock()
@@ -296,13 +364,16 @@ func (r *cardRegistry) Finalize(messageID string, state ProgressCardState) error
 	r.mu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("card %s not registered", cleanID)
+		return errors.New(r.tf(MsgCardNotRegistered, cleanID))
 	}
 
 	c.mu.Lock()
 	c.finalized = true
 	c.state = state
 	c.pending = true
+	// Mark the card as dirty so the final state is flushed on the next tick,
+	// even if the card content has not changed since the last push.
+	c.lastPushedContent = ""
 	c.mu.Unlock()
 
 	r.persistCard(c)
@@ -314,7 +385,14 @@ func isFinalProgressCardState(state ProgressCardState) bool {
 }
 
 func (r *cardRegistry) persistCard(c *cardState) {
-	if c == nil || r.dir == "" {
+	if c == nil {
+		return
+	}
+
+	r.mu.RLock()
+	dir := r.dir
+	r.mu.RUnlock()
+	if dir == "" {
 		return
 	}
 
@@ -323,6 +401,7 @@ func (r *cardRegistry) persistCard(c *cardState) {
 		MessageID: c.messageID,
 		Content:   c.content,
 		State:     c.state,
+		Finalized: c.finalized,
 		UpdatedAt: time.Now().UTC(),
 	}
 	c.mu.RUnlock()
@@ -332,11 +411,11 @@ func (r *cardRegistry) persistCard(c *cardState) {
 		slog.Error("card registry: marshal card failed", "messageID", c.messageID, "error", err)
 		return
 	}
-	if err := os.MkdirAll(r.dir, 0o755); err != nil {
-		slog.Error("card registry: mkdir failed", "dir", r.dir, "error", err)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Error("card registry: mkdir failed", "dir", dir, "error", err)
 		return
 	}
-	path := filepath.Join(r.dir, "cc-connect-progress-"+c.messageID+".json")
+	path := filepath.Join(dir, "cc-connect-progress-"+c.messageID+".json")
 	if err := AtomicWriteFile(path, data, 0o600); err != nil {
 		slog.Error("card registry: atomic write failed", "path", path, "error", err)
 	}
@@ -352,6 +431,10 @@ func (r *cardRegistry) LoadPersistedCards() []*cardState {
 	defer r.mu.Unlock()
 
 	r.cards = make(map[string]*cardState)
+
+	if r.dir == "" {
+		return nil
+	}
 
 	matches, err := filepath.Glob(filepath.Join(r.dir, "cc-connect-progress-*.json"))
 	if err != nil {
@@ -383,6 +466,7 @@ func (r *cardRegistry) LoadPersistedCards() []*cardState {
 			messageID: snap.MessageID,
 			content:   snap.Content,
 			state:     snap.State,
+			finalized: snap.Finalized,
 			pending:   true,
 		}
 		r.cards[snap.MessageID] = c

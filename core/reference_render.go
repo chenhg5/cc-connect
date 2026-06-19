@@ -56,8 +56,8 @@ func normalizeReferenceRenderCfg(cfg ReferenceRenderCfg) ReferenceRenderCfg {
 	return n
 }
 
-var supportedReferenceNormalizeAgents = []string{"codex", "claudecode"}
-var supportedReferenceRenderPlatforms = []string{"feishu", "weixin"}
+var supportedReferenceNormalizeAgents = []string{"codex", `claudecode`}
+var supportedReferenceRenderPlatforms = []string{`feishu`, "weixin"}
 
 func normalizeReferenceScope(values []string, supported []string) []string {
 	if len(values) == 0 {

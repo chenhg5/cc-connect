@@ -22,7 +22,7 @@ const (
 type ProviderPreset struct {
 	Name          string                       `json:"name"`
 	DisplayName   string                       `json:"display_name"`
-	Agents        map[string]PresetAgentConfig  `json:"agents"`               // per-agent-type configuration (keys: "claudecode", "codex", "gemini", "opencode", ...)
+	Agents        map[string]PresetAgentConfig  `json:"agents"`               // per-agent-type configuration (keys are agent registration names such as codex or gemini)
 	InviteURL     string                       `json:"invite_url,omitempty"`
 	Description   string                       `json:"description,omitempty"`
 	DescriptionZh string                       `json:"description_zh,omitempty"`

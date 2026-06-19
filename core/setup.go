@@ -146,7 +146,7 @@ func (m *ManagementServer) handleSetupFeishuPoll(w http.ResponseWriter, r *http.
 		clientID, _ := pollResp["client_id"].(string)
 		clientSecret, _ := pollResp["client_secret"].(string)
 		if clientID != "" && clientSecret != "" {
-			platform := "feishu"
+			platform := `feishu`
 			if userInfo, ok := pollResp["user_info"].(map[string]any); ok {
 				if brand, _ := userInfo["tenant_brand"].(string); strings.EqualFold(brand, "lark") {
 					platform = "lark"

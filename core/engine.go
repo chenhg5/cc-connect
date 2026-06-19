@@ -408,6 +408,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cardRegistryDir = filepath.Join(filepath.Dir(sessionStorePath), "cc-connect-progress-cards")
 	}
 	e.cardRegistry = NewCardRegistry(cardRegistryDir)
+	e.cardRegistry.SetI18n(e.i18n)
 	e.cardRegistry.StartTicker(nopMessageUpdater{}, 100*time.Millisecond)
 	e.newCompactProgressWriter = newCompactProgressWriter
 
@@ -933,7 +934,7 @@ func (e *Engine) SkillDirs() []string {
 	return e.skills.Dirs()
 }
 
-// AgentTypeName returns the agent type name (e.g. "claudecode", "codex").
+// AgentTypeName returns the agent type name (e.g. the registered agent identifier).
 func (e *Engine) AgentTypeName() string {
 	if e.agent != nil {
 		return e.agent.Name()
@@ -1366,6 +1367,34 @@ func (e *Engine) Stop() error {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
 	return nil
+}
+
+// RegisterCard records a card whose initial content has already been pushed to
+// the platform. It delegates to the engine's internal card registry and is
+// exposed for end-to-end / daemon tests that need to inject card state.
+func (e *Engine) RegisterCard(messageID string, handle any, content string, updater CardUpdater) error {
+	if e.cardRegistry == nil {
+		return errors.New("card registry not initialized")
+	}
+	return e.cardRegistry.RegisterCard(messageID, handle, content, updater)
+}
+
+// UpdateCard stores the latest card content and state in the engine's internal
+// card registry. It is exposed for end-to-end / daemon tests.
+func (e *Engine) UpdateCard(messageID string, handle any, content string, state ProgressCardState, updater CardUpdater) error {
+	if e.cardRegistry == nil {
+		return errors.New("card registry not initialized")
+	}
+	return e.cardRegistry.UpdateCard(messageID, handle, content, state, updater)
+}
+
+// FinalizeCard marks a card as finalized in the engine's internal card registry.
+// It is exposed for end-to-end / daemon tests.
+func (e *Engine) FinalizeCard(messageID string, state ProgressCardState) error {
+	if e.cardRegistry == nil {
+		return errors.New("card registry not initialized")
+	}
+	return e.cardRegistry.Finalize(messageID, state)
 }
 
 // OnPlatformReady marks an async platform as ready and initializes platform-level

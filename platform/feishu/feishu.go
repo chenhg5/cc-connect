@@ -2552,6 +2552,7 @@ func isTransientError(err error) bool {
 		"TLS handshake timeout",
 		"server misbehaving",
 		"connection refused",
+		"Client.Timeout exceeded",
 	} {
 		if strings.Contains(msg, substr) {
 			return true

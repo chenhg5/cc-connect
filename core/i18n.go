@@ -246,8 +246,8 @@ const (
 	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle          MsgKey = "status_title"
-	MsgReplyFooterRemaining MsgKey = "reply_footer_remaining"
+	MsgStatusTitle           MsgKey = "status_title"
+	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -323,6 +323,12 @@ const (
 	MsgCardTitleDoctor           MsgKey = "card_title_doctor"
 	MsgCardTitleVersion          MsgKey = "card_title_version"
 	MsgCardTitleUpgrade          MsgKey = "card_title_upgrade"
+	MsgCardContentTooLarge       MsgKey = "card_content_too_large"
+	MsgCardMessageIDRequired     MsgKey = "card_message_id_required"
+	MsgCardMessageIDInvalid      MsgKey = "card_message_id_invalid"
+	MsgCardUpdaterRequired       MsgKey = "card_updater_required"
+	MsgCardAlreadyFinalized      MsgKey = "card_already_finalized"
+	MsgCardNotRegistered         MsgKey = "card_not_registered"
 	MsgListItem                  MsgKey = "list_item"
 	MsgListEmptySummary          MsgKey = "list_empty_summary"
 	MsgCronIDLabel               MsgKey = "cron_id_label"
@@ -2289,6 +2295,48 @@ var messages = map[MsgKey]map[Language]string{
 	MsgCardTitleUpgrade: {
 		LangEnglish: "Upgrade", LangChinese: "升级", LangTraditionalChinese: "升級",
 		LangJapanese: "アップグレード", LangSpanish: "Actualización",
+	},
+	MsgCardContentTooLarge: {
+		LangEnglish:            "Card content exceeds maximum allowed size: %d > %d bytes",
+		LangChinese:            "卡片内容超出最大允许大小：%d > %d 字节",
+		LangTraditionalChinese: "卡片內容超出最大允許大小：%d > %d 位元組",
+		LangJapanese:           "カードコンテンツが最大許容サイズを超えています：%d > %d バイト",
+		LangSpanish:            "El contenido de la tarjeta excede el tamaño máximo permitido: %d > %d bytes",
+	},
+	MsgCardMessageIDRequired: {
+		LangEnglish:            "Message ID is required",
+		LangChinese:            "消息 ID 不能为空",
+		LangTraditionalChinese: "訊息 ID 不能為空",
+		LangJapanese:           "メッセージ ID が必要です",
+		LangSpanish:            "Se requiere el ID del mensaje",
+	},
+	MsgCardMessageIDInvalid: {
+		LangEnglish:            "Invalid message ID: %s",
+		LangChinese:            "无效的消息 ID：%s",
+		LangTraditionalChinese: "無效的訊息 ID：%s",
+		LangJapanese:           "無効なメッセージ ID です：%s",
+		LangSpanish:            "ID de mensaje no válido: %s",
+	},
+	MsgCardUpdaterRequired: {
+		LangEnglish:            "Updater is required",
+		LangChinese:            "更新器不能为空",
+		LangTraditionalChinese: "更新器不能為空",
+		LangJapanese:           "アップデーターが必要です",
+		LangSpanish:            "Se requiere el actualizador",
+	},
+	MsgCardAlreadyFinalized: {
+		LangEnglish:            "Card %s is already finalized",
+		LangChinese:            "卡片 %s 已结束",
+		LangTraditionalChinese: "卡片 %s 已結束",
+		LangJapanese:           "カード %s は既に確定しています",
+		LangSpanish:            "La tarjeta %s ya está finalizada",
+	},
+	MsgCardNotRegistered: {
+		LangEnglish:            "Card %s is not registered",
+		LangChinese:            "卡片 %s 未注册",
+		LangTraditionalChinese: "卡片 %s 未註冊",
+		LangJapanese:           "カード %s は登録されていません",
+		LangSpanish:            "La tarjeta %s no está registrada",
 	},
 	MsgListItem: {
 		LangEnglish:            "%s **%d.** %s · **%d** msgs · %s",

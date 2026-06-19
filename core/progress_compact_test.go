@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -52,6 +53,7 @@ func (r progressHintReplyCtx) progressStyleHint() string { return r.style }
 func (r progressHintReplyCtx) supportsProgressCardPayloadHint() bool { return r.payload }
 
 type previewCapturePlatform struct {
+	mu      sync.Mutex
 	started []string
 	updated []string
 }
@@ -63,13 +65,45 @@ func (p *previewCapturePlatform) Send(context.Context, any, string) error  { ret
 func (p *previewCapturePlatform) Stop() error                              { return nil }
 
 func (p *previewCapturePlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.mu.Lock()
 	p.started = append(p.started, content)
+	p.mu.Unlock()
 	return "preview-1", nil
 }
 
 func (p *previewCapturePlatform) UpdateMessage(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
 	p.updated = append(p.updated, content)
+	p.mu.Unlock()
 	return nil
+}
+
+func (p *previewCapturePlatform) startedLen() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.started)
+}
+
+func (p *previewCapturePlatform) updatedLen() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.updated)
+}
+
+func (p *previewCapturePlatform) startedSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.started))
+	copy(out, p.started)
+	return out
+}
+
+func (p *previewCapturePlatform) updatedSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.updated))
+	copy(out, p.updated)
+	return out
 }
 
 func TestBuildAndParseProgressCardPayload(t *testing.T) {
@@ -127,11 +161,11 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 	if !w.AppendEvent(ProgressEntryThinking, "planning bridge progress", "", "planning bridge progress") {
 		t.Fatal("AppendEvent() = false, want true")
 	}
-	if len(p.started) != 1 {
-		t.Fatalf("started = %d, want 1", len(p.started))
+	if p.startedLen() != 1 {
+		t.Fatalf("started = %d, want 1", p.startedLen())
 	}
-	if !strings.HasPrefix(p.started[0], ProgressCardPayloadPrefix) {
-		t.Fatalf("preview start payload = %q, want progress payload prefix", p.started[0])
+	if !strings.HasPrefix(p.startedSnapshot()[0], ProgressCardPayloadPrefix) {
+		t.Fatalf("preview start payload = %q, want progress payload prefix", p.startedSnapshot()[0])
 	}
 
 	if !w.Finalize(ProgressCardStateCompleted) {
@@ -139,11 +173,11 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 	}
 
 	time.Sleep(200 * time.Millisecond)
-	if len(p.updated) != 1 {
-		t.Fatalf("updated = %d, want 1", len(p.updated))
+	if p.updatedLen() != 1 {
+		t.Fatalf("updated = %d, want 1", p.updatedLen())
 	}
 
-	parsed, ok := ParseProgressCardPayload(p.updated[0])
+	parsed, ok := ParseProgressCardPayload(p.updatedSnapshot()[0])
 	if !ok {
 		t.Fatalf("ParseProgressCardPayload() failed for %q", p.updated[0])
 	}
@@ -288,8 +322,8 @@ func TestAppendStructuredUsesRegistryAfterStart(t *testing.T) {
 	if ok := w.AppendStructured(entry1, "step1"); !ok {
 		t.Fatal("first AppendStructured() = false, want true")
 	}
-	if len(p.started) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(p.started))
+	if p.startedLen() != 1 {
+		t.Fatalf("preview starts = %d, want 1", p.startedLen())
 	}
 
 	entry2 := ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}
@@ -298,8 +332,8 @@ func TestAppendStructuredUsesRegistryAfterStart(t *testing.T) {
 	}
 
 	// Direct PATCH must not be used for the second update.
-	if len(p.updated) != 0 {
-		t.Fatalf("direct UpdateMessage calls = %d, want 0; updates should go through registry", len(p.updated))
+	if p.updatedLen() != 0 {
+		t.Fatalf("direct UpdateMessage calls = %d, want 0; updates should go through registry", p.updatedLen())
 	}
 
 	card := registry.lookup("msg_xxx")
@@ -344,8 +378,8 @@ func TestAppendStructuredFallbackWithoutIdentifier(t *testing.T) {
 		t.Fatal("registry should not contain a card when handle lacks an identifier")
 	}
 	// Direct PATCH should have been used instead.
-	if len(p.updated) != 1 {
-		t.Fatalf("direct UpdateMessage calls = %d, want 1", len(p.updated))
+	if p.updatedLen() != 1 {
+		t.Fatalf("direct UpdateMessage calls = %d, want 1", p.updatedLen())
 	}
 }
 
@@ -415,8 +449,8 @@ func TestFinalizeDoesNotPatchImmediately(t *testing.T) {
 	// Before the registry ticker fires, the platform should not have received a
 	// direct PATCH.
 	time.Sleep(20 * time.Millisecond)
-	if len(p.updated) != 0 {
-		t.Fatalf("direct UpdateMessage calls = %d, want 0; final state should be flushed by registry ticker", len(p.updated))
+	if p.updatedLen() != 0 {
+		t.Fatalf("direct UpdateMessage calls = %d, want 0; final state should be flushed by registry ticker", p.updatedLen())
 	}
 }
 
@@ -543,4 +577,295 @@ func TestNewCompactProgressWriterWithRegistry(t *testing.T) {
 			t.Fatalf("nil-registry writer should not touch the unrelated registry, found %v", card)
 		}
 	})
+}
+
+func TestInferLegacyEntryKind(t *testing.T) {
+	cases := []struct {
+		in   string
+		want ProgressCardEntryKind
+	}{
+		{"💭 thinking", ProgressEntryThinking},
+		{"🔧 tool", ProgressEntryToolUse},
+		{"**Tool #1 pwd", ProgressEntryToolUse},
+		{"🧾 result", ProgressEntryToolResult},
+		{"❌ error", ProgressEntryError},
+		{"plain info", ProgressEntryInfo},
+	}
+	for _, tc := range cases {
+		got := inferLegacyEntryKind(tc.in)
+		if got != tc.want {
+			t.Errorf("inferLegacyEntryKind(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeProgressAgentLabel(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", "Agent"},
+		{"agent", "Agent"},
+		{"codex", "Codex"},
+		{"claudecode", "CC"},
+		{"claude-code", "CC"},
+		{"cc", "CC"},
+		{"gemini", "Gemini"},
+		{"cursor", "Cursor"},
+		{"qoder", "Qoder"},
+		{"iflow", "iFlow"},
+		{"opencode", "OpenCode"},
+		{"pi", "PI"},
+		{"myagent", "Myagent"},
+	}
+	for _, tc := range cases {
+		got := normalizeProgressAgentLabel(tc.in)
+		if got != tc.want {
+			t.Errorf("normalizeProgressAgentLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestMessageHandleID_NonIdentifier(t *testing.T) {
+	if got := messageHandleHasID("not an identifier"); got {
+		t.Errorf("messageHandleHasID(non-identifier) = true, want false")
+	}
+	if got := messageHandleID("not an identifier"); got != "" {
+		t.Errorf("messageHandleID(non-identifier) = %q, want empty", got)
+	}
+}
+
+func TestProgressCardPayloadForTarget_Fallback(t *testing.T) {
+	plain := &stubPlatformNoProgress{}
+	if progressCardPayloadForTarget(plain, "ctx") {
+		t.Fatal("expected false for platform without payload support")
+	}
+}
+
+func TestRegisterHandle_ErrorPaths(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCard, payload: true}, "Agent", LangEnglish, nil, nil)
+
+	if w.registerHandle(&stubIdentifiableHandle{id: "msg_1"}, "content") {
+		t.Fatal("registerHandle with nil registry should return false")
+	}
+
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
+	w2 := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCard, payload: true}, "Agent", LangEnglish, nil, registry)
+
+	if w2.registerHandle("not identifiable", "content") {
+		t.Fatal("registerHandle with non-identifiable handle should return false")
+	}
+	if w2.registerHandle(&stubIdentifiableHandle{id: "  "}, "content") {
+		t.Fatal("registerHandle with empty messageID should return false")
+	}
+}
+
+func TestCompactProgressWriter_Append(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCompact}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+	if !w.enabled {
+		t.Fatal("writer should be enabled")
+	}
+	if !w.Append("hello") {
+		t.Fatal("Append() = false, want true")
+	}
+	if got := p.getPreviewStarts(); len(got) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(got))
+	}
+}
+
+func TestCompactProgressWriter_AppendStructured_Disabled(t *testing.T) {
+	p := &stubPlatformNoProgress{}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+	if w.AppendStructured(ProgressCardEntry{Text: "hello"}, "hello") {
+		t.Fatal("AppendStructured on disabled writer should return false")
+	}
+}
+
+func TestCompactProgressWriter_AppendStructured_Empty(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCompact}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+	if !w.AppendStructured(ProgressCardEntry{Text: "   "}, "   ") {
+		t.Fatal("AppendStructured with empty text should return true")
+	}
+}
+
+func TestCompactProgressWriter_AppendStructured_DirectFallback(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCompact}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+
+	if !w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step1"}, "step1") {
+		t.Fatal("first AppendStructured failed")
+	}
+	if !w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}, "Tool: Bash\npwd") {
+		t.Fatal("second AppendStructured failed")
+	}
+
+	edits := p.getPreviewEdits()
+	if len(edits) != 1 {
+		t.Fatalf("direct edits = %d, want 1", len(edits))
+	}
+	if edits[0] != "step1\n\nTool: Bash\npwd" {
+		t.Errorf("edit content = %q", edits[0])
+	}
+}
+
+func TestCompactProgressWriter_AppendStructured_CardPayload(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCard, supportPayload: true}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+
+	if !w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step1"}, "step1") {
+		t.Fatal("AppendStructured failed")
+	}
+	starts := p.getPreviewStarts()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(starts))
+	}
+	if !strings.HasPrefix(starts[0], ProgressCardPayloadPrefix) {
+		t.Fatalf("expected structured payload, got %q", starts[0])
+	}
+}
+
+func TestCompactProgressWriter_AppendStructured_CardMarkdownFallback(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCard}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+
+	if !w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step1"}, "step1") {
+		t.Fatal("AppendStructured failed")
+	}
+	if len(p.getPreviewStarts()) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(p.getPreviewStarts()))
+	}
+	if strings.HasPrefix(p.getPreviewStarts()[0], ProgressCardPayloadPrefix) {
+		t.Fatal("expected markdown fallback, got payload")
+	}
+}
+
+func TestCompactProgressWriter_AppendStructured_Transform(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCompact}
+	transform := func(s string) string { return strings.ToUpper(s) }
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, transform, nil)
+
+	if !w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "hello"}, "hello") {
+		t.Fatal("AppendStructured thinking failed")
+	}
+	if !w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Text: "result"}, "result") {
+		t.Fatal("AppendStructured tool result failed")
+	}
+
+	edits := p.getPreviewEdits()
+	if len(edits) != 1 {
+		t.Fatalf("edits = %d, want 1", len(edits))
+	}
+	if !strings.Contains(edits[0], "HELLO") {
+		t.Errorf("thinking not transformed: %q", edits[0])
+	}
+	if strings.Contains(edits[0], "RESULT") {
+		t.Errorf("tool result should not be transformed: %q", edits[0])
+	}
+}
+
+func TestCompactProgressWriter_Finalize_DirectFallback(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCard, supportPayload: true}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+
+	if !w.AppendStructured(ProgressCardEntry{Text: "running"}, "running") {
+		t.Fatal("AppendStructured failed")
+	}
+	if !w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("Finalize failed")
+	}
+	if edits := p.getPreviewEdits(); len(edits) != 1 {
+		t.Fatalf("finalize edits = %d, want 1", len(edits))
+	}
+}
+
+func TestCompactProgressWriter_Finalize_Disabled(t *testing.T) {
+	p := &stubPlatformNoProgress{}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+	if w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("Finalize on disabled writer should return false")
+	}
+}
+
+func TestCompactProgressWriter_Finalize_SameState(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCard, supportPayload: true}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+	if !w.AppendStructured(ProgressCardEntry{Text: "running"}, "running") {
+		t.Fatal("AppendStructured failed")
+	}
+	if !w.Finalize(ProgressCardStateRunning) {
+		t.Fatal("Finalize with same state should return true")
+	}
+}
+
+func TestCompactProgressWriter_Finalize_DefaultState(t *testing.T) {
+	p := &stubCompactProgressPlatform{style: progressStyleCard, supportPayload: true}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, nil, nil)
+	if !w.AppendStructured(ProgressCardEntry{Text: "running"}, "running") {
+		t.Fatal("AppendStructured failed")
+	}
+	if !w.Finalize("") {
+		t.Fatal("Finalize with empty state should default to completed")
+	}
+	if w.state != ProgressCardStateCompleted {
+		t.Errorf("state = %q, want completed", w.state)
+	}
+}
+
+func TestWithAPITimeout_AlreadyHasDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	w := &compactProgressWriter{ctx: ctx}
+	callCtx, cancel2 := w.withAPITimeout()
+	if callCtx != ctx {
+		t.Fatal("withAPITimeout should return existing context when deadline present")
+	}
+	cancel2()
+}
+
+func TestRenderCardProgressMarkdownFallback_Truncated(t *testing.T) {
+	got := renderCardProgressMarkdownFallback([]string{"a", "b"}, true)
+	if !strings.Contains(got, "Showing latest updates only") {
+		t.Errorf("truncated marker missing: %q", got)
+	}
+}
+
+func TestTrimCompactProgressText(t *testing.T) {
+	if got := trimCompactProgressText("hello", 0); got != "hello" {
+		t.Errorf("max<=0 should return unchanged, got %q", got)
+	}
+	short := "short text"
+	if got := trimCompactProgressText(short, 100); got != short {
+		t.Errorf("short text changed: %q", got)
+	}
+	long := strings.Repeat("x", 100)
+	got := trimCompactProgressText(long, 10)
+	if !strings.HasPrefix(got, "…\n") {
+		t.Errorf("truncated text missing ellipsis prefix: %q", got)
+	}
+}
+
+func TestBuildProgressCardPayloadV2_Defaults(t *testing.T) {
+	payload := BuildProgressCardPayloadV2([]ProgressCardEntry{{Text: "step"}}, false, "", LangEnglish, "")
+	if payload == "" {
+		t.Fatal("payload empty")
+	}
+	parsed, ok := ParseProgressCardPayload(payload)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if parsed.State != ProgressCardStateRunning {
+		t.Errorf("state default = %q, want running", parsed.State)
+	}
+}
+
+func TestNewCompactProgressWriter_Disabled(t *testing.T) {
+	plain := &stubPlatformNoProgress{}
+	w := newCompactProgressWriter(context.Background(), plain, "ctx", "codex", LangEnglish, nil, nil)
+	if w.enabled {
+		t.Fatal("writer should be disabled for platform without MessageUpdater")
+	}
 }
