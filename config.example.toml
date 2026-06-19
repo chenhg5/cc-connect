@@ -103,8 +103,13 @@ level = "info" # debug, info, warn, error
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
 #                           #          隐藏思考和工具消息，每段文本独立发送
-#                           # quiet: hide thinking/tool, all text in one card, done emoji at end
-#                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+#                           # quiet: hide thinking/tool, deliver only the final text block
+#                           #        (the text emitted after the LAST tool_use). The
+#                           #        pre-tool "lead-in" is dropped by default. See
+#                           #        prepend_pre_tool_text below to opt back in.
+#                           #        静默模式（仅最终消息）：隐藏思考和工具消息，只投递最后一个
+#                           #        tool_use 之后的文本块；默认丢弃 tool_use 之前的"开场白"。
+#                           #        如需保留开场白，请见下面的 prepend_pre_tool_text。
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
@@ -113,6 +118,13 @@ level = "info" # debug, info, warn, error
 #                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+# prepend_pre_tool_text = false  # Quiet-mode-only: when mode = "quiet", keep the pre-tool
+#                                # "lead-in" (e.g. "Let me check that for you...") and
+#                                # concatenate it with the final text. Default false delivers
+#                                # only the post-tool text. Has no effect in full/compact mode.
+#                                # 仅对静默模式生效：true 时保留 tool_use 前的"开场白"并与最终文本
+#                                # 拼接后一起投递（恢复旧行为）；默认 false 仅投递 tool_use 之后的
+#                                # 文本。对 full/compact 模式无影响。
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.

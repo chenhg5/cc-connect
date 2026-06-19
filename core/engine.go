@@ -168,6 +168,13 @@ type DisplayCfg struct {
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
+	// PrependPreToolText is a quiet-mode-only knob (#1302). When Mode == "quiet"
+	// and this is false (the default), the engine slices the accumulated
+	// assistant text at the last tool_use boundary and only delivers the
+	// text block that follows. Set this to true to keep the pre-tool
+	// "lead-in" and restore the legacy "all text in one card" rendering.
+	// Ignored outside quiet mode.
+	PrependPreToolText bool
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -270,8 +277,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -4282,7 +4289,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
-	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	// postLastToolStart is the index in textParts where the text block emitted
+	// after the LAST tool_use begins. It stays 0 if no tool_use was observed.
+	// In quiet mode with PrependPreToolText=false (#1302), the EventResult
+	// handler uses textParts[postLastToolStart:] as the final reply so the
+	// user only sees the text emitted AFTER the last tool call, not the
+	// pre-tool "lead-in" (e.g. "Let me check that for you...").
+	postLastToolStart := 0
+	silentHold := false // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -4647,13 +4661,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				break
 			}
 			// When tool messages are hidden, behavior depends on display mode:
-			//   quiet:   append separator to keep all text in one card
+			//   quiet:   append separator to keep all text in one card (legacy
+			//            behaviour when PrependPreToolText=true; when false, the
+			//            pre-tool slice is dropped at EventResult time — see #1302)
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
+					// Mark the post-tool boundary (#1302): the next EventText
+					// chunk starts here. With PrependPreToolText=false (the
+					// default), EventResult slices textParts[postLastToolStart:]
+					// so the pre-tool "lead-in" is dropped from the final
+					// reply. The separator we just appended lives in the
+					// pre-tool segment and is dropped with it — fine, because
+					// nothing in the kept slice ever references it.
+					postLastToolStart = len(textParts)
 				} else {
 					if sp.canPreview() {
 						sp.freeze()
@@ -5041,7 +5065,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
 			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				fullResponse = strings.Join(textParts, "")
+				// Quiet mode slices off the pre-tool "lead-in" so the user only
+				// sees the text emitted after the last tool_use (#1302). Other
+				// modes keep the full accumulated text as before.
+				textSource := textParts
+				if e.display.Mode == "quiet" && !e.display.PrependPreToolText {
+					textSource = textParts[postLastToolStart:]
+				}
+				fullResponse = strings.Join(textSource, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}

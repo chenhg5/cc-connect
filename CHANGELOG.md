@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Quiet mode "final message only" enforced**: when `[display].mode = "quiet"` (or legacy `[projects.X].quiet = true`), the engine now slices the accumulated assistant text at the last `tool_use` boundary and delivers only the text block emitted AFTER the last tool call. Previously, the pre-tool "lead-in" (e.g. "Let me check that for you...") was concatenated with the post-tool answer, glued together with no separator in most cases — clashing with the inline doc that promised "final message only" and producing visibly malformed replies. New opt-in `[display].prepend_pre_tool_text = true` restores the old "all text in one card" rendering for users who relied on it. Has no effect in `full` / `compact` mode. The fix lives in the platform-agnostic `processInteractiveEvents` finalization path, so all platforms (Slack, Discord, Feishu, Telegram, DingTalk, WeChat, QQ, LINE, ...) inherit the corrected behaviour uniformly (#1302).
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5

@@ -181,7 +181,12 @@ type ManagementConfig struct {
 const (
 	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
 	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
-	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+	// DisplayModeQuiet (final message only): hide thinking/tool, only the text
+	// emitted AFTER the last tool_use is delivered as the final reply. The
+	// pre-tool "lead-in" (e.g. "Let me check that for you...") is dropped by
+	// default. Set DisplayConfig.PrependPreToolText = true to opt in to the
+	// pre-tool text and get the old "all text in one card" behaviour.
+	DisplayModeQuiet = "quiet"
 )
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
@@ -194,6 +199,13 @@ type DisplayConfig struct {
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
+	// PrependPreToolText is a quiet-mode-only knob. When mode = "quiet" and
+	// this is false (the default), the engine slices the accumulated text at
+	// the last tool_use boundary and only delivers the text block that
+	// follows it. Set this to true to keep the pre-tool "lead-in" and get
+	// the legacy "all text in one card" rendering (#1302). Has no effect in
+	// full / compact mode.
+	PrependPreToolText *bool `toml:"prepend_pre_tool_text"`
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -808,7 +820,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter bool) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter, prependPreToolText bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
 		projDisp = proj.Display
@@ -904,6 +916,14 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		replyFooter = *cfg.Display.ReplyFooter
 	} else {
 		replyFooter = true
+	}
+
+	// PrependPreToolText precedence: proj.Display.PrependPreToolText > cfg.Display.PrependPreToolText > default false.
+	// Only meaningful when mode = "quiet"; the engine ignores the field otherwise (#1302).
+	if projDisp != nil && projDisp.PrependPreToolText != nil {
+		prependPreToolText = *projDisp.PrependPreToolText
+	} else if cfg.Display.PrependPreToolText != nil {
+		prependPreToolText = *cfg.Display.PrependPreToolText
 	}
 
 	return
