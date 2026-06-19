@@ -2653,6 +2653,12 @@ type feishuPreviewHandle struct {
 	chatID    string
 }
 
+// MessageID returns the stable Feishu message ID stored in this handle.
+// It implements core.MessageHandleIdentifier.
+func (h *feishuPreviewHandle) MessageID() string {
+	return h.messageID
+}
+
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.

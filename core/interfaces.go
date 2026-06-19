@@ -149,6 +149,14 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// MessageHandleIdentifier is an optional interface for message handles that
+// carry a stable platform-level message ID. Callers can use it to distinguish
+// cards or messages by their underlying ID, for example when registering a
+// per-message rate limiter or matching an update to a specific card.
+type MessageHandleIdentifier interface {
+	MessageID() string
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".

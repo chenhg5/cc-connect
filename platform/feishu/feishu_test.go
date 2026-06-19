@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chenhg5/cc-connect/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -399,5 +400,21 @@ func TestStripMentions(t *testing.T) {
 				t.Errorf("stripMentions() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFeishuHandleMessageID(t *testing.T) {
+	h := &feishuPreviewHandle{messageID: "om_xxx", chatID: "oc_chat"}
+	if got := h.MessageID(); got != "om_xxx" {
+		t.Errorf("MessageID() = %q, want %q", got, "om_xxx")
+	}
+
+	var i any = h
+	ident, ok := i.(core.MessageHandleIdentifier)
+	if !ok {
+		t.Fatalf("feishuPreviewHandle should implement core.MessageHandleIdentifier")
+	}
+	if got := ident.MessageID(); got != "om_xxx" {
+		t.Errorf("interface MessageID() = %q, want %q", got, "om_xxx")
 	}
 }
