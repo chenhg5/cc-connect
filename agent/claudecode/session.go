@@ -740,9 +740,39 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
+			var result string
+			switch c := item["content"].(type) {
+			case string:
+				result = c
+			case []any:
+				var parts []string
+				for _, elem := range c {
+					if m, ok := elem.(map[string]any); ok {
+						if t, _ := m["text"].(string); t != "" {
+							parts = append(parts, t)
+						}
+					}
+				}
+				result = strings.Join(parts, "\n")
+			}
 			if isError {
-				result, _ := item["content"].(string)
 				slog.Debug("claudeSession: tool error", "content", result)
+			}
+			success := !isError
+			code := 0
+			if isError {
+				code = 1
+			}
+			evt := core.Event{
+				Type:         core.EventToolResult,
+				ToolResult:   truncateStr(strings.TrimSpace(result), 500),
+				ToolExitCode: &code,
+				ToolSuccess:  &success,
+			}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 	}
