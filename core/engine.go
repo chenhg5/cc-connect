@@ -63,6 +63,11 @@ const (
 	slowAgentClose      = 3 * time.Second  // agentSession.Close
 	slowAgentSend       = 2 * time.Second  // agentSession.Send
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
+
+	// pendingModelSwitchTimeout is the longest /model will wait for an
+	// in-flight turn to finish before force-closing the session and
+	// applying the new model anyway. See issue #1303.
+	pendingModelSwitchTimeout = 30 * time.Second
 )
 
 const (
@@ -270,8 +275,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -375,6 +380,16 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+
+	// pendingModel is a model switch the user requested while a turn was in
+	// flight (issue #1303). It is applied automatically once the in-flight
+	// turn finishes (EventResult), or force-applied after
+	// pendingModelSwitchTimeout if the turn does not finish in time.
+	// TODO: cross-agent (codex, cursor, opencode, ...) likely have the same
+	// problem and could share this same queueing mechanism; the fix here
+	// is wired for any ModelSwitcher, not specific to claudecode.
+	pendingModel   string
+	pendingModelAt time.Time
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -2359,6 +2374,18 @@ func (e *Engine) noteUserTurnCompleted(state *interactiveState) {
 		state.lastCompletedUserMessageTimeMs = t
 	}
 	state.mu.Unlock()
+}
+
+// isTurnInFlightLocked reports whether the interactiveState currently has
+// a turn being processed by the agent (started via Send, not yet reached a
+// terminal EventResult). Used by /model to decide between applying the
+// switch immediately vs. queueing it (issue #1303).
+// state.mu must be held.
+func (s *interactiveState) isTurnInFlightLocked() bool {
+	if s == nil {
+		return false
+	}
+	return s.currentTurnUserMessageTimeMs > s.lastCompletedUserMessageTimeMs
 }
 
 // noteUserMessageAccepted records that a user message was accepted for this
@@ -5162,6 +5189,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			e.noteUserTurnCompleted(state)
+
+			// Issue #1303: apply any model switch the user queued while this
+			// turn was in flight. Done after noteUserTurnCompleted so the
+			// in-flight watermark is up to date; the apply path pushes its
+			// own result card to the platform.
+			e.applyPendingModelSwitchIfAny(state, sessionKey)
 
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
@@ -11134,8 +11167,26 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		cancel()
 	}
 
+	// Issue #1303: if a turn is in flight, queue the model switch and
+	// apply it once the turn finishes. Do NOT call cleanupInteractiveState
+	// here — that would close the in-flight session and silently drop
+	// the reply. The timer in queuePendingModelSwitch force-applies
+	// after pendingModelSwitchTimeout if the turn does not finish.
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		state.mu.Lock()
+		inFlight := state.isTurnInFlightLocked()
+		state.mu.Unlock()
+		if inFlight {
+			return e.queuePendingModelSwitch(state, sessionKey, target)
+		}
+	}
+
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+	e.cleanupInteractiveState(interactiveKey)
 	if err == nil {
 		sessions.Save()
 	}
@@ -11170,9 +11221,30 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = resolveModelSwitchTarget(target, models)
 		}
 		cancel()
-		e.cleanupInteractiveState(interactiveKey)
+		// Issue #1303: if a turn is in flight, queue the model switch and
+		// apply it once the turn finishes. Do NOT call cleanupInteractiveState
+		// here — that would close the in-flight session and silently drop
+		// the reply.
 		e.interactiveMu.Lock()
 		state := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		if state != nil {
+			state.mu.Lock()
+			inFlight := state.isTurnInFlightLocked()
+			state.mu.Unlock()
+			if inFlight {
+				queued := e.queuePendingModelSwitch(state, sessionKey, target)
+				if queued != nil {
+					// Push the queued-state card to the platform so the
+					// user knows the switch will apply shortly.
+					e.pushModelSwitchResultCard(sessionKey, queued)
+				}
+				return
+			}
+		}
+		e.cleanupInteractiveState(interactiveKey)
+		e.interactiveMu.Lock()
+		state = e.interactiveStates[interactiveKey]
 		if state == nil {
 			state = &interactiveState{}
 			e.interactiveStates[interactiveKey] = state
@@ -12001,6 +12073,136 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 		Markdown(e.i18n.Tf(MsgModelCardSwitched, target)).
 		Buttons(e.modelCardBackButton()).
 		Build()
+}
+
+// renderModelQueuedCard is shown to the user when /model is invoked while
+// a turn is in flight. The switch will apply automatically once the
+// in-flight turn finishes (≤30s) — see issue #1303.
+func (e *Engine) renderModelQueuedCard(target string) *Card {
+	return NewCard().
+		Title(e.i18n.T(MsgCardTitleModel), "indigo").
+		Markdown(e.i18n.Tf(MsgModelCardSwitchQueued, target)).
+		Build()
+}
+
+// queuePendingModelSwitch defers a model change because a turn is in
+// flight. The switch is applied automatically once the in-flight turn
+// finishes (EventResult), or force-applied by the timer if the turn does
+// not finish within pendingModelSwitchTimeout. Returns the card the
+// caller should send back to the user.
+//
+// Called from the /model command path (handleModelCardAction,
+// executeCardAction case /model) when state.isTurnInFlightLocked() is
+// true. The caller must NOT call switchModelOnAgent or cleanupInteractiveState
+// — that would close the in-flight session and drop the reply.
+func (e *Engine) queuePendingModelSwitch(state *interactiveState, sessionKey, target string) *Card {
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	state.pendingModel = target
+	state.pendingModelAt = time.Now()
+	state.mu.Unlock()
+	go e.pendingModelSwitchTimer(sessionKey, target)
+	return e.renderModelQueuedCard(target)
+}
+
+// applyPendingModelSwitchIfAny checks whether the user queued a model
+// switch while a turn was in flight, and if so applies it. Called from
+// the EventResult handler right after noteUserTurnCompleted, so the
+// in-flight turn is now officially complete.
+//
+// On success the model has been applied AND a result card has been
+// pushed to the platform. On failure the pending model is dropped and
+// the failure card is shown instead.
+func (e *Engine) applyPendingModelSwitchIfAny(state *interactiveState, sessionKey string) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	target := state.pendingModel
+	state.pendingModel = ""
+	state.pendingModelAt = time.Time{}
+	state.mu.Unlock()
+	if target == "" {
+		return
+	}
+
+	agent := e.agent
+	if state.agent != nil {
+		agent = state.agent
+	}
+	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
+	if err == nil {
+		e.sessions.Save()
+	}
+	slog.Info("model switch: applied queued change after turn complete",
+		"target", resolved, "session", sessionKey, "error", err)
+	e.pushModelSwitchResultCard(sessionKey, e.renderModelSwitchResultCard(resolved, err))
+}
+
+// pendingModelSwitchTimer is the safety net for issue #1303. If the
+// in-flight turn does not finish within pendingModelSwitchTimeout, we
+// force-close the session and apply the queued model anyway so the
+// user's intent is not lost.
+func (e *Engine) pendingModelSwitchTimer(sessionKey, target string) {
+	time.Sleep(pendingModelSwitchTimeout)
+	e.checkAndForceApplyPendingModelSwitch(sessionKey, target)
+}
+
+// checkAndForceApplyPendingModelSwitch is the body of the pending-model
+// timer, extracted so tests can invoke it without waiting 30s. If the
+// session still has the same queued model AND the turn is still in
+// flight, it applies the model, force-closes the session, and pushes an
+// interrupted notice to the platform.
+func (e *Engine) checkAndForceApplyPendingModelSwitch(sessionKey, target string) {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	stillQueued := state.pendingModel == target
+	inFlight := state.isTurnInFlightLocked()
+	platform := state.platform
+	replyCtx := state.replyCtx
+	state.mu.Unlock()
+	if !stillQueued || !inFlight {
+		return
+	}
+
+	slog.Warn("model switch: timeout reached, force-applying",
+		"target", target, "session", sessionKey, "timeout", pendingModelSwitchTimeout)
+
+	// Apply the model and clear the pending marker first so a concurrent
+	// EventResult can't apply it again. Then close the session and notify
+	// the user.
+	state.mu.Lock()
+	state.pendingModel = ""
+	state.pendingModelAt = time.Time{}
+	state.mu.Unlock()
+
+	agent := e.agent
+	if state.agent != nil {
+		agent = state.agent
+	}
+	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
+	if err == nil {
+		e.sessions.Save()
+	}
+	e.pushModelSwitchResultCard(sessionKey, e.renderModelSwitchResultCard(resolved, err))
+
+	// Force-close the in-flight session. The cleanup path will mark the
+	// session stopped and the next user message will start a fresh session
+	// with the new model.
+	e.cleanupInteractiveState(sessionKey, state)
+
+	// Tell the user their previous message was interrupted so they can
+	// resend it.
+	if platform != nil {
+		e.send(platform, replyCtx, e.i18n.T(MsgModelSwitchInterrupted))
+	}
 }
 
 func (e *Engine) renderReasoningCard() *Card {

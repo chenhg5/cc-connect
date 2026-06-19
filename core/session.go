@@ -16,6 +16,39 @@ import (
 // to use --continue (resume most recent session) instead of a specific session ID.
 const ContinueSession = "__continue__"
 
+// Coordination note — Session vs interactiveState (issue #1303).
+//
+// Session is the persisted record of a conversation. The model field the
+// user has configured for a session lives on the *Agent* (see
+// core/interfaces.go ModelSwitcher and agent/claudecode.SetModel), NOT
+// on the Session struct. Session.AgentSessionID only points at the
+// running child process; the model that process was spawned with is
+// stored on the agent and not duplicated here.
+//
+// The /model flow therefore has to touch three things:
+//
+//   1. The model field on the agent (cheap — see
+//      claudecode.Agent.SetModel, which only updates an in-memory
+//      string under a mutex and does NOT close any session).
+//   2. The running interactiveState in core/engine.go (per-user
+//      ephemeral state for an in-flight turn).
+//   3. Optionally, the Session record — but currently /model does NOT
+//      persist the model choice; it only changes the agent's
+//      in-memory field. The next spawned session picks up whatever
+//      GetModel() returns at spawn time.
+//
+// Because (1) is safe to call mid-turn, the fix for issue #1303 can
+// defer the model change to the EventResult handler without any
+// coordination with Session. The pending switch lives on
+// interactiveState.pendingModel (see core/engine.go), is applied
+// automatically when the in-flight turn finishes, and is
+// force-applied after pendingModelSwitchTimeout if the turn never
+// completes. If you change the agent's model API (e.g. add a
+// SetModelAndRespawn that touches the session), update this comment
+// AND re-audit the queueing path: any new side effect on the running
+// process becomes a candidate for the same in-flight-vs-immediate
+// split the fix introduces.
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID                  string         `json:"id"`
@@ -828,7 +861,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	defer sm.mu.Unlock()
 
 	// Group sessions by baseChat
-	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
 	for userKey, sessionIDs := range sm.userSessions {

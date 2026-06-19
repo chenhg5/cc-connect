@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **`/model` during in-flight turn no longer drops the reply**: switching the model while a turn is still running used to close the in-flight session immediately, killing the agent process before it could emit `turn_complete`. The user's already-generated reply was silently dropped and they got no acknowledgement. The switch is now queued on the in-flight `interactiveState` and applied automatically when the turn finishes (`EventResult{Done:true}`). If the turn does not finish within 30s, a safety-net force-apply closes the session and posts an explicit "your previous message was interrupted" notice, so the user can resend it. The no-in-flight `/model` path is unchanged (#1303).
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5

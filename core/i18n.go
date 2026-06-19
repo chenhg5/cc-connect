@@ -295,18 +295,20 @@ const (
 	MsgCronBtnUnmute          MsgKey = "cron_btn_unmute"
 	MsgCronBtnDelete          MsgKey = "cron_btn_delete"
 
-	MsgStatusTitle           MsgKey = "status_title"
-	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
-	MsgModelCurrent          MsgKey = "model_current"
-	MsgModelChanged          MsgKey = "model_changed"
-	MsgModelChangeFailed     MsgKey = "model_change_failed"
-	MsgModelCardSwitching    MsgKey = "model_card_switching"
-	MsgModelCardSwitched     MsgKey = "model_card_switched"
-	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
-	MsgModelNotSupported     MsgKey = "model_not_supported"
-	MsgReasoningCurrent      MsgKey = "reasoning_current"
-	MsgReasoningChanged      MsgKey = "reasoning_changed"
-	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
+	MsgStatusTitle            MsgKey = "status_title"
+	MsgReplyFooterRemaining   MsgKey = "reply_footer_remaining"
+	MsgModelCurrent           MsgKey = "model_current"
+	MsgModelChanged           MsgKey = "model_changed"
+	MsgModelChangeFailed      MsgKey = "model_change_failed"
+	MsgModelCardSwitching     MsgKey = "model_card_switching"
+	MsgModelCardSwitched      MsgKey = "model_card_switched"
+	MsgModelCardSwitchFailed  MsgKey = "model_card_switch_failed"
+	MsgModelCardSwitchQueued  MsgKey = "model_card_switch_queued"
+	MsgModelNotSupported      MsgKey = "model_not_supported"
+	MsgModelSwitchInterrupted MsgKey = "model_switch_interrupted"
+	MsgReasoningCurrent       MsgKey = "reasoning_current"
+	MsgReasoningChanged       MsgKey = "reasoning_changed"
+	MsgReasoningNotSupported  MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
@@ -378,31 +380,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -2228,6 +2230,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "模型已切換為 `%s`。",
 		LangJapanese:           "モデルを `%s` に切り替えました。",
 		LangSpanish:            "Modelo cambiado a `%s`.",
+	},
+	MsgModelCardSwitchQueued: {
+		LangEnglish:            "Turn in progress. Model will switch to `%s` once the current response finishes (≤30s).",
+		LangChinese:            "当前回复尚未完成，模型切换到 `%s` 将在回复结束后自动应用（最长 30 秒）。",
+		LangTraditionalChinese: "當前回覆尚未完成，模型切換到 `%s` 將在回覆結束後自動套用（最長 30 秒）。",
+		LangJapanese:           "現在の応答が進行中です。`%s` へのモデル切替は現在の応答完了後に自動的に適用されます（最大 30 秒）。",
+		LangSpanish:            "Respuesta en curso. El cambio a `%s` se aplicará cuando termine la respuesta actual (≤30s).",
+	},
+	MsgModelSwitchInterrupted: {
+		LangEnglish:            "⚠️ The model switch waited too long; the in-flight turn was interrupted so the new model could take effect. Please resend your last message.",
+		LangChinese:            "⚠️ 模型切换等待超时，已中断当前回复以便切换到新模型。请重新发送上一条消息。",
+		LangTraditionalChinese: "⚠️ 模型切換等待逾時，已中斷當前回覆以便切換到新模型。請重新傳送上一則訊息。",
+		LangJapanese:           "⚠️ モデル切替の待機がタイムアウトしたため、新しいモデルを適用するために進行中の応答を中断しました。最後のメッセージを再送してください。",
+		LangSpanish:            "⚠️ La espera para cambiar de modelo agotó el tiempo; la respuesta en curso se interrumpió para aplicar el nuevo modelo. Vuelve a enviar tu último mensaje.",
 	},
 	MsgModelCardSwitchFailed: {
 		LangEnglish:            "Failed to switch model: %v",
