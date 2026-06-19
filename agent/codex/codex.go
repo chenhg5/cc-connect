@@ -501,14 +501,43 @@ func codexSkillDirs(workDir, explicitCodexHome string) []string {
 	}
 
 	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
-	userDirs := make([]string, 0, 2)
+	userDirs := make([]string, 0, 4)
 	if codexHome != "" {
-		userDirs = append(userDirs, filepath.Join(codexHome, "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(codexHome, "skills"),
+			filepath.Join(codexHome, "superpowers", "skills"),
+		)
+		userDirs = append(userDirs, codexPluginSkillDirs(filepath.Join(codexHome, "plugins"))...)
 	}
 	if homeDir != "" {
-		userDirs = append(userDirs, filepath.Join(homeDir, ".agents", "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(homeDir, ".agents", "skills"),
+			filepath.Join(homeDir, ".claude", "skills"),
+		)
 	}
 	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
+}
+
+func codexPluginSkillDirs(root string) []string {
+	var result []string
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		fullPath := filepath.Join(root, entry.Name())
+		info, err := os.Stat(fullPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if entry.Name() == "skills" {
+			result = append(result, fullPath)
+			continue
+		}
+		result = append(result, codexPluginSkillDirs(fullPath)...)
+	}
+	return result
 }
 
 func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
@@ -524,6 +553,7 @@ func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
 		dirs = append(dirs,
 			filepath.Join(current, ".agents", "skills"),
 			filepath.Join(current, ".codex", "skills"),
+			filepath.Join(current, ".claude", "skills"),
 		)
 		if stopAt != "" && sameCodexPath(current, stopAt) {
 			break

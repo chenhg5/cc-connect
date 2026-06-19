@@ -8,6 +8,53 @@ import (
 	"testing"
 )
 
+func TestSkillDirs_IncludesCodexSpecificSkillRoots(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	workDir := filepath.Join(tmp, "workspace")
+	codexHome := filepath.Join(tmp, "codex-home")
+
+	setTestHome(t, home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".git"), []byte("gitdir: fake\n"), 0o644); err != nil {
+		t.Fatalf("write .git: %v", err)
+	}
+
+	pluginSkillsDir := filepath.Join(codexHome, "plugins", "cache", "openai-curated", "github", "hash", "skills")
+	if err := os.MkdirAll(pluginSkillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir plugin skills dir: %v", err)
+	}
+
+	a := &Agent{workDir: workDir}
+	dirs := a.SkillDirs()
+
+	want := map[string]bool{
+		filepath.Join(workDir, ".agents", "skills"):       true,
+		filepath.Join(workDir, ".codex", "skills"):        true,
+		filepath.Join(workDir, ".claude", "skills"):       true,
+		filepath.Join(codexHome, "skills"):                true,
+		filepath.Join(codexHome, "superpowers", "skills"): true,
+		pluginSkillsDir:                          true,
+		filepath.Join(home, ".agents", "skills"): true,
+		filepath.Join(home, ".claude", "skills"): true,
+	}
+
+	got := map[string]bool{}
+	for _, dir := range dirs {
+		got[dir] = true
+	}
+
+	for dir := range want {
+		if !got[dir] {
+			t.Fatalf("SkillDirs missing %q, dirs=%v", dir, dirs)
+		}
+	}
+}
+
 func TestSkillDirs_UsesProjectAgentAndCodexHomes(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -37,12 +84,17 @@ func TestSkillDirs_UsesProjectAgentAndCodexHomes(t *testing.T) {
 	want := []string{
 		filepath.Join(workDir, ".agents", "skills"),
 		filepath.Join(workDir, ".codex", "skills"),
+		filepath.Join(workDir, ".claude", "skills"),
 		filepath.Join(repo, "nested", ".agents", "skills"),
 		filepath.Join(repo, "nested", ".codex", "skills"),
+		filepath.Join(repo, "nested", ".claude", "skills"),
 		filepath.Join(repo, ".agents", "skills"),
 		filepath.Join(repo, ".codex", "skills"),
+		filepath.Join(repo, ".claude", "skills"),
 		filepath.Join(codexHome, "skills"),
+		filepath.Join(codexHome, "superpowers", "skills"),
 		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".claude", "skills"),
 	}
 	if len(got) != len(want) {
 		t.Fatalf("len(SkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
