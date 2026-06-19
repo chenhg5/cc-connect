@@ -124,6 +124,33 @@ func TestSkillRegistryListAll_IgnoresRootSkillFile(t *testing.T) {
 	}
 }
 
+func TestSkillRegistryListAll_IgnoresNestedSkillFilesInsideSkillDirectories(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFile(t, filepath.Join(root, "frontend-design", "SKILL.md"), "Frontend design skill")
+	// Reference assets bundled inside the skill must not be registered as
+	// standalone skills (e.g. style template libraries).
+	writeSkillFile(t, filepath.Join(root, "frontend-design", "references", "styles", "finance-report", "SKILL.md"), "Finance report style template")
+	writeSkillFile(t, filepath.Join(root, "frontend-design", "references", "styles", "dcf-valuation", "SKILL.md"), "DCF valuation style template")
+
+	r := NewSkillRegistry()
+	r.SetDirs([]string{root})
+
+	skills := r.ListAll()
+
+	if len(skills) != 1 {
+		t.Fatalf("skills discovered = %d, want 1", len(skills))
+	}
+	if r.Resolve("frontend-design") == nil {
+		t.Fatalf("expected frontend-design skill to resolve")
+	}
+	if r.Resolve("finance-report") != nil {
+		t.Fatalf("nested reference template finance-report must not resolve as a skill")
+	}
+	if r.Resolve("dcf-valuation") != nil {
+		t.Fatalf("nested reference template dcf-valuation must not resolve as a skill")
+	}
+}
+
 func writeSkillFile(t *testing.T, path, description string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -97,37 +97,43 @@ func discoverSkillsInDir(scanRoot, currentDir string, seen, visited map[string]b
 		return nil
 	}
 
-	var result []*Skill
-	for _, entry := range entries {
-		fullPath := filepath.Join(currentDir, entry.Name())
-
-		if entry.Name() == "SKILL.md" {
-			skillDir := filepath.Dir(fullPath)
-			if sameFilePath(skillDir, scanRoot) {
+	// A directory containing SKILL.md is a skill. Register it and do NOT
+	// descend into its subdirectories: any deeper SKILL.md files are the
+	// skill's private reference assets (templates, style libraries, ...),
+	// not standalone skills. A SKILL.md directly at the scan root is
+	// ignored (the root is a container of skills, not a skill itself).
+	if !sameFilePath(currentDir, scanRoot) {
+		for _, entry := range entries {
+			if entry.IsDir() || entry.Name() != "SKILL.md" {
 				continue
 			}
 
-			skillName := filepath.Base(skillDir)
+			skillName := filepath.Base(currentDir)
 			if seen[strings.ToLower(skillName)] {
-				continue
+				return nil
 			}
 
-			data, err := os.ReadFile(fullPath)
+			data, err := os.ReadFile(filepath.Join(currentDir, entry.Name()))
 			if err != nil {
-				continue
+				return nil
 			}
 
-			skill := parseSkillMD(skillName, string(data), skillDir)
+			skill := parseSkillMD(skillName, string(data), currentDir)
 			if skill == nil {
-				continue
+				return nil
 			}
 
 			seen[strings.ToLower(skillName)] = true
-			result = append(result, skill)
-			slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
-			continue
+			slog.Debug("skill: discovered", "name", skillName, "dir", currentDir)
+			return []*Skill{skill}
 		}
+	}
 
+	// Not a skill directory itself — keep descending so grouped layouts
+	// (e.g. <root>/automation/<skill>/SKILL.md) are still discovered.
+	var result []*Skill
+	for _, entry := range entries {
+		fullPath := filepath.Join(currentDir, entry.Name())
 		if shouldDescendIntoSkillPath(fullPath, entry) {
 			result = append(result, discoverSkillsInDir(scanRoot, fullPath, seen, visited)...)
 		}
