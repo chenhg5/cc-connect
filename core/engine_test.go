@@ -1448,6 +1448,91 @@ func TestProcessInteractiveEvents_HybridModeCompactStyleSingleCardPlusFinal(t *t
 	}
 }
 
+// TestEnginePassesRegistryToWriter verifies that the Engine injects its shared
+// *cardRegistry into every compactProgressWriter it creates. The factory seam
+// captures the registry argument; both the live turn and a subsequent queued
+// turn must observe the same engine-owned registry.
+func TestEnginePassesRegistryToWriter(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "compact",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.cardRegistry.Stop()
+
+	if e.cardRegistry == nil {
+		t.Fatal("Engine.cardRegistry should be initialized by NewEngine")
+	}
+
+	type captured struct {
+		registry *cardRegistry
+	}
+	caps := make(chan *captured, 4)
+	e.newCompactProgressWriter = func(
+		ctx context.Context,
+		p Platform,
+		replyCtx any,
+		agentName string,
+		lang Language,
+		transform func(string) string,
+		registry *cardRegistry,
+	) *compactProgressWriter {
+		caps <- &captured{registry: registry}
+		return newCompactProgressWriter(ctx, p, replyCtx, agentName, lang, transform, registry)
+	}
+
+	sessionKey := "feishu:user-registry-pass-through"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-registry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-registry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "plan"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-registry", time.Now(), nil, nil, state.replyCtx)
+
+	select {
+	case got := <-caps:
+		if got.registry == nil {
+			t.Fatal("writer factory received nil registry; want engine-owned *cardRegistry")
+		}
+		if got.registry != e.cardRegistry {
+			t.Fatalf("writer factory received registry = %p, want engine registry = %p", got.registry, e.cardRegistry)
+		}
+	default:
+		t.Fatal("newCompactProgressWriter was not invoked by processInteractiveEvents")
+	}
+
+	// A subsequent turn for the same session must reuse the SAME registry
+	// (the shared engine registry), not allocate a fresh one.
+	agentSession2 := newControllableSession("s-registry-2")
+	state2 := &interactiveState{
+		agentSession: agentSession2,
+		platform:     p,
+		replyCtx:     "ctx-registry-2",
+	}
+	e.interactiveStates[sessionKey] = state2
+
+	agentSession2.events <- Event{Type: EventThinking, Content: "second"}
+	agentSession2.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state2, session, e.sessions, sessionKey, "m-registry-2", time.Now(), nil, nil, state2.replyCtx)
+
+	select {
+	case got := <-caps:
+		if got.registry != e.cardRegistry {
+			t.Fatalf("second turn factory received registry = %p, want engine registry = %p", got.registry, e.cardRegistry)
+		}
+	default:
+		t.Fatal("newCompactProgressWriter was not invoked for the second turn")
+	}
+}
+
 func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
 	p := &stubPlatformEngine{n: "feishu"}
 	a := &namedStubModelModeAgent{name: "codex"}

@@ -496,3 +496,51 @@ func TestRegisterHandleIdempotent(t *testing.T) {
 		t.Fatal("card handle was not updated by idempotent registration")
 	}
 }
+
+func TestNewCompactProgressWriterWithRegistry(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+
+	t.Run("stores provided registry", func(t *testing.T) {
+		registry := NewCardRegistry(t.TempDir())
+		defer registry.Stop()
+
+		w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCompact}, "codex", LangEnglish, nil, registry)
+		if w == nil {
+			t.Fatal("newCompactProgressWriter returned nil")
+		}
+		if w.registry != registry {
+			t.Fatalf("writer.registry = %p, want %p", w.registry, registry)
+		}
+		if w.cardUpdater == nil {
+			t.Fatal("writer.cardUpdater = nil, want messageUpdaterCardAdapter instance")
+		}
+	})
+
+	t.Run("nil registry keeps direct update fallback", func(t *testing.T) {
+		registry := NewCardRegistry(t.TempDir())
+		defer registry.Stop()
+
+		w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCompact}, "codex", LangEnglish, nil, nil)
+		if w == nil {
+			t.Fatal("newCompactProgressWriter(nil) returned nil")
+		}
+		if w.registry != nil {
+			t.Fatalf("writer.registry = %p, want nil", w.registry)
+		}
+		if w.cardUpdater != nil {
+			t.Fatalf("writer.cardUpdater = %v, want nil when no registry", w.cardUpdater)
+		}
+
+		// AppendStructured should still work via the direct UpdateMessage fallback.
+		entry := ProgressCardEntry{Kind: ProgressEntryThinking, Text: "fallback step"}
+		if ok := w.AppendStructured(entry, "fallback step"); !ok {
+			t.Fatal("AppendStructured() = false, want true (direct fallback)")
+		}
+
+		// AppendStructured with identifiable handle and nil registry must NOT
+		// register anything in the unrelated registry.
+		if card := registry.lookup("msg_xxx"); card != nil {
+			t.Fatalf("nil-registry writer should not touch the unrelated registry, found %v", card)
+		}
+	})
+}
