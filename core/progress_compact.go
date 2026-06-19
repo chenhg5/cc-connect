@@ -511,6 +511,9 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			}
 			w.handle = handle
 			w.lastSent = w.content
+			if w.registerHandle(handle, w.content) {
+				w.handleRegistered = true
+			}
 			return true
 		}
 		callCtx, cancel := w.withAPITimeout()
@@ -528,19 +531,10 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 
 	if w.registry != nil && messageHandleHasID(w.handle) {
 		messageID := messageHandleID(w.handle)
-		if !w.handleRegistered {
-			if err := w.registry.RegisterCard(messageID, w.handle, w.content, w.cardUpdater); err != nil {
-				slog.Warn("progress writer: registry register failed", "platform", w.platform.Name(), "style", w.style, "error", err)
-				w.failed = true
-				return false
-			}
-			w.handleRegistered = true
-		} else {
-			if err := w.registry.UpdateCard(messageID, w.handle, w.content, w.state, w.cardUpdater); err != nil {
-				slog.Warn("progress writer: registry update failed", "platform", w.platform.Name(), "style", w.style, "error", err)
-				w.failed = true
-				return false
-			}
+		if err := w.registry.UpdateCard(messageID, w.handle, w.content, w.state, w.cardUpdater); err != nil {
+			slog.Warn("progress writer: registry update failed", "platform", w.platform.Name(), "style", w.style, "error", err)
+			w.failed = true
+			return false
 		}
 		w.lastSent = w.content
 		return true
