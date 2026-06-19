@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -28,13 +31,15 @@ type persistedCardSnapshot struct {
 
 // cardState holds the in-memory state for a single card being throttled.
 type cardState struct {
-	messageID string
-	handle    any
-	content   string
-	state     ProgressCardState
-	updater   CardUpdater
-	finalized bool
-	pending   bool
+	messageID         string
+	handle            any
+	content           string
+	state             ProgressCardState
+	updater           CardUpdater
+	finalized         bool
+	pending           bool
+	lastPushedContent string
+	lastPushTime      time.Time
 
 	mu sync.RWMutex
 }
@@ -42,40 +47,99 @@ type cardState struct {
 // cardRegistry persists the latest state of progress cards to disk and
 // throttles platform updates via a background ticker.
 type cardRegistry struct {
-	dir    string
-	ticker *time.Ticker
-	stopCh chan struct{}
+	dir string
 
-	mu       sync.RWMutex
-	cards    map[string]*cardState
-	stopOnce sync.Once
+	mu    sync.RWMutex
+	cards map[string]*cardState
+
+	tickerMu sync.Mutex
+	ticker   *time.Ticker
+	stopCh   chan struct{}
+	wg       sync.WaitGroup
+	updater  CardUpdater
+	interval time.Duration
 }
 
-// NewCardRegistry creates a new in-memory card registry.
-// The dir argument is reserved for future disk persistence.
+// NewCardRegistry creates a new in-memory card registry and starts a background
+// ticker that flushes cards using their per-card updater every 100ms.
+// Callers can override the updater and interval via StartTicker.
 func NewCardRegistry(dir string) *cardRegistry {
 	r := &cardRegistry{
-		dir:    dir,
-		cards:  make(map[string]*cardState),
-		stopCh: make(chan struct{}),
-		ticker: time.NewTicker(100 * time.Millisecond),
+		dir:      dir,
+		cards:    make(map[string]*cardState),
+		interval: 100 * time.Millisecond,
 	}
-	go r.loop()
+	r.stopCh = make(chan struct{})
+	r.ticker = time.NewTicker(r.interval)
+	r.wg.Add(1)
+	go r.loop(r.ticker, r.stopCh)
 	return r
 }
 
-func (r *cardRegistry) loop() {
+// StartTicker starts a background ticker that scans the registry every interval
+// and PATCHes cards whose content has changed and whose last push is at least
+// interval ago. A zero or negative interval defaults to 100ms.
+func (r *cardRegistry) StartTicker(updater MessageUpdater, interval time.Duration) {
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+
+	r.tickerMu.Lock()
+	defer r.tickerMu.Unlock()
+
+	if r.ticker != nil {
+		r.ticker.Stop()
+		close(r.stopCh)
+		r.wg.Wait()
+	}
+
+	if updater != nil {
+		r.updater = &cardUpdaterFromMessageUpdater{updater: updater}
+	} else {
+		r.updater = nil
+	}
+	r.interval = interval
+	r.stopCh = make(chan struct{})
+	ticker := time.NewTicker(interval)
+	r.ticker = ticker
+	r.wg.Add(1)
+	go r.loop(ticker, r.stopCh)
+}
+
+// StopTicker stops the background ticker and waits for the current tick to finish.
+func (r *cardRegistry) StopTicker() {
+	r.tickerMu.Lock()
+	defer r.tickerMu.Unlock()
+
+	if r.ticker == nil {
+		return
+	}
+	r.ticker.Stop()
+	close(r.stopCh)
+	r.wg.Wait()
+	r.ticker = nil
+	r.stopCh = nil
+}
+
+// Stop is an alias for StopTicker for callers that use a single Stop method.
+func (r *cardRegistry) Stop() {
+	r.StopTicker()
+}
+
+func (r *cardRegistry) loop(ticker *time.Ticker, stopCh chan struct{}) {
+	defer r.wg.Done()
 	for {
 		select {
-		case <-r.ticker.C:
-			r.flush()
-		case <-r.stopCh:
+		case <-ticker.C:
+			r.tick()
+		case <-stopCh:
 			return
 		}
 	}
 }
 
-func (r *cardRegistry) flush() {
+// tick scans all cards and pushes pending updates that are due.
+func (r *cardRegistry) tick() {
 	r.mu.RLock()
 	cards := make([]*cardState, 0, len(r.cards))
 	for _, c := range r.cards {
@@ -83,9 +147,19 @@ func (r *cardRegistry) flush() {
 	}
 	r.mu.RUnlock()
 
+	now := time.Now()
 	for _, c := range cards {
 		c.mu.Lock()
-		if !c.pending && !c.finalized {
+		if !c.pending {
+			c.mu.Unlock()
+			continue
+		}
+		if c.content == c.lastPushedContent {
+			c.pending = false
+			c.mu.Unlock()
+			continue
+		}
+		if !c.lastPushTime.IsZero() && now.Sub(c.lastPushTime) < r.interval {
 			c.mu.Unlock()
 			continue
 		}
@@ -93,15 +167,35 @@ func (r *cardRegistry) flush() {
 		content := c.content
 		state := c.state
 		updater := c.updater
-		c.pending = false
+		if updater == nil {
+			updater = r.updater
+		}
 		c.mu.Unlock()
 
 		if updater == nil {
 			continue
 		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = updater.UpdateCard(ctx, handle, c.messageID, content, state)
+		err := updater.UpdateCard(ctx, handle, c.messageID, content, state)
 		cancel()
+		if err != nil {
+			if !isRetriablePatchError(err) {
+				c.mu.Lock()
+				c.lastPushedContent = content
+				c.lastPushTime = now
+				c.pending = false
+				c.mu.Unlock()
+			}
+			slog.Warn("card registry: patch failed", "messageID", c.messageID, "state", state, "error", err)
+			continue
+		}
+
+		c.mu.Lock()
+		c.lastPushedContent = content
+		c.lastPushTime = now
+		c.pending = false
+		c.mu.Unlock()
 	}
 }
 
@@ -114,9 +208,6 @@ func (r *cardRegistry) UpdateCard(messageID string, handle any, content string, 
 	cleanID := sanitizeMessageID(messageID)
 	if cleanID == "" {
 		return fmt.Errorf("invalid messageID: %s", messageID)
-	}
-	if updater == nil {
-		return errors.New("updater is required")
 	}
 
 	r.mu.Lock()
@@ -137,6 +228,53 @@ func (r *cardRegistry) UpdateCard(messageID string, handle any, content string, 
 	c.state = state
 	c.updater = updater
 	c.pending = true
+	c.mu.Unlock()
+
+	r.persistCard(c)
+	return nil
+}
+
+// cardUpdaterFromMessageUpdater adapts a MessageUpdater to the CardUpdater
+// interface used by the registry's global ticker.
+type cardUpdaterFromMessageUpdater struct {
+	updater MessageUpdater
+}
+
+func (a *cardUpdaterFromMessageUpdater) UpdateCard(ctx context.Context, handle any, _ string, content string, _ ProgressCardState) error {
+	return a.updater.UpdateMessage(ctx, handle, content)
+}
+
+// RegisterCard records a card whose initial content has already been pushed to
+// the platform (e.g. by SendPreviewStart). The card is persisted but not marked
+// pending, so the throttler will not re-send the same content. RegisterCard is
+// idempotent: repeated registration with the same messageID updates the stored
+// handle and content.
+func (r *cardRegistry) RegisterCard(messageID string, handle any, content string, updater CardUpdater) error {
+	if messageID == "" {
+		return errors.New("messageID is required")
+	}
+	cleanID := sanitizeMessageID(messageID)
+	if cleanID == "" {
+		return fmt.Errorf("invalid messageID: %s", messageID)
+	}
+	if updater == nil {
+		return errors.New("updater is required")
+	}
+
+	r.mu.Lock()
+	c, ok := r.cards[cleanID]
+	if !ok {
+		c = &cardState{messageID: cleanID}
+		r.cards[cleanID] = c
+	}
+	r.mu.Unlock()
+
+	c.mu.Lock()
+	c.handle = handle
+	c.content = content
+	c.updater = updater
+	// Content was already pushed by the caller; do not schedule a redundant flush.
+	c.pending = false
 	c.mu.Unlock()
 
 	r.persistCard(c)
@@ -176,7 +314,7 @@ func isFinalProgressCardState(state ProgressCardState) bool {
 }
 
 func (r *cardRegistry) persistCard(c *cardState) {
-	if c == nil {
+	if c == nil || r.dir == "" {
 		return
 	}
 
@@ -250,14 +388,6 @@ func (r *cardRegistry) LoadPersistedCards() []*cardState {
 	return loaded
 }
 
-// Stop halts the background ticker.
-func (r *cardRegistry) Stop() {
-	r.stopOnce.Do(func() {
-		r.ticker.Stop()
-		close(r.stopCh)
-	})
-}
-
 // lookup returns a snapshot of the card state for testing.
 func (r *cardRegistry) lookup(messageID string) *cardState {
 	r.mu.RLock()
@@ -298,4 +428,40 @@ func sanitizeMessageID(messageID string) string {
 		}
 	}
 	return s
+}
+
+// isRetriablePatchError reports whether a failed PATCH should be retried on the
+// next tick. Retriable failures include network timeouts, transient connection
+// errors, and HTTP 429/5xx responses.
+func isRetriablePatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "temporary") {
+		return true
+	}
+	for _, code := range []string{"429", "500", "502", "503", "504"} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
 }

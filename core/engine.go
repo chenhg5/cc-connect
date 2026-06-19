@@ -27,6 +27,13 @@ const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const maxQueuedMessages = 5 // cap queued messages to bound memory usage
 
+// nopMessageUpdater is a MessageUpdater that does nothing. It is used as the
+// global fallback for the engine's card registry because each registered card
+// supplies its own updater.
+type nopMessageUpdater struct{}
+
+func (nopMessageUpdater) UpdateMessage(_ context.Context, _ any, _ string) error { return nil }
+
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
@@ -197,15 +204,17 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
-	dirHistory       *DirHistory
-	baseWorkDir      string
-	projectState     *ProjectStateStore
+	rateLimiter              *RateLimiter
+	outgoingRL               *OutgoingRateLimiter
+	streamPreview            StreamPreviewCfg
+	references               ReferenceRenderCfg
+	relayManager             *RelayManager
+	eventIdleTimeout         time.Duration
+	dirHistory               *DirHistory
+	baseWorkDir              string
+	projectState             *ProjectStateStore
+	cardRegistry             *cardRegistry
+	newCompactProgressWriter func(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, registry *cardRegistry) *compactProgressWriter
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -393,6 +402,14 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
 	}
+
+	cardRegistryDir := ""
+	if sessionStorePath != "" {
+		cardRegistryDir = filepath.Join(filepath.Dir(sessionStorePath), "cc-connect-progress-cards")
+	}
+	e.cardRegistry = NewCardRegistry(cardRegistryDir)
+	e.cardRegistry.StartTicker(nopMessageUpdater{}, 100*time.Millisecond)
+	e.newCompactProgressWriter = newCompactProgressWriter
 
 	if ag != nil {
 		e.sessions.InvalidateForAgent(ag.Name())
@@ -1337,6 +1354,10 @@ func (e *Engine) Stop() error {
 		e.userRoles.Stop()
 	}
 	e.userRolesMu.Unlock()
+
+	if e.cardRegistry != nil {
+		e.cardRegistry.Stop()
+	}
 
 	if err := e.agent.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("stop agent %s: %w", e.agent.Name(), err))
@@ -2616,7 +2637,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, nil)
+	cp := e.newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, e.cardRegistry)
 	state.mu.Unlock()
 
 	// Idle timeout: 0 = disabled
@@ -3189,7 +3210,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, nil)
+				cp = e.newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, e.cardRegistry)
 
 				session.AddHistory("user", queued.content)
 

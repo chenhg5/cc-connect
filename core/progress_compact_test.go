@@ -3,8 +3,8 @@ package core
 import (
 	"context"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 )
 
 type suppressTestPlatform struct {
@@ -103,13 +103,17 @@ func TestBuildAndParseProgressCardPayload(t *testing.T) {
 }
 
 func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
-	p := &previewCapturePlatform{}
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
 	replyCtx := progressHintReplyCtx{
 		style:   progressStyleCard,
 		payload: true,
 	}
 
-	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil, nil)
+	registry.StartTicker(p, 50*time.Millisecond)
+
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil, registry)
 	if !w.enabled {
 		t.Fatal("progress writer should be enabled")
 	}
@@ -133,6 +137,8 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 	if !w.Finalize(ProgressCardStateCompleted) {
 		t.Fatal("Finalize() = false, want true")
 	}
+
+	time.Sleep(200 * time.Millisecond)
 	if len(p.updated) != 1 {
 		t.Fatalf("updated = %d, want 1", len(p.updated))
 	}
@@ -255,39 +261,6 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 }
 
-type stubProgressCardRegistry struct {
-	mu      sync.Mutex
-	updates []struct {
-		handle  any
-		content string
-	}
-}
-
-func (r *stubProgressCardRegistry) Update(handle any, content string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.updates = append(r.updates, struct {
-		handle  any
-		content string
-	}{handle: handle, content: content})
-}
-
-func (r *stubProgressCardRegistry) Stop() {}
-
-func (r *stubProgressCardRegistry) getUpdates() []struct {
-	handle  any
-	content string
-} {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]struct {
-		handle  any
-		content string
-	}, len(r.updates))
-	copy(out, r.updates)
-	return out
-}
-
 type stubIdentifiableHandle struct{ id string }
 
 func (h *stubIdentifiableHandle) MessageID() string { return h.id }
@@ -303,7 +276,8 @@ func (p *previewCapturePlatformWithIdentifiableHandle) SendPreviewStart(_ contex
 
 func TestAppendStructuredUsesRegistryAfterStart(t *testing.T) {
 	p := &previewCapturePlatformWithIdentifiableHandle{}
-	registry := &stubProgressCardRegistry{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
 	replyCtx := progressHintReplyCtx{
 		style:   progressStyleCard,
 		payload: true,
@@ -328,22 +302,14 @@ func TestAppendStructuredUsesRegistryAfterStart(t *testing.T) {
 		t.Fatalf("direct UpdateMessage calls = %d, want 0; updates should go through registry", len(p.updated))
 	}
 
-	updates := registry.getUpdates()
-	if len(updates) != 1 {
-		t.Fatalf("registry updates = %d, want 1", len(updates))
+	card := registry.lookup("msg_xxx")
+	if card == nil {
+		t.Fatal("card not registered in registry")
 	}
 
-	ident, ok := updates[0].handle.(MessageHandleIdentifier)
+	parsed, ok := ParseProgressCardPayload(card.content)
 	if !ok {
-		t.Fatalf("registry handle does not implement MessageHandleIdentifier")
-	}
-	if got := ident.MessageID(); got != "msg_xxx" {
-		t.Fatalf("registry message ID = %q, want msg_xxx", got)
-	}
-
-	parsed, ok := ParseProgressCardPayload(updates[0].content)
-	if !ok {
-		t.Fatalf("ParseProgressCardPayload(%q) failed", updates[0].content)
+		t.Fatalf("ParseProgressCardPayload(%q) failed", card.content)
 	}
 	if len(parsed.Items) != 2 {
 		t.Fatalf("registry payload items = %d, want 2", len(parsed.Items))
@@ -355,7 +321,8 @@ func TestAppendStructuredUsesRegistryAfterStart(t *testing.T) {
 
 func TestAppendStructuredFallbackWithoutIdentifier(t *testing.T) {
 	p := &previewCapturePlatform{}
-	registry := &stubProgressCardRegistry{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
 	replyCtx := progressHintReplyCtx{
 		style:   progressStyleCard,
 		payload: true,
@@ -373,11 +340,159 @@ func TestAppendStructuredFallbackWithoutIdentifier(t *testing.T) {
 	}
 
 	// Handle has no message ID, so registry must not be used.
-	if len(registry.updates) != 0 {
-		t.Fatalf("registry updates = %d, want 0; fallback should use direct PATCH", len(registry.updates))
+	if registry.lookup("msg_xxx") != nil {
+		t.Fatal("registry should not contain a card when handle lacks an identifier")
 	}
 	// Direct PATCH should have been used instead.
 	if len(p.updated) != 1 {
 		t.Fatalf("direct UpdateMessage calls = %d, want 1", len(p.updated))
+	}
+}
+
+func TestFinalizeWritesRegistry(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "Agent", LangEnglish, nil, registry)
+
+	if !w.AppendEvent(ProgressEntryThinking, "planning", "", "planning") {
+		t.Fatal("AppendEvent() = false, want true")
+	}
+
+	if !w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("Finalize() = false, want true")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	card := registry.lookup("msg_xxx")
+	if card == nil {
+		t.Fatal("card not found in registry")
+	}
+	if !card.finalized {
+		t.Fatal("finalized = false, want true")
+	}
+	if card.state != ProgressCardStateCompleted {
+		t.Fatalf("state = %q, want %q", card.state, ProgressCardStateCompleted)
+	}
+
+	parsed, ok := ParseProgressCardPayload(card.content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload(%q) failed", card.content)
+	}
+	if parsed.State != ProgressCardStateCompleted {
+		t.Fatalf("payload state = %q, want %q", parsed.State, ProgressCardStateCompleted)
+	}
+
+	// Non-final updates after finalization must be rejected.
+	if err := registry.UpdateCard("msg_xxx", card.handle, "stale", ProgressCardStateRunning, w.cardUpdater); err == nil {
+		t.Fatal("expected registry to reject non-final update after finalize")
+	}
+}
+
+func TestFinalizeDoesNotPatchImmediately(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "Agent", LangEnglish, nil, registry)
+
+	if !w.AppendEvent(ProgressEntryThinking, "planning", "", "planning") {
+		t.Fatal("AppendEvent() = false, want true")
+	}
+
+	if !w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("Finalize() = false, want true")
+	}
+
+	// Before the registry ticker fires, the platform should not have received a
+	// direct PATCH.
+	time.Sleep(20 * time.Millisecond)
+	if len(p.updated) != 0 {
+		t.Fatalf("direct UpdateMessage calls = %d, want 0; final state should be flushed by registry ticker", len(p.updated))
+	}
+}
+
+func TestAppendStructuredRegistersHandle(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "Agent", LangEnglish, nil, registry)
+
+	entry1 := ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step1"}
+	if ok := w.AppendStructured(entry1, "step1"); !ok {
+		t.Fatal("first AppendStructured() = false, want true")
+	}
+
+	entry2 := ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}
+	if ok := w.AppendStructured(entry2, "Tool: Bash\npwd"); !ok {
+		t.Fatal("second AppendStructured() = false, want true")
+	}
+
+	card := registry.lookup("msg_xxx")
+	if card == nil {
+		t.Fatal("handle was not registered in cardRegistry")
+	}
+	if card.handle == nil {
+		t.Fatal("registered card has nil handle")
+	}
+	ident, ok := card.handle.(MessageHandleIdentifier)
+	if !ok {
+		t.Fatal("registered handle does not implement MessageHandleIdentifier")
+	}
+	if got := ident.MessageID(); got != "msg_xxx" {
+		t.Fatalf("registered message ID = %q, want msg_xxx", got)
+	}
+
+	parsed, ok := ParseProgressCardPayload(card.content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload(%q) failed", card.content)
+	}
+	if len(parsed.Items) != 2 {
+		t.Fatalf("registered payload items = %d, want 2", len(parsed.Items))
+	}
+	if parsed.Items[1].Kind != ProgressEntryToolUse || parsed.Items[1].Tool != "Bash" {
+		t.Fatalf("registered payload item[1] = %#v, want tool_use/Bash", parsed.Items[1])
+	}
+}
+
+func TestRegisterHandleIdempotent(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	registry := NewCardRegistry(t.TempDir())
+	defer registry.Stop()
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "Agent", LangEnglish, nil, registry)
+
+	handle := &stubIdentifiableHandle{id: "msg_yyy"}
+	if !w.registerHandle(handle, "first") {
+		t.Fatal("first registerHandle() = false, want true")
+	}
+	if !w.registerHandle(handle, "second") {
+		t.Fatal("second registerHandle() = false, want true")
+	}
+
+	card := registry.lookup("msg_yyy")
+	if card == nil {
+		t.Fatal("card not found after repeated registration")
+	}
+	if card.content != "second" {
+		t.Fatalf("card content = %q, want second", card.content)
+	}
+	if card.handle != handle {
+		t.Fatal("card handle was not updated by idempotent registration")
 	}
 }

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,33 +12,33 @@ import (
 	"time"
 )
 
-type testCardUpdater struct {
+type testMessageUpdate struct {
+	handle  any
+	content string
+}
+
+type testMessageUpdater struct {
 	mu      sync.Mutex
-	updates []testCardUpdate
+	updates []testMessageUpdate
+	seqErrs []error
 }
 
-type testCardUpdate struct {
-	handle    any
-	messageID string
-	content   string
-	state     ProgressCardState
-}
-
-func newTestCardUpdater() *testCardUpdater {
-	return &testCardUpdater{}
-}
-
-func (u *testCardUpdater) UpdateCard(_ context.Context, handle any, messageID string, content string, state ProgressCardState) error {
+func (u *testMessageUpdater) UpdateMessage(_ context.Context, handle any, content string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.updates = append(u.updates, testCardUpdate{handle: handle, messageID: messageID, content: content, state: state})
+	if len(u.seqErrs) > 0 {
+		err := u.seqErrs[0]
+		u.seqErrs = u.seqErrs[1:]
+		return err
+	}
+	u.updates = append(u.updates, testMessageUpdate{handle: handle, content: content})
 	return nil
 }
 
-func (u *testCardUpdater) updatesSnapshot() []testCardUpdate {
+func (u *testMessageUpdater) snapshot() []testMessageUpdate {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	out := make([]testCardUpdate, len(u.updates))
+	out := make([]testMessageUpdate, len(u.updates))
 	copy(out, u.updates)
 	return out
 }
@@ -46,10 +47,9 @@ func TestRegistryUpdateAndFinalize(t *testing.T) {
 	r := NewCardRegistry(t.TempDir())
 	defer r.Stop()
 
-	updater := newTestCardUpdater()
 	h := "handle-1"
 
-	if err := r.UpdateCard("msg_123", h, `{"state":"running"}`, ProgressCardStateRunning, updater); err != nil {
+	if err := r.UpdateCard("msg_123", h, `{"state":"running"}`, ProgressCardStateRunning, nil); err != nil {
 		t.Fatalf("UpdateCard failed: %v", err)
 	}
 
@@ -93,14 +93,13 @@ func TestRegistryFinalizeBlocksUpdates(t *testing.T) {
 	r := NewCardRegistry(t.TempDir())
 	defer r.Stop()
 
-	updater := newTestCardUpdater()
-	if err := r.UpdateCard("msg_123", nil, "initial", ProgressCardStateRunning, updater); err != nil {
+	if err := r.UpdateCard("msg_123", nil, "initial", ProgressCardStateRunning, nil); err != nil {
 		t.Fatalf("UpdateCard failed: %v", err)
 	}
 	if err := r.Finalize("msg_123", ProgressCardStateCompleted); err != nil {
 		t.Fatalf("Finalize failed: %v", err)
 	}
-	if err := r.UpdateCard("msg_123", nil, "after finalize", ProgressCardStateRunning, updater); err == nil {
+	if err := r.UpdateCard("msg_123", nil, "after finalize", ProgressCardStateRunning, nil); err == nil {
 		t.Fatal("expected error updating finalized card with non-final state")
 	}
 }
@@ -109,14 +108,13 @@ func TestRegistryFinalizeAllowsFinalStateUpdate(t *testing.T) {
 	r := NewCardRegistry(t.TempDir())
 	defer r.Stop()
 
-	updater := newTestCardUpdater()
-	if err := r.UpdateCard("msg_123", nil, "initial", ProgressCardStateRunning, updater); err != nil {
+	if err := r.UpdateCard("msg_123", nil, "initial", ProgressCardStateRunning, nil); err != nil {
 		t.Fatalf("UpdateCard failed: %v", err)
 	}
 	if err := r.Finalize("msg_123", ProgressCardStateCompleted); err != nil {
 		t.Fatalf("Finalize failed: %v", err)
 	}
-	if err := r.UpdateCard("msg_123", nil, "failed payload", ProgressCardStateFailed, updater); err != nil {
+	if err := r.UpdateCard("msg_123", nil, "failed payload", ProgressCardStateFailed, nil); err != nil {
 		t.Fatalf("UpdateCard with final state after finalize should succeed: %v", err)
 	}
 }
@@ -125,8 +123,7 @@ func TestRegistryConcurrentUpdateFinalize(t *testing.T) {
 	r := NewCardRegistry(t.TempDir())
 	defer r.Stop()
 
-	updater := newTestCardUpdater()
-	if err := r.UpdateCard("msg_123", nil, "seed", ProgressCardStateRunning, updater); err != nil {
+	if err := r.UpdateCard("msg_123", nil, "seed", ProgressCardStateRunning, nil); err != nil {
 		t.Fatalf("seed UpdateCard failed: %v", err)
 	}
 
@@ -135,7 +132,7 @@ func TestRegistryConcurrentUpdateFinalize(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_ = r.UpdateCard("msg_123", nil, "content", ProgressCardStateRunning, updater)
+			_ = r.UpdateCard("msg_123", nil, "content", ProgressCardStateRunning, nil)
 		}()
 		go func() {
 			defer wg.Done()
@@ -157,8 +154,7 @@ func TestRegistryUpdateRejectsEmptyMessageID(t *testing.T) {
 	r := NewCardRegistry(t.TempDir())
 	defer r.Stop()
 
-	updater := newTestCardUpdater()
-	if err := r.UpdateCard("", nil, "x", ProgressCardStateRunning, updater); err == nil {
+	if err := r.UpdateCard("", nil, "x", ProgressCardStateRunning, nil); err == nil {
 		t.Fatal("expected error for empty messageID")
 	}
 }
@@ -172,21 +168,12 @@ func TestRegistryFinalizeRejectsUnregistered(t *testing.T) {
 	}
 }
 
-func TestRegistryUpdateRejectsNilUpdater(t *testing.T) {
-	r := NewCardRegistry(t.TempDir())
-	defer r.Stop()
-
-	if err := r.UpdateCard("msg_123", nil, "x", ProgressCardStateRunning, nil); err == nil {
-		t.Fatal("expected error for nil updater")
-	}
-}
-
 func TestPersistCardAtomicWrite(t *testing.T) {
 	tmp := t.TempDir()
 	r := NewCardRegistry(tmp)
 	defer r.Stop()
 
-	r.UpdateCard("msg_123", "handle", `{"state":"running"}`, ProgressCardStateRunning, newTestCardUpdater())
+	r.UpdateCard("msg_123", "handle", `{"state":"running"}`, ProgressCardStateRunning, nil)
 
 	files, err := filepath.Glob(filepath.Join(tmp, "cc-connect-progress-*.json"))
 	if err != nil {
@@ -315,7 +302,7 @@ func TestUpdateCardRejectsUnsafeMessageID(t *testing.T) {
 	r := NewCardRegistry(tmp)
 	defer r.Stop()
 
-	err := r.UpdateCard("../escape", nil, "x", ProgressCardStateRunning, newTestCardUpdater())
+	err := r.UpdateCard("../escape", nil, "x", ProgressCardStateRunning, nil)
 	if err == nil {
 		t.Fatal("expected error for unsafe messageID")
 	}
@@ -328,5 +315,94 @@ func TestUpdateCardRejectsUnsafeMessageID(t *testing.T) {
 		if strings.Contains(filepath.Base(f), "escape") {
 			t.Fatalf("unsafe messageID was persisted to %s", f)
 		}
+	}
+}
+
+func TestTickerSkipsUnchangedContent(t *testing.T) {
+	r := NewCardRegistry(t.TempDir())
+	defer r.Stop()
+
+	updater := &testMessageUpdater{}
+	r.StartTicker(updater, 50*time.Millisecond)
+
+	if err := r.UpdateCard("msg_1", "handle-1", "content-a", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("after first tick, updates = %d, want 1", n)
+	}
+
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("after second tick with unchanged content, updates = %d, want 1", n)
+	}
+}
+
+func TestTickerThrottlesPerWindow(t *testing.T) {
+	r := NewCardRegistry(t.TempDir())
+	defer r.Stop()
+
+	updater := &testMessageUpdater{}
+	interval := 200 * time.Millisecond
+	r.StartTicker(updater, interval)
+
+	if err := r.UpdateCard("msg_1", "handle-1", "content-a", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("first update = %d, want 1", n)
+	}
+
+	if err := r.UpdateCard("msg_1", "handle-1", "content-b", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("update within throttle window = %d, want 1", n)
+	}
+
+	time.Sleep(interval)
+	r.tick()
+	if n := len(updater.snapshot()); n != 2 {
+		t.Fatalf("after throttle window, updates = %d, want 2", n)
+	}
+}
+
+func TestTickerHandlesPatchErrors(t *testing.T) {
+	r := NewCardRegistry(t.TempDir())
+	defer r.Stop()
+
+	retriable := errors.New("gateway timeout")
+	updater := &testMessageUpdater{seqErrs: []error{retriable}}
+	r.StartTicker(updater, 50*time.Millisecond)
+
+	if err := r.UpdateCard("msg_1", "handle-1", "content-a", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+	r.tick()
+	if n := len(updater.snapshot()); n != 0 {
+		t.Fatalf("after retriable error, successes = %d, want 0", n)
+	}
+
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("after retry, successes = %d, want 1", n)
+	}
+
+	// Non-retriable error should mark the card as pushed and stop retrying.
+	updater.seqErrs = []error{errors.New("bad request")}
+	if err := r.UpdateCard("msg_1", "handle-1", "content-b", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard failed: %v", err)
+	}
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("after non-retriable error, successes = %d, want 1", n)
+	}
+	r.tick()
+	if n := len(updater.snapshot()); n != 1 {
+		t.Fatalf("non-retriable error should not be retried, successes = %d, want 1", n)
 	}
 }
