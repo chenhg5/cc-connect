@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -108,7 +109,7 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 		payload: true,
 	}
 
-	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil, nil)
 	if !w.enabled {
 		t.Fatal("progress writer should be enabled")
 	}
@@ -198,7 +199,7 @@ func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T
 	}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
-	})
+	}, nil)
 
 	if ok := w.AppendStructured(ProgressCardEntry{
 		Kind: ProgressEntryThinking,
@@ -231,7 +232,7 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
-	})
+	}, nil)
 
 	raw := "/root/code/demo/src/app.ts:42"
 	if ok := w.AppendStructured(ProgressCardEntry{
@@ -251,5 +252,132 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 	if got := payload.Items[0].Text; got != raw {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
+	}
+}
+
+type stubProgressCardRegistry struct {
+	mu      sync.Mutex
+	updates []struct {
+		handle  any
+		content string
+	}
+}
+
+func (r *stubProgressCardRegistry) Update(handle any, content string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updates = append(r.updates, struct {
+		handle  any
+		content string
+	}{handle: handle, content: content})
+}
+
+func (r *stubProgressCardRegistry) Stop() {}
+
+func (r *stubProgressCardRegistry) getUpdates() []struct {
+	handle  any
+	content string
+} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]struct {
+		handle  any
+		content string
+	}, len(r.updates))
+	copy(out, r.updates)
+	return out
+}
+
+type stubIdentifiableHandle struct{ id string }
+
+func (h *stubIdentifiableHandle) MessageID() string { return h.id }
+
+type previewCapturePlatformWithIdentifiableHandle struct {
+	previewCapturePlatform
+}
+
+func (p *previewCapturePlatformWithIdentifiableHandle) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.previewCapturePlatform.SendPreviewStart(context.Background(), nil, content)
+	return &stubIdentifiableHandle{id: "msg_xxx"}, nil
+}
+
+func TestAppendStructuredUsesRegistryAfterStart(t *testing.T) {
+	p := &previewCapturePlatformWithIdentifiableHandle{}
+	registry := &stubProgressCardRegistry{}
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "Agent", LangEnglish, nil, registry)
+
+	entry1 := ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step1"}
+	if ok := w.AppendStructured(entry1, "step1"); !ok {
+		t.Fatal("first AppendStructured() = false, want true")
+	}
+	if len(p.started) != 1 {
+		t.Fatalf("preview starts = %d, want 1", len(p.started))
+	}
+
+	entry2 := ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}
+	if ok := w.AppendStructured(entry2, "Tool: Bash\npwd"); !ok {
+		t.Fatal("second AppendStructured() = false, want true")
+	}
+
+	// Direct PATCH must not be used for the second update.
+	if len(p.updated) != 0 {
+		t.Fatalf("direct UpdateMessage calls = %d, want 0; updates should go through registry", len(p.updated))
+	}
+
+	updates := registry.getUpdates()
+	if len(updates) != 1 {
+		t.Fatalf("registry updates = %d, want 1", len(updates))
+	}
+
+	ident, ok := updates[0].handle.(MessageHandleIdentifier)
+	if !ok {
+		t.Fatalf("registry handle does not implement MessageHandleIdentifier")
+	}
+	if got := ident.MessageID(); got != "msg_xxx" {
+		t.Fatalf("registry message ID = %q, want msg_xxx", got)
+	}
+
+	parsed, ok := ParseProgressCardPayload(updates[0].content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload(%q) failed", updates[0].content)
+	}
+	if len(parsed.Items) != 2 {
+		t.Fatalf("registry payload items = %d, want 2", len(parsed.Items))
+	}
+	if parsed.Items[1].Kind != ProgressEntryToolUse || parsed.Items[1].Tool != "Bash" || parsed.Items[1].Text != "pwd" {
+		t.Fatalf("registry payload item[1] = %#v, want tool_use/Bash/pwd", parsed.Items[1])
+	}
+}
+
+func TestAppendStructuredFallbackWithoutIdentifier(t *testing.T) {
+	p := &previewCapturePlatform{}
+	registry := &stubProgressCardRegistry{}
+	replyCtx := progressHintReplyCtx{
+		style:   progressStyleCard,
+		payload: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "Agent", LangEnglish, nil, registry)
+
+	entry1 := ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step1"}
+	if ok := w.AppendStructured(entry1, "step1"); !ok {
+		t.Fatal("first AppendStructured() = false, want true")
+	}
+
+	entry2 := ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}
+	if ok := w.AppendStructured(entry2, "Tool: Bash\npwd"); !ok {
+		t.Fatal("second AppendStructured() = false, want true")
+	}
+
+	// Handle has no message ID, so registry must not be used.
+	if len(registry.updates) != 0 {
+		t.Fatalf("registry updates = %d, want 0; fallback should use direct PATCH", len(registry.updates))
+	}
+	// Direct PATCH should have been used instead.
+	if len(p.updated) != 1 {
+		t.Fatalf("direct UpdateMessage calls = %d, want 1", len(p.updated))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -51,6 +52,109 @@ type ProgressCardEntry struct {
 	Status   string                `json:"status,omitempty"`
 	ExitCode *int                  `json:"exit_code,omitempty"`
 	Success  *bool                 `json:"success,omitempty"`
+}
+
+// ProgressCardRegistry buffers progress card content updates and flushes them
+// periodically via a ticker. It is used by compactProgressWriter to coalesce
+// multiple AppendStructured calls into batched PATCH updates.
+type ProgressCardRegistry interface {
+	// Update registers or updates the pending content for the message identified
+	// by handle. The handle should implement MessageHandleIdentifier; otherwise
+	// the update is ignored.
+	Update(handle any, content string)
+	// Stop halts the ticker and flushes any pending updates.
+	Stop()
+}
+
+// NewProgressCardRegistry creates a registry that flushes pending card updates
+// via the provided MessageUpdater every interval. A zero or negative interval
+// defaults to 500ms.
+func NewProgressCardRegistry(ctx context.Context, updater MessageUpdater, interval time.Duration) ProgressCardRegistry {
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+	r := &tickingProgressCardRegistry{
+		ctx:     ctx,
+		updater: updater,
+		entries: make(map[string]*progressCardRegistryEntry),
+		stop:    make(chan struct{}),
+	}
+	r.ticker = time.NewTicker(interval)
+	go r.loop()
+	return r
+}
+
+type progressCardRegistryEntry struct {
+	handle   any
+	pending  string
+	lastSent string
+}
+
+type tickingProgressCardRegistry struct {
+	mu      sync.Mutex
+	updater MessageUpdater
+	entries map[string]*progressCardRegistryEntry
+	ticker  *time.Ticker
+	stop    chan struct{}
+	done    sync.Once
+	ctx     context.Context
+}
+
+func (r *tickingProgressCardRegistry) Update(handle any, content string) {
+	id := ""
+	if ident, ok := handle.(MessageHandleIdentifier); ok {
+		id = ident.MessageID()
+	}
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[id]
+	if !ok {
+		e = &progressCardRegistryEntry{handle: handle}
+		r.entries[id] = e
+	}
+	e.pending = content
+}
+
+func (r *tickingProgressCardRegistry) Stop() {
+	r.done.Do(func() {
+		r.ticker.Stop()
+		r.flush()
+		close(r.stop)
+	})
+}
+
+func (r *tickingProgressCardRegistry) loop() {
+	for {
+		select {
+		case <-r.ticker.C:
+			r.flush()
+		case <-r.stop:
+			return
+		case <-r.ctx.Done():
+			return
+		}
+	}
+}
+
+func (r *tickingProgressCardRegistry) flush() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		if e.pending == "" || e.pending == e.lastSent {
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(r.ctx, compactProgressAPITimeout)
+		err := r.updater.UpdateMessage(callCtx, e.handle, e.pending)
+		cancel()
+		if err != nil {
+			slog.Warn("progress card registry: flush failed", "error", err)
+			continue
+		}
+		e.lastSent = e.pending
+	}
 }
 
 // ProgressCardPayload carries structured progress entries for platforms that
@@ -227,6 +331,7 @@ type compactProgressWriter struct {
 	truncated  bool
 	lastSent   string
 	maxEntries int
+	registry   ProgressCardRegistry
 }
 
 func normalizeProgressStyle(style string) string {
@@ -240,6 +345,14 @@ func normalizeProgressStyle(style string) string {
 	default:
 		return progressStyleLegacy
 	}
+}
+
+func messageHandleHasID(handle any) bool {
+	ident, ok := handle.(MessageHandleIdentifier)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(ident.MessageID()) != ""
 }
 
 func progressStyleForPlatform(p Platform) string {
@@ -288,7 +401,7 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 	return progressStyleForPlatform(p) == progressStyleLegacy
 }
 
-func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
+func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, registry ProgressCardRegistry) *compactProgressWriter {
 	w := &compactProgressWriter{
 		ctx:        ctx,
 		platform:   p,
@@ -299,6 +412,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
 		maxEntries: 10,
+		registry:   registry,
 	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
 		slog.Debug("progress writer disabled: unsupported style", "platform", p.Name(), "style", w.style)
@@ -468,6 +582,12 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		return true
 	}
 
+	if w.registry != nil && messageHandleHasID(w.handle) {
+		w.registry.Update(w.handle, w.content)
+		w.lastSent = w.content
+		return true
+	}
+
 	callCtx, cancel := w.withAPITimeout()
 	err := w.updater.UpdateMessage(callCtx, w.handle, w.content)
 	cancel()
@@ -496,6 +616,11 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 	w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
 	if w.content == "" || w.content == w.lastSent {
 		return w.content != ""
+	}
+	if w.registry != nil && messageHandleHasID(w.handle) {
+		w.registry.Update(w.handle, w.content)
+		w.lastSent = w.content
+		return true
 	}
 	callCtx, cancel := w.withAPITimeout()
 	err := w.updater.UpdateMessage(callCtx, w.handle, w.content)
