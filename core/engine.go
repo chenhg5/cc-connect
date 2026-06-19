@@ -4374,13 +4374,19 @@ func compactReplyFooterPath(path string) string {
 	}
 	path = normalizeWorkspacePath(path)
 	if home, err := os.UserHomeDir(); err == nil {
-		home = normalizeWorkspacePath(home)
-		if path == home {
-			return "~"
-		}
-		prefix := home + string(os.PathSeparator)
-		if strings.HasPrefix(path, prefix) {
-			return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
+		// Try both the symlink-resolved home and the cleaned home path. The
+		// workspace directory may not exist yet, in which case normalizeWorkspacePath
+		// falls back to filepath.Clean and won't follow symlinks. Matching against
+		// both forms prevents macOS /private/var vs /var mismatches.
+		candidates := []string{normalizeWorkspacePath(home), filepath.Clean(home)}
+		for _, home := range candidates {
+			if path == home {
+				return "~"
+			}
+			prefix := home + string(os.PathSeparator)
+			if strings.HasPrefix(path, prefix) {
+				return "~" + filepath.ToSlash(strings.TrimPrefix(path, home))
+			}
 		}
 	}
 
