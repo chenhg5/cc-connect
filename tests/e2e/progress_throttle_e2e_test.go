@@ -87,9 +87,10 @@ func (u *recordingUpdater) callsForHandle(h any) int {
 }
 
 func TestThrottlePerformance(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	r := core.NewCardRegistry(tmpDir)
+	// Pass an empty dir to disable atomic-write persistence; otherwise the
+	// 100 UpdateCard calls would each trigger an os.WriteFile which inflates
+	// the burst well past one ticker window and weakens the test's signal.
+	r := core.NewCardRegistry("")
 	defer r.Stop()
 
 	updater := &recordingUpdater{}
@@ -246,7 +247,23 @@ func (p *httpRecordingPlatform) UpdateMessage(ctx context.Context, handle any, c
 func (p *httpRecordingPlatform) LastReplyCtx() *httpPlatformMessageHandle {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastReplyCtx
+	if p.lastReplyCtx == nil {
+		return nil
+	}
+	h, _ := p.lastReplyCtx.(*httpPlatformMessageHandle)
+	return h
+}
+
+// messageUpdaterCardAdapter adapts a MessageUpdater to the CardUpdater
+// interface expected by cardRegistry. The progress state encoded in the
+// payload is opaque to the upstream, so the adapter simply forwards the
+// UpdateMessage call.
+type messageUpdaterCardAdapter struct {
+	updater core.MessageUpdater
+}
+
+func (a *messageUpdaterCardAdapter) UpdateCard(ctx context.Context, handle any, _ string, content string, _ core.ProgressCardState) error {
+	return a.updater.UpdateMessage(ctx, handle, content)
 }
 
 func TestDaemonEndToEnd(t *testing.T) {
@@ -296,16 +313,22 @@ func TestDaemonEndToEnd(t *testing.T) {
 	//    registry below to exercise the public chain end-to-end.
 	agent := fake.NewFakeAgent("e2e-fake-agent")
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
-	engine := core.NewEngine("e2e-daemon", agent, []core.Platform{platform}, storePath, core.LanguageEN)
+	engine := core.NewEngine("e2e-daemon", agent, []core.Platform{platform}, storePath, core.LangEnglish)
 	defer engine.Stop()
 
 	// 4. Drive a real cardRegistry that uses the platform's UpdateMessage as
 	//    the global ticker updater. This is the full chain:
 	//      UpdateCard → ticker → platform.UpdateMessage → httptest /patch.
-	registryDir := t.TempDir()
-	registry := core.NewCardRegistry(registryDir)
+	//    Pass an empty dir to disable atomic-write persistence — the
+	//    persistence I/O is orthogonal to the throttling chain we are
+	//    testing here.
+	registry := core.NewCardRegistry("")
 	defer registry.Stop()
 	registry.StartTicker(platform, 50*time.Millisecond)
+
+	// adapter wraps the platform (a MessageUpdater) so the registry can
+	// call UpdateCard on it.
+	adapter := &messageUpdaterCardAdapter{updater: platform}
 
 	// 5. Inject 5 cards: create each via the platform's Send (which mints a
 	//    real message ID from the httptest server), then register/finalize
@@ -323,14 +346,14 @@ func TestDaemonEndToEnd(t *testing.T) {
 
 		// RegisterCard signals "content already pushed via Send" — the
 		// registry will not re-PATCH the initial content.
-		if err := registry.RegisterCard(handle.id, handle, initialContent, nil); err != nil {
+		if err := registry.RegisterCard(handle.id, handle, initialContent, adapter); err != nil {
 			t.Fatalf("RegisterCard %d failed: %v", i, err)
 		}
 
 		// Drive one fresh content update through UpdateCard, which DOES
 		// need to be PATCHed.
 		updated := fmt.Sprintf("card-%d updated", i)
-		if err := registry.UpdateCard(handle.id, handle, updated, core.ProgressCardStateRunning, nil); err != nil {
+		if err := registry.UpdateCard(handle.id, handle, updated, core.ProgressCardStateRunning, adapter); err != nil {
 			t.Fatalf("UpdateCard %d failed: %v", i, err)
 		}
 

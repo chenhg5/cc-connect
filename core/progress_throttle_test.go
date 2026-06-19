@@ -674,3 +674,361 @@ func TestTickerPatchErrors(t *testing.T) {
 		t.Errorf("after new update v2, total PATCHes = %d, want 2 (recovery + v2)", got)
 	}
 }
+
+// TestAtomicWriteNoResidual verifies that AtomicWriteFile does not leave
+// behind partial temp files after successful or failed writes. It exercises
+// a high-volume burst of writes plus a forced-failure path.
+func TestAtomicWriteNoResidual(t *testing.T) {
+	tmp := t.TempDir()
+
+	r := NewCardRegistry(tmp)
+	defer r.Stop()
+
+	// Burst: 50 distinct cards, each overwritten 20 times. This guarantees
+	// lots of temp-file churn (one .tmp-* per atomic write).
+	const cards = 50
+	const overwrites = 20
+	for i := 0; i < cards; i++ {
+		msgID := fmt.Sprintf("burst-%d", i)
+		for j := 0; j < overwrites; j++ {
+			content := fmt.Sprintf("v-%d-%d", i, j)
+			if err := r.UpdateCard(msgID, "h", content, ProgressCardStateRunning, nil); err != nil {
+				t.Fatalf("UpdateCard %s v%d failed: %v", msgID, j, err)
+			}
+		}
+	}
+
+	// Only the final, fully-named snapshot files should exist.
+	final, err := filepath.Glob(filepath.Join(tmp, "cc-connect-progress-*.json"))
+	if err != nil {
+		t.Fatalf("glob final files: %v", err)
+	}
+	if len(final) != cards {
+		t.Fatalf("final file count = %d, want %d", len(final), cards)
+	}
+
+	// And absolutely no residual temp files.
+	tmpFiles, err := filepath.Glob(filepath.Join(tmp, ".tmp-*"))
+	if err != nil {
+		t.Fatalf("glob tmp files: %v", err)
+	}
+	if len(tmpFiles) != 0 {
+		var names []string
+		for _, f := range tmpFiles {
+			names = append(names, filepath.Base(f))
+		}
+		t.Fatalf("found %d residual temp file(s): %v", len(tmpFiles), names)
+	}
+
+	// Forced-failure path: chmod the dir to read-only so AtomicWriteFile
+	// fails. The registry must not panic, and no residual .tmp-* must be
+	// left behind from the failed attempt.
+	if err := os.Chmod(tmp, 0o500); err != nil {
+		t.Fatalf("chmod 0500: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(tmp, 0o755) // restore for t.TempDir cleanup
+	}()
+
+	// UpdateCard calls persistCard synchronously; with the dir read-only,
+	// this should fail internally without panicking.
+	_ = r.UpdateCard("after-fail", "h", "x", ProgressCardStateRunning, nil)
+
+	tmpFiles, err = filepath.Glob(filepath.Join(tmp, ".tmp-*"))
+	if err != nil {
+		t.Fatalf("glob tmp files post-fail: %v", err)
+	}
+	if len(tmpFiles) != 0 {
+		var names []string
+		for _, f := range tmpFiles {
+			names = append(names, filepath.Base(f))
+		}
+		t.Fatalf("forced-failure path left %d residual temp file(s): %v", len(tmpFiles), names)
+	}
+}
+
+// TestMidWindowKillRecovery simulates a process kill mid-window: r1 is
+// started, pushes v1, then a second update is made but r1 is killed BEFORE
+// it can push v2. A fresh registry r2 must load the persisted card, start
+// its ticker, and push v2 on the next tick.
+//
+// Also verifies that persisted files use mode 0600 and stay inside the
+// configured directory (no path-traversal escape).
+func TestMidWindowKillRecovery(t *testing.T) {
+	tmp := t.TempDir()
+	interval := 100 * time.Millisecond
+
+	// Phase 1 — drive a couple of updates and stop r1 before the throttle
+	// window opens for the second update.
+	r1 := NewCardRegistry(tmp)
+	updater1 := &testMessageUpdater{}
+	r1.StartTicker(updater1, interval)
+
+	if err := r1.UpdateCard("m1", "h1", "v1", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard v1 failed: %v", err)
+	}
+	// Wait for v1 to actually be pushed so we know the state is consistent.
+	time.Sleep(2 * interval)
+	if n := updater1.callsForHandle("h1"); n != 1 {
+		t.Fatalf("r1 pushed v1: %d PATCHes, want 1", n)
+	}
+
+	// Stage v2 — this writes to disk via persistCard and marks pending=true,
+	// but we kill r1 before the next tick window elapses, so v2 is never
+	// pushed to the platform.
+	if err := r1.UpdateCard("m1", "h1", "v2", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("UpdateCard v2 failed: %v", err)
+	}
+	r1.StopTicker() // "kill"
+
+	if n := updater1.callsForHandle("h1"); n != 1 {
+		t.Fatalf("after kill, r1 PATCHes = %d, want 1 (v2 must NOT have been pushed)", n)
+	}
+
+	// Sanity: v2 was persisted to disk.
+	path := filepath.Join(tmp, "cc-connect-progress-m1.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("persisted file missing: %v", err)
+	}
+	var snap persistedCardSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal persisted snapshot: %v", err)
+	}
+	if snap.Content != "v2" {
+		t.Fatalf("persisted content = %q, want %q (v2 must be on disk before kill)", snap.Content, "v2")
+	}
+
+	// Phase 2 — fresh registry, fresh updater: r2 must load m1 from disk
+	// and push v2 on its first tick.
+	r2 := NewCardRegistry(tmp)
+	updater2 := &testMessageUpdater{}
+	r2.StartTicker(updater2, interval)
+
+	loaded := r2.LoadPersistedCards()
+	if len(loaded) != 1 {
+		t.Fatalf("r2 loaded cards = %d, want 1", len(loaded))
+	}
+	if loaded[0].messageID != "m1" {
+		t.Fatalf("loaded card messageID = %q, want m1", loaded[0].messageID)
+	}
+	if loaded[0].content != "v2" {
+		t.Fatalf("loaded card content = %q, want v2", loaded[0].content)
+	}
+
+	// Drive a tick and verify the dirty state is flushed.
+	r2.tick()
+
+	snapshot := updater2.snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("r2 pushed PATCHes = %d, want 1 (the recovered v2)", len(snapshot))
+	}
+	if snapshot[0].content != "v2" {
+		t.Errorf("r2 PATCH content = %q, want %q", snapshot[0].content, "v2")
+	}
+
+	r2.StopTicker()
+
+	// TDD spec: persisted file mode must be 0600 (owner r/w only).
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat persisted file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("persisted file mode = %o, want 0600", got)
+	}
+
+	// TDD spec: no file was created outside the configured directory.
+	escapePattern := filepath.Join(filepath.Dir(tmp), "cc-connect-progress-*")
+	escape, err := filepath.Glob(escapePattern)
+	if err != nil {
+		t.Fatalf("glob escape pattern: %v", err)
+	}
+	for _, f := range escape {
+		if !strings.HasPrefix(f, tmp+string(os.PathSeparator)) {
+			t.Errorf("persisted file escaped sandbox: %s", f)
+		}
+	}
+}
+
+// TestMtimeFilter is a dedicated, table-driven test for the 24h mtime filter.
+// It verifies boundary cases around the 24-hour cutoff.
+func TestMtimeFilter(t *testing.T) {
+	tmp := t.TempDir()
+
+	cases := []struct {
+		name    string
+		age     time.Duration
+		load    bool
+	}{
+		{"just-written", 1 * time.Millisecond, true},
+		{"6h-old", 6 * time.Hour, true},
+		{"12h-old", 12 * time.Hour, true},
+		{"23h59m-old (just inside)", 23*time.Hour + 59*time.Minute, true},
+		{"24h01m-old (just outside)", 24*time.Hour + 1*time.Minute, false},
+		{"25h-old", 25 * time.Hour, false},
+		{"72h-old", 72 * time.Hour, false},
+	}
+
+	for i, tc := range cases {
+		path := filepath.Join(tmp, fmt.Sprintf("cc-connect-progress-case-%d.json", i))
+		snap := persistedCardSnapshot{
+			MessageID: fmt.Sprintf("case-%d", i),
+			Content:   "x",
+			State:     ProgressCardStateRunning,
+			UpdatedAt: time.Now().UTC().Add(-tc.age),
+		}
+		data, _ := json.Marshal(snap)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", tc.name, err)
+		}
+		oldTime := time.Now().Add(-tc.age)
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatalf("chtimes %s: %v", tc.name, err)
+		}
+	}
+
+	r := NewCardRegistry(tmp)
+	defer r.Stop()
+
+	loaded := r.LoadPersistedCards()
+	loadedIDs := make(map[string]bool, len(loaded))
+	for _, c := range loaded {
+		loadedIDs[c.messageID] = true
+	}
+
+	for i, tc := range cases {
+		id := fmt.Sprintf("case-%d", i)
+		got := loadedIDs[id]
+		if got != tc.load {
+			t.Errorf("case %q (age=%v): loaded=%v, want %v", tc.name, tc.age, got, tc.load)
+		}
+	}
+}
+
+// TestFilePermission0600 verifies that every persisted card snapshot file is
+// written with mode 0600 (owner read/write only). It covers initial writes,
+// multiple cards, and overwrites.
+func TestFilePermission0600(t *testing.T) {
+	tmp := t.TempDir()
+	r := NewCardRegistry(tmp)
+	defer r.Stop()
+
+	ids := []string{"perm-a", "perm-b", "perm-c", "perm-d"}
+	for _, id := range ids {
+		if err := r.UpdateCard(id, "h", "v1", ProgressCardStateRunning, nil); err != nil {
+			t.Fatalf("UpdateCard %s: %v", id, err)
+		}
+	}
+
+	for _, id := range ids {
+		path := filepath.Join(tmp, "cc-connect-progress-"+id+".json")
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		perm := info.Mode().Perm()
+		if perm != 0o600 {
+			t.Errorf("file %s mode = %o, want 0600", filepath.Base(path), perm)
+		}
+	}
+
+	// Overwrite one of them — the mode must remain 0600 (atomic write
+	// must not change permissions).
+	if err := r.UpdateCard("perm-a", "h", "v2", ProgressCardStateRunning, nil); err != nil {
+		t.Fatalf("overwrite perm-a: %v", err)
+	}
+	path := filepath.Join(tmp, "cc-connect-progress-perm-a.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after overwrite: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("after overwrite, mode = %o, want 0600", got)
+	}
+}
+
+// TestPathTraversalBlocked verifies that the registry refuses to persist or
+// load any card whose messageID contains path traversal patterns. It also
+// verifies that no file is created outside the configured directory.
+func TestPathTraversalBlocked(t *testing.T) {
+	tmp := t.TempDir()
+
+	attacks := []struct {
+		name    string
+		id      string
+		rejected bool
+	}{
+		{"dotdot-slash", "../escape", true},
+		{"dotdot-backslash", `..\escape`, true},
+		{"dotdot-only", "..", true},
+		{"single-dot", ".", true},
+		{"subdir-slash", "subdir/file", true},
+		{"subdir-backslash", `subdir\file`, true},
+		{"abs-slash", "/etc/passwd", true},
+		{"tilde", "~/.ssh/authorized_keys", true},
+		{"dotdot-inside", "msg..id", true},
+		{"null-byte", "msg\x00id", true},
+		{"control-char", "msg\x1fid", true},
+	}
+
+	r := NewCardRegistry(tmp)
+	defer r.Stop()
+
+	for _, tc := range attacks {
+		err := r.UpdateCard(tc.id, nil, "evil", ProgressCardStateRunning, nil)
+		if tc.rejected {
+			if err == nil {
+				t.Errorf("attack %q (%s): UpdateCard accepted unsafe ID", tc.id, tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("attack %q (%s): UpdateCard rejected safe ID: %v", tc.id, tc.name, err)
+		}
+	}
+
+	// Ensure no escaped files were created anywhere outside tmp.
+	parent := filepath.Dir(tmp)
+	matches, err := filepath.Glob(filepath.Join(parent, "cc-connect-progress-*.json"))
+	if err != nil {
+		t.Fatalf("glob parent: %v", err)
+	}
+	for _, m := range matches {
+		if !strings.HasPrefix(m, tmp+string(os.PathSeparator)) {
+			t.Errorf("file escaped sandbox: %s", m)
+		}
+	}
+
+	// And ensure no file inside tmp contains any of the attack patterns in
+	// its basename.
+	inside, err := filepath.Glob(filepath.Join(tmp, "cc-connect-progress-*.json"))
+	if err != nil {
+		t.Fatalf("glob inside: %v", err)
+	}
+	for _, f := range inside {
+		base := filepath.Base(f)
+		for _, tc := range attacks {
+			if !tc.rejected {
+				continue
+			}
+			// Compare against the sanitized form (sanitizeMessageID trims,
+			// so the basename cannot legally contain the raw attack — but
+			// it must not be created at all).
+			clean := sanitizeMessageID(tc.id)
+			if clean != "" && strings.Contains(base, clean) {
+				t.Errorf("unsafe messageID %q (sanitized=%q) appears in persisted file %s", tc.id, clean, f)
+			}
+		}
+	}
+
+	// SanitizeMessageID directly: every rejected ID must sanitize to "".
+	for _, tc := range attacks {
+		if !tc.rejected {
+			continue
+		}
+		if got := sanitizeMessageID(tc.id); got != "" {
+			t.Errorf("sanitizeMessageID(%q) = %q, want \"\"", tc.id, got)
+		}
+	}
+}
