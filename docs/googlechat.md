@@ -2,7 +2,7 @@
 
 This guide walks you through connecting **cc-connect** to Google Chat, so you can chat with your local Claude Code from a Google Chat space or DM.
 
-cc-connect uses a registered **Google Chat app** whose **Cloud Pub/Sub connection** publishes events to a topic. cc-connect pulls that topic locally and replies through the Chat REST API as the app's service account. This means:
+cc-connect uses a registered **Google Chat app** whose **Cloud Pub/Sub connection** publishes events to a topic. cc-connect pulls that topic locally (native Go, no extra binaries) and replies through the Chat REST API as the app's service account. This means:
 
 - **No public IP / domain / reverse proxy** — events arrive over a Pub/Sub pull.
 - **No subscription expiry or per-restart resource leak** — the Pub/Sub subscription is fixed (unlike the Workspace Events API, whose subscriptions expire and are recreated each run).
@@ -11,7 +11,6 @@ cc-connect uses a registered **Google Chat app** whose **Cloud Pub/Sub connectio
 
 - A **Google Workspace** account. The Google Chat API is only available to Workspace users; consumer `@gmail.com` accounts cannot configure a Chat app. (This applies to every Chat-app/REST integration, not just cc-connect.)
 - A Google Cloud project (billing enabled).
-- `gws` (google-workspace-cli) installed and logged in (`gws auth login`). cc-connect uses it to pull events.
 - `gcloud` CLI installed and authenticated (for the one-time GCP setup below).
 - Claude Code installed and configured.
 
@@ -30,7 +29,7 @@ cc-connect uses a registered **Google Chat app** whose **Cloud Pub/Sub connectio
 │                       ▼                                       │
 │            Cloud Pub/Sub topic ──→ subscription               │
 └───────────────────────────────────────┼──────────────────────┘
-                                         │ pull (gws, no public IP)
+                                         │ streaming pull (no public IP)
                                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                     Your Local Machine                        │
@@ -41,8 +40,10 @@ cc-connect uses a registered **Google Chat app** whose **Cloud Pub/Sub connectio
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- **Receive**: `gws events +subscribe --subscription <sub>` pulls the topic and emits one JSON event per line. gws authenticates with its own OAuth login.
-- **Send**: cc-connect posts to the Chat REST API authenticated as the app's **service account** (`chat.bot` scope), so replies appear as the bot. (gws has no service-account auth, so sending is done natively by cc-connect.)
+Both directions are native Go and authenticate with the **same service-account key** (`chat.bot` scope):
+
+- **Receive**: cc-connect opens a streaming pull on the subscription via the Cloud Pub/Sub client. The service account needs `roles/pubsub.subscriber` on the subscription.
+- **Send**: cc-connect posts to the Chat REST API as the service account, so replies appear as the bot.
 
 ---
 
@@ -82,13 +83,18 @@ The subscription resource name is `projects/YOUR_PROJECT_ID/subscriptions/cc-con
 
 ---
 
-## Step 3: Create a service account for replies
+## Step 3: Create a service account
 
-The bot replies via the Chat REST API authenticated as a service account.
+cc-connect uses one service account for **both** pulling events and replying.
 
 ```bash
 gcloud iam service-accounts create cc-connect-bot --project "$PROJECT_ID" \
   --display-name "cc-connect Chat bot"
+
+# Allow the service account to pull from the subscription
+gcloud pubsub subscriptions add-iam-policy-binding cc-connect-chat-sub --project "$PROJECT_ID" \
+  --member="serviceAccount:cc-connect-bot@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/pubsub.subscriber"
 
 # Download a JSON key (this is a secret — store it safely, e.g. ~/.config/cc-connect/)
 mkdir -p ~/.config/cc-connect
@@ -100,7 +106,8 @@ chmod 600 ~/.config/cc-connect/cc-connect-bot-key.json
 
 > ⚠️ The key file grants the bot's identity — keep it private and never commit it.
 
-No extra IAM role on the project is required: a service account in the project, calling the Chat API with the `chat.bot` scope, acts as the configured Chat app.
+- **Send**: no project-level role is needed — a service account calling the Chat API with the `chat.bot` scope acts as the configured Chat app.
+- **Receive**: the `roles/pubsub.subscriber` binding above (on the subscription) is what lets the service account pull events.
 
 ---
 
@@ -143,8 +150,7 @@ type = "googlechat"
 [projects.platforms.options]
 # Pub/Sub subscription the Chat app publishes to (required)
 subscription = "projects/YOUR_PROJECT_ID/subscriptions/cc-connect-chat-sub"
-# Service-account key used to reply as the bot (chat.bot). Without it the bot
-# can receive but not send.
+# Service-account key, used to pull events AND reply as the bot (chat.bot) (required)
 credentials_file = "/Users/you/.config/cc-connect/cc-connect-bot-key.json"
 # Allowed sender IDs (e.g. "users/1234567890"); "*" = everyone (default).
 allow_from = "*"
@@ -153,7 +159,6 @@ session_scope = "space"
 # Optional: only handle messages starting with this prefix (e.g. "claude:").
 # Leave empty to handle the whole message.
 # trigger = ""
-# gws_path = "gws"   # path to the gws binary if not on PATH
 ```
 
 ### Options reference
@@ -161,11 +166,10 @@ session_scope = "space"
 | Option | Required | Purpose |
 |--------|----------|---------|
 | `subscription` | ✅ | Pub/Sub subscription the Chat app publishes to |
-| `credentials_file` | recommended | Service-account JSON key for bot replies (`chat.bot`). Omit → receive-only |
+| `credentials_file` | ✅ | Service-account JSON key, used to pull events and reply (`chat.bot`) |
 | `allow_from` | — | Comma-separated allowed sender IDs; `*` = all |
 | `session_scope` | — | `space` (default) / `thread` / `user` |
 | `trigger` | — | If set, only messages starting with the prefix are handled (prefix stripped) |
-| `gws_path` | — | Path to the `gws` binary (default `gws`) |
 
 ---
 
@@ -198,7 +202,7 @@ The bot replies in-thread as the app.
 ## Key facts
 
 - **The Chat app must be Live.** If App status is not *Live*, the app neither receives events nor sends replies. Set it to *Live — available to users* in the Chat API Configuration tab.
-- **gws OAuth (receive) vs service account (send) are separate.** Receiving uses gws's own login; replying uses the service-account key in `credentials_file`.
+- **One service account does both.** The key in `credentials_file` pulls events (needs `roles/pubsub.subscriber` on the subscription) and posts replies (`chat.bot`).
 - **Fixed subscription = no expiry, no leak.** Unlike the Workspace Events API, the Chat app's Pub/Sub connection uses one stable topic/subscription, so there is no subscription to renew and nothing is recreated on restart.
 - **One Chat app per Google Cloud project.**
 
@@ -209,14 +213,14 @@ The bot replies in-thread as the app.
 ### Q: I sent a message but the bot doesn't respond at all.
 
 1. Is the Chat app **App status = Live**? (required for both receiving and sending)
-2. Is `cc-connect` running, and is there a `gws events +subscribe` child process? (receive path)
-3. Is `gws` logged in? (`gws auth status`)
+2. Is `cc-connect` running? Check the log for `googlechat: started`.
+3. Does the service account have `roles/pubsub.subscriber` on the subscription? (receive path)
 4. Is `work_dir` a real directory? The agent can't start otherwise.
 5. Give the agent a few seconds on the first message (cold start).
 
 ### Q: It receives but never replies.
 
-1. Is `credentials_file` set and readable, and is it a service-account key in the same project?
+1. Is `credentials_file` readable and a service-account key in the same project?
 2. Check logs for `googlechat: send: status ...`.
 
 ### Q: "Google Chat app is inactive" error when sending.

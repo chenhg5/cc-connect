@@ -1174,32 +1174,32 @@ app_secret = "your-feishu-app-secret"
 # subscription expiry or per-restart resource leak (the subscription is fixed).
 # 注册的 Google Chat 应用通过 Cloud Pub/Sub 连接发布事件，无需公网 IP，且订阅固定（无过期/泄漏）。
 #
-# - receive: `gws events +subscribe --subscription <sub>` pulls the Chat app's
-#   Pub/Sub subscription (gws authenticates with its own OAuth login).
-#   接收：gws 拉取 Chat 应用的 Pub/Sub 订阅（gws 用自身 OAuth 登录）。
+# - receive: cc-connect pulls the Chat app's Pub/Sub subscription with a native
+#   streaming pull (no gws binary). 接收：原生流式拉取 Chat 应用的 Pub/Sub 订阅（无需 gws）。
 # - send: replies post via the Chat REST API as the app's service account
 #   (chat.bot), so replies appear as the bot. 发送：以服务账号（chat.bot）作为机器人回复。
+# Both directions use the same service-account key. 收发使用同一个服务账号密钥。
 #
 # Setup / 配置:
-# 1. Enable Chat API + Pub/Sub API; install & log in `gws`. / 启用 Chat/Pub/Sub API，安装并登录 gws
+# 1. Enable Chat API + Pub/Sub API. / 启用 Chat API 与 Pub/Sub API。
 # 2. Create a Pub/Sub topic; grant Publisher to
 #    chat-api-push@system.gserviceaccount.com; create a pull subscription.
 #    创建 Pub/Sub 主题并授予 chat-api-push@system Publisher，创建拉取订阅。
-# 3. Configure a Chat app (Chat API > Configuration): set status LIVE,
+# 3. Create a service account + JSON key (chat.bot). Grant it
+#    roles/pubsub.subscriber on the subscription so it can pull events.
+#    创建服务账号及 JSON 密钥，并在订阅上授予 roles/pubsub.subscriber 以拉取事件。
+# 4. Configure a Chat app (Chat API > Configuration): set status LIVE,
 #    Connection settings = Cloud Pub/Sub (your topic), Visibility = yourself.
 #    Do NOT check "Build as a Google Workspace add-on".
 #    配置 Chat 应用：状态 LIVE，连接方式选 Cloud Pub/Sub（你的主题），可见性=自己；不要勾选 add-on。
-# 4. Create a service account + JSON key for the app's replies (chat.bot).
-#    为机器人回复创建服务账号及 JSON 密钥。
 # 5. DM the app (or @mention it in a space). / 私聊该应用（或在空间中 @ 它）。
 
 # [[projects.platforms]]
 # type = "googlechat"
 #
 # [projects.platforms.options]
-# gws_path = "gws"                                  # Path to the gws binary / gws 可执行文件路径
 # subscription = "projects/PROJECT/subscriptions/NAME"  # Pub/Sub subscription the Chat app publishes to (required) / Chat 应用发布到的 Pub/Sub 订阅（必填）
-# credentials_file = "/path/to/service-account.json"    # SA key for bot replies (chat.bot); without it the bot can receive but not send / 机器人回复用 SA 密钥（缺省则只收不发）
+# credentials_file = "/path/to/service-account.json"    # SA key, used to pull events AND reply (chat.bot) (required) / 服务账号密钥，用于拉取事件与回复（必填）
 # allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123456789" / 允许的发送者 ID
 # trigger = ""                                      # Empty = use full message; set e.g. "claude:" to only handle messages starting with it / 留空=整条消息；设为前缀则仅处理以其开头的消息
 # session_scope = "space"                           # "space" (default) | "thread" | "user" / 会话粒度
