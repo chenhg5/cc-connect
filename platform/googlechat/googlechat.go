@@ -252,16 +252,25 @@ func (p *Platform) parseEvent(line []byte) (*core.Message, bool) {
 	if !strings.EqualFold(m.Sender.Type, "HUMAN") {
 		return nil, false
 	}
+	if !core.AllowList(p.allowFrom, m.Sender.Name) {
+		slog.Debug("googlechat: message from unauthorized sender", "sender", m.Sender.Name)
+		return nil, false
+	}
+	// Drop messages predating startup so a restart does not replay backlog.
+	if t, err := time.Parse(time.RFC3339, m.CreateTime); err == nil && core.IsOldMessage(t) {
+		slog.Debug("googlechat: ignoring old message after restart", "create_time", m.CreateTime)
+		return nil, false
+	}
 
-	content := strings.TrimSpace(m.Text)
-	if content == "" {
+	content, ok := p.extractContent(m)
+	if !ok {
 		return nil, false
 	}
 
 	space := m.Space.Name
 	thread := m.Thread.Name
 	return &core.Message{
-		SessionKey: "googlechat:" + space,
+		SessionKey: p.buildSessionKey(space, m.Sender.Name, thread),
 		Platform:   "googlechat",
 		MessageID:  m.Name,
 		UserID:     m.Sender.Name,
@@ -270,6 +279,67 @@ func (p *Platform) parseEvent(line []byte) (*core.Message, bool) {
 		Content:    content,
 		ReplyCtx:   replyContext{space: space, thread: thread},
 	}, true
+}
+
+// extractContent returns the prompt text for a message. With a trigger word
+// configured, only messages starting with it are handled and the prefix is
+// stripped (user-OAuth mode, no Chat App). Otherwise argumentText is used,
+// which Google already strips of the @mention markup, falling back to text.
+func (p *Platform) extractContent(m chatMessage) (string, bool) {
+	if t := strings.TrimSpace(p.trigger); t != "" {
+		text := strings.TrimSpace(m.Text)
+		if !strings.HasPrefix(text, t) {
+			return "", false
+		}
+		content := strings.TrimSpace(strings.TrimPrefix(text, t))
+		return content, content != ""
+	}
+	content := strings.TrimSpace(m.ArgumentText)
+	if content == "" {
+		content = strings.TrimSpace(m.Text)
+	}
+	return content, content != ""
+}
+
+// buildSessionKey derives the engine session key per session_scope:
+//   - "space":  one session per space          -> googlechat:<space>
+//   - "thread": one session per thread          -> googlechat:<space>:t:<thread>
+//   - "user":   one session per (space, sender)  -> googlechat:<space>:<user>
+//
+// "thread" falls back to the space key when the message has no thread.
+func (p *Platform) buildSessionKey(space, user, thread string) string {
+	switch p.sessionScope {
+	case "thread":
+		if thread != "" {
+			return fmt.Sprintf("googlechat:%s:t:%s", space, thread)
+		}
+		return "googlechat:" + space
+	case "user":
+		return fmt.Sprintf("googlechat:%s:%s", space, user)
+	default:
+		return "googlechat:" + space
+	}
+}
+
+// ReconstructReplyCtx rebuilds a reply context from a session key so proactive
+// sends (cron, send-to-session, restart notices) can reach the right space and
+// thread. Implements core.ReplyContextReconstructor.
+func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	// googlechat:<space>  |  googlechat:<space>:t:<thread>  |  googlechat:<space>:<user>
+	// <space> is itself "spaces/<id>", so split off the known prefix first.
+	rest, ok := strings.CutPrefix(sessionKey, "googlechat:")
+	if !ok {
+		return nil, fmt.Errorf("googlechat: invalid session key %q", sessionKey)
+	}
+	if idx := strings.Index(rest, ":t:"); idx != -1 {
+		return replyContext{space: rest[:idx], thread: rest[idx+3:]}, nil
+	}
+	// User-scoped keys append ":<user>" where user is "users/<id>"; strip a
+	// trailing "users/..." segment to recover the bare space.
+	if idx := strings.LastIndex(rest, ":users/"); idx != -1 {
+		return replyContext{space: rest[:idx]}, nil
+	}
+	return replyContext{space: rest}, nil
 }
 
 // buildCreateArgs builds the `gws chat spaces messages create` arguments to
