@@ -175,6 +175,9 @@ type Platform struct {
 	richCardImageUploadFunc func(context.Context, string) (string, error)
 }
 
+// compile-time interface assertions
+var _ core.RelayGroupVisibilityTarget = (*Platform)(nil)
+
 type interactivePlatform struct {
 	*Platform
 }
@@ -3312,6 +3315,27 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		}
 	}
 	return rc, nil
+}
+
+// RelayGroupVisibilityKey implements core.RelayGroupVisibilityTarget for
+// feishu.  When the caller session key targets a feishu thread (its
+// third colon-separated segment carries a non-empty "root:" or
+// "thread:" prefix produced by makeSessionKey), the visibility echo
+// gets routed back into that thread; otherwise the platform returns
+// ("", false) so core falls back to the channel-level ":relay" default.
+func (p *Platform) RelayGroupVisibilityKey(callerSessionKey string) (string, bool) {
+	parts := strings.SplitN(callerSessionKey, ":", 3)
+	if len(parts) < 3 || parts[0] != "feishu" {
+		return "", false
+	}
+	chatID := parts[1]
+	third := parts[2]
+	for _, pfx := range []string{"root:", "thread:"} {
+		if after, ok := strings.CutPrefix(third, pfx); ok && after != "" {
+			return "feishu:" + chatID + ":" + third, true
+		}
+	}
+	return "", false
 }
 
 func parseThreadRootID(sessionTail string) (string, bool) {
