@@ -37,12 +37,17 @@ func TestSkillDirs_UsesProjectAgentAndCodexHomes(t *testing.T) {
 	want := []string{
 		filepath.Join(workDir, ".agents", "skills"),
 		filepath.Join(workDir, ".codex", "skills"),
+		filepath.Join(workDir, ".claude", "skills"),
 		filepath.Join(repo, "nested", ".agents", "skills"),
 		filepath.Join(repo, "nested", ".codex", "skills"),
+		filepath.Join(repo, "nested", ".claude", "skills"),
 		filepath.Join(repo, ".agents", "skills"),
 		filepath.Join(repo, ".codex", "skills"),
+		filepath.Join(repo, ".claude", "skills"),
 		filepath.Join(codexHome, "skills"),
+		filepath.Join(codexHome, "superpowers", "skills"),
 		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".claude", "skills"),
 	}
 	if len(got) != len(want) {
 		t.Fatalf("len(SkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
@@ -77,6 +82,81 @@ func TestSkillDirs_FallsBackToEnvCodexHome(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("SkillDirs() missing CODEX_HOME skills dir: %v", got)
+	}
+}
+
+func TestSkillDirs_IncludesCodexPluginSkillRoots(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	workDir := filepath.Join(tmp, "workspace")
+	codexHome := filepath.Join(tmp, "codex-home")
+	pluginSkillsDir := filepath.Join(codexHome, "plugins", "cache", "openai-curated", "github", "hash", "skills")
+
+	setTestHome(t, home)
+	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	if err := os.MkdirAll(pluginSkillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir plugin skills dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(pluginSkillsDir, "github", "references", "template", "skills"), 0o755); err != nil {
+		t.Fatalf("mkdir nested asset skills dir: %v", err)
+	}
+
+	a := &Agent{workDir: workDir}
+	got := map[string]bool{}
+	for _, dir := range a.SkillDirs() {
+		got[dir] = true
+	}
+
+	want := []string{
+		filepath.Join(workDir, ".codex", "skills"),
+		filepath.Join(workDir, ".claude", "skills"),
+		filepath.Join(codexHome, "skills"),
+		filepath.Join(codexHome, "superpowers", "skills"),
+		pluginSkillsDir,
+		filepath.Join(home, ".claude", "skills"),
+	}
+	for _, dir := range want {
+		if !got[dir] {
+			t.Fatalf("SkillDirs missing %q, dirs=%v", dir, a.SkillDirs())
+		}
+	}
+	if got[filepath.Join(pluginSkillsDir, "github", "references", "template", "skills")] {
+		t.Fatalf("SkillDirs must not include nested skills directories inside plugin skill roots: %v", a.SkillDirs())
+	}
+}
+
+func TestSkillDirs_FollowsCodexPluginSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires administrator on Windows")
+	}
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	workDir := filepath.Join(tmp, "workspace")
+	codexHome := filepath.Join(tmp, "codex-agent-home")
+	mainCodexPlugins := filepath.Join(home, ".codex", "plugins")
+	pluginSkillsDir := filepath.Join(codexHome, "plugins", "cache", "openai-curated", "github", "hash", "skills")
+
+	setTestHome(t, home)
+	t.Setenv("CODEX_HOME", "")
+	for _, dir := range []string{workDir, codexHome, filepath.Join(mainCodexPlugins, "cache", "openai-curated", "github", "hash", "skills")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.Symlink(mainCodexPlugins, filepath.Join(codexHome, "plugins")); err != nil {
+		t.Fatalf("symlink plugins: %v", err)
+	}
+
+	a := &Agent{workDir: workDir, codexHome: codexHome}
+	got := map[string]bool{}
+	for _, dir := range a.SkillDirs() {
+		got[dir] = true
+	}
+	if !got[pluginSkillsDir] {
+		t.Fatalf("SkillDirs() missing plugin root through symlink %q, dirs=%v", pluginSkillsDir, a.SkillDirs())
 	}
 }
 
