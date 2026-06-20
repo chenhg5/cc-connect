@@ -299,7 +299,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -412,7 +412,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
@@ -476,6 +476,46 @@ func TestEffectiveHistoryMaxLen(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := EffectiveHistoryMaxLen(&tt.cfg, &tt.proj); got != tt.want {
 				t.Fatalf("EffectiveHistoryMaxLen() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplayHideAgentFooter(t *testing.T) {
+	tru := true
+	fal := false
+
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want bool
+	}{
+		{
+			name: "default false",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			want: false,
+		},
+		{
+			name: "global true",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			proj: ProjectConfig{},
+			want: true,
+		},
+		{
+			name: "project overrides global",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			proj: ProjectConfig{Display: &DisplayConfig{HideAgentFooter: &fal}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, _, _, _, got := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if got != tt.want {
+				t.Fatalf("hideAgentFooter = %v, want %v", got, tt.want)
 			}
 		})
 	}

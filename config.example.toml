@@ -125,6 +125,8 @@ level = "info" # debug, info, warn, error
 #                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+# hide_agent_footer = false      # Strip standalone model/token footer lines emitted by agents (default: false)
+#                                # 过滤 agent 自己混入正文的模型/token 统计 footer 行（默认 false 不过滤）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
@@ -139,6 +141,7 @@ level = "info" # debug, info, warn, error
 # [projects.display]
 # thinking_messages = false  # Override only this field; others inherit from global
 # tool_messages = false
+# hide_agent_footer = true   # Hide agent-emitted model/token footer only for this project
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
