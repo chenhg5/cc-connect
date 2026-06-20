@@ -8402,6 +8402,122 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_SecondMessageProcessedAfterCleanEventResult is a regression
+// test for issue #933. After a claudecode (or any agent) turn completes with
+// a clean EventResult, the next user message routed through handleMessage
+// must not be silently queued, dropped, or rejected — the engine must have
+// released the session lock and must deliver the new prompt to the agent
+// session via Send().
+//
+// Symptom of the original bug: user sends a message, the agent replies once,
+// then every subsequent message is "never processed" even though
+// cc-connect receives it on the wire. The session lock is leaked across turns
+// when processInteractiveEvents returns without unlocking (or with the lock
+// still held by a stuck goroutine), so the next handleMessage's TryLock()
+// fails and the message is either queued forever or dropped.
+func TestHandleMessage_SecondMessageProcessedAfterCleanEventResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("two-turn")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+
+	// Drive the first turn: push EventResult on the first Send() call,
+	// and a second EventResult on the second Send() call. The session
+	// stays alive throughout both turns, matching the claudecode
+	// stream-json mode where the subprocess keeps running between turns.
+	go func() {
+		// Wait for the first turn's Send() to record a call.
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		firstCount := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		sess.events <- Event{Type: EventText, Content: "first response"}
+		sess.events <- Event{Type: EventResult, Content: "first response", Done: true}
+
+		// Wait for the second turn's Send() to record a call.
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == firstCount {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		sess.events <- Event{Type: EventText, Content: "second response"}
+		sess.events <- Event{Type: EventResult, Content: "second response", Done: true}
+	}()
+
+	// First user message.
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "first",
+		ReplyCtx:   "ctx-1",
+		MessageID:  "m1",
+	})
+
+	// Second user message — sent only after a brief wait so the first turn
+	// has a chance to start. handleMessage's TryLock() must succeed and
+	// the message must reach the agent via Send().
+	time.Sleep(50 * time.Millisecond)
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "second",
+		ReplyCtx:   "ctx-2",
+		MessageID:  "m2",
+	})
+
+	// Wait for both turns to complete.
+	deadline := time.After(3 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			sess.sendMu.Lock()
+			calls := append([]string(nil), sess.sendCalls...)
+			sess.sendMu.Unlock()
+			t.Fatalf("timed out waiting for second turn Send(); only got %d call(s): %v", n, calls)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	calls := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(calls) < 2 {
+		t.Fatalf("sendCalls = %v, want at least 2 (one per turn)", calls)
+	}
+	// The recorded prompts should mention each user message body.
+	hasFirst, hasSecond := false, false
+	for _, c := range calls {
+		if strings.Contains(c, "first") {
+			hasFirst = true
+		}
+		if strings.Contains(c, "second") {
+			hasSecond = true
+		}
+	}
+	if !hasFirst || !hasSecond {
+		t.Fatalf("sendCalls = %v, want one call mentioning %q and one mentioning %q", calls, "first", "second")
+	}
+}
+
 // replyCtxRecordingPlatform records (replyCtx, content) for each Send/Reply
 // so tests can assert which trigger context was used for which message.
 type replyCtxRecordingPlatform struct {
