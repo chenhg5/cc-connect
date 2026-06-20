@@ -1228,6 +1228,39 @@ app_secret = "your-feishu-app-secret"
 #                         #  a fresh session, replies in the same thread continue it).
 #                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
 
+# Google Chat (uncomment to enable / 取消注释以启用)
+# Inbound uses the google-workspace-cli (`gws`) binary as a subprocess, so no
+# public IP is needed: `gws events +subscribe` pulls Google Chat events from a
+# Cloud Pub/Sub topic; replies go out via `gws chat spaces messages create`.
+# 入站通过子进程方式调用 google-workspace-cli（gws），无需公网 IP。
+#
+# Prerequisites / 前置条件:
+# 1. Install `gws` and authenticate it (see google-workspace-cli docs). / 安装并登录 gws
+# 2. A GCP project with the Workspace Events API and Pub/Sub API enabled. / 启用 Workspace Events 与 Pub/Sub API 的 GCP 项目
+#
+# Two modes / 两种模式:
+# - @mention mode: register a GCP Chat App (it has a mentionable identity) and
+#   authenticate gws with its service account via credentials_file. Leave
+#   trigger empty. / @提及模式：注册 GCP Chat App，并用其服务账号（credentials_file）登录 gws，trigger 留空。
+# - trigger-word mode: no Chat App; user OAuth only; set trigger (e.g. "claude:")
+#   so only messages starting with it are handled. Best for a personal space.
+#   / 触发词模式：无需 Chat App，仅用户 OAuth；设置 trigger（如 "claude:"），仅处理以其开头的消息。
+
+# [[projects.platforms]]
+# type = "googlechat"
+#
+# [projects.platforms.options]
+# gws_path = "gws"                                  # Path to the gws binary / gws 可执行文件路径
+# project = "my-gcp-project"                        # GCP project for Pub/Sub (required unless subscription set) / 用于 Pub/Sub 的 GCP 项目
+# target = "//chat.googleapis.com/users/me"         # Workspace Events target; users/me covers all your spaces,
+#                                                   # or use //chat.googleapis.com/spaces/AAAA for one space.
+#                                                   # 事件目标；users/me 覆盖你的全部空间，或用 spaces/AAAA 指定单个空间
+# subscription = ""                                 # Reuse an existing Pub/Sub subscription (skips setup) / 复用已有 Pub/Sub 订阅
+# allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123" / 允许的发送者 ID
+# trigger = ""                                      # Empty = @mention mode; set e.g. "claude:" for trigger-word mode / 留空为提及模式
+# session_scope = "space"                           # "space" (default) | "thread" | "user" / 会话粒度
+# credentials_file = ""                             # Service account JSON for a Chat App (sets GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE) / Chat App 服务账号
+
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
 # 2. Under "Bot", create a bot and copy the token / 创建 Bot 并复制 token
