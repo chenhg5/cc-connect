@@ -2,27 +2,34 @@ package googlechat
 
 import (
 	"encoding/json"
+	"net/url"
+	"strings"
 	"testing"
 )
 
 // newTestPlatform builds a Platform directly so tests can exercise parsing and
-// routing without a gws subprocess.
+// routing without a gws subprocess or service-account client.
 func newTestPlatform(allowFrom, trigger, scope string) *Platform {
 	return &Platform{allowFrom: allowFrom, trigger: trigger, sessionScope: scope}
 }
 
-// eventLine renders a chat.message.v1.created event as the single NDJSON line
-// the gws subprocess would emit.
-func eventLine(t *testing.T, data map[string]any) []byte {
+// wrapEvent renders a Chat-app event as the single NDJSON line gws emits:
+// {"data":{"type":<evType>,"message":<msg>}}.
+func wrapEvent(t *testing.T, evType string, msg map[string]any) []byte {
 	t.Helper()
 	line, err := json.Marshal(map[string]any{
-		"type": createdEventType,
-		"data": data,
+		"type": "unknown",
+		"data": map[string]any{"type": evType, "message": msg},
 	})
 	if err != nil {
 		t.Fatalf("marshal event: %v", err)
 	}
 	return line
+}
+
+// messageEvent wraps msg as a MESSAGE event line.
+func messageEvent(t *testing.T, msg map[string]any) []byte {
+	return wrapEvent(t, "MESSAGE", msg)
 }
 
 func humanMessage(text, argumentText string) map[string]any {
@@ -38,7 +45,7 @@ func humanMessage(text, argumentText string) map[string]any {
 
 func TestParseEvent_MentionMode(t *testing.T) {
 	p := newTestPlatform("*", "", "space")
-	line := eventLine(t, humanMessage("@Claude summarize this", "summarize this"))
+	line := messageEvent(t, humanMessage("@Claude summarize this", "summarize this"))
 
 	msg, ok := p.parseEvent(line)
 	if !ok {
@@ -61,9 +68,7 @@ func TestParseEvent_MentionMode(t *testing.T) {
 
 func TestParseEvent_MentionModeFallsBackToText(t *testing.T) {
 	p := newTestPlatform("*", "", "space")
-	line := eventLine(t, humanMessage("hello there", ""))
-
-	msg, ok := p.parseEvent(line)
+	msg, ok := p.parseEvent(messageEvent(t, humanMessage("hello there", "")))
 	if !ok {
 		t.Fatal("expected message to be handled")
 	}
@@ -75,7 +80,7 @@ func TestParseEvent_MentionModeFallsBackToText(t *testing.T) {
 func TestParseEvent_TriggerMode(t *testing.T) {
 	p := newTestPlatform("*", "claude:", "space")
 
-	msg, ok := p.parseEvent(eventLine(t, humanMessage("claude: do the thing", "")))
+	msg, ok := p.parseEvent(messageEvent(t, humanMessage("claude: do the thing", "")))
 	if !ok {
 		t.Fatal("expected triggered message to be handled")
 	}
@@ -83,7 +88,7 @@ func TestParseEvent_TriggerMode(t *testing.T) {
 		t.Errorf("Content = %q, want trigger stripped", msg.Content)
 	}
 
-	if _, ok := p.parseEvent(eventLine(t, humanMessage("no trigger here", ""))); ok {
+	if _, ok := p.parseEvent(messageEvent(t, humanMessage("no trigger here", ""))); ok {
 		t.Error("expected message without trigger to be ignored")
 	}
 }
@@ -93,30 +98,26 @@ func TestParseEvent_SkipsNonHuman(t *testing.T) {
 	data := humanMessage("hi", "hi")
 	data["sender"] = map[string]any{"name": "users/bot", "type": "BOT"}
 
-	if _, ok := p.parseEvent(eventLine(t, data)); ok {
+	if _, ok := p.parseEvent(messageEvent(t, data)); ok {
 		t.Error("expected non-human sender to be ignored")
 	}
 }
 
-func TestParseEvent_IgnoresWrongType(t *testing.T) {
+func TestParseEvent_IgnoresNonMessageType(t *testing.T) {
 	p := newTestPlatform("*", "", "space")
-	line, _ := json.Marshal(map[string]any{
-		"type": "google.workspace.chat.message.v1.updated",
-		"data": humanMessage("hi", "hi"),
-	})
-	if _, ok := p.parseEvent(line); ok {
-		t.Error("expected non-created event to be ignored")
+	if _, ok := p.parseEvent(wrapEvent(t, "ADDED_TO_SPACE", humanMessage("hi", "hi"))); ok {
+		t.Error("expected non-MESSAGE event to be ignored")
 	}
 }
 
 func TestParseEvent_AllowFromEnforced(t *testing.T) {
 	p := newTestPlatform("users/999", "", "space")
-	if _, ok := p.parseEvent(eventLine(t, humanMessage("hi", "hi"))); ok {
+	if _, ok := p.parseEvent(messageEvent(t, humanMessage("hi", "hi"))); ok {
 		t.Error("expected unauthorized sender to be ignored")
 	}
 
 	p2 := newTestPlatform("users/123", "", "space")
-	if _, ok := p2.parseEvent(eventLine(t, humanMessage("hi", "hi"))); !ok {
+	if _, ok := p2.parseEvent(messageEvent(t, humanMessage("hi", "hi"))); !ok {
 		t.Error("expected authorized sender to be handled")
 	}
 }
@@ -125,7 +126,7 @@ func TestParseEvent_DropsOldMessage(t *testing.T) {
 	p := newTestPlatform("*", "", "space")
 	data := humanMessage("hi", "hi")
 	data["createTime"] = "2000-01-01T00:00:00Z"
-	if _, ok := p.parseEvent(eventLine(t, data)); ok {
+	if _, ok := p.parseEvent(messageEvent(t, data)); ok {
 		t.Error("expected message predating startup to be ignored")
 	}
 }
@@ -174,56 +175,44 @@ func TestReconstructReplyCtx(t *testing.T) {
 	}
 }
 
-func TestBuildCreateArgs(t *testing.T) {
-	// Threaded reply: params carry the reply option, body carries the thread.
-	args, err := buildCreateArgs(replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}, "hi")
+func TestBuildSendRequest(t *testing.T) {
+	// Threaded reply: URL carries the reply option, body carries the thread.
+	u, body, err := buildSendRequest(replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}, "hi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	params, body := decodeArgs(t, args)
-	if params["parent"] != "spaces/A" || params["messageReplyOption"] != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" {
-		t.Errorf("params = %+v", params)
+	if !strings.HasPrefix(u, chatAPIBase+"spaces/A/messages") {
+		t.Errorf("url = %q, want prefix %q", u, chatAPIBase+"spaces/A/messages")
 	}
-	if body["text"] != "hi" {
-		t.Errorf("body text = %v", body["text"])
+	parsed, _ := url.Parse(u)
+	if parsed.Query().Get("messageReplyOption") != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" {
+		t.Errorf("url = %q, want messageReplyOption query", u)
 	}
-	thread, _ := body["thread"].(map[string]any)
+	var b map[string]any
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatal(err)
+	}
+	if b["text"] != "hi" {
+		t.Errorf("body text = %v", b["text"])
+	}
+	thread, _ := b["thread"].(map[string]any)
 	if thread["name"] != "spaces/A/threads/T" {
-		t.Errorf("body thread = %+v", body["thread"])
+		t.Errorf("body thread = %+v", b["thread"])
 	}
 
 	// No thread: no reply option, no thread in body.
-	args, err = buildCreateArgs(replyContext{space: "spaces/A"}, "hi")
+	u2, body2, err := buildSendRequest(replyContext{space: "spaces/A"}, "hi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	params, body = decodeArgs(t, args)
-	if _, ok := params["messageReplyOption"]; ok {
-		t.Errorf("unexpected messageReplyOption for top-level reply: %+v", params)
+	if strings.Contains(u2, "messageReplyOption") {
+		t.Errorf("unexpected messageReplyOption for top-level reply: %q", u2)
 	}
-	if _, ok := body["thread"]; ok {
-		t.Errorf("unexpected thread for top-level reply: %+v", body)
+	var b2 map[string]any
+	if err := json.Unmarshal(body2, &b2); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// decodeArgs extracts and parses the --params and --json JSON payloads from a
-// buildCreateArgs result.
-func decodeArgs(t *testing.T, args []string) (params, body map[string]any) {
-	t.Helper()
-	for i := 0; i < len(args)-1; i++ {
-		switch args[i] {
-		case "--params":
-			if err := json.Unmarshal([]byte(args[i+1]), &params); err != nil {
-				t.Fatalf("unmarshal params: %v", err)
-			}
-		case "--json":
-			if err := json.Unmarshal([]byte(args[i+1]), &body); err != nil {
-				t.Fatalf("unmarshal body: %v", err)
-			}
-		}
+	if _, ok := b2["thread"]; ok {
+		t.Errorf("unexpected thread for top-level reply: %+v", b2)
 	}
-	if params == nil || body == nil {
-		t.Fatalf("missing --params/--json in args: %v", args)
-	}
-	return params, body
 }

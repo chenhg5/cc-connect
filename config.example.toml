@@ -1229,37 +1229,40 @@ app_secret = "your-feishu-app-secret"
 #                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
 
 # Google Chat (uncomment to enable / 取消注释以启用)
-# Inbound uses the google-workspace-cli (`gws`) binary as a subprocess, so no
-# public IP is needed: `gws events +subscribe` pulls Google Chat events from a
-# Cloud Pub/Sub topic; replies go out via `gws chat spaces messages create`.
-# 入站通过子进程方式调用 google-workspace-cli（gws），无需公网 IP。
+# Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
+# events to a topic. No public IP is needed and there is NO Workspace Events
+# subscription expiry or per-restart resource leak (the subscription is fixed).
+# 注册的 Google Chat 应用通过 Cloud Pub/Sub 连接发布事件，无需公网 IP，且订阅固定（无过期/泄漏）。
 #
-# Prerequisites / 前置条件:
-# 1. Install `gws` and authenticate it (see google-workspace-cli docs). / 安装并登录 gws
-# 2. A GCP project with the Workspace Events API and Pub/Sub API enabled. / 启用 Workspace Events 与 Pub/Sub API 的 GCP 项目
+# - receive: `gws events +subscribe --subscription <sub>` pulls the Chat app's
+#   Pub/Sub subscription (gws authenticates with its own OAuth login).
+#   接收：gws 拉取 Chat 应用的 Pub/Sub 订阅（gws 用自身 OAuth 登录）。
+# - send: replies post via the Chat REST API as the app's service account
+#   (chat.bot), so replies appear as the bot. 发送：以服务账号（chat.bot）作为机器人回复。
 #
-# Two modes / 两种模式:
-# - @mention mode: register a GCP Chat App (it has a mentionable identity) and
-#   authenticate gws with its service account via credentials_file. Leave
-#   trigger empty. / @提及模式：注册 GCP Chat App，并用其服务账号（credentials_file）登录 gws，trigger 留空。
-# - trigger-word mode: no Chat App; user OAuth only; set trigger (e.g. "claude:")
-#   so only messages starting with it are handled. Best for a personal space.
-#   / 触发词模式：无需 Chat App，仅用户 OAuth；设置 trigger（如 "claude:"），仅处理以其开头的消息。
+# Setup / 配置:
+# 1. Enable Chat API + Pub/Sub API; install & log in `gws`. / 启用 Chat/Pub/Sub API，安装并登录 gws
+# 2. Create a Pub/Sub topic; grant Publisher to
+#    chat-api-push@system.gserviceaccount.com; create a pull subscription.
+#    创建 Pub/Sub 主题并授予 chat-api-push@system Publisher，创建拉取订阅。
+# 3. Configure a Chat app (Chat API > Configuration): set status LIVE,
+#    Connection settings = Cloud Pub/Sub (your topic), Visibility = yourself.
+#    Do NOT check "Build as a Google Workspace add-on".
+#    配置 Chat 应用：状态 LIVE，连接方式选 Cloud Pub/Sub（你的主题），可见性=自己；不要勾选 add-on。
+# 4. Create a service account + JSON key for the app's replies (chat.bot).
+#    为机器人回复创建服务账号及 JSON 密钥。
+# 5. DM the app (or @mention it in a space). / 私聊该应用（或在空间中 @ 它）。
 
 # [[projects.platforms]]
 # type = "googlechat"
 #
 # [projects.platforms.options]
 # gws_path = "gws"                                  # Path to the gws binary / gws 可执行文件路径
-# project = "my-gcp-project"                        # GCP project for Pub/Sub (required unless subscription set) / 用于 Pub/Sub 的 GCP 项目
-# target = "//chat.googleapis.com/users/me"         # Workspace Events target; users/me covers all your spaces,
-#                                                   # or use //chat.googleapis.com/spaces/AAAA for one space.
-#                                                   # 事件目标；users/me 覆盖你的全部空间，或用 spaces/AAAA 指定单个空间
-# subscription = ""                                 # Reuse an existing Pub/Sub subscription (skips setup) / 复用已有 Pub/Sub 订阅
-# allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123" / 允许的发送者 ID
-# trigger = ""                                      # Empty = @mention mode; set e.g. "claude:" for trigger-word mode / 留空为提及模式
+# subscription = "projects/PROJECT/subscriptions/NAME"  # Pub/Sub subscription the Chat app publishes to (required) / Chat 应用发布到的 Pub/Sub 订阅（必填）
+# credentials_file = "/path/to/service-account.json"    # SA key for bot replies (chat.bot); without it the bot can receive but not send / 机器人回复用 SA 密钥（缺省则只收不发）
+# allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123456789" / 允许的发送者 ID
+# trigger = ""                                      # Empty = use full message; set e.g. "claude:" to only handle messages starting with it / 留空=整条消息；设为前缀则仅处理以其开头的消息
 # session_scope = "space"                           # "space" (default) | "thread" | "user" / 会话粒度
-# credentials_file = ""                             # Service account JSON for a Chat App (sets GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE) / Chat App 服务账号
 
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
