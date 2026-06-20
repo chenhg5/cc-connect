@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 ### New Features
 - **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.

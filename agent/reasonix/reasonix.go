@@ -148,3 +148,10 @@ func (a *Agent) ProjectMemoryFile() string {
 }
 
 func (a *Agent) GlobalMemoryFile() string { return "" }
+
+// Static interface assertions — ensure Agent remains compliant with core.Agent.
+var _ core.Agent = (*Agent)(nil)        // *Agent satisfies core.Agent
+var _ core.ModeSwitcher = (*Agent)(nil)          // mode switching
+var _ core.WorkDirSwitcher = (*Agent)(nil)       // work dir switching
+var _ core.ContextCompressor = (*Agent)(nil)     // compact support
+var _ core.MemoryFileProvider = (*Agent)(nil)    // memory file support

@@ -95,6 +95,10 @@ type reasonixSession struct {
 	// Pending approval tracking
 	pendingApprovalID string
 
+	// Reconnect tracking
+	maxReconnects int
+	reconnectCount int
+
 	// Thinking accumulator — buffers incremental reasoning chunks
 	thinkingBuf strings.Builder
 }
@@ -112,6 +116,7 @@ func newSession(ctx context.Context, serveURL, workDir, sessionID, mode string) 
 		events:       make(chan core.Event, 128),
 		turnDone:     make(chan struct{}, 1),
 		readLoopDone: make(chan struct{}),
+		maxReconnects: 5,
 		sseClient: &http.Client{
 			Timeout: 0, // no timeout for SSE
 			Transport: &http.Transport{
@@ -254,7 +259,8 @@ func (s *reasonixSession) readLoop(ctx context.Context) {
 
 		slog.Info("reasonix: SSE connected")
 		s.alive.Store(true)
-		backoff = 1 * time.Second // reset on successful connection
+		backoff = 1 * time.Second  // reset backoff on successful connection
+		s.reconnectCount = 0       // reset reconnect count on successful connection
 		s.readSSE(ctx, resp.Body)
 		_ = resp.Body.Close()
 
@@ -275,6 +281,16 @@ func (s *reasonixSession) readLoop(ctx context.Context) {
 		slog.Warn("reasonix: SSE connection lost, reconnecting", "backoff", backoff)
 
 	retryWait:
+		s.reconnectCount++
+		if s.reconnectCount >= s.maxReconnects {
+			slog.Error("reasonix: SSE reconnect limit reached, closing session", "max", s.maxReconnects)
+			s.alive.Store(false)
+			if s.inTurn.Load() {
+				s.inTurn.Store(false)
+				s.turnDone <- struct{}{}
+			}
+			return
+		}
 		select {
 		case <-ctx.Done():
 			s.alive.Store(false)
@@ -482,7 +498,9 @@ func (s *reasonixSession) httpPost(path string, body any) error {
 	}()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("reasonix: POST %s returned %d", path, resp.StatusCode)
+		// Include response body (first 512 bytes) in error for debugging.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("reasonix: POST %s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(errBody)))
 	}
 	return nil
 }
@@ -498,3 +516,6 @@ func formatImages(images []core.ImageAttachment) string {
 	}
 	return strings.Join(names, ", ")
 }
+
+// Static interface assertion — ensure reasonixSession satisfies core.AgentSession.
+var _ core.AgentSession = (*reasonixSession)(nil)
