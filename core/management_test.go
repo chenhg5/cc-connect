@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -119,6 +120,26 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 		t.Fatalf("decode POST response: %v", err)
 	}
 	return r
+}
+
+func mgmtPostHandler(t *testing.T, handler http.HandlerFunc, path string, body any) (mgmtResponse, int) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode POST body: %v", err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	var r mgmtResponse
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode POST handler response: %v", err)
+	}
+	return r, w.Code
 }
 
 func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
@@ -1063,6 +1084,112 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	}
 }
 
+func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	called := false
+	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
+		called = true
+		return nil
+	})
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", "tok", map[string]any{
+		"type":     "dingtalk",
+		"options":  map[string]any{"client_id": "abc", "client_secret": "def"},
+		"work_dir": missing,
+	})
+	if r.OK {
+		t.Fatal("expected missing work_dir to be rejected")
+	}
+	if !strings.Contains(r.Error, "work_dir does not exist") {
+		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+	}
+	if called {
+		t.Fatal("addPlatformToProject should not be called when work_dir is invalid")
+	}
+}
+
+func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("feishu", func(t *testing.T) {
+		mgmt := NewManagementServer(0, "", nil)
+		called := false
+		mgmt.SetSetupFeishuSave(func(req FeishuSetupSaveRequest) error {
+			called = true
+			return nil
+		})
+
+		r, code := mgmtPostHandler(t, mgmt.handleSetupFeishuSave, "/api/v1/setup/feishu/save", map[string]any{
+			"project":    "demo",
+			"app_id":     "app",
+			"app_secret": "secret",
+			"work_dir":   missing,
+		})
+		if r.OK || code != http.StatusBadRequest {
+			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		}
+		if !strings.Contains(r.Error, "work_dir does not exist") {
+			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+		}
+		if called {
+			t.Fatal("setupFeishuSave should not be called when work_dir is invalid")
+		}
+	})
+
+	t.Run("weixin", func(t *testing.T) {
+		mgmt := NewManagementServer(0, "", nil)
+		called := false
+		mgmt.SetSetupWeixinSave(func(req WeixinSetupSaveRequest) error {
+			called = true
+			return nil
+		})
+
+		r, code := mgmtPostHandler(t, mgmt.handleSetupWeixinSave, "/api/v1/setup/weixin/save", map[string]any{
+			"project":  "demo",
+			"token":    "token",
+			"work_dir": missing,
+		})
+		if r.OK || code != http.StatusBadRequest {
+			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		}
+		if !strings.Contains(r.Error, "work_dir does not exist") {
+			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+		}
+		if called {
+			t.Fatal("setupWeixinSave should not be called when work_dir is invalid")
+		}
+	})
+}
+
+func TestValidateProjectWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	got, err := validateProjectWorkDir("  " + dir + "  ")
+	if err != nil {
+		t.Fatalf("validate existing dir: %v", err)
+	}
+	if got != dir {
+		t.Fatalf("trimmed work_dir = %q, want %q", got, dir)
+	}
+
+	got, err = validateProjectWorkDir("  ")
+	if err != nil {
+		t.Fatalf("empty work_dir should be accepted: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("empty work_dir = %q, want empty", got)
+	}
+
+	file := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	if _, err := validateProjectWorkDir(file); err == nil || !strings.Contains(err.Error(), "work_dir is not a directory") {
+		t.Fatalf("file work_dir error = %v, want not a directory", err)
+	}
+}
+
 func TestMgmt_OtherRoutesStillRequireEngine(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 
@@ -2003,6 +2130,35 @@ func TestMgmt_ProjectPatch_UnknownAgentType(t *testing.T) {
 	}
 	if !strings.Contains(r.Error, "unknown agent type") {
 		t.Fatalf("error = %q", r.Error)
+	}
+}
+
+func TestMgmt_ProjectPatch_RejectsMissingWorkDirBeforeMutation(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	agent := &stubWorkDirAgent{workDir: "/existing"}
+	e.agent = agent
+
+	saveCalled := false
+	mgmt.SetSaveProjectSettings(func(projectName string, update ProjectSettingsUpdate) error {
+		saveCalled = true
+		return nil
+	})
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+		"work_dir": missing,
+	})
+	if r.OK {
+		t.Fatal("expected missing work_dir to be rejected")
+	}
+	if !strings.Contains(r.Error, "work_dir does not exist") {
+		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+	}
+	if got := agent.GetWorkDir(); got != "/existing" {
+		t.Fatalf("work_dir mutated to %q, want original value", got)
+	}
+	if saveCalled {
+		t.Fatal("saveProjectSettings should not be called when work_dir is invalid")
 	}
 }
 
