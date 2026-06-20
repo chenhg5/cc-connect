@@ -548,6 +548,10 @@ type ProjectConfig struct {
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+	// HideSchedulerSessions hides cron/timer new_per_run background sessions from
+	// /list, /switch, and /delete. Default true fixes scheduler session leaks;
+	// set false to keep the pre-#1417 behavior.
+	HideSchedulerSessions *bool `toml:"hide_scheduler_sessions,omitempty"`
 	// Shell overrides the global shell for this project. See Config.Shell.
 	Shell string `toml:"shell,omitempty"`
 	// ShellProfile overrides the global shell_profile for this project.
