@@ -15,9 +15,16 @@
 package googlechat
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -103,7 +110,166 @@ func (p *Platform) Name() string { return "googlechat" }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+
+	go p.subscribeLoop(ctx)
+	slog.Info("googlechat: started", "target", p.target, "scope", p.sessionScope)
 	return nil
+}
+
+// subscribeArgs builds the `gws events +subscribe` argument list. When a
+// subscription is configured it is reused (no Pub/Sub setup); otherwise a new
+// topic/subscription is created for target+project.
+func (p *Platform) subscribeArgs() []string {
+	if strings.TrimSpace(p.subscription) != "" {
+		return []string{"events", "+subscribe", "--subscription", p.subscription}
+	}
+	return []string{
+		"events", "+subscribe",
+		"--target", p.target,
+		"--event-types", createdEventType,
+		"--project", p.project,
+	}
+}
+
+// subscribeLoop supervises the gws subprocess, restarting it with a small
+// backoff if it exits unexpectedly while the context is still alive.
+func (p *Platform) subscribeLoop(ctx context.Context) {
+	const backoff = 5 * time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := p.runSubscribe(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("googlechat: subscribe exited, restarting", "error", err, "backoff", backoff)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+}
+
+// runSubscribe runs one gws subprocess to completion, streaming stdout events
+// to the handler and stderr to the log.
+func (p *Platform) runSubscribe(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, p.gwsPath, p.subscribeArgs()...)
+	if strings.TrimSpace(p.credentialsFile) != "" {
+		cmd.Env = core.MergeEnv(os.Environ(), []string{
+			"GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=" + p.credentialsFile,
+		})
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("googlechat: stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("googlechat: stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("googlechat: start gws: %w", err)
+	}
+
+	go logStderr(stderr)
+	p.scanEvents(stdout)
+
+	return cmd.Wait()
+}
+
+// scanEvents reads NDJSON events (one per line) from the gws subprocess and
+// dispatches parsed messages to the handler. The scanner buffer is enlarged
+// because a single event carries the full Chat message resource.
+func (p *Platform) scanEvents(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		msg, ok := p.parseEvent(line)
+		if !ok {
+			continue
+		}
+		p.handler(p, msg)
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Debug("googlechat: scan events ended", "error", err)
+	}
+}
+
+func logStderr(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		slog.Debug("googlechat: gws", "stderr", scanner.Text())
+	}
+}
+
+// chatEvent is the envelope emitted by `gws events +subscribe`.
+type chatEvent struct {
+	Type string      `json:"type"`
+	Data chatMessage `json:"data"`
+}
+
+// chatMessage is the subset of the Google Chat Message resource we use.
+type chatMessage struct {
+	Name         string `json:"name"`
+	Text         string `json:"text"`
+	ArgumentText string `json:"argumentText"`
+	CreateTime   string `json:"createTime"`
+	Sender       struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"displayName"`
+		Type        string `json:"type"`
+	} `json:"sender"`
+	Space struct {
+		Name string `json:"name"`
+	} `json:"space"`
+	Thread struct {
+		Name string `json:"name"`
+	} `json:"thread"`
+}
+
+// parseEvent converts one NDJSON line into a core.Message. The bool is false
+// when the event should be ignored (wrong type, non-human sender, empty text).
+func (p *Platform) parseEvent(line []byte) (*core.Message, bool) {
+	var ev chatEvent
+	if err := json.Unmarshal(line, &ev); err != nil {
+		slog.Debug("googlechat: parse event failed", "error", err)
+		return nil, false
+	}
+	if ev.Type != createdEventType {
+		return nil, false
+	}
+	m := ev.Data
+	// Only react to human messages; skipping app/bot senders prevents the
+	// adapter from replying to its own posts.
+	if !strings.EqualFold(m.Sender.Type, "HUMAN") {
+		return nil, false
+	}
+
+	content := strings.TrimSpace(m.Text)
+	if content == "" {
+		return nil, false
+	}
+
+	space := m.Space.Name
+	thread := m.Thread.Name
+	return &core.Message{
+		SessionKey: "googlechat:" + space,
+		Platform:   "googlechat",
+		MessageID:  m.Name,
+		UserID:     m.Sender.Name,
+		UserName:   m.Sender.DisplayName,
+		ChatName:   space,
+		Content:    content,
+		ReplyCtx:   replyContext{space: space, thread: thread},
+	}, true
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
