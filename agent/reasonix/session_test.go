@@ -265,7 +265,7 @@ func TestReasonixSession_SSEReconnect_Backoff(t *testing.T) {
 		for {
 			select {
 			case data := <-sseFeed:
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
 			case <-r.Context().Done():
 				return
