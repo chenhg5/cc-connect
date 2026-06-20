@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhg5/cc-connect/config"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -115,6 +116,65 @@ func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid progress_style") {
 		t.Fatalf("error = %q, want invalid progress_style", err.Error())
+	}
+}
+
+func TestBuildReplyContent_PlainMessageTypeDoesNotUseInteractiveCard(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":     "cli_xxx",
+		"app_secret": "secret",
+		"feishu_message": map[string]any{
+			"type": "plain",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+	msgType, body := ip.buildReplyContent("**bold**\n\n```go\nfmt.Println(1)\n```")
+	if msgType != larkim.MsgTypeText {
+		t.Fatalf("msgType = %q, want text", msgType)
+	}
+	if strings.Contains(body, `"schema":"2.0"`) {
+		t.Fatalf("plain message body should not contain card JSON: %s", body)
+	}
+	if ip.ProgressStyle() != config.FeishuProgressStyleLegacy {
+		t.Fatalf("plain message ProgressStyle() = %q, want legacy", ip.ProgressStyle())
+	}
+	if ip.RichCardEnabled() {
+		t.Fatal("plain message RichCardEnabled() = true, want false")
+	}
+}
+
+func TestBuildReplyContent_RawCardJSONStaysInteractive(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":     "cli_xxx",
+		"app_secret": "secret",
+		"feishu_message": map[string]any{
+			"type": "card2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+	cardJSON := buildRichCardWithConfig(core.CardStatusDone, []core.ToolStep{{
+		Name:    "Bash",
+		Summary: "pwd",
+		Done:    true,
+	}}, "final answer", false, "", config.DefaultFeishuCard2Config())
+	msgType, body := ip.buildReplyContent(cardJSON)
+	if msgType != larkim.MsgTypeInteractive {
+		t.Fatalf("msgType = %q, want interactive", msgType)
+	}
+	if body != cardJSON {
+		t.Fatal("raw card JSON should pass through unchanged")
 	}
 }
 
@@ -1140,6 +1200,179 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	}
 	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
 		t.Fatalf("rich card should not contain progress payload prefix, got %q", cardJSON)
+	}
+}
+
+func TestBuildRichCardWithConfig_UnifiedExecutionPanelCountsToolsOnly(t *testing.T) {
+	cardJSON := buildRichCardWithConfig(core.CardStatusWorking, []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Summary: "reasoning that should not count as a step"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
+		{Kind: core.ToolStepKindTool, Name: "WebSearch", Summary: "cc-connect card"},
+	}, "answer", true, "", config.FeishuCard2Config{
+		PanelExpanded:          false,
+		StreamingPanelExpanded: true,
+		PrintStrategy:          config.FeishuCard2PrintStrategyFast,
+		FlushIntervalMs:        120,
+		MaxToolSteps:           20,
+		MaxReasoningRounds:     20,
+		ShowReasoning:          true,
+	})
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("unmarshal card: %v", err)
+	}
+	if _, ok := card["header"]; ok {
+		t.Fatalf("card2 cc-connect style should not render status header: %#v", card["header"])
+	}
+	cfg, ok := card["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("config missing: %#v", card)
+	}
+	streamingCfg, ok := cfg["streaming_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("streaming_config missing: %#v", cfg)
+	}
+	if streamingCfg["print_strategy"] != "fast" {
+		t.Fatalf("print_strategy = %v, want fast", streamingCfg["print_strategy"])
+	}
+	printFrequency, ok := streamingCfg["print_frequency_ms"].(map[string]any)
+	if !ok {
+		t.Fatalf("print_frequency_ms should be config object: %#v", streamingCfg["print_frequency_ms"])
+	}
+	if printFrequency["default"] != float64(120) {
+		t.Fatalf("print_frequency_ms.default = %v, want 120", printFrequency["default"])
+	}
+	printStep, ok := streamingCfg["print_step"].(map[string]any)
+	if !ok {
+		t.Fatalf("print_step should be config object: %#v", streamingCfg["print_step"])
+	}
+	if printStep["default"] != float64(1) {
+		t.Fatalf("print_step.default = %v, want 1", printStep["default"])
+	}
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1 unified execution panel: %#v", len(panels), panels)
+	}
+	if got := cardPanelTitle(panels[0]); got != "🛠️ 工具执行 · 2 步" {
+		t.Fatalf("panel title = %q, want 🛠️ 工具执行 · 2 步", got)
+	}
+	if _, ok := panels[0]["background_color"]; ok {
+		t.Fatalf("execution panel should not set background_color: %#v", panels[0])
+	}
+	header, ok := panels[0]["header"].(map[string]any)
+	if !ok {
+		t.Fatalf("panel header missing: %#v", panels[0])
+	}
+	if header["icon_position"] != "right" || header["icon_expanded_angle"] != float64(-180) {
+		t.Fatalf("panel header should render right-side collapse arrow: %#v", header)
+	}
+	titleEl, ok := header["title"].(map[string]any)
+	if !ok {
+		t.Fatalf("panel title element missing: %#v", header)
+	}
+	if _, ok := titleEl["icon"]; ok {
+		t.Fatalf("panel title should use text icon instead of unsupported title.icon: %#v", titleEl)
+	}
+	if panels[0]["expanded"] != true {
+		t.Fatalf("streaming panel expanded = %v, want true", panels[0]["expanded"])
+	}
+	for _, want := range []string{"reasoning that should not count", "pwd", "cc-connect card"} {
+		if !panelContains(t, panels[0], want) {
+			t.Fatalf("panel should contain %q: %#v", want, panels[0])
+		}
+	}
+}
+
+func TestBuildRichCardWithConfig_HidesReasoningWhenDisabled(t *testing.T) {
+	cardJSON := buildRichCardWithConfig(core.CardStatusWorking, []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Summary: "hidden reasoning"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
+	}, "answer", false, "", config.FeishuCard2Config{
+		PrintStrategy:      config.FeishuCard2PrintStrategyDelay,
+		FlushIntervalMs:    100,
+		MaxToolSteps:       20,
+		MaxReasoningRounds: 20,
+		ShowReasoning:      false,
+	})
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1: %#v", len(panels), panels)
+	}
+	if got := cardPanelTitle(panels[0]); got != "🛠️ 工具执行 · 1 步" {
+		t.Fatalf("panel title = %q, want 🛠️ 工具执行 · 1 步", got)
+	}
+	if panelContains(t, panels[0], "hidden reasoning") {
+		t.Fatalf("panel should hide reasoning when show_reasoning=false: %#v", panels[0])
+	}
+}
+
+func TestBuildRichCardWithConfig_SummarizesCommandOutput(t *testing.T) {
+	success := true
+	exitCode := 0
+	readmeOutput := `<p align="center">
+  <a href="https://pi.dev">
+    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
+  </a>
+</p>
+<p align="center">
+  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2" /></a>
+</p>`
+	cardJSON := buildRichCardWithConfig(core.CardStatusDone, []core.ToolStep{{
+		Kind:     core.ToolStepKindTool,
+		Name:     "Bash",
+		Summary:  `"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command "Get-Content -Path .\\README.md -Raw"`,
+		Result:   readmeOutput,
+		Status:   "completed",
+		ExitCode: &exitCode,
+		Success:  &success,
+		Elapsed:  440 * time.Millisecond,
+		Done:     true,
+	}}, "answer", false, "", config.DefaultFeishuCard2Config())
+
+	panels := collectCardPanels(t, cardJSON)
+	if len(panels) != 1 {
+		t.Fatalf("panel count = %d, want 1: %#v", len(panels), panels)
+	}
+	for _, want := range []string{"Terminal (440 ms)", "Succeeded", `Get-Content -Path .\\README.md -Raw`} {
+		if !panelContains(t, panels[0], want) {
+			t.Fatalf("panel should contain %q: %#v", want, panels[0])
+		}
+	}
+	for _, notWant := range []string{"<p align", "logo-auto.svg", "discord-community"} {
+		if panelContains(t, panels[0], notWant) {
+			t.Fatalf("panel should not dump command output %q: %#v", notWant, panels[0])
+		}
+	}
+}
+
+func TestBuildRichCardWithConfig_FooterUsesCard2SupportedFields(t *testing.T) {
+	cardJSON := buildRichCardWithConfig(core.CardStatusDone, nil, "answer", false, "完成 · 1.2s\nmodel x", config.DefaultFeishuCard2Config())
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		t.Fatalf("unmarshal card: %v", err)
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("body missing: %#v", card)
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok {
+		t.Fatalf("body.elements missing: %#v", body)
+	}
+	for _, element := range elements {
+		elem, ok := element.(map[string]any)
+		if !ok || elem["tag"] != "markdown" {
+			continue
+		}
+		content, _ := elem["content"].(string)
+		if strings.Contains(content, "完成") || strings.Contains(content, "model") {
+			if _, exists := elem["text_color"]; exists {
+				t.Fatalf("card2 footer markdown should not use unsupported text_color: %#v", elem)
+			}
+		}
 	}
 }
 

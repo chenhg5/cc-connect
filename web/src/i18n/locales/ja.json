@@ -57,7 +57,22 @@
       "providers": "プロバイダー",
       "heartbeat": "ハートビート",
       "settings": "設定"
-    }
+    },
+    "feishuMessageSettings": "Feishu メッセージ表示",
+    "feishuMessageHint": "プレーンテキスト、Card 1.0、Card 2.0 を選び、対応する設定を変更します。",
+    "feishuMessageType": "メッセージ種別",
+    "feishuMessagePlain": "プレーンテキスト",
+    "feishuCard1ProgressStyle": "Card 1.0 進行表示",
+    "feishuCard2PanelExpanded": "完了後にパネルを展開",
+    "feishuCard2StreamingPanelExpanded": "ストリーミング中にパネルを展開",
+    "feishuCard2ShowReasoning": "reasoning を表示",
+    "feishuCard2PrintStrategy": "表示戦略",
+    "feishuCard2FlushInterval": "更新間隔（ms）",
+    "feishuCard2MaxToolSteps": "最大ツールステップ数",
+    "feishuCard2MaxReasoningRounds": "最大 reasoning ラウンド数",
+    "feishuInteractiveCardEnable": "インタラクティブカード操作",
+    "feishuMessageSavedApplied": "保存しました。すでに適用されています。",
+    "feishuMessageSavedRestartRequired": "保存しました。cc-connect の再起動後に適用されます。"
   },
   "sessions": {
     "title": "セッション",
@@ -211,6 +226,7 @@
     "savingConfig": "設定を保存しています...",
     "completed": "プラットフォームに接続しました！",
     "restartHint": "新しいプラットフォームを有効にするにはサービスを再起動してください。",
+    "restartHintGeneric": "設定を有効にするにはサービスを再起動してください。",
     "restartRequired": "再起動が必要です",
     "restartNow": "今すぐ再起動",
     "restarting": "サービスを再起動中...",

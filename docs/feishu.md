@@ -108,15 +108,30 @@ type = "feishu"
 app_id = "cli_axxxxxxxxxxxx"
 app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
-# enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
+# enable_feishu_card = true  # 可选：飞书交互卡片操作能力开关，修改后可能需要重启
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
-# progress_style = "legacy"  # 可选：legacy | compact | card
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
+
+[projects.platforms.options.feishu_message]
+type = "card1" # plain | card1 | card2
+
+[projects.platforms.options.feishu_message.card1]
+progress_style = "legacy" # legacy | compact | card
+
+[projects.platforms.options.feishu_message.card2]
+panel_expanded = false
+streaming_panel_expanded = false
+print_strategy = "delay" # fast | delay
+flush_interval_ms = 100  # 70..2000
+max_tool_steps = 20      # 1..100
+max_reasoning_rounds = 20 # 1..100
+show_reasoning = true
 ```
 
-> 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
+> `feishu_message.type` 控制普通回复的显示方式：`plain` 为纯文本，`card1` 为现有进度卡片样式，`card2` 为 Card 2.0 统一折叠面板样式。
+> 旧配置 `progress_style = "legacy"` 仍兼容，但只会映射到 `feishu_message.card1.progress_style`。
+> `enable_feishu_card` 是交互卡片操作能力开关（例如权限确认、provider 选择等按钮），不是 Card 2.0 样式开关。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
-> `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先移除 "OnIt" 表情（如果有），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
 
@@ -398,14 +413,14 @@ cc-connect 默认使用交互卡片显示权限确认、provider 选择等操作
 2. **应用发布**：修改事件订阅后需要重新发布应用版本
 3. **权限配置**：确保应用有 `im:message:send_as_bot` 权限
 
-**快速解决方案**：如果暂时无法配置卡片回调，可以在 `config.toml` 中关闭交互卡片：
+**快速解决方案**：如果暂时无法配置卡片回调，可以在 `config.toml` 中关闭交互卡片操作能力：
 
 ```toml
 [projects.platforms.options]
 enable_feishu_card = false
 ```
 
-关闭后，所有交互将回退为纯文本模式，权限确认等操作通过直接回复文字完成。
+关闭后，按钮类交互将回退为纯文本模式，权限确认等操作通过直接回复文字完成。普通回复样式仍由 `feishu_message.type` 控制。
 
 ### Q: 提示权限不足？
 

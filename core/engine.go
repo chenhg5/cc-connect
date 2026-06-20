@@ -270,8 +270,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -4507,9 +4507,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// sessionQuiet which we drop. e.display.ThinkingMessages /
 		// ToolMessages handle user-level quiet in the fallback branches.
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
-		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
-		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if policy, ok := p.(RichCardPolicyProvider); ok {
+			hasRichCard = hasRichCard && policy.RichCardEnabled()
+		} else if e.display.CardMode != "rich" {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -4624,9 +4624,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
-					Kind:    ToolStepKindTool,
-					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Kind:      ToolStepKindTool,
+					Name:      event.ToolName,
+					Summary:   truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					StartedAt: time.Now(),
 				})
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -5651,6 +5652,9 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
 	steps[idx].ExitCode = event.ToolExitCode
 	steps[idx].Success = event.ToolSuccess
+	if !steps[idx].StartedAt.IsZero() && steps[idx].Elapsed == 0 {
+		steps[idx].Elapsed = time.Since(steps[idx].StartedAt)
+	}
 	steps[idx].Done = true
 	return steps
 }

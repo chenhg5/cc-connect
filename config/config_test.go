@@ -2657,6 +2657,101 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	}
 }
 
+func TestEffectiveFeishuMessageConfig_LegacyProgressStyleMapsToCard1(t *testing.T) {
+	cfg := EffectiveFeishuMessageConfig(map[string]any{
+		"progress_style": "compact",
+	})
+	if cfg.Type != FeishuMessageTypeCard1 {
+		t.Fatalf("Type = %q, want card1", cfg.Type)
+	}
+	if cfg.Card1.ProgressStyle != FeishuProgressStyleCompact {
+		t.Fatalf("Card1.ProgressStyle = %q, want compact", cfg.Card1.ProgressStyle)
+	}
+}
+
+func TestEffectiveFeishuMessageConfig_IgnoresDisplayCardMode(t *testing.T) {
+	cfg := EffectiveFeishuMessageConfig(map[string]any{
+		"card_mode": "rich",
+	})
+	if cfg.Type != FeishuMessageTypeCard1 {
+		t.Fatalf("Type = %q, want card1", cfg.Type)
+	}
+}
+
+func TestSaveFeishuMessageConfig_PreservesCommentsAndUnknownFields(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+# keep this file comment
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "cli_old"
+app_secret = "secret"
+custom_flag = "keep-me" # keep this line comment
+progress_style = "compact"
+`)
+	patchConfigPath(t, configPath)
+
+	enabled := false
+	cfg := FeishuMessageConfig{
+		Type:  FeishuMessageTypeCard2,
+		Card1: FeishuCard1Config{ProgressStyle: FeishuProgressStyleCard},
+		Card2: FeishuCard2Config{
+			PanelExpanded:          true,
+			StreamingPanelExpanded: false,
+			PrintStrategy:          FeishuCard2PrintStrategyFast,
+			FlushIntervalMs:        120,
+			MaxToolSteps:           12,
+			MaxReasoningRounds:     7,
+			ShowReasoning:          false,
+		},
+	}
+	result, err := SaveFeishuMessageConfig("alpha", FeishuMessageUpdate{
+		PlatformIndex:         0,
+		InteractiveCardEnable: &enabled,
+		Config:                &cfg,
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuMessageConfig: %v", err)
+	}
+	if !result.RestartRequired {
+		t.Fatal("RestartRequired = false, want true when enable_feishu_card changes")
+	}
+	if result.Config.Type != FeishuMessageTypeCard2 {
+		t.Fatalf("result.Config.Type = %q, want card2", result.Config.Type)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"# keep this file comment",
+		`custom_flag = "keep-me" # keep this line comment`,
+		`[projects.platforms.options.feishu_message]`,
+		`type = "card2"`,
+		`[projects.platforms.options.feishu_message.card2]`,
+		`print_strategy = "fast"`,
+		`show_reasoning = false`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("saved config missing %q:\n%s", want, text)
+		}
+	}
+	reloaded := readConfigFixture(t, configPath)
+	got := EffectiveFeishuMessageConfig(reloaded.Projects[0].Platforms[0].Options)
+	if got.Type != FeishuMessageTypeCard2 || got.Card2.MaxToolSteps != 12 || got.Card2.MaxReasoningRounds != 7 {
+		t.Fatalf("reloaded feishu_message = %#v", got)
+	}
+}
+
 func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)

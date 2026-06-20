@@ -57,7 +57,22 @@
       "providers": "Providers",
       "heartbeat": "Heartbeat",
       "settings": "Settings"
-    }
+    },
+    "feishuMessageSettings": "Feishu message display",
+    "feishuMessageHint": "Choose plain text, Card 1.0, or Card 2.0 and configure its options.",
+    "feishuMessageType": "Message type",
+    "feishuMessagePlain": "Plain text",
+    "feishuCard1ProgressStyle": "Card 1.0 progress style",
+    "feishuCard2PanelExpanded": "Panel expanded",
+    "feishuCard2StreamingPanelExpanded": "Streaming panel expanded",
+    "feishuCard2ShowReasoning": "Show reasoning",
+    "feishuCard2PrintStrategy": "Print strategy",
+    "feishuCard2FlushInterval": "Flush interval (ms)",
+    "feishuCard2MaxToolSteps": "Max tool steps",
+    "feishuCard2MaxReasoningRounds": "Max reasoning rounds",
+    "feishuInteractiveCardEnable": "Interactive-card actions",
+    "feishuMessageSavedApplied": "Saved and applied.",
+    "feishuMessageSavedRestartRequired": "Saved. Restart cc-connect to apply."
   },
   "sessions": {
     "title": "Sessions",
@@ -211,6 +226,7 @@
     "savingConfig": "Saving configuration...",
     "completed": "Platform connected successfully!",
     "restartHint": "Restart the service for the new platform to take effect.",
+    "restartHintGeneric": "Restart the service for the configuration to take effect.",
     "restartRequired": "Restart required",
     "restartNow": "Restart now",
     "restarting": "Restarting service...",

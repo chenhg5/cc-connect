@@ -63,14 +63,16 @@ const (
 
 // ToolStep is one summarized progress row shown in rich progress cards.
 type ToolStep struct {
-	Kind     ToolStepKind // progress row kind; empty means tool for backward compatibility
-	Name     string       // tool name (e.g. "Bash", "Edit")
-	Summary  string       // human-readable summary shown in the card
-	Result   string       // optional tool output/result summary
-	Status   string       // optional tool status (e.g. completed/failed)
-	ExitCode *int         // optional process exit code
-	Success  *bool        // optional success flag
-	Done     bool         // true once a tool result has been observed
+	Kind      ToolStepKind  // progress row kind; empty means tool for backward compatibility
+	Name      string        // tool name (e.g. "Bash", "Edit")
+	Summary   string        // human-readable summary shown in the card
+	Result    string        // optional tool output/result summary
+	Status    string        // optional tool status (e.g. completed/failed)
+	ExitCode  *int          // optional process exit code
+	Success   *bool         // optional success flag
+	StartedAt time.Time     // optional local timestamp when the tool started
+	Elapsed   time.Duration // optional elapsed time once the tool completes
+	Done      bool          // true once a tool result has been observed
 }
 
 // RichCardSupporter is an optional interface for platforms that can build
@@ -88,6 +90,19 @@ type ToolStep struct {
 // uniformly with the rest of the footer.)
 type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
+}
+
+// RichCardPolicyProvider lets a platform decide whether its rich-card reply
+// path is enabled. Platforms that do not implement it keep the legacy engine
+// behavior controlled by DisplayCfg.CardMode.
+type RichCardPolicyProvider interface {
+	RichCardEnabled() bool
+}
+
+// MessageRenderConfigUpdater is implemented by platforms that can hot-apply
+// reply rendering settings saved through the management API.
+type MessageRenderConfigUpdater interface {
+	UpdateMessageRenderConfig(config any)
 }
 
 // RichCardMarkdownResolver is an optional interface for platforms that need to
