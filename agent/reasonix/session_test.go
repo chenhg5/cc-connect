@@ -1,4 +1,4 @@
-package reasonix
+﻿package reasonix
 
 import (
 	"context"
@@ -88,7 +88,7 @@ func sseServer(t *testing.T) (*httptest.Server, chan string) {
 				if !more {
 					return
 				}
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
 			case <-r.Context().Done():
 				return
@@ -144,7 +144,7 @@ func TestReasonixSession_Send_PostsToSubmitEndpoint(t *testing.T) {
 		switch r.URL.Path {
 		case "/submit":
 			var body map[string]interface{}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			submitMethod = r.Method
 			submitBody, _ = body["input"].(string)
@@ -159,7 +159,7 @@ func TestReasonixSession_Send_PostsToSubmitEndpoint(t *testing.T) {
 			flusher.Flush()
 			select {
 			case data := <-sseCh:
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
 			case <-time.After(5 * time.Second):
 			}
@@ -171,7 +171,7 @@ func TestReasonixSession_Send_PostsToSubmitEndpoint(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Feed turn_done so Send() can return
 	go func() {
@@ -196,7 +196,7 @@ func TestReasonixSession_SSE_MapsEventTypes(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Feed a complete SSE stream
 	go func() {
@@ -278,7 +278,7 @@ func TestReasonixSession_SSEReconnect_Backoff(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Wait for first connection (which will be dropped)
 	time.Sleep(300 * time.Millisecond)
@@ -392,7 +392,7 @@ func TestReasonixSession_RespondPermission_PostsApprove(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	err = sess.RespondPermission("req-1", core.PermissionResult{Behavior: "allow"})
 	assert.NoError(t, err)
@@ -431,7 +431,7 @@ func TestReasonixSession_Send_CompactCommand(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	err = sess.Send("/compact", nil, nil)
 	assert.NoError(t, err)
@@ -445,7 +445,7 @@ func TestReasonixSession_httpPost_ErrorIncludesBody(t *testing.T) {
 	mux.HandleFunc("POST /submit", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		// Write an error body that should be included in the error message
-		w.Write([]byte(`{"error": "something went wrong"}`))
+		_, _ = w.Write([]byte(`{"error": "something went wrong"}`))
 	})
 	mux.HandleFunc("GET /events", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -459,7 +459,7 @@ func TestReasonixSession_httpPost_ErrorIncludesBody(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	err = sess.httpPost("/submit", map[string]string{"input": "test"})
 	require.Error(t, err)
@@ -494,7 +494,7 @@ func TestReasonixSession_ThinkingAccumulator(t *testing.T) {
 
 	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
 	require.NoError(t, err)
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Feed reasoning + text + turn_done
 	go func() {
