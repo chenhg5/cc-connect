@@ -272,12 +272,61 @@ func (p *Platform) parseEvent(line []byte) (*core.Message, bool) {
 	}, true
 }
 
-func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+// buildCreateArgs builds the `gws chat spaces messages create` arguments to
+// post content into rc's space. When a thread is known the reply is threaded
+// (falling back to a new thread if that thread no longer accepts replies).
+func buildCreateArgs(rc replyContext, content string) ([]string, error) {
+	params := map[string]any{"parent": rc.space}
+	body := map[string]any{"text": content}
+	if rc.thread != "" {
+		params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+		body["thread"] = map[string]any{"name": rc.thread}
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("googlechat: marshal params: %w", err)
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("googlechat: marshal body: %w", err)
+	}
+	return []string{
+		"chat", "spaces", "messages", "create",
+		"--params", string(paramsJSON),
+		"--json", string(bodyJSON),
+	}, nil
+}
+
+func (p *Platform) post(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("googlechat: invalid reply context type %T", rctx)
+	}
+	if rc.space == "" {
+		return fmt.Errorf("googlechat: missing space in reply context")
+	}
+	args, err := buildCreateArgs(rc, content)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, p.gwsPath, args...)
+	if strings.TrimSpace(p.credentialsFile) != "" {
+		cmd.Env = core.MergeEnv(os.Environ(), []string{
+			"GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=" + p.credentialsFile,
+		})
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("googlechat: send: %w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
+func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	return p.post(ctx, rctx, content)
+}
+
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	return nil
+	return p.post(ctx, rctx, content)
 }
 
 func (p *Platform) Stop() error {
