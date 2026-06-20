@@ -294,6 +294,16 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	// debounceStates buffers the first message of a truly fresh session for a
+	// short window so that rapid consecutive messages arriving before the
+	// agent process is spawned get merged into a single agent turn instead
+	// of racing the session startup (issue #461). Only the first message of
+	// a session that has never had an agent process is debounced; resumed
+	// sessions and follow-up messages bypass the window entirely.
+	debounceMu     sync.Mutex
+	debounceStates map[string]*debounceState // key = sessionKey
+	debounceWindow time.Duration             // 0 disables debouncing
+
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
@@ -540,6 +550,178 @@ func (pp *pendingPermission) resolve() {
 	pp.resolveOnce.Do(func() { close(pp.Resolved) })
 }
 
+// debounceState collects messages arriving on a fresh session during a
+// short window so they can be merged into a single agent turn.
+type debounceState struct {
+	timer    *time.Timer
+	messages []queuedMessage
+}
+
+const defaultDebounceWindow = 500 * time.Millisecond
+
+// SetDebounceWindow configures how long the engine waits for additional
+// rapid messages to arrive on a fresh session before dispatching the
+// first one. A value <= 0 disables debouncing. Defaults to 500ms.
+func (e *Engine) SetDebounceWindow(d time.Duration) {
+	e.debounceMu.Lock()
+	defer e.debounceMu.Unlock()
+	e.debounceWindow = d
+}
+
+// shouldDebounceFreshSession reports whether the given sessionKey is
+// eligible for debouncing: the session has never had an agent process
+// spawned and there is no in-flight interactive state. Resumed sessions
+// and any session with an active or pending state bypass the window.
+func (e *Engine) shouldDebounceFreshSession(sessionKey string, session *Session) bool {
+	if e.debounceWindow <= 0 || session == nil {
+		return false
+	}
+	if session.GetAgentSessionID() != "" {
+		return false
+	}
+	e.interactiveMu.Lock()
+	_, busy := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if busy {
+		return false
+	}
+	e.debounceMu.Lock()
+	_, pending := e.debounceStates[sessionKey]
+	e.debounceMu.Unlock()
+	if pending {
+		return false
+	}
+	return true
+}
+
+// tryDebounceMessage buffers the message on a per-sessionKey debounce
+// state and returns true. The first message starts the timer; subsequent
+// calls (from the same window) append. When the timer fires, the merged
+// messages are dispatched via dispatchDebouncedMessages.
+func (e *Engine) tryDebounceMessage(p Platform, msg *Message, sessionKey string) bool {
+	qm := queuedMessage{
+		messageID:         msg.MessageID,
+		platform:          p,
+		replyCtx:          msg.ReplyCtx,
+		content:           msg.Content,
+		images:            msg.Images,
+		files:             msg.Files,
+		fromVoice:         msg.FromVoice,
+		userID:            msg.UserID,
+		userName:          msg.UserName,
+		msgPlatform:       msg.Platform,
+		msgSessionKey:     msg.SessionKey,
+		channelKey:        msg.ChannelKey,
+		userMessageTimeMs: msg.UserMessageTimeMs,
+	}
+
+	e.debounceMu.Lock()
+	state, exists := e.debounceStates[sessionKey]
+	if !exists {
+		state = &debounceState{}
+		state.timer = time.AfterFunc(e.debounceWindow, func() {
+			e.dispatchDebouncedMessages(sessionKey)
+		})
+		e.debounceStates[sessionKey] = state
+	}
+	state.messages = append(state.messages, qm)
+	window := e.debounceWindow
+	e.debounceMu.Unlock()
+
+	slog.Debug("message debounced on fresh session",
+		"session", sessionKey,
+		"queue_depth", len(state.messages),
+		"window", window,
+		"msg_id", msg.MessageID,
+	)
+	return true
+}
+
+// dispatchDebouncedMessages drains a session's debounce buffer and
+// reposts the merged payload through the normal handleMessage path so
+// the rest of the pipeline (workspace resolution, command dispatch,
+// session locking, agent dispatch) runs unchanged.
+func (e *Engine) dispatchDebouncedMessages(sessionKey string) {
+	e.debounceMu.Lock()
+	state, ok := e.debounceStates[sessionKey]
+	if !ok {
+		e.debounceMu.Unlock()
+		return
+	}
+	delete(e.debounceStates, sessionKey)
+	e.debounceMu.Unlock()
+
+	if len(state.messages) == 0 {
+		return
+	}
+
+	merged := mergeDebouncedMessages(state.messages)
+	merged.privateSkipDebounce = true
+	slog.Info("dispatching debounced messages",
+		"session", sessionKey,
+		"count", len(state.messages),
+		"merged_len", len(merged.Content),
+	)
+
+	if state.messages[0].platform != nil {
+		e.handleMessage(state.messages[0].platform, merged)
+	}
+}
+
+// mergeDebouncedMessages concatenates a batch of debounced messages
+// into a single Message. Content is joined with newlines; images and
+// files are appended in arrival order. Other metadata (user, platform,
+// session) comes from the first message; the reply context is the
+// first message's so user-visible replies go to the original sender.
+func mergeDebouncedMessages(msgs []queuedMessage) *Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+	first := msgs[0]
+	var b strings.Builder
+	var images []ImageAttachment
+	var files []FileAttachment
+	for i, m := range msgs {
+		if i > 0 && m.content != "" {
+			b.WriteString("\n")
+		}
+		if m.content != "" {
+			b.WriteString(m.content)
+		}
+		images = append(images, m.images...)
+		files = append(files, m.files...)
+	}
+	return &Message{
+		MessageID:         first.messageID,
+		Platform:          first.msgPlatform,
+		SessionKey:        first.msgSessionKey,
+		ChannelKey:        first.channelKey,
+		UserID:            first.userID,
+		UserName:          first.userName,
+		Content:           b.String(),
+		Images:            images,
+		Files:             files,
+		FromVoice:         first.fromVoice,
+		UserMessageTimeMs: first.userMessageTimeMs,
+		ReplyCtx:          first.replyCtx,
+	}
+}
+
+// cancelDebounceForSession drops any pending debounced messages for the
+// given sessionKey. Used when the engine stops or when a session is
+// explicitly reset, so the buffered messages are not dispatched against
+// a stale session.
+func (e *Engine) cancelDebounceForSession(sessionKey string) {
+	e.debounceMu.Lock()
+	defer e.debounceMu.Unlock()
+	if state, ok := e.debounceStates[sessionKey]; ok {
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		delete(e.debounceStates, sessionKey)
+	}
+}
+
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
@@ -557,6 +739,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
 		platformReady:         make(map[Platform]bool),
+		debounceStates:        make(map[string]*debounceState),
+		debounceWindow:        defaultDebounceWindow,
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
@@ -2700,6 +2884,34 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+
+	// Debounce rapid messages on a truly fresh session (no agent session
+	// ID, no in-flight interactive state, no debounce in progress). The
+	// first message starts a short timer; subsequent messages within the
+	// window — including any message arriving after the first while a
+	// debounce is still pending — are buffered and merged into one agent
+	// turn when the timer fires. This closes the race where a second
+	// message arrives between the first message claiming the session
+	// lock and the agent process becoming reachable (issue #461).
+	// interactiveKey is used as the debounce key so multi-workspace
+	// sessions stay isolated. Messages re-dispatched from the debounce
+	// buffer itself bypass this check.
+	if !msg.privateSkipDebounce && e.shouldDebounceFreshSession(interactiveKey, session) {
+		e.tryDebounceMessage(p, msg, interactiveKey)
+		return
+	}
+	// A debounce is already pending for this session: absorb this
+	// message into it instead of letting it race the dispatch.
+	if !msg.privateSkipDebounce {
+		e.debounceMu.Lock()
+		_, debouncePending := e.debounceStates[interactiveKey]
+		e.debounceMu.Unlock()
+		if debouncePending {
+			e.tryDebounceMessage(p, msg, interactiveKey)
+			return
+		}
+	}
+
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {

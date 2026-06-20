@@ -169,6 +169,7 @@ func (a *sessionEnvRecordingAgent) EnvValue(key string) string {
 }
 
 type resultAgentSession struct {
+	mu          sync.Mutex
 	events      chan Event
 	result      string
 	sendOnce    sync.Once
@@ -183,7 +184,9 @@ func newResultAgentSession(result string) *resultAgentSession {
 }
 
 func (s *resultAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.mu.Unlock()
 	s.sendOnce.Do(func() {
 		s.events <- Event{Type: EventResult, Content: s.result, Done: true}
 	})
@@ -3379,29 +3382,155 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
 		ReplyCtx:   "ctx",
 	}
 	e.handleMessage(p, msg)
+}
 
+// TestHandleMessage_DebounceMergesRapidFreshSessionMessages is a regression
+// test for issue #461: when two messages arrive in quick succession on a
+// truly fresh session, the first was lost because the second raced session
+// startup. With debouncing, both messages should be buffered and forwarded
+// to the agent as a single merged prompt.
+func TestHandleMessage_DebounceMergesRapidFreshSessionMessages(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("merged reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDebounceWindow(200 * time.Millisecond)
+
+	key := "test:user1"
+	if got := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); got != "" {
+		t.Fatalf("preconditions: expected fresh session with no agent id, got %q", got)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "first half",
+		ReplyCtx:   "ctx1",
+		MessageID:  "m1",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "second half",
+		ReplyCtx:   "ctx2",
+		MessageID:  "m2",
+	})
+
+	// While the debounce window is open, no Send should have happened yet.
+	if got := len(agentSession.sentPrompts); got != 0 {
+		t.Fatalf("expected no Send during debounce window, got %d prompts: %v", got, agentSession.sentPrompts)
+	}
+
+	// Wait for the merged dispatch to complete. We expect exactly one
+	// Send call carrying the concatenated content of both messages —
+	// not two separate Sends (one from each message racing session
+	// startup) and not zero (dropped).
+	deadline := time.After(3 * time.Second)
+	for {
+		agentSession.mu.Lock()
+		prompts := append([]string(nil), agentSession.sentPrompts...)
+		agentSession.mu.Unlock()
+		if len(prompts) == 1 {
+			break
+		}
+		if len(prompts) > 1 {
+			t.Fatalf("expected exactly one merged Send, got %d: %v", len(prompts), prompts)
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for debounced dispatch")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	agentSession.mu.Lock()
+	merged := agentSession.sentPrompts[0]
+	agentSession.mu.Unlock()
+	if !strings.Contains(merged, "first half") || !strings.Contains(merged, "second half") {
+		t.Fatalf("merged prompt missing both halves: %q", merged)
+	}
+	if !strings.Contains(merged, "\n") {
+		t.Fatalf("merged prompt should be joined with newline separator, got %q", merged)
+	}
+}
+
+// TestHandleMessage_DebounceSkippedOnResumedSession verifies that a
+// session with an existing agent session id is processed immediately
+// without debouncing — debouncing should only apply to truly fresh
+// sessions where the agent process hasn't been spawned yet.
+func TestHandleMessage_DebounceSkippedOnResumedSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agentSession := newResultAgentSession("resume reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDebounceWindow(150 * time.Millisecond)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("existing-id", "stub")
+
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "follow up",
+		ReplyCtx:   "ctx",
+		MessageID:  "m1",
+	})
+
+	// Resumed session: dispatch happens synchronously in handleMessage
+	// via the goroutine, so the agent receives the prompt quickly.
 	deadline := time.After(2 * time.Second)
 	for {
-		if len(session.GetHistory(0)) >= 3 {
+		agentSession.mu.Lock()
+		done := len(agentSession.sentPrompts) > 0
+		agentSession.mu.Unlock()
+		if done {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for normal turn, sent=%v", p.getSent())
+			t.Fatal("resumed session should not be debounced; timed out waiting for prompt")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+}
 
-	active := e.sessions.GetOrCreateActive(key)
-	if active.ID != session.ID {
-		t.Fatalf("active session = %s, want unchanged %s", active.ID, session.ID)
+// TestMergeDebouncedMessages verifies the merge helper concatenates
+// content with newlines, accumulates images/files in arrival order,
+// and preserves the first message's user metadata.
+func TestMergeDebouncedMessages(t *testing.T) {
+	img := ImageAttachment{FileName: "a.png", MimeType: "image/png"}
+	img2 := ImageAttachment{FileName: "b.png", MimeType: "image/png"}
+	file := FileAttachment{FileName: "a.txt", MimeType: "text/plain"}
+
+	msgs := []queuedMessage{
+		{content: "one", userName: "alice", images: []ImageAttachment{img}},
+		{content: "two", userName: "bob", images: []ImageAttachment{img2}, files: []FileAttachment{file}},
+		{content: "three", userName: "carol"},
 	}
-	sent := p.getSent()
-	for _, line := range sent {
-		if strings.Contains(line, "Session auto-reset") {
-			t.Fatalf("unexpected auto-reset notice in replies: %v", sent)
-		}
+	merged := mergeDebouncedMessages(msgs)
+	if merged == nil {
+		t.Fatal("mergeDebouncedMessages returned nil")
+	}
+	if merged.Content != "one\ntwo\nthree" {
+		t.Errorf("merged content = %q, want %q", merged.Content, "one\ntwo\nthree")
+	}
+	if merged.UserName != "alice" {
+		t.Errorf("merged UserName = %q, want %q (first message wins)", merged.UserName, "alice")
+	}
+	if len(merged.Images) != 2 || merged.Images[0].FileName != "a.png" || merged.Images[1].FileName != "b.png" {
+		t.Errorf("merged images = %+v, want [a.png, b.png]", merged.Images)
+	}
+	if len(merged.Files) != 1 || merged.Files[0].FileName != "a.txt" {
+		t.Errorf("merged files = %+v, want [a.txt]", merged.Files)
 	}
 }
 

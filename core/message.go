@@ -200,6 +200,12 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+
+	// privateSkipDebounce is set by the engine when re-dispatching a
+	// message that came out of the debounce buffer; it tells handleMessage
+	// not to re-debounce. Not part of the platform contract; callers
+	// outside core should leave it false.
+	privateSkipDebounce bool
 }
 
 // EventType distinguishes different kinds of agent output.
