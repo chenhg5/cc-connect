@@ -4,22 +4,18 @@
 // without a public endpoint. This adapter uses a registered Google Chat app
 // whose Cloud Pub/Sub connection publishes Chat events to a topic:
 //
-//   - receive: `gws events +subscribe --subscription <sub>` pulls the Chat
-//     app's Pub/Sub subscription and emits one JSON event per line on stdout
-//     (no public IP needed). The subscription is fixed, so there is no
-//     Workspace Events subscription expiry or per-restart resource leak.
+//   - receive: cc-connect pulls the Chat app's Pub/Sub subscription with a
+//     streaming pull (no public IP needed). The subscription is fixed, so there
+//     is no Workspace Events subscription expiry or per-restart resource leak.
 //   - send:    the Chat app replies via the Chat REST API
 //     (spaces.messages.create) authenticated as the app's service account
 //     (chat.bot scope), so replies appear as the bot.
 //
-// Receiving still shells out to `gws` (a binary dependency, a deliberate
-// deviation from cc-connect's native-Go norm), but sending is native Go since
-// gws does not support service-account auth. The core.Platform interface is
-// unchanged so the engine can later be swapped to a fully native client.
+// Both directions are native Go: receive uses cloud.google.com/go/pubsub and
+// send uses net/http, authenticated by the same service-account key.
 package googlechat
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -28,13 +24,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
+	"cloud.google.com/go/pubsub/v2"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/option"
 )
 
 // chatBotScope authorizes posting messages as the Chat app (app auth).
@@ -55,13 +52,15 @@ type replyContext struct {
 }
 
 type Platform struct {
-	gwsPath      string
-	subscription string // Pub/Sub subscription the Chat app publishes to
-	allowFrom    string
-	trigger      string
-	sessionScope string // "space" (default) | "thread" | "user"
+	subscription    string // full resource name: projects/<p>/subscriptions/<s>
+	projectID       string // parsed from subscription, for the Pub/Sub client
+	credentialsFile string // service-account key, used for both receive and send
+	allowFrom       string
+	trigger         string
+	sessionScope    string // "space" (default) | "thread" | "user"
 
-	botClient *http.Client // service-account authed client for sending (nil = cannot send)
+	botClient *http.Client // service-account authed client for sending
+	psClient  *pubsub.Client
 
 	handler core.MessageHandler
 	cancel  context.CancelFunc
@@ -69,43 +68,55 @@ type Platform struct {
 
 // New builds a Google Chat platform from config options.
 func New(opts map[string]any) (core.Platform, error) {
-	gwsPath, _ := opts["gws_path"].(string)
-	if strings.TrimSpace(gwsPath) == "" {
-		gwsPath = "gws"
-	}
 	subscription, _ := opts["subscription"].(string)
-	if strings.TrimSpace(subscription) == "" {
+	subscription = strings.TrimSpace(subscription)
+	if subscription == "" {
 		return nil, fmt.Errorf("googlechat: subscription is required (the Pub/Sub subscription your Chat app publishes to)")
 	}
+	projectID, err := projectFromSubscription(subscription)
+	if err != nil {
+		return nil, err
+	}
+
+	credentialsFile, _ := opts["credentials_file"].(string)
+	credentialsFile = strings.TrimSpace(credentialsFile)
+	if credentialsFile == "" {
+		return nil, fmt.Errorf("googlechat: credentials_file is required (the Chat app's service-account key, used to pull events and send replies)")
+	}
+	keyBytes, err := os.ReadFile(credentialsFile)
+	if err != nil {
+		return nil, fmt.Errorf("googlechat: read credentials_file: %w", err)
+	}
+	conf, err := google.JWTConfigFromJSON(keyBytes, chatBotScope)
+	if err != nil {
+		return nil, fmt.Errorf("googlechat: parse service account credentials: %w", err)
+	}
+	botClient := conf.Client(context.Background())
+
 	allowFrom, _ := opts["allow_from"].(string)
 	trigger, _ := opts["trigger"].(string)
-	credentialsFile, _ := opts["credentials_file"].(string)
-
-	var botClient *http.Client
-	if strings.TrimSpace(credentialsFile) != "" {
-		keyBytes, err := os.ReadFile(credentialsFile)
-		if err != nil {
-			return nil, fmt.Errorf("googlechat: read credentials_file: %w", err)
-		}
-		conf, err := google.JWTConfigFromJSON(keyBytes, chatBotScope)
-		if err != nil {
-			return nil, fmt.Errorf("googlechat: parse service account credentials: %w", err)
-		}
-		botClient = conf.Client(context.Background())
-	} else {
-		slog.Warn("googlechat: credentials_file not set — the bot cannot send replies; set it to the Chat app's service account key")
-	}
 
 	core.CheckAllowFrom("googlechat", allowFrom)
 
 	return &Platform{
-		gwsPath:      gwsPath,
-		subscription: subscription,
-		allowFrom:    allowFrom,
-		trigger:      trigger,
-		sessionScope: normalizeSessionScope(opts["session_scope"]),
-		botClient:    botClient,
+		subscription:    subscription,
+		projectID:       projectID,
+		credentialsFile: credentialsFile,
+		allowFrom:       allowFrom,
+		trigger:         trigger,
+		sessionScope:    normalizeSessionScope(opts["session_scope"]),
+		botClient:       botClient,
 	}, nil
+}
+
+// projectFromSubscription extracts the project ID from a Pub/Sub subscription
+// resource name so the Pub/Sub client can be created for the right project.
+func projectFromSubscription(sub string) (string, error) {
+	parts := strings.Split(sub, "/")
+	if len(parts) == 4 && parts[0] == "projects" && parts[2] == "subscriptions" {
+		return parts[1], nil
+	}
+	return "", fmt.Errorf("googlechat: subscription must be of the form projects/<project>/subscriptions/<name>, got %q", sub)
 }
 
 // normalizeSessionScope resolves session_scope to "space" | "thread" | "user",
@@ -132,21 +143,32 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 
-	go p.subscribeLoop(ctx)
+	client, err := pubsub.NewClient(ctx, p.projectID, option.WithCredentialsFile(p.credentialsFile))
+	if err != nil {
+		cancel()
+		return fmt.Errorf("googlechat: create pubsub client: %w", err)
+	}
+	p.psClient = client
+
+	go p.receiveLoop(ctx)
 	slog.Info("googlechat: started", "subscription", p.subscription, "scope", p.sessionScope)
 	return nil
 }
 
-// subscribeLoop supervises the gws subprocess, restarting it with a small
-// backoff if it exits unexpectedly while the context is still alive.
-func (p *Platform) subscribeLoop(ctx context.Context) {
+// receiveLoop runs a streaming pull on the subscription, restarting with a small
+// backoff if Receive returns an error while the context is still alive.
+func (p *Platform) receiveLoop(ctx context.Context) {
 	const backoff = 5 * time.Second
+	sub := p.psClient.Subscriber(p.subscription)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := p.runSubscribe(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("googlechat: subscribe exited, restarting", "error", err, "backoff", backoff)
+		err := sub.Receive(ctx, func(_ context.Context, m *pubsub.Message) {
+			p.handleMessage(m)
+		})
+		if err != nil && ctx.Err() == nil {
+			slog.Error("googlechat: receive exited, restarting", "error", err, "backoff", backoff)
 		}
 		select {
 		case <-ctx.Done():
@@ -156,69 +178,20 @@ func (p *Platform) subscribeLoop(ctx context.Context) {
 	}
 }
 
-// runSubscribe runs one gws subprocess to completion, streaming stdout events
-// to the handler and stderr to the log. gws authenticates the pull with its own
-// OAuth login (the service-account key is only used for sending).
-func (p *Platform) runSubscribe(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, p.gwsPath,
-		"events", "+subscribe", "--subscription", p.subscription)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("googlechat: stdout pipe: %w", err)
+// handleMessage acks the Pub/Sub message and dispatches it to the handler when
+// it is a usable Chat message. The message is acked regardless so non-message
+// events (e.g. ADDED_TO_SPACE) are not redelivered.
+func (p *Platform) handleMessage(m *pubsub.Message) {
+	msg, ok := p.parseEvent(m.Data)
+	m.Ack()
+	if !ok {
+		return
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("googlechat: stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("googlechat: start gws: %w", err)
-	}
-
-	go logStderr(stderr)
-	p.scanEvents(stdout)
-
-	return cmd.Wait()
+	p.handler(p, msg)
 }
 
-// scanEvents reads NDJSON events (one per line) from the gws subprocess and
-// dispatches parsed messages to the handler. The scanner buffer is enlarged
-// because a single event carries the full Chat message resource.
-func (p *Platform) scanEvents(r io.Reader) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
-		}
-		msg, ok := p.parseEvent(line)
-		if !ok {
-			continue
-		}
-		p.handler(p, msg)
-	}
-	if err := scanner.Err(); err != nil {
-		slog.Debug("googlechat: scan events ended", "error", err)
-	}
-}
-
-func logStderr(r io.Reader) {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		slog.Debug("googlechat: gws", "stderr", scanner.Text())
-	}
-}
-
-// gwsEnvelope is the wrapper `gws events +subscribe` writes per Pub/Sub message:
-// {"type":...,"source":...,"attributes":{...},"data":<decoded payload>}.
-// A Chat app's Pub/Sub messages carry no CloudEvents attributes, so the real
-// Chat event (with its own type + message) lives under "data".
-type gwsEnvelope struct {
-	Data chatAppEvent `json:"data"`
-}
-
-// chatAppEvent is the Google Chat app event payload.
+// chatAppEvent is the Google Chat app event payload that the Chat app publishes
+// to its Pub/Sub topic. It arrives as the Pub/Sub message data directly.
 type chatAppEvent struct {
 	Type    string         `json:"type"` // MESSAGE, ADDED_TO_SPACE, REMOVED_FROM_SPACE, ...
 	Message chatAppMessage `json:"message"`
@@ -243,16 +216,15 @@ type chatAppMessage struct {
 	} `json:"thread"`
 }
 
-// parseEvent converts one NDJSON line into a core.Message. The bool is false
-// when the event should be ignored (not a new message, non-human sender,
-// unauthorized, stale, or empty text).
-func (p *Platform) parseEvent(line []byte) (*core.Message, bool) {
-	var env gwsEnvelope
-	if err := json.Unmarshal(line, &env); err != nil {
+// parseEvent converts one Pub/Sub message payload into a core.Message. The bool
+// is false when the event should be ignored (not a new message, non-human
+// sender, unauthorized, stale, or empty text).
+func (p *Platform) parseEvent(data []byte) (*core.Message, bool) {
+	var ev chatAppEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
 		slog.Debug("googlechat: parse event failed", "error", err)
 		return nil, false
 	}
-	ev := env.Data
 	if ev.Type != "MESSAGE" {
 		return nil, false
 	}
@@ -376,9 +348,6 @@ func (p *Platform) post(ctx context.Context, rctx any, content string) error {
 	if rc.space == "" {
 		return fmt.Errorf("googlechat: missing space in reply context")
 	}
-	if p.botClient == nil {
-		return fmt.Errorf("googlechat: cannot send: credentials_file (service account) is not configured")
-	}
 	url, body, err := buildSendRequest(rc, content)
 	if err != nil {
 		return err
@@ -411,6 +380,9 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()
+	}
+	if p.psClient != nil {
+		p.psClient.Close()
 	}
 	return nil
 }
