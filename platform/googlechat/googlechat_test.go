@@ -8,23 +8,20 @@ import (
 )
 
 // newTestPlatform builds a Platform directly so tests can exercise parsing and
-// routing without a gws subprocess or service-account client.
+// routing without a Pub/Sub client or service-account client.
 func newTestPlatform(allowFrom, trigger, scope string) *Platform {
 	return &Platform{allowFrom: allowFrom, trigger: trigger, sessionScope: scope}
 }
 
-// wrapEvent renders a Chat-app event as the single NDJSON line gws emits:
-// {"data":{"type":<evType>,"message":<msg>}}.
+// wrapEvent renders a Chat-app event as the Pub/Sub message payload the Chat app
+// publishes: {"type":<evType>,"message":<msg>}.
 func wrapEvent(t *testing.T, evType string, msg map[string]any) []byte {
 	t.Helper()
-	line, err := json.Marshal(map[string]any{
-		"type": "unknown",
-		"data": map[string]any{"type": evType, "message": msg},
-	})
+	data, err := json.Marshal(map[string]any{"type": evType, "message": msg})
 	if err != nil {
 		t.Fatalf("marshal event: %v", err)
 	}
-	return line
+	return data
 }
 
 // messageEvent wraps msg as a MESSAGE event line.
