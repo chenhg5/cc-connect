@@ -210,3 +210,34 @@ func TestBuildSendRequest(t *testing.T) {
 		t.Errorf("unexpected thread for top-level reply: %+v", b2)
 	}
 }
+
+func TestBuildUpdateRequest(t *testing.T) {
+	msgName := "spaces/AAA/messages/MMM"
+	u, body, err := buildUpdateRequest(msgName, "updated text")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// URL must point at the message resource and carry updateMask=text.
+	wantPrefix := chatAPIBase + msgName
+	if !strings.HasPrefix(u, wantPrefix) {
+		t.Errorf("url = %q, want prefix %q", u, wantPrefix)
+	}
+	parsed, _ := url.Parse(u)
+	if parsed.Query().Get("updateMask") != "text" {
+		t.Errorf("url = %q, want updateMask=text query param", u)
+	}
+
+	// Body must carry the updated text.
+	var b map[string]any
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatal(err)
+	}
+	if b["text"] != "updated text" {
+		t.Errorf("body text = %v, want %q", b["text"], "updated text")
+	}
+	// No thread or reply-option fields.
+	if _, ok := b["thread"]; ok {
+		t.Errorf("unexpected thread field in update body: %+v", b)
+	}
+}

@@ -335,6 +335,23 @@ func buildSendRequest(rc replyContext, content string) (string, []byte, error) {
 	return url, b, nil
 }
 
+// doRequest executes req using botClient and returns the response on success.
+// On non-2xx it reads the error body, closes it, and returns an error.
+// The caller is responsible for draining and closing resp.Body on success.
+func (p *Platform) doRequest(req *http.Request) (*http.Response, error) {
+	resp, err := p.botClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return nil, fmt.Errorf("googlechat: %s %s: status %d: %s",
+			req.Method, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return resp, nil
+}
+
 func (p *Platform) post(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -352,15 +369,12 @@ func (p *Platform) post(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("googlechat: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.botClient.Do(req)
+	resp, err := p.doRequest(req)
 	if err != nil {
-		return fmt.Errorf("googlechat: send: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("googlechat: send: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 	return nil
 }
 
