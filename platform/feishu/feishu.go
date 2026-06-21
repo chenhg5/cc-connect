@@ -1599,7 +1599,9 @@ func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string
 
 // resolveMentionsInContent replaces @name with Feishu at tags in raw content
 // (before JSON serialization). Reverse-matches against the chat member list,
-// longest name first. Uses the correct at syntax based on predicted message type.
+// longest name first. Always emits the MsgTypeText at syntax
+// (<at user_id="...">name</at>) because Feishu only fires mention events for
+// <at> inside MsgTypeText — not inside cards or post messages.
 func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
 	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
 		return content
