@@ -1,10 +1,19 @@
 package googlechat
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // newTestPlatform builds a Platform directly so tests can exercise parsing and
@@ -156,6 +165,63 @@ func TestReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestBuildAttachmentRequest(t *testing.T) {
+	// Threaded reply: URL carries reply option, body carries thread + attachment.
+	u, body, err := buildAttachmentRequest(replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}, "ref/123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(u, chatAPIBase+"spaces/A/messages") {
+		t.Errorf("url = %q, want prefix %q", u, chatAPIBase+"spaces/A/messages")
+	}
+	parsed, _ := url.Parse(u)
+	if parsed.Query().Get("messageReplyOption") != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" {
+		t.Errorf("url = %q, want messageReplyOption query", u)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatal(err)
+	}
+	attachments, _ := b["attachment"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("body attachment count = %d, want 1", len(attachments))
+	}
+	att, _ := attachments[0].(map[string]any)
+	ref, _ := att["attachmentDataRef"].(map[string]any)
+	if ref["resourceName"] != "ref/123" {
+		t.Errorf("attachmentDataRef.resourceName = %v, want ref/123", ref["resourceName"])
+	}
+	thread, _ := b["thread"].(map[string]any)
+	if thread["name"] != "spaces/A/threads/T" {
+		t.Errorf("body thread = %+v", b["thread"])
+	}
+
+	// No thread: no reply option, no thread in body.
+	u2, body2, err := buildAttachmentRequest(replyContext{space: "spaces/A"}, "ref/456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(u2, "messageReplyOption") {
+		t.Errorf("unexpected messageReplyOption for top-level: %q", u2)
+	}
+	var b2 map[string]any
+	if err := json.Unmarshal(body2, &b2); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b2["thread"]; ok {
+		t.Errorf("unexpected thread for top-level reply: %+v", b2)
+	}
+	attachments2, _ := b2["attachment"].([]any)
+	if len(attachments2) != 1 {
+		t.Fatalf("body attachment count = %d, want 1", len(attachments2))
+	}
+	att2, _ := attachments2[0].(map[string]any)
+	ref2, _ := att2["attachmentDataRef"].(map[string]any)
+	if ref2["resourceName"] != "ref/456" {
+		t.Errorf("attachmentDataRef.resourceName = %v, want ref/456", ref2["resourceName"])
+	}
+}
+
 func TestFormattingInstructions(t *testing.T) {
 	p := newTestPlatform("*", "space")
 	s := p.FormattingInstructions()
@@ -239,5 +305,194 @@ func TestBuildUpdateRequest(t *testing.T) {
 	// No thread or reply-option fields.
 	if _, ok := b["thread"]; ok {
 		t.Errorf("unexpected thread field in update body: %+v", b)
+	}
+}
+
+// testAttachmentServer creates an httptest.Server that handles both the upload
+// endpoint and the create-message endpoint. uploadFn and msgFn are called for
+// the respective requests; pass nil to use a default no-op that returns 200.
+func testAttachmentServer(t *testing.T, uploadFn, msgFn http.HandlerFunc) (p *Platform, restore func()) {
+	t.Helper()
+	if uploadFn == nil {
+		uploadFn = func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/default"}}`)
+		}
+	}
+	if msgFn == nil {
+		msgFn = func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintln(w, "{}")
+		}
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "attachments") {
+			uploadFn(w, r)
+		} else {
+			msgFn(w, r)
+		}
+	}))
+	origUpload, origAPI := chatUploadBase, chatAPIBase
+	chatUploadBase = ts.URL + "/upload/"
+	chatAPIBase = ts.URL + "/api/"
+	return &Platform{botClient: &http.Client{}}, func() {
+		ts.Close()
+		chatUploadBase, chatAPIBase = origUpload, origAPI
+	}
+}
+
+func TestUploadAttachment_Success(t *testing.T) {
+	p, restore := testAttachmentServer(t, nil, nil)
+	defer restore()
+	name, err := p.uploadAttachment(context.Background(), "spaces/X", "f.txt", "text/plain", []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "ref/default" {
+		t.Errorf("resourceName = %q, want ref/default", name)
+	}
+}
+
+func TestUploadAttachment_HTTPError(t *testing.T) {
+	p, restore := testAttachmentServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintln(w, "access denied")
+	}, nil)
+	defer restore()
+	_, err := p.uploadAttachment(context.Background(), "spaces/X", "f.txt", "text/plain", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected HTTP 403 error, got %v", err)
+	}
+}
+
+func TestUploadAttachment_EmptyResourceName(t *testing.T) {
+	p, restore := testAttachmentServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":""}}`)
+	}, nil)
+	defer restore()
+	_, err := p.uploadAttachment(context.Background(), "spaces/X", "f.txt", "text/plain", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "empty resourceName") {
+		t.Errorf("expected empty resourceName error, got %v", err)
+	}
+}
+
+func TestPostAttachment_MissingSpace(t *testing.T) {
+	p := &Platform{botClient: &http.Client{}}
+	err := p.postAttachment(context.Background(), replyContext{}, "f.txt", "text/plain", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "missing space") {
+		t.Errorf("expected missing space error, got %v", err)
+	}
+}
+
+func TestPostAttachment_TwoStep(t *testing.T) {
+	var gotCreateBody []byte
+	p, restore := testAttachmentServer(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/xyz"}}`)
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			gotCreateBody, _ = io.ReadAll(r.Body)
+			fmt.Fprintln(w, "{}")
+		},
+	)
+	defer restore()
+
+	rc := replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}
+	if err := p.postAttachment(context.Background(), rc, "doc.pdf", "application/pdf", []byte("pdf")); err != nil {
+		t.Fatal(err)
+	}
+
+	var b map[string]any
+	if err := json.Unmarshal(gotCreateBody, &b); err != nil {
+		t.Fatal(err)
+	}
+	thread, _ := b["thread"].(map[string]any)
+	if thread["name"] != "spaces/A/threads/T" {
+		t.Errorf("thread.name = %v, want spaces/A/threads/T", thread["name"])
+	}
+	attachments, _ := b["attachment"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("attachment count = %d, want 1", len(attachments))
+	}
+	att, _ := attachments[0].(map[string]any)
+	ref, _ := att["attachmentDataRef"].(map[string]any)
+	if ref["resourceName"] != "ref/xyz" {
+		t.Errorf("attachmentDataRef.resourceName = %v, want ref/xyz", ref["resourceName"])
+	}
+}
+
+// parseUploadParts parses the multipart/related upload body and returns the
+// filename from the metadata part and the MIME type from the media part.
+func parseUploadParts(t *testing.T, r *http.Request) (filename, mimeType string) {
+	t.Helper()
+	ct := r.Header.Get("Content-Type")
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		t.Fatalf("parse Content-Type %q: %v", ct, err)
+	}
+	mr := multipart.NewReader(r.Body, params["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		partCT := part.Header.Get("Content-Type")
+		if strings.HasPrefix(partCT, "application/json") {
+			var meta map[string]string
+			json.NewDecoder(part).Decode(&meta) //nolint:errcheck
+			filename = meta["filename"]
+		} else {
+			mimeType = partCT
+		}
+	}
+	return
+}
+
+func TestSendImage_Defaults(t *testing.T) {
+	var gotFilename, gotMIME string
+	p, restore := testAttachmentServer(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			gotFilename, gotMIME = parseUploadParts(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/1"}}`)
+		},
+		nil,
+	)
+	defer restore()
+
+	err := p.SendImage(context.Background(), replyContext{space: "spaces/A"}, core.ImageAttachment{Data: []byte("img")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFilename != "image.png" {
+		t.Errorf("filename = %q, want image.png", gotFilename)
+	}
+	if gotMIME != "image/png" {
+		t.Errorf("MIME = %q, want image/png", gotMIME)
+	}
+}
+
+func TestSendFile_Defaults(t *testing.T) {
+	var gotFilename, gotMIME string
+	p, restore := testAttachmentServer(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			gotFilename, gotMIME = parseUploadParts(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/2"}}`)
+		},
+		nil,
+	)
+	defer restore()
+
+	err := p.SendFile(context.Background(), replyContext{space: "spaces/A"}, core.FileAttachment{Data: []byte("bin")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFilename != "attachment" {
+		t.Errorf("filename = %q, want attachment", gotFilename)
+	}
+	if gotMIME != "application/octet-stream" {
+		t.Errorf("MIME = %q, want application/octet-stream", gotMIME)
 	}
 }
