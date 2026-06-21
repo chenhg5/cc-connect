@@ -121,6 +121,86 @@ func TestParseEvent_DropsOldMessage(t *testing.T) {
 	}
 }
 
+// fakeAckMsg is a test double for *pubsub.Message that records Ack/Nack calls
+// and supports optional callbacks so tests can track call ordering.
+type fakeAckMsg struct {
+	acked  bool
+	nacked bool
+	ackFn  func()
+	nackFn func()
+}
+
+func (f *fakeAckMsg) Ack() {
+	f.acked = true
+	if f.ackFn != nil {
+		f.ackFn()
+	}
+}
+
+func (f *fakeAckMsg) Nack() {
+	f.nacked = true
+	if f.nackFn != nil {
+		f.nackFn()
+	}
+}
+
+func TestDispatchMessage_AcksAfterHandler(t *testing.T) {
+	p := newTestPlatform("*", "space")
+	data := messageEvent(t, humanMessage("hello", "hello"))
+
+	var events []string
+	m := &fakeAckMsg{ackFn: func() { events = append(events, "ack") }}
+	p.handler = func(_ core.Platform, _ *core.Message) {
+		events = append(events, "handler")
+	}
+	p.dispatchMessage(m, data)
+
+	want := []string{"handler", "ack"}
+	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
+		t.Errorf("event order: got %v, want %v", events, want)
+	}
+	if m.nacked {
+		t.Error("Nack should not be called on success")
+	}
+}
+
+func TestDispatchMessage_NacksOnPanic(t *testing.T) {
+	p := newTestPlatform("*", "space")
+	data := messageEvent(t, humanMessage("hello", "hello"))
+
+	m := &fakeAckMsg{}
+	p.handler = func(_ core.Platform, _ *core.Message) {
+		panic("simulated handler panic")
+	}
+	p.dispatchMessage(m, data)
+
+	if m.acked {
+		t.Error("Ack should not be called when handler panics")
+	}
+	if !m.nacked {
+		t.Error("Nack should be called when handler panics")
+	}
+}
+
+func TestDispatchMessage_AcksOnParseFailure(t *testing.T) {
+	p := newTestPlatform("*", "space")
+
+	handlerCalled := false
+	m := &fakeAckMsg{}
+	p.handler = func(_ core.Platform, _ *core.Message) { handlerCalled = true }
+	p.dispatchMessage(m, []byte("not-json"))
+
+	if !m.acked {
+		t.Error("Ack should be called for unparseable messages")
+	}
+	if m.nacked {
+		t.Error("Nack should not be called for unparseable messages")
+	}
+	if handlerCalled {
+		t.Error("handler should not be called for unparseable messages")
+	}
+}
+
 func TestBuildSessionKey(t *testing.T) {
 	cases := []struct {
 		scope, space, user, thread, want string
@@ -316,12 +396,16 @@ func testAttachmentServer(t *testing.T, uploadFn, msgFn http.HandlerFunc) (p *Pl
 	if uploadFn == nil {
 		uploadFn = func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/default"}}`)
+			if _, err := fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/default"}}`); err != nil {
+				t.Fatalf("write default upload response: %v", err)
+			}
 		}
 	}
 	if msgFn == nil {
 		msgFn = func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintln(w, "{}")
+			if _, err := fmt.Fprintln(w, "{}"); err != nil {
+				t.Fatalf("write default message response: %v", err)
+			}
 		}
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -355,7 +439,9 @@ func TestUploadAttachment_Success(t *testing.T) {
 func TestUploadAttachment_HTTPError(t *testing.T) {
 	p, restore := testAttachmentServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintln(w, "access denied")
+		if _, err := fmt.Fprintln(w, "access denied"); err != nil {
+			t.Fatalf("write forbidden response: %v", err)
+		}
 	}, nil)
 	defer restore()
 	_, err := p.uploadAttachment(context.Background(), "spaces/X", "f.txt", "text/plain", []byte("x"))
@@ -367,7 +453,9 @@ func TestUploadAttachment_HTTPError(t *testing.T) {
 func TestUploadAttachment_EmptyResourceName(t *testing.T) {
 	p, restore := testAttachmentServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":""}}`)
+		if _, err := fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":""}}`); err != nil {
+			t.Fatalf("write empty resourceName response: %v", err)
+		}
 	}, nil)
 	defer restore()
 	_, err := p.uploadAttachment(context.Background(), "spaces/X", "f.txt", "text/plain", []byte("x"))
@@ -389,11 +477,15 @@ func TestPostAttachment_TwoStep(t *testing.T) {
 	p, restore := testAttachmentServer(t,
 		func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/xyz"}}`)
+			if _, err := fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/xyz"}}`); err != nil {
+				t.Fatalf("write upload response: %v", err)
+			}
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			gotCreateBody, _ = io.ReadAll(r.Body)
-			fmt.Fprintln(w, "{}")
+			if _, err := fmt.Fprintln(w, "{}"); err != nil {
+				t.Fatalf("write create response: %v", err)
+			}
 		},
 	)
 	defer restore()
@@ -455,7 +547,9 @@ func TestSendImage_Defaults(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) {
 			gotFilename, gotMIME = parseUploadParts(t, r)
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/1"}}`)
+			if _, err := fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/1"}}`); err != nil {
+				t.Fatalf("write upload response: %v", err)
+			}
 		},
 		nil,
 	)
@@ -479,7 +573,9 @@ func TestSendFile_Defaults(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) {
 			gotFilename, gotMIME = parseUploadParts(t, r)
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/2"}}`)
+			if _, err := fmt.Fprintln(w, `{"attachmentDataRef":{"resourceName":"ref/2"}}`); err != nil {
+				t.Fatalf("write upload response: %v", err)
+			}
 		},
 		nil,
 	)

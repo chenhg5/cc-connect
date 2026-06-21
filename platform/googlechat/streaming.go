@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -42,7 +43,11 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if err != nil {
 		return nil, fmt.Errorf("googlechat: send preview: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("googlechat: close preview response body", "error", err)
+		}
+	}()
 	var msg struct {
 		Name string `json:"name"`
 	}
@@ -88,8 +93,13 @@ func (p *Platform) UpdateMessage(ctx context.Context, handle any, content string
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		_ = resp.Body.Close()
+		return fmt.Errorf("googlechat: drain update response body: %w", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		return fmt.Errorf("googlechat: close update response body: %w", err)
+	}
 	return nil
 }
 
