@@ -25,6 +25,28 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// TurnUsage captures a single turn's token consumption, reported to usage
+// observers. It intentionally carries NO message content, so it is safe to
+// forward to external monitoring/telemetry surfaces.
+type TurnUsage struct {
+	SessionKey               string `json:"session_key"`
+	Platform                 string `json:"platform"`
+	AgentType                string `json:"agent_type,omitempty"`
+	InputTokens              int    `json:"input_tokens"`
+	OutputTokens             int    `json:"output_tokens"`
+	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int    `json:"cache_creation_input_tokens"`
+}
+
+// UsageEmitter is an optional interface for platforms that forward per-turn
+// token usage to external observers such as dashboards or telemetry collectors.
+// Only platforms wired to an observer bus (e.g. the WebSocket bridge) implement
+// it; others simply ignore usage reporting. The engine calls it best-effort
+// after each turn completes and must never depend on delivery.
+type UsageEmitter interface {
+	EmitUsage(usage TurnUsage)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {
