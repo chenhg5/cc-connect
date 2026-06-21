@@ -458,7 +458,6 @@ func (p *Platform) uploadAttachment(ctx context.Context, space, filename, mimeTy
 			ResourceName string `json:"resourceName"`
 		} `json:"attachmentDataRef"`
 	}
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body) }()
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("googlechat: upload: decode response: %w", err)
 	}
@@ -541,13 +540,14 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 var _ core.ImageSender = (*Platform)(nil)
 var _ core.FileSender = (*Platform)(nil)
+var _ core.ReplyContextReconstructor = (*Platform)(nil)
 
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()
 	}
 	if p.psClient != nil {
-		p.psClient.Close()
+		return p.psClient.Close()
 	}
 	return nil
 }
