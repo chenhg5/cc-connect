@@ -897,3 +897,224 @@ func TestPruneDuplicateSessions_Persistence(t *testing.T) {
 		t.Errorf("merged history after reload = %d, want 2", len(history))
 	}
 }
+
+// TestSwitchToAgentSession_PreservesOldSession locks down that switching the
+// active session to a different agent_session_id keeps the previous ID in
+// KnownAgentSessionIDs so it stays visible to /list, /switch, and
+// filterOwnedSessions. Regression test for #603 / issue #600.
+func TestSwitchToAgentSession_PreservesOldSession(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:alice"
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "session A")
+
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["agent-A"]; !ok {
+		t.Fatal("agent-A should be in KnownAgentSessionIDs before switch")
+	}
+
+	s2 := sm.SwitchToAgentSession(userKey, "agent-B", "claude", "session B")
+	if s2.GetAgentSessionID() != "agent-B" {
+		t.Fatalf("switched session AgentSessionID = %q, want agent-B", s2.GetAgentSessionID())
+	}
+
+	known = sm.KnownAgentSessionIDs()
+	if _, ok := known["agent-A"]; !ok {
+		t.Fatal("agent-A should still be in KnownAgentSessionIDs after switch")
+	}
+	if _, ok := known["agent-B"]; !ok {
+		t.Fatal("agent-B should be in KnownAgentSessionIDs after switch")
+	}
+}
+
+func TestSwitchToAgentSession_ReusesExisting(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:bob"
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "session A")
+
+	sm.SwitchToAgentSession(userKey, "agent-B", "claude", "session B")
+
+	s3 := sm.SwitchToAgentSession(userKey, "agent-A", "claude", "session A")
+	if s3.ID != s1.ID {
+		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
+	}
+}
+
+// TestSwitchToAgentSession_PreservesHistory locks down the fix for the
+// `/switch` regression: when switching back to a previously-used
+// agent_session_id, the returned Session must retain its conversation history.
+// Before the fix, cmdSwitch called session.ClearHistory() unconditionally,
+// which made /history return empty after any switch round-trip.
+func TestSwitchToAgentSession_PreservesHistory(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:carol"
+
+	// Original session with some conversation history.
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "Session A")
+	s1.AddHistory("user", "hello from session A")
+	s1.AddHistory("assistant", "hi! this is session A")
+
+	// Switch away to a different agent session.
+	sm.SwitchToAgentSession(userKey, "agent-B", "claude", "Session B")
+
+	// Switch back to the original agent session.
+	s3 := sm.SwitchToAgentSession(userKey, "agent-A", "claude", "Session A")
+	if s3.ID != s1.ID {
+		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
+	}
+
+	got := s3.GetHistory(0)
+	if len(got) != 2 {
+		t.Fatalf("history after switch-back: got %d entries, want 2 — history was wiped (regression of cmdSwitch.ClearHistory bug)", len(got))
+	}
+	if got[0].Role != "user" || got[0].Content != "hello from session A" {
+		t.Fatalf("first history entry = (%q, %q), want (user, hello from session A)", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != "assistant" || got[1].Content != "hi! this is session A" {
+		t.Fatalf("second history entry = (%q, %q), want (assistant, hi! this is session A)", got[1].Role, got[1].Content)
+	}
+}
+
+func TestPastAgentSessionIDs_ClearPreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestPastAgentSessionIDs_ReplacePreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("thread-2", "codex")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+	if s.AgentSessionID != "thread-2" {
+		t.Fatalf("AgentSessionID = %q, want thread-2", s.AgentSessionID)
+	}
+}
+
+func TestPastAgentSessionIDs_NoDuplicates(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+
+	if len(s.PastAgentSessionIDs) != 1 {
+		t.Fatalf("PastAgentSessionIDs has duplicates: %v", s.PastAgentSessionIDs)
+	}
+}
+
+func TestPastAgentSessionIDs_ContinueSentinelNotRecorded(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID(ContinueSession, "codex")
+	s.SetAgentSessionID("real-id", "codex")
+	s.SetAgentSessionID("", "")
+
+	for _, past := range s.PastAgentSessionIDs {
+		if past == ContinueSession {
+			t.Fatal("ContinueSession sentinel should not be in PastAgentSessionIDs")
+		}
+	}
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "real-id" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [real-id]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestKnownAgentSessionIDs_IncludesPast(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "a")
+	s1.SetAgentSessionID("thread-aaa", "codex")
+	s1.SetAgentSessionID("", "")
+
+	s2 := sm.NewSession("user1", "b")
+	s2.SetAgentSessionID("thread-bbb", "codex")
+
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["thread-aaa"]; !ok {
+		t.Fatal("expected thread-aaa (past ID) in known set")
+	}
+	if _, ok := known["thread-bbb"]; !ok {
+		t.Fatal("expected thread-bbb (current ID) in known set")
+	}
+}
+
+// TestKnownAgentSessionIDs_ReproducesNewCommandBug simulates the exact user
+// reproduction steps: repeated /new commands progressively clear AgentSessionIDs.
+// Before the PastAgentSessionIDs fix, only the latest session would remain visible.
+func TestKnownAgentSessionIDs_ReproducesNewCommandBug(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "user:test"
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "codex-thread-1"},
+		{ID: "codex-thread-2"},
+		{ID: "codex-thread-3"},
+	}
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("codex-thread-1", "codex")
+
+	s1.SetAgentSessionID("", "")
+	s2 := sm.NewSession(userKey, "session 2")
+	s2.SetAgentSessionID("codex-thread-2", "codex")
+
+	s2.SetAgentSessionID("", "")
+	s3 := sm.NewSession(userKey, "session 3")
+	s3.SetAgentSessionID("codex-thread-3", "codex")
+
+	known := sm.KnownAgentSessionIDs()
+	filtered := filterOwnedSessions(agentSessions, known)
+
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions returned %d sessions, want 3 (all should be visible)\nknown IDs: %v",
+			len(filtered), known)
+	}
+}
+
+// TestKnownAgentSessionIDs_ResetAllSessionsBug simulates resetAllSessions
+// clearing all IDs (management API provider switch). Past IDs should keep
+// all sessions visible.
+func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "user:test"
+
+	s1 := sm.NewSession(userKey, "a")
+	s1.SetAgentSessionID("thread-1", "codex")
+	s2 := sm.NewSession(userKey, "b")
+	s2.SetAgentSessionID("thread-2", "codex")
+	s3 := sm.NewSession(userKey, "c")
+	s3.SetAgentSessionID("thread-3", "codex")
+
+	for _, s := range sm.AllSessions() {
+		s.SetAgentSessionID("", "")
+	}
+
+	known := sm.KnownAgentSessionIDs()
+	for _, id := range []string{"thread-1", "thread-2", "thread-3"} {
+		if _, ok := known[id]; !ok {
+			t.Fatalf("expected %s in known set after resetAllSessions, known = %v", id, known)
+		}
+	}
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "thread-1"}, {ID: "thread-2"}, {ID: "thread-3"},
+	}
+	filtered := filterOwnedSessions(agentSessions, known)
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions returned %d, want 3", len(filtered))
+	}
+}
+

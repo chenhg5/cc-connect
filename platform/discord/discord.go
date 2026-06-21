@@ -54,7 +54,6 @@ type Platform struct {
 	threadIsolation            bool
 	respondToAtEveryoneAndHere bool
 	proxyURL                   *url.URL
-	session                    *discordgo.Session
 	handler                    core.MessageHandler
 	botID                      string
 	appID                      string
@@ -64,7 +63,19 @@ type Platform struct {
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
 	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
 	self                       core.Platform
+
+	mu               sync.RWMutex
+	session          *discordgo.Session
+	cancel           context.CancelFunc
+	stopping         bool
+	everConnected    bool
+	lifecycleHandler core.PlatformLifecycleHandler
 }
+
+const (
+	discordInitialReconnectBackoff = 5 * time.Second
+	discordMaxReconnectBackoff     = 5 * time.Minute
+)
 
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
@@ -87,10 +98,15 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
-	progressStyle := "legacy"
+	// Default to "compact" so streaming edits work out of the box (Discord
+	// supports MessageUpdater.UpdateMessage). Users can opt back into the old
+	// "send entire reply at once" behavior with progress_style = "legacy".
+	progressStyle := "compact"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "", "legacy":
+		case "":
+			// keep default
+		case "legacy":
 			progressStyle = "legacy"
 		case "compact", "card":
 			progressStyle = strings.ToLower(strings.TrimSpace(v))
@@ -509,12 +525,46 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	return nil
 }
 
-func (p *Platform) Start(handler core.MessageHandler) error {
-	p.handler = handler
+// SetLifecycleHandler registers a handler that will be notified when the
+// Discord platform becomes ready or unavailable. Implementing this method
+// also opts the platform into Engine.Start's AsyncRecoverablePlatform path,
+// so a transient gateway error at startup no longer aborts the platform.
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
 
+// Start launches the gateway connection in the background. It returns nil as
+// soon as the recovery loop is running; the caller should treat
+// OnPlatformReady as the signal that the platform is actually usable.
+//
+// Before this change Start returned the first session.Open() error directly,
+// which meant a transient proxy/network blip during cc-connect startup
+// permanently took Discord offline until manual restart (release-gate
+// 2026-06-14: "discord: open gateway: ... EOF" with no retry).
+func (p *Platform) Start(handler core.MessageHandler) error {
+	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		return fmt.Errorf("discord: platform stopped")
+	}
+	p.handler = handler
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.mu.Unlock()
+
+	go p.connectLoop(ctx)
+	return nil
+}
+
+// buildSession creates a fresh discordgo session with proxy + handlers wired up.
+// It is called once per connect attempt so a session that failed mid-handshake
+// is fully discarded before the next retry.
+func (p *Platform) buildSession() (*discordgo.Session, error) {
 	session, err := discordgo.New("Bot " + p.token)
 	if err != nil {
-		return fmt.Errorf("discord: create session: %w", err)
+		return nil, fmt.Errorf("discord: create session: %w", err)
 	}
 	if p.proxyURL != nil {
 		transport := &http.Transport{Proxy: http.ProxyURL(p.proxyURL)}
@@ -522,7 +572,6 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		session.Dialer = &websocket.Dialer{Proxy: http.ProxyURL(p.proxyURL)}
 		slog.Info("discord: using proxy", "proxy", p.proxyURL.Host)
 	}
-	p.session = session
 
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
@@ -638,11 +687,86 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		p.handleInteraction(s, i)
 	})
 
-	if err := session.Open(); err != nil {
-		return fmt.Errorf("discord: open gateway: %w", err)
-	}
+	return session, nil
+}
 
-	return nil
+// connectLoop drives the Discord gateway connection with exponential-backoff
+// retry. After session.Open() succeeds once, discordgo's own logic keeps the
+// gateway alive (heartbeat + automatic reconnect on transient errors), so the
+// loop blocks on ctx.Done() and tears the session down on shutdown.
+func (p *Platform) connectLoop(ctx context.Context) {
+	backoff := discordInitialReconnectBackoff
+	attempt := 0
+
+	for {
+		if err := ctx.Err(); err != nil || p.isStopping() {
+			return
+		}
+
+		attempt++
+		session, err := p.buildSession()
+		if err == nil {
+			err = session.Open()
+		}
+
+		if err == nil {
+			p.mu.Lock()
+			p.session = session
+			p.everConnected = true
+			handler := p.lifecycleHandler
+			p.mu.Unlock()
+
+			if attempt > 1 {
+				slog.Info("discord: connected after retries", "attempts", attempt)
+			}
+			if handler != nil {
+				handler.OnPlatformReady(p.selfPlatform())
+			}
+
+			// Block until shutdown; discordgo manages reconnects internally.
+			<-ctx.Done()
+			_ = session.Close()
+			return
+		}
+
+		// Best-effort cleanup of a half-opened session.
+		if session != nil {
+			_ = session.Close()
+		}
+
+		slog.Warn("discord: connect attempt failed",
+			"attempt", attempt,
+			"backoff", backoff,
+			"error", err,
+		)
+		p.mu.RLock()
+		handler := p.lifecycleHandler
+		p.mu.RUnlock()
+		if handler != nil {
+			handler.OnPlatformUnavailable(p.selfPlatform(), err)
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if backoff < discordMaxReconnectBackoff {
+			backoff *= 2
+			if backoff > discordMaxReconnectBackoff {
+				backoff = discordMaxReconnectBackoff
+			}
+		}
+	}
+}
+
+func (p *Platform) isStopping() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.stopping
 }
 
 // handleInteraction processes incoming Discord command and button interactions.
@@ -1199,8 +1323,19 @@ func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 }
 
 func (p *Platform) Stop() error {
-	if p.session != nil {
-		return p.session.Close()
+	p.mu.Lock()
+	p.stopping = true
+	cancel := p.cancel
+	session := p.session
+	p.cancel = nil
+	p.session = nil
+	p.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if session != nil {
+		return session.Close()
 	}
 	return nil
 }

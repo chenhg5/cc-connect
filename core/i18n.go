@@ -364,6 +364,7 @@ const (
 	MsgCardTitleHistoryLast      MsgKey = "card_title_history_last"
 	MsgCardTitleProvider         MsgKey = "card_title_provider"
 	MsgCardTitleCron             MsgKey = "card_title_cron"
+	MsgCardTitleTimer            MsgKey = "card_title_timer"
 	MsgCardTitleHeartbeat        MsgKey = "card_title_heartbeat"
 	MsgCardTitleCommands         MsgKey = "card_title_commands"
 	MsgCardTitleAlias            MsgKey = "card_title_alias"
@@ -376,6 +377,29 @@ const (
 	MsgListEmptySummary          MsgKey = "list_empty_summary"
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
+
+	MsgTimerNotAvailable  MsgKey = "timer_not_available"
+	MsgTimerUsage         MsgKey = "timer_usage"
+	MsgTimerAddUsage      MsgKey = "timer_add_usage"
+	MsgTimerAdded         MsgKey = "timer_added"
+	MsgTimerAddedExec     MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty         MsgKey = "timer_empty"
+	MsgTimerListTitle     MsgKey = "timer_list_title"
+	MsgTimerListFooter    MsgKey = "timer_list_footer"
+	MsgTimerDelUsage      MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
+	MsgTimerDeleted       MsgKey = "timer_deleted"
+	MsgTimerNotFound      MsgKey = "timer_not_found"
+	MsgTimerMuted         MsgKey = "timer_muted"
+	MsgTimerUnmuted       MsgKey = "timer_unmuted"
+	MsgTimerCardHint      MsgKey = "timer_card_hint"
+	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel       MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
 	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
 	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
 	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
@@ -391,12 +415,12 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle    MsgKey = "ask_question_title"
+	MsgAskQuestionTitle     MsgKey = "ask_question_title"
 	MsgAskQuestionNote      MsgKey = "ask_question_note"
 	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
 	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt   MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered MsgKey = "ask_question_answered"
+	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -975,6 +999,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|exec|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  Manage one-shot timers\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Manage heartbeat\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
@@ -1018,6 +1043,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|exec|del|enable|disable]\n  管理定时任务\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  管理一次性定时器\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
@@ -1060,6 +1086,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
 			"/cron [add|list|exec|del|enable|disable]\n  管理定時任務\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  管理一次性定時器\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
@@ -1101,6 +1128,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
 			"/cron [add|list|exec|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  ワンショットタイマー管理\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
@@ -1142,6 +1170,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
 			"/cron [add|list|exec|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  Gestionar temporizadores de uso único\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
@@ -1260,6 +1289,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
 			"/cron [add|list|exec|del|...] — Scheduled tasks\n" +
+			"/timer [add|list|del|...] — One-shot timers\n" +
 			"/commands [add|del] — Custom commands\n" +
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
@@ -1270,6 +1300,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
 			"/cron [add|list|exec|del|...] — 定时任务\n" +
+			"/timer [add|list|del|...] — 一次性定时器\n" +
 			"/commands [add|del] — 自定义命令\n" +
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1280,6 +1311,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
 			"/cron [add|list|exec|del|...] — 定時任務\n" +
+			"/timer [add|list|del|...] — 一次性定時器\n" +
 			"/commands [add|del] — 自訂命令\n" +
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1290,6 +1322,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
 			"/cron [add|list|exec|del|...] — スケジュールタスク\n" +
+			"/timer [add|list|del|...] — ワンショットタイマー\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
@@ -1300,6 +1333,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
 			"/cron [add|list|exec|del|...] — Tareas programadas\n" +
+			"/timer [add|list|del|...] — Temporizadores de uso único\n" +
 			"/commands [add|del] — Comandos personalizados\n" +
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
@@ -1806,11 +1840,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: /cron addexec <min> <hora> <día> <mes> <día_semana> <comando shell>\nEjemplo: /cron addexec 0 6 * * * df -h",
 	},
 	MsgCronEmpty: {
-		LangEnglish:            "No scheduled tasks.",
-		LangChinese:            "暂无定时任务。",
-		LangTraditionalChinese: "暫無定時任務。",
-		LangJapanese:           "スケジュールタスクはありません。",
-		LangSpanish:            "No hay tareas programadas.",
+		LangEnglish:            "No recurring tasks.\n(For one-shot reminders/delays, use /timer)",
+		LangChinese:            "暂无周期任务。\n（一次性提醒/延迟任务请用 /timer 查看）",
+		LangTraditionalChinese: "暫無週期任務。\n（一次性提醒/延遲任務請用 /timer 查看）",
+		LangJapanese:           "繰り返しタスクはありません。\n（ワンショットのリマインダーは /timer をご利用ください）",
+		LangSpanish:            "No hay tareas recurrentes.\n(Para recordatorios únicos use /timer)",
 	},
 	MsgCronListTitle: {
 		LangEnglish:            "⏰ Scheduled Tasks (%d)",
@@ -1952,6 +1986,165 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "前回",
 		LangSpanish:            "Últ",
 	},
+
+	// ── Timer (one-shot) ──────────────────────────────────────
+
+	MsgCardTitleTimer: {
+		LangEnglish:            "One-Shot Timer",
+		LangChinese:            "一次性定时器",
+		LangTraditionalChinese: "一次性定時器",
+		LangJapanese:           "ワンショットタイマー",
+		LangSpanish:            "Temporizador único",
+	},
+	MsgTimerNotAvailable: {
+		LangEnglish:            "Timer scheduler is not available.",
+		LangChinese:            "定时器调度器未启用。",
+		LangTraditionalChinese: "定時器調度器未啟用。",
+		LangJapanese:           "タイマースケジューラは利用できません。",
+		LangSpanish:            "El programador de temporizador no está disponible.",
+	},
+	MsgTimerUsage: {
+		LangEnglish:            "Usage:\n/timer add <delay|time> <prompt>\n/timer addexec <delay|time> <command>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nDelay: 30m, 2h, 1h30m. Or absolute time: 2026-05-16T09:00\nTime without timezone uses system local time.",
+		LangChinese:            "用法：\n/timer add <延迟|时间> <任务描述>\n/timer addexec <延迟|时间> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延迟：30m、2h、1h30m。或绝对时间：2026-05-16T09:00\n不带时区的时间按系统本地时区解析。",
+		LangTraditionalChinese: "用法：\n/timer add <延遲|時間> <任務描述>\n/timer addexec <延遲|時間> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延遲：30m、2h、1h30m。或絕對時間：2026-05-16T09:00\n不帶時區的時間按系統本地時區解析。",
+		LangJapanese:           "使い方:\n/timer add <遅延|時刻> <タスク内容>\n/timer addexec <遅延|時刻> <コマンド>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n遅延: 30m, 2h, 1h30m。または絶対時刻: 2026-05-16T09:00\nタイムゾーンなしの時刻はシステムのローカルタイムゾーンで解釈されます。",
+		LangSpanish:            "Uso:\n/timer add <retraso|hora> <tarea>\n/timer addexec <retraso|hora> <comando>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nRetraso: 30m, 2h, 1h30m. O hora absoluta: 2026-05-16T09:00\nHora sin zona horaria usa la hora local del sistema.",
+	},
+	MsgTimerAddUsage: {
+		LangEnglish:            "Usage: /timer add <delay|time> <prompt>\nExamples:\n  /timer add 2h Check PR status\n  /timer add 2026-05-16T09:00 Morning standup reminder\nDelay: 30m, 2h, 1h30m. Time: ISO format (2026-05-16T09:00)\nTime without timezone uses system local time.",
+		LangChinese:            "用法：/timer add <延迟|时间> <任务描述>\n示例：\n  /timer add 2h 检查PR状态\n  /timer add 2026-05-16T09:00 早会提醒\n延迟：30m、2h、1h30m。时间：ISO格式（2026-05-16T09:00）\n不带时区的时间按系统本地时区解析。",
+		LangTraditionalChinese: "用法：/timer add <延遲|時間> <任務描述>\n範例：\n  /timer add 2h 檢查PR狀態\n  /timer add 2026-05-16T09:00 早會提醒\n延遲：30m、2h、1h30m。時間：ISO格式（2026-05-16T09:00）\n不帶時區的時間按系統本地時區解析。",
+		LangJapanese:           "使い方: /timer add <遅延|時刻> <タスク内容>\n例:\n  /timer add 2h PRの状態を確認\n  /timer add 2026-05-16T09:00 朝会リマインダー\n遅延: 30m, 2h, 1h30m。時刻: ISO形式（2026-05-16T09:00）\nタイムゾーンなしの時刻はシステムのローカルタイムゾーンで解釈されます。",
+		LangSpanish:            "Uso: /timer add <retraso|hora> <tarea>\nEjemplos:\n  /timer add 2h Verificar estado del PR\n  /timer add 2026-05-16T09:00 Recordatorio de reunión\nRetraso: 30m, 2h, 1h30m. Hora: formato ISO (2026-05-16T09:00)\nHora sin zona horaria usa la hora local del sistema.",
+	},
+	MsgTimerAdded: {
+		LangEnglish:            "⏰ Reminder set (one-shot)\nID: `%s`\nFires in: %s\nPrompt: %s\n(use /timer to view, /cron for recurring tasks)",
+		LangChinese:            "⏰ 提醒已设定（一次性）\nID: `%s`\n将在 %s 后触发\n内容: %s\n（用 /timer 查看，周期任务请用 /cron）",
+		LangTraditionalChinese: "⏰ 提醒已設定（一次性）\nID: `%s`\n將在 %s 後觸發\n內容: %s\n（用 /timer 查看，週期任務請用 /cron）",
+		LangJapanese:           "⏰ リマインダーを設定しました（ワンショット）\nID: `%s`\n%s 後に実行\n内容: %s\n（/timer で確認、繰り返しは /cron）",
+		LangSpanish:            "⏰ Recordatorio creado (único)\nID: `%s`\nSe ejecuta en: %s\nContenido: %s\n(use /timer para verlos, /cron para tareas recurrentes)",
+	},
+	MsgTimerAddedExec: {
+		LangEnglish:            "⏰ Shell reminder set (one-shot)\nID: `%s`\nFires in: %s\nCommand: `%s`\n(use /timer to view, /cron for recurring tasks)",
+		LangChinese:            "⏰ Shell 提醒已设定（一次性）\nID: `%s`\n将在 %s 后触发\n命令: `%s`\n（用 /timer 查看，周期任务请用 /cron）",
+		LangTraditionalChinese: "⏰ Shell 提醒已設定（一次性）\nID: `%s`\n將在 %s 後觸發\n命令: `%s`\n（用 /timer 查看，週期任務請用 /cron）",
+		LangJapanese:           "⏰ Shell リマインダーを設定しました（ワンショット）\nID: `%s`\n%s 後に実行\nコマンド: `%s`\n（/timer で確認、繰り返しは /cron）",
+		LangSpanish:            "⏰ Recordatorio shell creado (único)\nID: `%s`\nSe ejecuta en: %s\nComando: `%s`\n(use /timer para verlos, /cron para tareas recurrentes)",
+	},
+	MsgTimerAddExecUsage: {
+		LangEnglish:            "Usage: /timer addexec <delay> <shell command>\nExample: /timer addexec 30m df -h",
+		LangChinese:            "用法：/timer addexec <延迟> <shell 命令>\n示例：/timer addexec 30m df -h",
+		LangTraditionalChinese: "用法：/timer addexec <延遲> <shell 命令>\n範例：/timer addexec 30m df -h",
+		LangJapanese:           "使い方: /timer addexec <遅延> <シェルコマンド>\n例: /timer addexec 30m df -h",
+		LangSpanish:            "Uso: /timer addexec <retraso> <comando shell>\nEjemplo: /timer addexec 30m df -h",
+	},
+	MsgTimerEmpty: {
+		LangEnglish:            "No pending reminders.\n(For recurring tasks, use /cron)",
+		LangChinese:            "暂无待执行的提醒。\n（周期任务请用 /cron 查看）",
+		LangTraditionalChinese: "暫無待執行的提醒。\n（週期任務請用 /cron 查看）",
+		LangJapanese:           "保留中のリマインダーはありません。\n（繰り返しタスクは /cron をご利用ください）",
+		LangSpanish:            "No hay recordatorios pendientes.\n(Para tareas recurrentes use /cron)",
+	},
+	MsgTimerListTitle: {
+		LangEnglish:            "⏰ Pending Timers (%d)",
+		LangChinese:            "⏰ 待执行定时器 (%d)",
+		LangTraditionalChinese: "⏰ 待執行定時器 (%d)",
+		LangJapanese:           "⏰ 保留中のタイマー (%d)",
+		LangSpanish:            "⏰ Temporizadores pendientes (%d)",
+	},
+	MsgTimerListFooter: {
+		LangEnglish:            "`/timer del <id>` remove · `/timer mute/unmute <id>` mute",
+		LangChinese:            "`/timer del <id>` 删除 · `/timer mute/unmute <id>` 静音",
+		LangTraditionalChinese: "`/timer del <id>` 刪除 · `/timer mute/unmute <id>` 靜音",
+		LangJapanese:           "`/timer del <id>` 削除 · `/timer mute/unmute <id>` ミュート",
+		LangSpanish:            "`/timer del <id>` eliminar · `/timer mute/unmute <id>` silenciar",
+	},
+	MsgTimerDelUsage: {
+		LangEnglish:            "Usage: /timer del <id>",
+		LangChinese:            "用法：/timer del <id>",
+		LangTraditionalChinese: "用法：/timer del <id>",
+		LangJapanese:           "使い方: /timer del <id>",
+		LangSpanish:            "Uso: /timer del <id>",
+	},
+	MsgTimerMuteUsage: {
+		LangEnglish:            "Usage: /timer mute <id> · /timer unmute <id>",
+		LangChinese:            "用法：/timer mute <id> · /timer unmute <id>",
+		LangTraditionalChinese: "用法：/timer mute <id> · /timer unmute <id>",
+		LangJapanese:           "使い方: /timer mute <id> · /timer unmute <id>",
+		LangSpanish:            "Uso: /timer mute <id> · /timer unmute <id>",
+	},
+	MsgTimerDeleted: {
+		LangEnglish:            "✅ Timer `%s` cancelled.",
+		LangChinese:            "✅ 定时器 `%s` 已取消。",
+		LangTraditionalChinese: "✅ 定時器 `%s` 已取消。",
+		LangJapanese:           "✅ タイマー `%s` をキャンセルしました。",
+		LangSpanish:            "✅ Temporizador `%s` cancelado.",
+	},
+	MsgTimerNotFound: {
+		LangEnglish:            "❌ Timer `%s` not found.",
+		LangChinese:            "❌ 定时器 `%s` 未找到。",
+		LangTraditionalChinese: "❌ 定時器 `%s` 未找到。",
+		LangJapanese:           "❌ タイマー `%s` が見つかりません。",
+		LangSpanish:            "❌ Temporizador `%s` no encontrado.",
+	},
+	MsgTimerMuted: {
+		LangEnglish:            "🔇 Timer `%s` muted.",
+		LangChinese:            "🔇 定时器 `%s` 已静音。",
+		LangTraditionalChinese: "🔇 定時器 `%s` 已靜音。",
+		LangJapanese:           "🔇 タイマー `%s` をミュートしました。",
+		LangSpanish:            "🔇 Temporizador `%s` silenciado.",
+	},
+	MsgTimerUnmuted: {
+		LangEnglish:            "🔔 Timer `%s` unmuted.",
+		LangChinese:            "🔔 定时器 `%s` 已取消静音。",
+		LangTraditionalChinese: "🔔 定時器 `%s` 已取消靜音。",
+		LangJapanese:           "🔔 タイマー `%s` のミュートを解除しました。",
+		LangSpanish:            "🔔 Temporizador `%s` reactivado.",
+	},
+	MsgTimerCardHint: {
+		LangEnglish:            "💡 `/timer add <delay> <prompt>` · `/timer del <id>` · `/timer mute/unmute <id>`",
+		LangChinese:            "💡 `/timer add <延迟> <内容>` 添加 · `/timer del <id>` 删除 · `/timer mute/unmute <id>` 静音",
+		LangTraditionalChinese: "💡 `/timer add <延遲> <內容>` 新增 · `/timer del <id>` 刪除 · `/timer mute/unmute <id>` 靜音",
+		LangJapanese:           "💡 `/timer add <遅延> <内容>` 追加 · `/timer del <id>` 削除 · `/timer mute/unmute <id>` ミュート",
+		LangSpanish:            "💡 `/timer add <retraso> <tarea>` · `/timer del <id>` · `/timer mute/unmute <id>`",
+	},
+	MsgTimerBtnMute: {
+		LangEnglish:            "Mute",
+		LangChinese:            "静音",
+		LangTraditionalChinese: "靜音",
+		LangJapanese:           "ミュート",
+		LangSpanish:            "Silenciar",
+	},
+	MsgTimerBtnUnmute: {
+		LangEnglish:            "Unmute",
+		LangChinese:            "取消静音",
+		LangTraditionalChinese: "取消靜音",
+		LangJapanese:           "ミュート解除",
+		LangSpanish:            "Reactivar",
+	},
+	MsgTimerBtnDelete: {
+		LangEnglish:            "Cancel Timer",
+		LangChinese:            "取消定时器",
+		LangTraditionalChinese: "取消定時器",
+		LangJapanese:           "タイマーをキャンセル",
+		LangSpanish:            "Cancelar temporizador",
+	},
+	MsgTimerIDLabel: {
+		LangEnglish: "ID: %s\n", LangChinese: "ID：%s\n", LangTraditionalChinese: "ID：%s\n",
+		LangJapanese: "ID: %s\n", LangSpanish: "ID: %s\n",
+	},
+	MsgTimerScheduledLabel: {
+		LangEnglish:            "Scheduled: %s (%s remaining)\n",
+		LangChinese:            "计划: %s（剩余 %s）\n",
+		LangTraditionalChinese: "計劃: %s（剩餘 %s）\n",
+		LangJapanese:           "予定: %s（残り %s）\n",
+		LangSpanish:            "Programado: %s (%s restante)\n",
+	},
+	MsgTimerFailedSuffix: {
+		LangEnglish: " (failed: %s)", LangChinese: "（失败：%s）", LangTraditionalChinese: "（失敗：%s）",
+		LangJapanese: "（失敗: %s）", LangSpanish: " (falló: %s)",
+	},
+
 	MsgStatusTitle: {
 		LangEnglish: "cc-connect Status\n\n" +
 			"Project: %s\n" +

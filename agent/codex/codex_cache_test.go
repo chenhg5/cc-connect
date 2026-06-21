@@ -40,4 +40,3 @@ func TestAvailableModels_FallbackToModelsCache(t *testing.T) {
 		t.Fatalf("models = %v, want [gpt-5.4 gpt-5.3-codex]", models)
 	}
 }
-

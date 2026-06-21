@@ -39,6 +39,17 @@ type piSession struct {
 	alive     atomic.Bool
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
+
+	// modelsCW is a cached map of model ID → contextWindow, loaded once
+	// from ~/.pi/agent/models.json so every turn can look up the window.
+	// Loaded at session start and never refreshed — if models.json changes
+	// mid-session the new context windows won't be visible until restart.
+	// Sessions are typically short-lived and the 200K fallback handles
+	// unknown models, so a session-lifetime cache is acceptable.
+	modelsCW map[string]int
+
+	usageMu   sync.Mutex
+	lastUsage *core.ContextUsage
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -53,9 +64,10 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 		extraEnv: extraEnv,
 		attachDir: filepath.Join(workDir, ".cc-connect", "attachments",
 			fmt.Sprintf("pi_%d", time.Now().UnixNano())),
-		events: make(chan core.Event, 64),
-		ctx:    sessionCtx,
-		cancel: cancel,
+		events:   make(chan core.Event, 64),
+		ctx:      sessionCtx,
+		cancel:   cancel,
+		modelsCW: loadModelsContextWindows(),
 	}
 	s.alive.Store(true)
 
@@ -220,7 +232,10 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_end":
 		s.handleMessageEnd(raw)
 
-	case "agent_start", "agent_end", "turn_start", "turn_end", "message_start":
+	case "agent_end":
+		s.handleAgentEnd(raw)
+
+	case "agent_start", "turn_start", "turn_end", "message_start":
 		// Logged for debugging but no action needed.
 		slog.Debug("piSession: lifecycle event", "type", eventType)
 
@@ -373,6 +388,84 @@ func extractToolInput(item map[string]any) string {
 	}
 	b, _ := json.Marshal(args)
 	return truncStr(string(b), 200)
+}
+
+// handleAgentEnd processes the "agent_end" event from pi's RPC protocol.
+// It extracts the last assistant message's usage + model to populate
+// ContextUsage for the reply footer.
+func (s *piSession) handleAgentEnd(raw map[string]any) {
+	msgs, _ := raw["messages"].([]any)
+	if len(msgs) == 0 {
+		return
+	}
+
+	// Walk backwards to find the last assistant message with usage data.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg, _ := msgs[i].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		usageRaw, _ := msg["usage"].(map[string]any)
+		if usageRaw == nil {
+			continue
+		}
+		model, _ := msg["model"].(string)
+		inputTokens, _ := usageRaw["input"].(float64)
+		outputTokens, _ := usageRaw["output"].(float64)
+		cacheReadTokens, _ := usageRaw["cacheRead"].(float64)
+		cacheWriteTokens, _ := usageRaw["cacheWrite"].(float64)
+
+		input := int(inputTokens)
+		output := int(outputTokens)
+		cr := int(cacheReadTokens)
+		cw := int(cacheWriteTokens)
+
+		// UsedTokens mirrors claudecode's per-sub-call pattern: track input
+		// + cache tokens from the last assistant message. The LLM API's
+		// input_tokens already counts the full conversation history, so this
+		// naturally represents cumulative context load across turns.
+		// TotalTokens = context load + output for this turn.
+		used := input + cw + cr
+		total := used + output
+
+		// Look up context window from models.json, fallback to 200K.
+		ctxWindow := s.modelsCW[model]
+		if ctxWindow == 0 {
+			ctxWindow = 200_000
+		}
+
+		s.usageMu.Lock()
+		s.lastUsage = &core.ContextUsage{
+			UsedTokens:               used,
+			TotalTokens:              total,
+			InputTokens:              input,
+			OutputTokens:             output,
+			CachedInputTokens:        cr,
+			CacheCreationInputTokens: cw,
+			ContextWindow:            ctxWindow,
+			// BaselineTokens and ReasoningOutputTokens are left zero — pi's
+			// RPC protocol does not report these. The engine's UI must handle
+			// zero values (e.g. hide the "baseline" or "reasoning" segments).
+		}
+		s.usageMu.Unlock()
+		return
+	}
+}
+
+// GetContextUsage implements core.ContextUsageReporter.
+// Returns a copy to prevent concurrent readers from seeing mutations.
+func (s *piSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.lastUsage == nil {
+		return nil
+	}
+	u := *s.lastUsage
+	return &u
 }
 
 func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {

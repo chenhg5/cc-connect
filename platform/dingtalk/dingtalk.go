@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -314,6 +315,14 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		return
 	}
 
+	// Handle file messages (PDF, txt, docx, …). Same downloadCode mechanism as
+	// images, but the payload also carries fileName / fileSize that we surface
+	// to the agent via core.FileAttachment.FileName.
+	if data.Msgtype == "file" {
+		p.handleFileMessage(data, sessionKey)
+		return
+	}
+
 	// Extract message content, recovering quoted/reply info from richText.
 	messageContent := data.Text.Content
 	if richText != nil && richText.IsReplyMsg && richText.RepliedMsg != nil {
@@ -535,6 +544,90 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 	p.handler(p, msg)
 }
 
+// handleFileMessage downloads a file attachment (msgtype=file) and dispatches
+// it to the engine as a core.FileAttachment so the agent can read its contents.
+// Mirrors handleImageMessage but uses a larger size cap (50 MiB) and preserves
+// the file name reported by DingTalk.
+func (p *Platform) handleFileMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
+	slog.Debug("dingtalk: file message received", "user", data.SenderNick)
+
+	fileData, ok := data.Content.(map[string]interface{})
+	if !ok {
+		slog.Error("dingtalk: invalid file content type", "type", fmt.Sprintf("%T", data.Content))
+		return
+	}
+
+	downloadCode, _ := fileData["downloadCode"].(string)
+	if downloadCode == "" {
+		slog.Error("dingtalk: file message missing downloadCode")
+		return
+	}
+
+	fileName, _ := fileData["fileName"].(string)
+
+	downloadURL, err := p.getDownloadURL(downloadCode)
+	if err != nil {
+		slog.Error("dingtalk: failed to get file download URL", "error", err)
+		return
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		slog.Error("dingtalk: failed to download file", "error", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("dingtalk: file download returned status", "status", resp.StatusCode)
+		return
+	}
+
+	// DingTalk caps single file at 100 MiB; 50 MiB is plenty for agent inputs
+	// and matches what other platforms accept without OOM risk.
+	const maxFileBytes = 50 * 1024 * 1024
+	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
+	if err != nil {
+		slog.Error("dingtalk: failed to read file data", "error", err)
+		return
+	}
+	if len(fileBytes) > maxFileBytes {
+		slog.Error("dingtalk: file too large, dropping", "size", len(fileBytes), "limit", maxFileBytes, "file_name", fileName)
+		return
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	slog.Info("dingtalk: file downloaded successfully", "size", len(fileBytes), "mime", mimeType, "file_name", fileName)
+
+	msg := &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "dingtalk",
+		UserID:     data.SenderStaffId,
+		UserName:   data.SenderNick,
+		ChatName:   data.ConversationTitle,
+		MessageID:  data.MsgId,
+		ChannelKey: data.ConversationId,
+		ReplyCtx: replyContext{
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			messageID:      data.MsgId,
+			isGroup:        data.ConversationType == "2",
+		},
+		Files: []core.FileAttachment{{
+			MimeType: mimeType,
+			Data:     fileBytes,
+			FileName: fileName,
+		}},
+	}
+
+	p.handler(p, msg)
+}
+
 func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
 	// Get download URL
 	downloadURL, err := p.getDownloadURL(downloadCode)
@@ -744,11 +837,19 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return p.sendProactiveMessage(ctx, rc, content)
 	}
 
+	atUserIds := extractAtUserIds(content)
+
 	content = preprocessDingTalkMarkdown(content)
 
 	payload := map[string]any{
 		"msgtype":  "markdown",
 		"markdown": map[string]string{"title": "reply", "text": content},
+	}
+	if len(atUserIds) > 0 {
+		payload["at"] = map[string]any{
+			"atUserIds": atUserIds,
+			"isAtAll":   false,
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1588,6 +1689,23 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 
 	slog.Debug("dingtalk: proactive message sent", "api", apiURL, "status", resp.StatusCode)
 	return nil
+}
+
+var atUserIDRegexp = regexp.MustCompile(`@(\d{4,})`)
+
+// extractAtUserIds extracts @userId patterns from content for DingTalk's atUserIds field.
+// Matches @ followed by numeric DingTalk user IDs (e.g. @194252073827812352).
+func extractAtUserIds(content string) []string {
+	matches := atUserIDRegexp.FindAllStringSubmatch(content, -1)
+	seen := make(map[string]bool)
+	var ids []string
+	for _, m := range matches {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			ids = append(ids, m[1])
+		}
+	}
+	return ids
 }
 
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:

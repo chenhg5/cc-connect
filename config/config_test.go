@@ -933,6 +933,100 @@ tts_mode = "auto"
 	}
 }
 
+func TestResolveTTSConfigForProject_AgentOverrides(t *testing.T) {
+	raw := `
+[tts]
+enabled = true
+provider = "minimax"
+voice = "global-voice"
+voice_id = "global-id"
+speed = 1.1
+language_type = "Chinese"
+tts_mode = "voice_only"
+max_text_len = 200
+
+[tts.agents.assistant]
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
+max_text_len = 120
+
+[tts.agents.reviewer]
+voice = "Chinese (Mandarin)_Gentle_Senior"
+`
+	var cfg Config
+	if _, err := toml.Decode(raw, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	assistant := ResolveTTSConfigForProject(cfg.TTS, "assistant")
+	if !assistant.Enabled {
+		t.Fatal("expected assistant TTS enabled")
+	}
+	if assistant.Provider != "minimax" {
+		t.Fatalf("provider = %q, want minimax", assistant.Provider)
+	}
+	if assistant.Voice != "Chinese (Mandarin)_Crisp_Girl" {
+		t.Fatalf("voice = %q", assistant.Voice)
+	}
+	if assistant.Speed != 0.98 {
+		t.Fatalf("speed = %v, want 0.98", assistant.Speed)
+	}
+	if assistant.LanguageType != "Chinese" {
+		t.Fatalf("language_type = %q, want Chinese", assistant.LanguageType)
+	}
+	if assistant.MaxTextLen != 120 {
+		t.Fatalf("max_text_len = %d, want 120", assistant.MaxTextLen)
+	}
+
+	reviewer := ResolveTTSConfigForProject(cfg.TTS, "reviewer")
+	if reviewer.Voice != "Chinese (Mandarin)_Gentle_Senior" {
+		t.Fatalf("reviewer voice = %q", reviewer.Voice)
+	}
+	if reviewer.Speed != 1.1 {
+		t.Fatalf("reviewer speed = %v, want inherited 1.1", reviewer.Speed)
+	}
+
+	unknown := ResolveTTSConfigForProject(cfg.TTS, "unknown")
+	if unknown.Voice != "global-id" {
+		t.Fatalf("unknown voice = %q, want global voice_id", unknown.Voice)
+	}
+}
+
+func TestLoadMiniMaxLocalConfig_DefaultDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgDir := filepath.Join(dataDir, "config")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "minimax.json"), []byte(`{
+  "api_key": "sk-test",
+  "api_host": "https://api.minimaxi.com"
+}`), 0o600); err != nil {
+		t.Fatalf("write minimax config: %v", err)
+	}
+
+	cfg, err := LoadMiniMaxLocalConfig(dataDir, "")
+	if err != nil {
+		t.Fatalf("LoadMiniMaxLocalConfig() error: %v", err)
+	}
+	if cfg.APIKey != "sk-test" {
+		t.Fatalf("api key not loaded")
+	}
+	if cfg.APIHost != "https://api.minimaxi.com" {
+		t.Fatalf("api_host = %q", cfg.APIHost)
+	}
+}
+
+func TestLoadMiniMaxLocalConfig_MissingFileReturnsEmpty(t *testing.T) {
+	cfg, err := LoadMiniMaxLocalConfig(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("LoadMiniMaxLocalConfig() error: %v", err)
+	}
+	if cfg != (MiniMaxLocalConfig{}) {
+		t.Fatalf("config = %#v, want empty", cfg)
+	}
+}
+
 const multiProjectConfigTOML = `# multi-project config
 [[projects]]
 name = "alpha"

@@ -5,11 +5,128 @@
 ### Added
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 
-### New Features
-- **QQ Bot inline keyboard**: add support for inline keyboard buttons and INTERACTION_CREATE events. Permission requests now render as clickable buttons instead of text replies. Requires enabling the INTERACTION capability (bit 26) in the QQ Open Platform bot settings.
+## Unreleased
 
-### ⚠️ QQ Bot Intent Configuration Change
-The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you previously set a custom `intents` value without this bit, inline keyboard buttons will not work — update your `intents` to include bit 26. If you use the default intents, no action is needed. See `config.example.toml` for the new `intents` option.
+### Fixed
+- **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
+
+## v1.3.3 (2026-06-15)
+
+First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5
+line (≈ 235 PRs since v1.3.2) plus 7 post-beta.5 fixes. See `changelogs/v1.3.3.md` for
+the full themed summary; per-beta details remain in the beta sections below.
+
+### Highlights
+- **New agents**: Devin CLI, Google Antigravity (`agy`), GitHub Copilot — all first
+  class. Hardened coverage for Cursor, OpenCode, Qoder, Kimi, Pi.
+- **Platform expansion**: QQ Bot inline keyboards + file send/receive (OneBot), WeCom
+  `SendFile` (WebSocket), Feishu audio + video native media, Slack Assistant API, MAX
+  webhook delivery, DingTalk @mentions / richText / image / file inbound, WPS Xiezuo
+  (金山协作), broader Weibo DM.
+- **Long-running turn hardening**: new `max_turn_time_mins` wall-clock cap with
+  soft-stop + force-kill + auto-resume — long bash / test commands can no longer lock
+  a session indefinitely.
+- **Core commands**: `/timer`, `/cancel`, `/ps` (replaces `/btw`), `cron add --silent`,
+  agent-driven TTS.
+- **Multi-user / permissions**: reply-to-unauthorized-IM-senders, @mention-tolerant
+  permission keywords (`@Bot/permit` ≡ `/permit`), Bridge requires token when enabled.
+- **Observability**: blackbox testing framework (P0/P1/P2 + config-switch matrix), CUJ
+  test framework, agent-resume regression suite, Pi context-usage reporter.
+- **Provider ecosystem**: NekoCode, VisionCoder, AIHubMix, MiniMax M3 presets; Claude
+  Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks; Codex
+  `request_user_input` app-server events; configurable shell + shell profile.
+
+### Post-beta.5 fixes (delta from beta.5)
+- **qoder**: emit streaming text without dropping final result (#1290)
+- **weixin**: use `ilink_user_id` in `getConfigReq` for typing ticket (#1308)
+- **daemon**: remove redundant `linger_other.go` that breaks non-linux builds (#1314)
+- **wps-xiezuo**: preserve newlines in outbound messages — fixes unreadable `/status`
+  (#1361)
+- **core**: `/switch` no longer loses history; persist user msgs immediately; add CUJ
+  test framework (#1348)
+- **core**: queued FIFO drains no longer drop earlier queued messages as stale just
+  because a later queued message has a higher `create_time` (#1286)
+- **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
+- **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
+
+### ⚠️ Behavior Changes (carried forward from the beta cycle)
+All behavior changes from beta.1 → beta.5 remain in effect for v1.3.3. **Most likely
+to affect existing configs:**
+- `progress_style` default for Telegram & Discord is now `compact` (was `legacy`). Set
+  `progress_style = "legacy"` to revert. (#1354)
+- QQ Bot default `intents` now include `INTERACTION_CREATE` (bit 26). Custom `intents`
+  must include `1<<26` for inline keyboard buttons.
+- DingTalk `msgtype=file` inbound now reaches the agent (#1357).
+- Engine permission keyword matching is @mention-tolerant: `@Bot/permit` ≡ `/permit`
+  (#1358).
+- `reset_on_idle_mins` default is now 30 minutes (#494). Set to `0` to disable.
+- Bridge with no `[bridge].token` configured will refuse to start (#408).
+
+### Breaking Changes
+**None.** Fully additive release.
+
+### Upgrade
+```bash
+npm i -g cc-connect@1.3.3
+# or
+go install github.com/chenhg5/cc-connect/cmd/cc-connect@v1.3.3
+```
+
+Coming from a `v1.3.3-beta.*`: this is a small fix-only upgrade. No config change
+required.
+
+Coming from `v1.3.2`: review the Behavior Changes above before upgrading.
+
+---
+
+## v1.3.3-beta.5 (2026-06-15)
+
+Large beta with 74 PRs from 28 contributors. New agents (Google Antigravity `agy`, GitHub Copilot), QQ
+file send/receive via OneBot, WeCom `SendFile` (WebSocket), Feishu audio/video media, agent-driven TTS,
+`/timer` and `/cancel` commands, and broad platform fixes across Telegram, Discord, DingTalk, Feishu,
+WeCom, WeiXin, Cursor, OpenCode, Pi, and Codex. See `changelogs/v1.3.3-beta.5.md` for the full list.
+
+### New Features
+- **Google Antigravity (`agy`)** agent as a first-class integration (#1123)
+- **GitHub Copilot** agent as a first-class integration (#865)
+- **`/timer`** — one-shot delayed task system (#1012)
+- **`/cancel`** — interrupt and reset the current session (#957)
+- **Session prune** command to remove duplicate sessions (#603)
+- **Agent-driven TTS** send (#1230)
+- **Reply to unauthorized IM senders** option (#1190)
+- **QQ Bot inline keyboard buttons** and INTERACTION_CREATE events. Permission requests now render as clickable buttons (#1131)
+- **QQ (OneBot) file send/receive** via HTTP API (#323)
+- **WeCom `SendFile`** in WebSocket mode (#1199)
+- **Feishu audio + video attachments** as native media (#1202)
+- **Feishu rich card rendering + panel handling** refresh (#1204)
+- **DingTalk reaction emoji** support (#1213)
+- **DingTalk @mention via `send --at-users` / `--at-all`** (#1188)
+- **Slack + tmux** per-thread session scope with per-session tmux windows (#1179)
+- **`cron add --silent`** CLI flag (#1285, closes #858)
+- **Codex `request_user_input`** app-server events + relay group visibility (#1200, #1209)
+- **Claude Code** custom `append_system_prompt` + PermissionRequest hooks (#1175, #850)
+- **Pi** `ContextUsageReporter` for reply footer token stats (#1235)
+- **Daemon** hardened service-file env capture + EnvDiscoverer plugin hook (#1034)
+- **Configurable shell + shell profile** for `exec` (#870)
+
+### Fixed
+- Many fixes across the engine, agents, and platforms. Highlights: Telegram/Discord progress style,
+  DingTalk file inbound, Feishu link/card URLs, WeCom long-message split, Cursor session titles,
+  OpenCode tool rejection, Codex resume + sandbox_mode, Pi `/dir` and `/model`, Windows instance
+  lock, and Claude Code provider preservation. See `changelogs/v1.3.3-beta.5.md`.
+
+### ⚠️ Behavior Notes
+- **`progress_style` default** for Telegram and Discord is now `compact` (was `legacy`). Set
+  `progress_style = "legacy"` in the platform config to restore previous behavior (#1354).
+- **DingTalk `msgtype=file`** inbound messages now reach the agent. Previously silently dropped (#1357).
+- **Engine permission keyword matching** is now @mention-tolerant: `@Bot/permit` matches the same as
+  `/permit` (#1358).
+
+### ⚠️ QQ Bot Intent Configuration
+The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you
+previously set a custom `intents` value without this bit, inline keyboard buttons will not work —
+update your `intents` to include bit 26. If you use the default intents, no action is needed. See
+`config.example.toml` for the new `intents` option.
 
 ## v1.3.3-beta.4 (2026-05-28)
 

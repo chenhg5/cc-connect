@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/chenhg5/cc-connect/core"
@@ -650,7 +651,8 @@ func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
 
 func TestNew_LegacyProgressStyleDoesNotEnableProgressInterfaces(t *testing.T) {
 	pAny, err := New(map[string]any{
-		"token": "discord-token",
+		"token":          "discord-token",
+		"progress_style": "legacy",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -660,6 +662,27 @@ func TestNew_LegacyProgressStyleDoesNotEnableProgressInterfaces(t *testing.T) {
 	}
 	if _, ok := pAny.(core.ProgressCardPayloadSupport); ok {
 		t.Fatalf("legacy discord platform should not implement ProgressCardPayloadSupport, got %T", pAny)
+	}
+}
+
+// TestNew_DefaultProgressStyleIsCompact verifies that omitting progress_style
+// opts in to streaming edits (compact). Before this change, the default was
+// "legacy" which meant Discord would silently fall through to one big final
+// p.Send for long replies — see release-gate note 2026-06-14 §"Telegram 同样
+// 无默认流式". Discord behaves identically to Telegram on this code path.
+func TestNew_DefaultProgressStyleIsCompact(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token": "discord-token",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	sp, ok := pAny.(core.ProgressStyleProvider)
+	if !ok {
+		t.Fatalf("default discord platform should implement ProgressStyleProvider, got %T", pAny)
+	}
+	if got := sp.ProgressStyle(); got != "compact" {
+		t.Fatalf("default ProgressStyle() = %q, want %q", got, "compact")
 	}
 }
 
@@ -701,7 +724,8 @@ func TestDispatchMessage_UsesWrappedProgressPlatformForHandler(t *testing.T) {
 
 func TestDispatchMessage_LegacyPlatformFallsBackToBasePlatform(t *testing.T) {
 	pAny, err := New(map[string]any{
-		"token": "discord-token",
+		"token":          "discord-token",
+		"progress_style": "legacy",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1563,3 +1587,113 @@ func TestDispatchMessage_SetsChannelKeyForThreadIsolation(t *testing.T) {
 		t.Fatal("SessionKey should differ from ChannelKey (thread ID vs parent channel)")
 	}
 }
+
+// ── Async recovery loop tests ─────────────────────────────────
+
+// TestPlatformImplementsAsyncRecoverable ensures the Discord platform satisfies
+// core.AsyncRecoverablePlatform so engine.Start treats a transient gateway
+// error as "still pending" rather than "permanently failed". Before this
+// change a single EOF on first connect (release-gate 2026-06-14) put the
+// platform offline until cc-connect was manually restarted.
+func TestPlatformImplementsAsyncRecoverable(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token":          "discord-token",
+		"progress_style": "compact",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, ok := pAny.(core.AsyncRecoverablePlatform); !ok {
+		t.Fatalf("platform type %T does not implement core.AsyncRecoverablePlatform", pAny)
+	}
+}
+
+type recordingLifecycleHandler struct {
+	mu          sync.Mutex
+	unavailable []error
+	ready       int
+}
+
+func (h *recordingLifecycleHandler) OnPlatformReady(_ core.Platform) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ready++
+}
+
+func (h *recordingLifecycleHandler) OnPlatformUnavailable(_ core.Platform, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.unavailable = append(h.unavailable, err)
+}
+
+// TestStartReturnsImmediatelyAndStopCancelsLoop verifies Start() returns nil
+// without blocking on the gateway handshake (so a slow/unreachable Discord
+// endpoint cannot stall engine startup) and Stop() unwinds the recovery
+// goroutine deterministically.
+func TestStartReturnsImmediatelyAndStopCancelsLoop(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token": "discord-token",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := basePlatformFor(t, pAny)
+	handler := &recordingLifecycleHandler{}
+	p.SetLifecycleHandler(handler)
+
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- p.Start(func(_ core.Platform, _ *core.Message) {})
+	}()
+
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("Start() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() did not return within 2s — should be non-blocking once recovery loop owns the connect")
+	}
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	if !p.isStopping() {
+		t.Fatal("isStopping() = false after Stop()")
+	}
+}
+
+// TestStopBeforeFirstConnectAttempt covers the path where Stop() races the
+// first connect attempt — the loop must observe the cancel signal and exit
+// without panicking, even if no session was ever opened.
+func TestStopBeforeFirstConnectAttempt(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"token": "discord-token",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := basePlatformFor(t, pAny)
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop() before Start() error = %v, want nil", err)
+	}
+}
+
+// basePlatformFor unwraps the optional progressPlatform wrapper so tests can
+// reach the methods that live on *Platform directly (Start / Stop /
+// SetLifecycleHandler / isStopping).
+func basePlatformFor(t *testing.T, pAny core.Platform) *Platform {
+	t.Helper()
+	switch v := pAny.(type) {
+	case *Platform:
+		return v
+	case *progressPlatform:
+		return v.Platform
+	default:
+		t.Fatalf("unexpected platform type %T", pAny)
+		return nil
+	}
+}
+

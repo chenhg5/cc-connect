@@ -23,6 +23,17 @@
 # - "" (empty/not set): Auto-detect from user's first message / 留空自动检测
 # language = "en"
 
+# Shell for /shell commands, cron exec, hooks, and webhook exec.
+# /shell 命令、cron exec、hooks 和 webhook exec 使用的 shell。
+# Default / 默认: "sh" (Unix) or "powershell.exe" (Windows)
+# Supported / 支持: sh, bash, zsh, fish, cmd, powershell, pwsh
+# shell = "/bin/zsh"
+
+# Init command prepended to every shell command. Useful for sourcing profiles
+# so user-defined functions and aliases are available.
+# 初始化命令，会添加到每条 shell 命令前面。用于加载 profile，使自定义函数和别名可用。
+# shell_profile = "source ~/.zshrc"
+
 # Session data storage directory (default: ~/.cc-connect)
 # Stores conversation history and session state as JSON files.
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
@@ -444,6 +455,10 @@ level = "info" # debug, info, warn, error
 # enabled  = true
 # provider = "qwen"          # "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
 # voice    = "Cherry"        # default voice / 默认音色（千问支持：Cherry/Serena/Ethan/Chelsie 等；MiMo 支持：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）
+# voice_id = ""              # optional alias for voice, useful for MiniMax voice IDs / 可选，MiniMax 音色 ID 可写这里
+# speed    = 0               # optional speed multiplier; 0 = provider default; valid range is provider-specific
+#                            # 可选语速；0 表示服务商默认；有效范围取决于具体 provider
+# language_type = ""         # optional provider-specific language hint / 可选语言提示
 # tts_mode = "voice_only"    # "voice_only" (default) | "always"
 # max_text_len = 0           # max rune count before skipping TTS; 0 = no limit
 #                            # 超过此长度则跳过 TTS；0 表示不限制
@@ -467,9 +482,22 @@ level = "info" # debug, info, warn, error
 # # 备选：MiniMax TTS（T2A v2 流式 API）
 # # Docs: https://platform.minimaxi.com/document/T2A%20V2
 # [tts.minimax]
-# api_key  = "your-minimax-api-key"
-# base_url = ""              # optional: default "https://api.minimax.io" / 留空使用默认地址
+# api_key  = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""              # optional: default "https://api.minimaxi.com" / 留空使用默认地址
 # model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
+# config_file = ""           # optional MiniMax JSON config path; default data_dir/config/minimax.json
+#
+# # Per-project/agent voice overrides. Keys match [[projects]].name.
+# # 每个项目/Agent 可单独覆盖音色；key 与 [[projects]].name 一致。
+# # Agent tool command: cc-connect send --tts <text>
+# # Agent 工具命令：cc-connect send --tts <文本>
+# [tts.agents.assistant]
+# voice_id = "Chinese (Mandarin)_Crisp_Girl"
+# speed = 0.98
+#
+# [tts.agents.reviewer]
+# voice_id = "Chinese (Mandarin)_Gentle_Senior"
+# speed = 0.96
 #
 # # Alternative: Xiaomi MiMo-V2.5-TTS (OpenAI-compatible chat completions style)
 # # 备选：小米 MiMo-V2.5-TTS（OpenAI 兼容的 chat completions 风格）
@@ -669,6 +697,9 @@ name = "my-backend"
 # filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
+# shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
+# shell_profile = "source ~/.config/fish/config.fish"  # Per-project shell profile / 项目级 shell profile
+#
 # admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec).
 # admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec）。
 #
@@ -774,7 +805,17 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # disallowed_tools = ["WebSearch", "WebFetch"]
 
 # Optional: specify a custom system prompt / 可选：指定自定义系统提示
+# Replaces Claude's default system prompt (passed via --system-prompt).
+# 替换 Claude 默认系统提示（通过 --system-prompt 传入）。
 # system_prompt = "You are a helpful AI assistant that specializes in Python development."
+
+# Optional: append extra text to the system prompt / 可选：向系统提示追加额外内容
+# Keeps Claude's default system prompt and appends this text (via --append-system-prompt).
+# Use this instead of system_prompt when you want to add instructions without
+# discarding Claude's defaults. Can be combined with system_prompt.
+# 保留 Claude 默认系统提示，并在其后追加本内容（通过 --append-system-prompt）。
+# 想在不丢弃默认提示的前提下补充指令时用它；可与 system_prompt 同时使用。
+# append_system_prompt = "Always respond in Chinese and prefer concise answers."
 
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
@@ -858,10 +899,11 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # model = "deepseek-ai/DeepSeek-V3"
 # thinking = "disabled"
 #
-# # MiniMax — OpenAI-compatible provider with 1M context window
-# # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
+# # MiniMax — OpenAI-compatible agent provider with 1M context window
+# # MiniMax — 兼容 OpenAI 接口的大模型 Agent provider，支持 1M 超长上下文
 # # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed
 # # Docs: https://platform.minimaxi.com
+# # China-region accounts may use https://api.minimaxi.com/v1 / 中国区账号可使用 https://api.minimaxi.com/v1
 # [[projects.agent.providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
@@ -1043,6 +1085,39 @@ app_secret = "your-feishu-app-secret"
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
+# progress_style = "compact"  # Progress rendering: legacy | compact (default). Telegram has no rich card UI,
+#                             # so "card" is normalized to "compact". Set "legacy" to disable streaming edits.
+#                             # 进度展示：legacy | compact（默认）。Telegram 不支持富卡片，"card" 会被规整为 "compact"。
+#                             # 设为 "legacy" 可关闭流式 edit。
+
+# Matrix (uncomment to enable / 取消注释以启用)
+# 1. Create an account on your Matrix homeserver (matrix.org or self-hosted)
+#    在 Matrix 服务器上创建账号（matrix.org 或自建服务器）
+# 2. Get an access token via curl (recommended, ensures E2EE works):
+#    curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
+#      -H "Content-Type: application/json" \
+#      -d '{"type":"m.login.password","user":"YOUR_USER","password":"YOUR_PASS","device_id":"CC-CONNECT"}'
+#    通过 curl 获取 access token（推荐，确保 E2EE 正常工作）：
+#    curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
+#      -H "Content-Type: application/json" \
+#      -d '{"type":"m.login.password","user":"你的用户名","password":"你的密码","device_id":"CC-CONNECT"}'
+# Connection: Long polling via /sync (no public URL needed) / 长轮询，无需公网 IP
+
+# [[projects.platforms]]
+# type = "matrix"
+#
+# [projects.platforms.options]
+# homeserver = "https://matrix.org"
+# access_token = "syt_xxx_xxx"
+# user_id = "@bot:matrix.org"            # optional, auto-detected via /whoami / 可选，自动检测
+# allow_from = "*"                        # Matrix user IDs, e.g. "@user:matrix.org,@other:example.com"
+# auto_join = true                        # auto-join room invites (default true) / 自动加入被邀请的房间（默认 true）
+# auto_verify = true                     # auto-accept SAS key verification (default true) / 自动接受 SAS 密钥验证（默认 true）
+# cross_signing_password = ""            # bot account password for cross-signing setup (one-time) / 跨签名初始化密码（一次性）
+#                                       # Or use env var MATRIX_CROSS_SIGNING_PASSWORD (takes precedence) / 也可用环境变量 MATRIX_CROSS_SIGNING_PASSWORD（优先级更高）
+# share_session_in_channel = false        # share one agent session per room / 房间内所有用户共享会话
+# group_reply_all = false                 # respond to all room messages without @mention / 群聊无需 @ 也响应
+# proxy = ""                              # optional HTTP/SOCKS5 proxy / 可选代理
 
 # MAX messenger (uncomment to enable / 取消注释以启用)
 # 1. Create a bot via @MasterBot in MAX, get the access token
@@ -1388,6 +1463,21 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
 #
+# Optional: project system prompt / 可选：项目系统提示
+# Codex has no native system-prompt flag, so cc-connect injects this as a
+# preamble prepended to your first message of each new session (resumed
+# sessions are not re-injected).
+# Codex 没有原生的系统提示参数，cc-connect 会将其作为前导内容注入到每个新
+# 会话的第一条消息之前（恢复的会话不会重复注入）。
+# system_prompt = "You are a helpful AI assistant that specializes in Python development."
+#
+# Optional: additional project instructions / 可选：追加的项目指令
+# Appended after system_prompt in the same injected preamble. Can be used
+# alone or combined with system_prompt.
+# 追加在 system_prompt 之后，包含在同一段注入的前导内容中。可单独使用，也可与
+# system_prompt 同时使用。
+# append_system_prompt = "Always respond in Chinese and prefer concise answers."
+#
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
 #
@@ -1435,6 +1525,9 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # ws_url = "ws://127.0.0.1:3001"  # NapCat Forward WebSocket URL
 # token = ""                       # optional: access_token / 可选鉴权 token
+# http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
+#                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
+#                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话

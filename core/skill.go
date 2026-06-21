@@ -78,84 +78,74 @@ func (r *SkillRegistry) ListAll() []*Skill {
 	seen := make(map[string]bool)
 
 	for _, dir := range r.dirs {
-		result = append(result, discoverSkillsInDir(dir, dir, seen, make(map[string]bool))...)
+		result = append(result, discoverSkillsInDir(dir, seen)...)
 	}
 
 	r.cache = result
 	return result
 }
 
-func discoverSkillsInDir(scanRoot, currentDir string, seen, visited map[string]bool) []*Skill {
-	realDir := realPath(currentDir)
-	if visited[realDir] {
-		return nil
-	}
-	visited[realDir] = true
-
-	entries, err := os.ReadDir(currentDir)
+// discoverSkillsInDir scans a single skill root directory for immediate
+// subdirectories that contain a SKILL.md file. Per the Claude Code CLI
+// convention (issue #1304), only depth-1 layout is recognised:
+//
+//	<root>/<skill-name>/SKILL.md        — registered
+//	<root>/<skill-name>/references/...  — asset, NOT registered
+//
+// Nested SKILL.md files inside a skill (e.g. example templates shipped
+// alongside the real one) are treated as skill assets and ignored, so they
+// cannot leak into platform command menus as phantom slash commands.
+func discoverSkillsInDir(scanRoot string, seen map[string]bool) []*Skill {
+	entries, err := os.ReadDir(scanRoot)
 	if err != nil {
 		return nil
 	}
 
 	var result []*Skill
 	for _, entry := range entries {
-		fullPath := filepath.Join(currentDir, entry.Name())
-
-		if entry.Name() == "SKILL.md" {
-			skillDir := filepath.Dir(fullPath)
-			if sameFilePath(skillDir, scanRoot) {
-				continue
-			}
-
-			skillName := filepath.Base(skillDir)
-			if seen[strings.ToLower(skillName)] {
-				continue
-			}
-
-			data, err := os.ReadFile(fullPath)
-			if err != nil {
-				continue
-			}
-
-			skill := parseSkillMD(skillName, string(data), skillDir)
-			if skill == nil {
-				continue
-			}
-
-			seen[strings.ToLower(skillName)] = true
-			result = append(result, skill)
-			slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
+		if !isDiscoverableSubdir(scanRoot, entry) {
 			continue
 		}
 
-		if shouldDescendIntoSkillPath(fullPath, entry) {
-			result = append(result, discoverSkillsInDir(scanRoot, fullPath, seen, visited)...)
+		skillName := entry.Name()
+		if seen[strings.ToLower(skillName)] {
+			continue
 		}
+
+		skillDir := filepath.Join(scanRoot, skillName)
+		skillFile := filepath.Join(skillDir, "SKILL.md")
+		data, err := os.ReadFile(skillFile)
+		if err != nil {
+			// No SKILL.md at the top of this subdir — and we deliberately
+			// do NOT recurse, matching the Claude Code CLI rule.
+			continue
+		}
+
+		skill := parseSkillMD(skillName, string(data), skillDir)
+		if skill == nil {
+			continue
+		}
+
+		seen[strings.ToLower(skillName)] = true
+		result = append(result, skill)
+		slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
 	}
 
 	return result
 }
 
-func shouldDescendIntoSkillPath(path string, entry os.DirEntry) bool {
+// isDiscoverableSubdir reports whether entry should be considered as a
+// potential skill subdirectory of parentDir. Accepts real directories and
+// symlinks that resolve to directories.
+func isDiscoverableSubdir(parentDir string, entry os.DirEntry) bool {
 	if entry.IsDir() {
 		return true
 	}
 	if entry.Type()&os.ModeSymlink == 0 {
 		return false
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(filepath.Join(parentDir, entry.Name()))
 	return err == nil && info.IsDir()
-}
-
-func sameFilePath(a, b string) bool {
-	return realPath(a) == realPath(b)
-}
-
-func realPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(resolved)
-	}
-	return filepath.Clean(path)
 }
 
 // Dirs returns the configured skill directories.
@@ -165,7 +155,7 @@ func (r *SkillRegistry) Dirs() []string {
 	return append([]string(nil), r.dirs...)
 }
 
-// Invalidate clears the cache so skills are re-scanned on next access.
+// Invalidate clears the cache so skills will be re-scanned on next access.
 func (r *SkillRegistry) Invalidate() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

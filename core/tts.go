@@ -31,11 +31,13 @@ type TTSSynthesisOpts struct {
 
 // TTSCfg holds TTS configuration for the engine (mirrors SpeechCfg).
 type TTSCfg struct {
-	Enabled    bool
-	Provider   string
-	Voice      string // default voice used when TTSSynthesisOpts.Voice is empty
-	TTS        TextToSpeech
-	MaxTextLen int // max rune count before skipping TTS; 0 = no limit
+	Enabled      bool
+	Provider     string
+	Voice        string  // default voice used when TTSSynthesisOpts.Voice is empty
+	LanguageType string  // optional provider-specific language hint
+	Speed        float64 // speaking speed multiplier; 0 = provider default
+	TTS          TextToSpeech
+	MaxTextLen   int // max rune count before skipping TTS; 0 = no limit
 
 	mu      sync.RWMutex
 	ttsMode string // "voice_only" (default) | "always"
@@ -59,8 +61,26 @@ func (c *TTSCfg) SetTTSMode(mode string) {
 }
 
 // AudioSender is implemented by platforms that support sending voice/audio messages.
+//
+// `format` is the lowercase short format hint extracted from the filename
+// extension or MIME type (e.g. "mp3", "ogg", "opus", "m4a"). Platforms
+// that need a specific codec (Feishu requires opus) are expected to
+// transcode internally; format is only an input hint.
 type AudioSender interface {
 	SendAudio(ctx context.Context, replyCtx any, audio []byte, format string) error
+}
+
+// VideoSender is implemented by platforms that can render a native
+// inline video bubble for an outbound clip rather than a generic file
+// download. Engine code falls back to FileSender when a platform does
+// not implement this interface.
+//
+// `format` is the lowercase short format hint (e.g. "mp4", "mov",
+// "webm"). Implementations are free to transcode to the platform's
+// preferred codec; on Feishu mp4/H.264 has the broadest playback
+// support so non-mp4 inputs may render with reduced compatibility.
+type VideoSender interface {
+	SendVideo(ctx context.Context, replyCtx any, video []byte, format string, fileName string) error
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -265,7 +285,7 @@ type MiniMaxTTS struct {
 // NewMiniMaxTTS creates a new MiniMaxTTS instance.
 func NewMiniMaxTTS(apiKey, baseURL, model string, client *http.Client) *MiniMaxTTS {
 	if baseURL == "" {
-		baseURL = "https://api.minimax.io"
+		baseURL = "https://api.minimaxi.com"
 	}
 	if model == "" {
 		model = "speech-2.8-hd"
@@ -293,9 +313,9 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 	}
 
 	reqBody := map[string]any{
-		"model":        m.Model,
-		"text":         text,
-		"stream":       true,
+		"model":  m.Model,
+		"text":   text,
+		"stream": true,
 		"voice_setting": map[string]any{
 			"voice_id": voice,
 			"speed":    speed,
@@ -362,6 +382,13 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		}
 		if chunk.BaseResp.StatusCode != 0 {
 			return nil, "", fmt.Errorf("minimax tts API error %d: %s", chunk.BaseResp.StatusCode, chunk.BaseResp.StatusMsg)
+		}
+		// MiniMax T2A v2 stream protocol: status=1 carries incremental audio
+		// chunks; the final status=2 chunk re-sends the full audio as a
+		// trailer for non-stream clients. Appending the trailer doubles the
+		// audio length and makes the spoken text play twice, so skip it.
+		if chunk.Data.Status == 2 {
+			break
 		}
 		if chunk.Data.Audio != "" {
 			audioBytes, err := hex.DecodeString(chunk.Data.Audio)

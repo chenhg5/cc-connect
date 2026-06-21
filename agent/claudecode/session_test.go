@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +43,73 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	}
 	if evt.OutputTokens != 2000 {
 		t.Errorf("OutputTokens = %d, want 2000", evt.OutputTokens)
+	}
+	if !evt.Done {
+		t.Errorf("regular result event Done = false, want true")
+	}
+}
+
+// TestHandleResultCompactionSubtypeIsNotTerminal is a regression test for
+// issue #481: Claude Code's mid-turn context compaction emits a
+// `type:"result"` event with `subtype:"compact"` (newer CLI) or
+// `subtype:"compaction"` (older CLI). The engine must keep the turn
+// running, so the emitted EventResult must have Done=false.
+func TestHandleResultCompactionSubtypeIsNotTerminal(t *testing.T) {
+	cases := []string{"compact", "compaction"}
+	for _, subtype := range cases {
+		t.Run(subtype, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cs := &claudeSession{
+				events: make(chan core.Event, 4),
+				ctx:    ctx,
+			}
+			cs.sessionID.Store("test-session")
+			cs.alive.Store(true)
+
+			cs.handleResult(map[string]any{
+				"type":       "result",
+				"subtype":    subtype,
+				"isCompact":  true,
+				"session_id": "test-session",
+			})
+
+			select {
+			case evt := <-cs.events:
+				if evt.Type != core.EventResult {
+					t.Fatalf("event type = %q, want %q", evt.Type, core.EventResult)
+				}
+				if evt.Done {
+					t.Errorf("compaction result Done = true, want false (turn must continue)")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for EventResult")
+			}
+		})
+	}
+}
+
+// TestIsCompactionResult covers both accepted subtype spellings and the
+// negative case (regular result with no subtype).
+func TestIsCompactionResult(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want bool
+	}{
+		{"nil_subtype", map[string]any{"type": "result"}, false},
+		{"empty_subtype", map[string]any{"type": "result", "subtype": ""}, false},
+		{"success_subtype", map[string]any{"type": "result", "subtype": "success"}, false},
+		{"compact_subtype", map[string]any{"type": "result", "subtype": "compact"}, true},
+		{"compaction_subtype", map[string]any{"type": "result", "subtype": "compaction"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCompactionResult(tc.raw); got != tc.want {
+				t.Errorf("isCompactionResult(%v) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -360,6 +429,157 @@ func TestShellJoinArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildAppendSystemPrompt(t *testing.T) {
+	tests := []struct {
+		name           string
+		agentPrompt    string
+		platformPrompt string
+		userAppend     string
+		want           string
+	}{
+		{"all_empty", "", "", "", ""},
+		{"agent_only", "AGENT", "", "", "AGENT"},
+		{"agent_and_platform", "AGENT", "PLAT", "", "AGENT\n## Formatting\nPLAT\n"},
+		{"user_only", "", "", "USER", "USER"},
+		{"user_only_platform_ignored", "", "PLAT", "USER", "USER"},
+		{"agent_and_user", "AGENT", "", "USER", "AGENT\nUSER"},
+		{"all_three", "AGENT", "PLAT", "USER", "AGENT\n## Formatting\nPLAT\n\nUSER"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildAppendSystemPrompt(tt.agentPrompt, tt.platformPrompt, tt.userAppend)
+			if got != tt.want {
+				t.Errorf("buildAppendSystemPrompt(%q, %q, %q)\n  got  = %q\n  want = %q",
+					tt.agentPrompt, tt.platformPrompt, tt.userAppend, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnsureSharedSystemPromptFile_WritesOnceAndReuses covers the 99%
+// case for the #1376 workaround. The cc-connect default
+// AgentSystemPrompt is written once to <ccDataDir>/agent-prompts/
+// cc-connect-system.md and reused across spawns — no per-spawn write,
+// no cleanup. claude only reads the file, so reuse is safe under
+// concurrent spawns.
+func TestEnsureSharedSystemPromptFile_WritesOnceAndReuses(t *testing.T) {
+	dir := t.TempDir()
+	content := "## cc-connect prompt\n" + makeFiller(10*1024)
+
+	// First call must create the file.
+	path1, err := ensureSharedSystemPromptFile(dir, content)
+	if err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(path1), "agent-prompts/cc-connect-system.md") {
+		t.Errorf("path %q does not end in agent-prompts/cc-connect-system.md", path1)
+	}
+	got, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("content mismatch after first write")
+	}
+	stat1, err := os.Stat(path1)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Second call with identical content must NOT rewrite the file
+	// (mtime stays the same). This is what gives the common case
+	// zero per-spawn overhead.
+	time.Sleep(20 * time.Millisecond)
+	path2, err := ensureSharedSystemPromptFile(dir, content)
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if path2 != path1 {
+		t.Errorf("path drifted between calls: %q vs %q", path1, path2)
+	}
+	stat2, err := os.Stat(path2)
+	if err != nil {
+		t.Fatalf("stat 2: %v", err)
+	}
+	if !stat1.ModTime().Equal(stat2.ModTime()) {
+		t.Errorf("file was rewritten despite identical content: mtime %v -> %v",
+			stat1.ModTime(), stat2.ModTime())
+	}
+}
+
+// TestEnsureSharedSystemPromptFile_RewritesOnContentChange covers
+// cc-connect upgrades: when AgentSystemPrompt content changes between
+// releases, the shared file must be refreshed automatically.
+func TestEnsureSharedSystemPromptFile_RewritesOnContentChange(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ensureSharedSystemPromptFile(dir, "v1"); err != nil {
+		t.Fatalf("ensure v1: %v", err)
+	}
+	path, err := ensureSharedSystemPromptFile(dir, "v2 — upgraded prompt")
+	if err != nil {
+		t.Fatalf("ensure v2: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "v2 — upgraded prompt" {
+		t.Fatalf("file did not refresh after content change: got %q", string(got))
+	}
+}
+
+// TestEnsureSharedSystemPromptFile_EmptyDirUsesTempDir guards the
+// degraded path where ccDataDir was not injected (e.g. older host
+// code or test harnesses) — the shared file still lands somewhere
+// writable instead of failing the spawn.
+func TestEnsureSharedSystemPromptFile_EmptyDirUsesTempDir(t *testing.T) {
+	path, err := ensureSharedSystemPromptFile("", "hello")
+	if err != nil {
+		t.Fatalf("ensure with empty dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	if !strings.Contains(filepath.ToSlash(path), "/agent-prompts/cc-connect-system.md") {
+		t.Errorf("unexpected fallback path: %q", path)
+	}
+}
+
+// TestWriteTempAppendPromptFile_UniquePerCall covers the 1% edge case:
+// when the prompt includes per-session pieces (platform formatting or
+// user append) two concurrent spawns must each get their own file so
+// they cannot overwrite each other's content before claude reads it.
+func TestWriteTempAppendPromptFile_UniquePerCall(t *testing.T) {
+	// dir is auto-cleaned by t.TempDir(), so per-file Remove is unnecessary.
+	dir := t.TempDir()
+	a, err := writeTempAppendPromptFile(dir, "session A")
+	if err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	b, err := writeTempAppendPromptFile(dir, "session B")
+	if err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+	if a == b {
+		t.Fatalf("two writeTempAppendPromptFile calls returned the same path %q "+
+			"— concurrent customised sessions would overwrite each other", a)
+	}
+
+	// Files must contain their own content (no cross-talk).
+	gotA, _ := os.ReadFile(a)
+	gotB, _ := os.ReadFile(b)
+	if string(gotA) != "session A" || string(gotB) != "session B" {
+		t.Errorf("cross-talk: A=%q B=%q", string(gotA), string(gotB))
+	}
+}
+
+func makeFiller(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 'a' + byte(i%26)
+	}
+	return string(b)
 }
 
 func helperCommand(ctx context.Context, mode string) *exec.Cmd {

@@ -59,6 +59,7 @@ func closeCronResponseBody(body io.Closer) {
 func runCronAdd(args []string) {
 	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
 	var timeoutMins *int
+	var silent bool
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -113,6 +114,8 @@ func runCronAdd(args []string) {
 				}
 				timeoutMins = &n
 			}
+		case "--silent":
+			silent = true
 		case "--help", "-h":
 			printCronAddUsage()
 			return
@@ -162,6 +165,9 @@ func runCronAdd(args []string) {
 		"prompt":      prompt,
 		"exec":        execCmd,
 		"description": desc,
+	}
+	if silent {
+		body["silent"] = true
 	}
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
@@ -622,12 +628,14 @@ Options:
       --desc <text>          Short description
       --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
+      --silent               Suppress cron start notification
       --data-dir <path>      Data directory (default: ~/.cc-connect)
   -h, --help                 Show this help
 
 Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
+  cc-connect cron add --cron "0 9 * * *" --prompt "Daily standup reminder" --silent
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
 }
 

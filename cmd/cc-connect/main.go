@@ -109,6 +109,61 @@ func preScanLogMaxSizeFlag(args []string) string {
 	return ""
 }
 
+// logBackupsSource describes where the resolved max-backups count came
+// from, mirroring logSizeSource so operators can audit the active value
+// from the startup log line alone.
+type logBackupsSource string
+
+const (
+	logBackupsSourceFlag    logBackupsSource = "flag"
+	logBackupsSourceEnv     logBackupsSource = "env"
+	logBackupsSourceDefault logBackupsSource = "default"
+)
+
+// resolveLogMaxBackups picks the effective number of rotated log backups
+// to retain, with the same priority order as resolveLogMaxSize: explicit
+// flag value > CC_LOG_MAX_BACKUPS env var > built-in default. Returns
+// the count and which source won. Invalid inputs are logged to stderr
+// and the value is ignored so a typo never silently downgrades to "0".
+func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogBackups(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+		} else {
+			return n, logBackupsSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
+		n, err := daemon.ParseLogBackups(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+		} else {
+			return n, logBackupsSourceEnv
+		}
+	}
+	return daemon.DefaultLogMaxBackups, logBackupsSourceDefault
+}
+
+// preScanLogMaxBackupsFlag returns the value passed via --log-max-backups
+// before flag.Parse() runs, mirroring preScanLogMaxSizeFlag. Returns ""
+// if the flag is absent.
+func preScanLogMaxBackupsFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-backups" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-backups=") {
+			return strings.TrimPrefix(a, "--log-max-backups=")
+		}
+	}
+	return ""
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -146,6 +201,9 @@ func main() {
 		case "cron":
 			runCron(os.Args[2:])
 			return
+		case "timer", "at":
+			runTimer(os.Args[2:])
+			return
 		case "relay":
 			runRelay(os.Args[2:])
 			return
@@ -182,8 +240,9 @@ func main() {
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
 		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
-		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s)\n", logFile, maxSize, maxSizeSrc)
-		w, err := daemon.NewRotatingWriter(logFile, maxSize)
+		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
+		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
 			os.Exit(1)
@@ -199,6 +258,7 @@ func main() {
 	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	logMaxSizeFlag := flag.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
+	logMaxBackupsFlag := flag.Int("log-max-backups", 0, "number of rotated log files to retain (.log.1 .. .log.N); overrides CC_LOG_MAX_BACKUPS env var (default: 3)")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -211,6 +271,9 @@ func main() {
 		if _, err := daemon.ParseLogSize(*logMaxSizeFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", *logMaxSizeFlag, err)
 		}
+	}
+	if *logMaxBackupsFlag < 0 {
+		fmt.Fprintf(os.Stderr, "warning: --log-max-backups=%d must be >= 0 (0 means use env/default)\n", *logMaxBackupsFlag)
 	}
 
 	if *showVersion {
@@ -485,6 +548,10 @@ func main() {
 			})
 		}
 
+		// Wire shell configuration
+		shell, shellFlag, shellProfile := config.EffectiveShell(cfg, &proj)
+		engine.SetShell(shell, shellFlag, shellProfile)
+
 		// Wire hooks
 		if len(cfg.Hooks) > 0 {
 			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
@@ -498,7 +565,7 @@ func main() {
 					Async:   h.Async,
 				}
 			}
-			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks))
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, shellProfile))
 		}
 
 		// Wire local reference normalization / rendering
@@ -684,13 +751,16 @@ func main() {
 		}
 
 		// Wire text-to-speech if enabled
-		if cfg.TTS.Enabled {
+		ttsEffective := config.ResolveTTSConfigForProject(cfg.TTS, proj.Name)
+		if ttsEffective.Enabled {
 			ttsCfg := &core.TTSCfg{
-				Enabled:    true,
-				Voice:      cfg.TTS.Voice,
-				MaxTextLen: cfg.TTS.MaxTextLen,
+				Enabled:      true,
+				Voice:        ttsEffective.Voice,
+				LanguageType: ttsEffective.LanguageType,
+				Speed:        ttsEffective.Speed,
+				MaxTextLen:   ttsEffective.MaxTextLen,
 			}
-			initMode := cfg.TTS.TTSMode
+			initMode := ttsEffective.TTSMode
 			switch initMode {
 			case "always", "voice_only":
 			case "":
@@ -700,7 +770,7 @@ func main() {
 				initMode = "voice_only"
 			}
 			ttsCfg.SetTTSMode(initMode)
-			switch cfg.TTS.Provider {
+			switch ttsEffective.Provider {
 			case "qwen":
 				apiKey := cfg.TTS.Qwen.APIKey
 				baseURL := cfg.TTS.Qwen.BaseURL
@@ -715,6 +785,21 @@ func main() {
 				apiKey := cfg.TTS.MiniMax.APIKey
 				baseURL := cfg.TTS.MiniMax.BaseURL
 				model := cfg.TTS.MiniMax.Model
+				if apiKey == "" {
+					localCfg, err := config.LoadMiniMaxLocalConfig(cfg.DataDir, cfg.TTS.MiniMax.ConfigFile)
+					if err != nil {
+						slog.Warn("tts: failed to load minimax local config", "error", err)
+					} else {
+						apiKey = localCfg.APIKey
+						if baseURL == "" {
+							if localCfg.BaseURL != "" {
+								baseURL = localCfg.BaseURL
+							} else if localCfg.APIHost != "" {
+								baseURL = localCfg.APIHost
+							}
+						}
+					}
+				}
 				if apiKey != "" {
 					ttsCfg.TTS = core.NewMiniMaxTTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "minimax"
@@ -732,21 +817,21 @@ func main() {
 					slog.Warn("tts: mimo provider enabled but api_key is empty")
 				}
 			case "espeak":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh" // default to Chinese
 				}
 				ttsCfg.TTS = core.NewEspeakTTS("", voice)
 				ttsCfg.Provider = "espeak"
 			case "pico":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN" // default to Chinese (Simplified)
 				}
 				ttsCfg.TTS = core.NewPicoTTS("", voice)
 				ttsCfg.Provider = "pico"
 			case "edge":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN-XiaoxiaoNeural" // default Chinese neural voice
 				}
@@ -875,6 +960,26 @@ func main() {
 		}
 	}
 
+	// Start timer scheduler
+	timerStore, err := core.NewTimerStore(cfg.DataDir)
+	if err != nil {
+		slog.Warn("timer store unavailable", "error", err)
+	}
+	var timerSched *core.TimerScheduler
+	if timerStore != nil {
+		timerSched = core.NewTimerScheduler(timerStore)
+		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
+			timerSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		}
+		for i, e := range engines {
+			timerSched.RegisterEngine(cfg.Projects[i].Name, e)
+			e.SetTimerScheduler(timerSched)
+		}
+	}
+
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
 	for i, proj := range cfg.Projects {
@@ -901,6 +1006,12 @@ func main() {
 	if cronSched != nil {
 		if err := cronSched.Start(); err != nil {
 			slog.Error("cron scheduler start failed", "error", err)
+		}
+	}
+
+	if timerSched != nil {
+		if err := timerSched.Start(); err != nil {
+			slog.Error("timer scheduler start failed", "error", err)
 		}
 	}
 
@@ -967,6 +1078,9 @@ func main() {
 		}
 		if cronSched != nil {
 			mgmtSrv.SetCronScheduler(cronSched)
+		}
+		if timerSched != nil {
+			mgmtSrv.SetTimerScheduler(timerSched)
 		}
 		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
 		if bridgeSrv != nil {
@@ -1151,6 +1265,9 @@ func main() {
 		if cronSched != nil {
 			apiSrv.SetCronScheduler(cronSched)
 		}
+		if timerSched != nil {
+			apiSrv.SetTimerScheduler(timerSched)
+		}
 		apiSrv.Start()
 	}
 
@@ -1186,6 +1303,9 @@ func main() {
 		webhookSrv.Stop()
 	}
 	heartbeatSched.Stop()
+	if timerSched != nil {
+		timerSched.Stop()
+	}
 	if cronSched != nil {
 		cronSched.Stop()
 	}
