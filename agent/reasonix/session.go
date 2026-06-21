@@ -505,6 +505,10 @@ func (s *reasonixSession) httpPost(path string, body any) error {
 	return nil
 }
 
+// formatImages builds a comma-separated list of image filenames for inclusion
+// in the prompt. Reasons adopts the standard cc-connect file-save pattern so
+// the actual image bytes land on disk (via core.SaveFilesToDisk); this list
+// gives reasonix serve a human-readable hint about which images were attached.
 func formatImages(images []core.ImageAttachment) string {
 	names := make([]string, len(images))
 	for i, img := range images {

@@ -34,6 +34,7 @@ type Agent struct {
 func New(opts map[string]any) (core.Agent, error) {
 	serveURL, _ := opts["serve_url"].(string)
 	serveURL = strings.TrimRight(serveURL, "/")
+	// Strip trailing slashes so path-join never produces "//submit".
 	if serveURL == "" {
 		return nil, fmt.Errorf("reasonix: serve_url is required")
 	}
@@ -58,6 +59,9 @@ func New(opts map[string]any) (core.Agent, error) {
 
 func normalizeMode(opts map[string]any) string {
 	raw, _ := opts["mode"].(string)
+	// "auto" and "force" are legacy aliases from reasonix serve's CLI flags;
+	// both map to "yolo" (no interactive approval). All unrecognised values
+	// fall back to "default" (interactive approval per tool).
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "yolo", "auto", "force":
 		return "yolo"
