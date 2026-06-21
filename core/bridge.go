@@ -1401,6 +1401,15 @@ func (bs *BridgeServer) BroadcastUsage(usage TurnUsage) {
 	if usage.TurnID != "" {
 		msg["turn_id"] = usage.TurnID
 	}
+	if usage.UserID != "" {
+		msg["user_id"] = usage.UserID
+	}
+	if usage.UserName != "" {
+		msg["user_name"] = usage.UserName
+	}
+	if usage.ChatName != "" {
+		msg["chat_name"] = usage.ChatName
+	}
 
 	bs.mu.RLock()
 	observers := make([]*bridgeAdapter, 0, len(bs.observers))

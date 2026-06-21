@@ -33,6 +33,9 @@ type TurnUsage struct {
 	Platform                 string `json:"platform"`
 	AgentType                string `json:"agent_type,omitempty"`
 	TurnID                   string `json:"turn_id,omitempty"`
+	UserID                   string `json:"user_id,omitempty"`
+	UserName                 string `json:"user_name,omitempty"`
+	ChatName                 string `json:"chat_name,omitempty"`
 	InputTokens              int    `json:"input_tokens"`
 	OutputTokens             int    `json:"output_tokens"`
 	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
