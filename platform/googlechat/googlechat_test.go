@@ -10,11 +10,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// testServiceAccountJSON is a syntactically valid service-account JSON whose
+// private_key is intentionally invalid. JWTConfigFromJSON accepts it (key
+// parsing is lazy), so New() succeeds — useful for testing config paths beyond
+// credential loading.
+const testServiceAccountJSON = `{"type":"service_account","project_id":"p","private_key_id":"k","private_key":"not-a-key","client_email":"x@p.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}`
 
 // newTestPlatform builds a Platform directly so tests can exercise parsing and
 // routing without a Pub/Sub client or service-account client.
@@ -590,5 +598,80 @@ func TestSendFile_Defaults(t *testing.T) {
 	}
 	if gotMIME != "application/octet-stream" {
 		t.Errorf("MIME = %q, want application/octet-stream", gotMIME)
+	}
+}
+
+func TestNew_MissingSubscription(t *testing.T) {
+	for _, opts := range []map[string]any{
+		{},
+		{"subscription": ""},
+		{"subscription": "   "},
+	} {
+		_, err := New(opts)
+		if err == nil || !strings.Contains(err.Error(), "subscription is required") {
+			t.Errorf("opts %v: want subscription required error, got %v", opts, err)
+		}
+	}
+}
+
+func TestNew_MalformedSubscription(t *testing.T) {
+	_, err := New(map[string]any{"subscription": "bad/format"})
+	if err == nil {
+		t.Error("expected error for malformed subscription")
+	}
+}
+
+func TestNew_MissingCredentialsFile(t *testing.T) {
+	for _, opts := range []map[string]any{
+		{"subscription": "projects/p/subscriptions/s"},
+		{"subscription": "projects/p/subscriptions/s", "credentials_file": ""},
+		{"subscription": "projects/p/subscriptions/s", "credentials_file": "   "},
+	} {
+		_, err := New(opts)
+		if err == nil || !strings.Contains(err.Error(), "credentials_file is required") {
+			t.Errorf("opts %v: want credentials_file required error, got %v", opts, err)
+		}
+	}
+}
+
+func TestNew_UnreadableCredentialsFile(t *testing.T) {
+	_, err := New(map[string]any{
+		"subscription":     "projects/p/subscriptions/s",
+		"credentials_file": filepath.Join(t.TempDir(), "nonexistent.json"),
+	})
+	if err == nil {
+		t.Error("expected error for non-existent credentials file")
+	}
+}
+
+func TestNew_InvalidCredentialsFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "key.json")
+	if err := os.WriteFile(f, []byte("not valid json"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	_, err := New(map[string]any{
+		"subscription":     "projects/p/subscriptions/s",
+		"credentials_file": f,
+	})
+	if err == nil || !strings.Contains(err.Error(), "parse service account credentials") {
+		t.Errorf("want parse credentials error, got %v", err)
+	}
+}
+
+func TestNew_UnknownSessionScope(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "key.json")
+	if err := os.WriteFile(f, []byte(testServiceAccountJSON), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	p, err := New(map[string]any{
+		"subscription":     "projects/p/subscriptions/s",
+		"credentials_file": f,
+		"session_scope":    "invalid_scope",
+	})
+	if err != nil {
+		t.Fatalf("New() with unknown session_scope should succeed, got: %v", err)
+	}
+	if got := p.(*Platform).sessionScope; got != "space" {
+		t.Errorf("sessionScope = %q, want space", got)
 	}
 }
