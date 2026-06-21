@@ -38,18 +38,17 @@ func registerObserverAdapter(t *testing.T, conn *websocket.Conn, platform string
 }
 
 // TestBridge_UsageObserver covers all three connection roles at the bridge
-// layer (the engine side is a best-effort type-assertion that delegates to
-// BridgePlatform.EmitUsage, exercised directly here):
+// layer (the engine side is a best-effort broadcast via BroadcastUsage,
+// exercised directly here):
 //   - a pure observer (no platform) is acked as observer and never becomes an
 //     adapter;
 //   - an adapter may additionally subscribe with observe_usage:true and keep
 //     full send/receive while also receiving usage (additive);
-//   - EmitUsage fans a usage-only event to every subscriber;
+//   - BroadcastUsage fans a usage-only event to every subscriber;
 //   - the event carries token counts but NO message content;
 //   - a plain platform adapter (no observe_usage) never receives it.
 func TestBridge_UsageObserver(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
-	bp := bs.NewPlatform("test-proj")
 
 	// Two pure observers (no platform).
 	obs1 := dialWS(t, wsURL, nil)
@@ -89,11 +88,12 @@ func TestBridge_UsageObserver(t *testing.T) {
 		t.Fatalf("ConnectedAdapters = %v, want both feishu and hermit", adapters)
 	}
 
-	// Same EmitUsage call the engine makes at turn-complete.
-	bp.EmitUsage(TurnUsage{
+	// Same BroadcastUsage call the engine makes at turn-complete.
+	bs.BroadcastUsage(TurnUsage{
 		SessionKey:               "feishu:chat-1:user-1",
 		Platform:                 "feishu",
 		AgentType:                "claudecode",
+		TurnID:                   "om_turn_1",
 		InputTokens:              932,
 		OutputTokens:             587,
 		CacheReadInputTokens:     126016,
@@ -123,6 +123,9 @@ func TestBridge_UsageObserver(t *testing.T) {
 		}
 		if msg["agent_type"] != "claudecode" {
 			t.Fatalf("subscriber%d: agent_type = %v", i+1, msg["agent_type"])
+		}
+		if msg["turn_id"] != "om_turn_1" {
+			t.Fatalf("subscriber%d: turn_id = %v, want om_turn_1", i+1, msg["turn_id"])
 		}
 		if got := jsonInt(msg, "input_tokens"); got != 932 {
 			t.Fatalf("subscriber%d: input_tokens = %d, want 932", i+1, got)

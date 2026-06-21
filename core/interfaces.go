@@ -32,19 +32,11 @@ type TurnUsage struct {
 	SessionKey               string `json:"session_key"`
 	Platform                 string `json:"platform"`
 	AgentType                string `json:"agent_type,omitempty"`
+	TurnID                   string `json:"turn_id,omitempty"`
 	InputTokens              int    `json:"input_tokens"`
 	OutputTokens             int    `json:"output_tokens"`
 	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int    `json:"cache_creation_input_tokens"`
-}
-
-// UsageEmitter is an optional interface for platforms that forward per-turn
-// token usage to external observers such as dashboards or telemetry collectors.
-// Only platforms wired to an observer bus (e.g. the WebSocket bridge) implement
-// it; others simply ignore usage reporting. The engine calls it best-effort
-// after each turn completes and must never depend on delivery.
-type UsageEmitter interface {
-	EmitUsage(usage TurnUsage)
 }
 
 // MessageRecallDetector is an optional interface for platforms that can check

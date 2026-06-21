@@ -173,6 +173,12 @@ func NewBridgeServerInsecure(port int, token, path string, corsOrigins []string)
 	return newBridgeServer(port, token, path, corsOrigins, true)
 }
 
+// globalBridgeServer is the process-wide bridge instance, set by newBridgeServer.
+// Exactly one bridge server is created at startup and shared across all engines,
+// so the engine can read this to broadcast per-turn usage to observers for EVERY
+// turn — not just the ones routed through a bridge-backed platform.
+var globalBridgeServer *BridgeServer
+
 func newBridgeServer(port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
 	if port <= 0 {
 		port = 9810
@@ -194,7 +200,7 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		slog.Warn("bridge: running in INSECURE mode without authentication - only use for local development!")
 	}
 
-	return &BridgeServer{
+	bs := &BridgeServer{
 		port:        port,
 		token:       token,
 		path:        path,
@@ -204,6 +210,8 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		observers:   make(map[*bridgeAdapter]struct{}),
 		engines:     make(map[string]*bridgeEngineRef),
 	}
+	globalBridgeServer = bs
+	return bs
 }
 
 // NewPlatform creates a BridgePlatform for a specific project engine.
@@ -355,26 +363,6 @@ func (bp *BridgePlatform) Reply(ctx context.Context, replyCtx any, content strin
 
 func (bp *BridgePlatform) Send(ctx context.Context, replyCtx any, content string) error {
 	return bp.Reply(ctx, replyCtx, content)
-}
-
-// EmitUsage implements UsageEmitter. It builds a usage-only event (no content)
-// and fans it out to all registered usage observers. Best-effort by contract:
-// callers must never depend on delivery.
-func (bp *BridgePlatform) EmitUsage(usage TurnUsage) {
-	msg := map[string]any{
-		"type":                        "usage",
-		"session_key":                 usage.SessionKey,
-		"platform":                    usage.Platform,
-		"input_tokens":                usage.InputTokens,
-		"output_tokens":               usage.OutputTokens,
-		"cache_read_input_tokens":     usage.CacheReadInputTokens,
-		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
-		"ts":                          time.Now().Unix(),
-	}
-	if usage.AgentType != "" {
-		msg["agent_type"] = usage.AgentType
-	}
-	bp.server.broadcastUsage(msg)
 }
 
 func (bp *BridgePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
@@ -1390,11 +1378,30 @@ func (bs *BridgeServer) sendToAdapter(platform string, msg map[string]any) error
 	return writeJSON(a.conn, &a.writeMu, msg)
 }
 
-// broadcastUsage fans a usage-only event out to every registered usage observer.
-// The event carries no message content. Observers are snapshotted under the
-// read lock and written outside it (mirroring sendToAdapter) so a slow or dead
+// BroadcastUsage fans a best-effort usage-only event (token counts, NO message
+// content) to every registered usage observer. It is called by the engine at
+// turn-complete for EVERY turn regardless of which IM platform ran it, via the
+// package-level globalBridgeServer. Observers are snapshotted under the read
+// lock and written outside it (mirroring sendToAdapter) so a slow or dead
 // observer connection cannot block registration or other observers.
-func (bs *BridgeServer) broadcastUsage(msg map[string]any) {
+func (bs *BridgeServer) BroadcastUsage(usage TurnUsage) {
+	msg := map[string]any{
+		"type":                        "usage",
+		"session_key":                 usage.SessionKey,
+		"platform":                    usage.Platform,
+		"input_tokens":                usage.InputTokens,
+		"output_tokens":               usage.OutputTokens,
+		"cache_read_input_tokens":     usage.CacheReadInputTokens,
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+		"ts":                          time.Now().Unix(),
+	}
+	if usage.AgentType != "" {
+		msg["agent_type"] = usage.AgentType
+	}
+	if usage.TurnID != "" {
+		msg["turn_id"] = usage.TurnID
+	}
+
 	bs.mu.RLock()
 	observers := make([]*bridgeAdapter, 0, len(bs.observers))
 	for obs := range bs.observers {

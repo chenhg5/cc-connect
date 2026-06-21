@@ -5175,13 +5175,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"silent", isSilent,
 			)
 			// Best-effort: report this turn's token usage to external observers
-			// (dashboards/telemetry). Only bridge-backed platforms implement
-			// UsageEmitter; failures here must never affect the turn.
-			if emitter, ok := state.platform.(UsageEmitter); ok {
-				emitter.EmitUsage(TurnUsage{
+			// (dashboards/telemetry). The bridge server is the process-wide
+			// singleton, so broadcast for EVERY turn regardless of which IM
+			// platform ran it. Failures here must never affect the turn.
+			if globalBridgeServer != nil {
+				globalBridgeServer.BroadcastUsage(TurnUsage{
 					SessionKey:               sessionKey,
 					Platform:                 state.platform.Name(),
 					AgentType:                e.AgentTypeName(),
+					TurnID:                   msgID,
 					InputTokens:              event.InputTokens,
 					OutputTokens:             event.OutputTokens,
 					CacheReadInputTokens:     event.CacheReadInputTokens,
