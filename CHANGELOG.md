@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+### Added
+- **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1341).
+
 ### Fixed
 - **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
+- **Feishu: tighter `@` mention detection in `SendWithStatusFooter` / `buildReplyContent`** — a bare `@` inside an email address, URL, or escaped character no longer false-positives as a mention. Mention detection now checks for the resolved `<at user_id="...">` tag instead of a substring match, so card rendering (and the notation-style status footer) is preserved for content that merely contains `@`. Real `@mentions` still force `MsgTypeText` so Feishu fires the mention event (#1341).
 
 ## v1.3.3 (2026-06-15)
 

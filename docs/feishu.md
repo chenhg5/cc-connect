@@ -366,6 +366,70 @@ AI 输出中包含 `@某人` 时，发送到飞书前会自动匹配并替换。
 
 ---
 
+## 机器人间 @ 通知（`mention_map`）
+
+`resolve_mentions` 通过匹配**群成员显示名**来解析 `@name`，但当目标是**另一个机器人 / Agent**（而非真人成员）时，机器人不一定出现在群成员列表中，名字匹配会失败。
+
+`mention_map` 选项用于这种场景：手动把「显示名」映射到机器人的 `open_id`，让 cc-connect 直接生成原生飞书 `<at user_id="...">` 标签，触发真正的 @ 通知。
+
+### 配置
+
+```toml
+[projects.platforms.options]
+resolve_mentions = true                       # mention_map 依赖 resolve_mentions = true
+mention_map = { BOT-B = "ou_bot_b_open_id", BOT-A = "ou_bot_a_open_id" }
+```
+
+> `mention_map` 与 `resolve_mentions` 是叠加关系，并非二选一：
+> - `resolve_mentions` 负责按群成员显示名匹配（覆盖普通用户）
+> - `mention_map` 负责显式 open_id 映射（覆盖不在群成员列表里的机器人）
+> - 当同一个 `@name` 两者都能匹配时，**`mention_map` 优先级更高**，确保显式配置不会被群成员匹配覆盖。
+
+### 使用示例
+
+Agent 输出 `@BOT-B 请复核巡检报告` 时，cc-connect 在发送到飞书前会把它替换为：
+
+```
+<at user_id="ou_bot_b_open_id">BOT-B</at> 请复核巡检报告
+```
+
+BOT-B 机器人会收到飞书 @ 事件并被触发。
+
+典型场景：
+
+- **多 Agent 协作**：BOT-A 巡检发现问题 → 在回复里 @BOT-B 触发修复 Agent。
+- **跨 Agent 通知**：长任务（Cron）由一个 Agent 完成后，@另一个 Agent 接力。
+- **@ 机器人触发 Hook**：飞书机器人收到 @ 事件可触发 cc-connect 的会话路由。
+
+### 如何获取机器人 open_id
+
+机器人的 `open_id`（`ou_` 开头）**不是** App ID（`cli_` 开头），两者在飞书里是完全不同的标识符。「凭证与基础信息」页只显示 App ID / App Secret，**不显示** bot 的 `open_id`。
+
+获取方式（按推荐顺序）：
+
+1. **读 cc-connect 启动日志（最简单，适用于自己控制的应用）**
+   cc-connect 启动时会自动调用 `/open-apis/bot/v3/info` 拉取自身 `open_id`，并打印：
+   ```
+   feishu: bot identified open_id=ou_xxxxxxxxxxxxxxxx
+   ```
+   直接复制日志里的值即可。
+
+2. **调用「获取机器人信息」API（`/open-apis/bot/v3/info`）**
+   用任意有效 `tenant_access_token` 发起请求：
+   ```bash
+   curl -H "Authorization: Bearer t-xxxx" https://open.feishu.cn/open-apis/bot/v3/info
+   # 响应：{ "code": 0, "bot": { "open_id": "ou_xxx", ... } }
+   ```
+
+### 注意事项
+
+- `mention_map` 必须配合 `resolve_mentions = true` 才会生效；单独配置 `mention_map` 不会触发解析。
+- `@name` 必须与 `mention_map` 的 key 完全一致（区分大小写）。
+- 飞书机器人的 `open_id` 是**应用级别**的，与群聊无关；同一个机器人在不同群的 `open_id` 一致。
+- 被 @ 的机器人需要在**目标群里**，且该群已开启机器人能力，否则飞书不会派发 @ 事件。
+
+---
+
 ## 常见问题
 
 ### Q: 长连接和 Webhook 有什么区别？

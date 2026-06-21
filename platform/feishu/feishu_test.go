@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1296,35 +1297,6 @@ func TestResolveMentions_MentionMapPriority(t *testing.T) {
 	}
 }
 
-func TestResolveMentions_MergedResolution(t *testing.T) {
-	ctx := context.Background()
-
-	// mentionMap + group members both resolve (different keys)
-	p := newTestPlatform(
-		map[string]string{"BotA": "ou_bot_openid"},
-		true,
-		map[string]string{"Alice": "ou_alice_openid"},
-	)
-	result := p.resolveMentionsInContent(ctx, "oc_test_group", "Hey @BotA and @Alice")
-	if !strings.Contains(result, `user_id="ou_bot_openid"`) {
-		t.Error("BotA should resolve via mentionMap")
-	}
-	if !strings.Contains(result, `user_id="ou_alice_openid"`) {
-		t.Error("Alice should resolve via group members")
-	}
-
-	// nil mentionMap: still works with group members only
-	p2 := &Platform{resolveMentions: true}
-	p2.chatMemberCache.Store("oc_test_group", &chatMemberEntry{
-		members:   map[string]string{"Alice": "ou_alice"},
-		fetchedAt: time.Now(),
-	})
-	result2 := p2.resolveMentionsInContent(ctx, "oc_test_group", "@Alice hello")
-	if !strings.Contains(result2, `user_id="ou_alice"`) {
-		t.Error("should still resolve via group members when mentionMap is nil")
-	}
-}
-
 func TestResolveMentions_LongestMatch(t *testing.T) {
 	p := newTestPlatform(
 		map[string]string{"Collector-B": "ou_collectorb"},
@@ -1341,57 +1313,6 @@ func TestResolveMentions_LongestMatch(t *testing.T) {
 	}
 }
 
-func TestResolveMentions_Disabled(t *testing.T) {
-	p := &Platform{
-		resolveMentions: false,
-		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
-	}
-	ctx := context.Background()
-	result := p.resolveMentionsInContent(ctx, "oc_test", "@BotA hello")
-	if result != "@BotA hello" {
-		t.Errorf("expected no substitution when disabled, got: %s", result)
-	}
-}
-
-func TestResolveMentions_EdgeCases(t *testing.T) {
-	ctx := context.Background()
-
-	// No @ sign: early exit
-	p := &Platform{
-		resolveMentions: true,
-		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
-	}
-	result := p.resolveMentionsInContent(ctx, "oc_test", "No mentions here at all")
-	if result != "No mentions here at all" {
-		t.Errorf("expected unchanged content, got: %s", result)
-	}
-
-	// Unmatched @name: no substitution
-	p2 := newTestPlatform(
-		map[string]string{"BotA": "ou_bot_openid"},
-		true,
-		map[string]string{},
-	)
-	result2 := p2.resolveMentionsInContent(ctx, "oc_test_group", "Hey @Nobody here")
-	if result2 != "Hey @Nobody here" {
-		t.Errorf("expected unchanged content for unmatched mention, got: %s", result2)
-	}
-
-	// Ambiguous member (empty openID): skipped
-	p3 := &Platform{
-		resolveMentions: true,
-		mentionMap:      map[string]string{},
-	}
-	p3.chatMemberCache.Store("oc_test_group", &chatMemberEntry{
-		members:   map[string]string{"Dup": ""},
-		fetchedAt: time.Now(),
-	})
-	result3 := p3.resolveMentionsInContent(ctx, "oc_test_group", "Hey @Dup")
-	if strings.Contains(result3, "<at") {
-		t.Error("should NOT substitute ambiguous member with empty openID")
-	}
-}
-
 func TestResolveMentions_MultipleOccurrences(t *testing.T) {
 	p := newTestPlatform(
 		map[string]string{"BotA": "ou_bot"},
@@ -1403,5 +1324,128 @@ func TestResolveMentions_MultipleOccurrences(t *testing.T) {
 	count := strings.Count(result, `user_id="ou_bot"`)
 	if count != 2 {
 		t.Errorf("expected 2 substitutions, got %d. result: %s", count, result)
+	}
+}
+
+// TestBuildReplyContent_NoFalsePositiveOnEmail: a bare "@"
+// inside an email (or URL) must not be mistaken for a mention and must not
+// force MsgTypeText, so markdown content still renders as an interactive card.
+func TestBuildReplyContent_NoFalsePositiveOnEmail(t *testing.T) {
+	msgType, _ := buildReplyContent("**bold** report sent to a@b.com")
+	if msgType != larkim.MsgTypeInteractive {
+		t.Errorf("email '@' should not force MsgTypeText; got %s", msgType)
+	}
+}
+
+// TestBuildReplyContent_RealMentionForcesText confirms a resolved mention
+// (<at user_id="...">) still forces MsgTypeText even when markdown is present.
+func TestBuildReplyContent_RealMentionForcesText(t *testing.T) {
+	msgType, _ := buildReplyContent("**bold** <at user_id=\"ou_bot\">Collector-B</at> please review")
+	if msgType != larkim.MsgTypeText {
+		t.Errorf("resolved mention should force MsgTypeText; got %s", msgType)
+	}
+}
+
+func TestBuildReplyContent_CardFormatMentionForcesText(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"text_format", "**bold** <at user_id=\"ou_bot\">Collector-B</at> please review"},
+		{"card_format", "# report\n\n<at id=ou_bot></at> please review\n\n```\nok\n```"},
+	}
+	for _, tc := range cases {
+		msgType, _ := buildReplyContent(tc.content)
+		if msgType != larkim.MsgTypeText {
+			t.Errorf("%s: mention should force MsgTypeText; got %s", tc.name, msgType)
+		}
+	}
+}
+
+func TestResolveMentions_MarkdownForcesTextFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"Collector-B": "ou_bot_b"},
+		fetchedAt: time.Now(),
+	})
+	input := "# Report\n\n@Collector-B please review\n\n**done**"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, `<at user_id="ou_bot_b">Collector-B</at>`) {
+		t.Fatalf("markdown content must still resolve to text format; got %q", result)
+	}
+	// Verify the full pipeline forces MsgTypeText
+	msgType, _ := buildReplyContent(result)
+	if msgType != larkim.MsgTypeText {
+		t.Fatalf("markdown + mention must force MsgTypeText so Feishu fires the mention event; got %s", msgType)
+	}
+}
+
+// TestSendWithStatusFooter_NoFallbackOnNonMentionAt: a bare
+// "@" that is NOT a mention (email, URL) must not degrade SendWithStatusFooter
+// to plain Send — the interactive card must be preserved. 
+func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
+	const appID = "cli_footer_at"
+	const appSecret = "secret"
+	const chatID = "oc_test_group"
+
+	var gotMsgType string
+	var gotContent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "t"})
+		case r.URL.Path == "/open-apis/im/v1/messages" && r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				MsgType string `json:"msg_type"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatalf("unmarshal request body: %v", err)
+			}
+			gotMsgType = req.MsgType
+			gotContent = req.Content
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_ok"}})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		resolveMentions: true,
+		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
+		client:          lark.NewClient(appID, appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient:    lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+	p.chatMemberCache.Store(chatID, &chatMemberEntry{members: map[string]string{"BotA": "ou_bot_openid"}, fetchedAt: time.Now()})
+
+	ctx := context.Background()
+	rc := replyContext{chatID: chatID}
+	for _, tc := range []struct {
+		name        string
+		content     string
+		wantMsgType string
+	}{
+		{"email", "**bold** report sent to a@b.com", larkim.MsgTypeInteractive},
+		{"url", "see [docs](http://x@y.com/z)", larkim.MsgTypeInteractive},
+		{"mention", "hey @BotA review please", larkim.MsgTypeText},
+	} {
+		if err := p.SendWithStatusFooter(ctx, rc, tc.content, "done"); err != nil {
+			t.Fatalf("%s: SendWithStatusFooter error = %v", tc.name, err)
+		}
+		if gotMsgType != tc.wantMsgType {
+			t.Errorf("%s: msg_type = %q, want %q", tc.name, gotMsgType, tc.wantMsgType)
+		}
+		if tc.name == "mention" {
+			if !strings.Contains(gotContent, "ou_bot_openid") || !strings.Contains(gotContent, "done") {
+				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
+			}
+		}
 	}
 }

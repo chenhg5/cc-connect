@@ -1635,7 +1635,6 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
 
-	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
 	result := content
 	for _, name := range names {
 		pattern := "@" + name
@@ -1646,13 +1645,11 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 		if openID == "" {
 			continue // ambiguous member, skip
 		}
-		var atTag string
-		if useCardFormat {
-			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
-		} else {
-			escapedName := html.EscapeString(name)
-			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
-		}
+		// Always use the MsgTypeText at syntax so Feishu fires a mention
+		// event. The card variant (<at id=...></at>) renders the name but
+		// does NOT notify the target, which defeats bot-to-bot mentions.
+		escapedName := html.EscapeString(name)
+		atTag := fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
@@ -2426,19 +2423,22 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // SendWithStatusFooter implements core.StatusFooterSender: send a reply with
 // the body content followed by a small/dim status-footer block. Always uses
 // the interactive card path so the footer can render with text_size:
-// "notation". Falls back to plain Send when the footer is empty.
+// "notation". Falls back to plain Send when the footer is empty or the content
+// contains a resolved @mention (Feishu only fires mention events for <at> tags
+// inside MsgTypeText, not inside cards).
 func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
-	if strings.TrimSpace(footer) == "" || strings.Contains(content, "<at ") || strings.Contains(content, "@") {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	// Resolve mentions first so we can detect whether a real @mention is
+	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+	if strings.TrimSpace(footer) == "" || strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`) {
 		if strings.TrimSpace(footer) != "" {
 			content += "\n\n" + footer
 		}
 		return p.Send(ctx, rctx, content)
 	}
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
-	}
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
 	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
@@ -2668,24 +2668,14 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
-// predictMsgType returns the message type that buildReplyContent will choose,
-// without actually building the content. Used to select the correct at syntax
-// before building.
-func predictMsgType(content string) string {
-	if !containsMarkdown(content) {
-		return larkim.MsgTypeText
-	}
-	if countMarkdownTables(content) <= maxCardTables {
-		return larkim.MsgTypeInteractive
-	}
-	return larkim.MsgTypePost
-}
-
 func buildReplyContent(content string) (msgType string, body string) {
 	// Feishu does not generate mention events for <at> tags in card/post
-	// messages sent by bots. Force MsgTypeText when @mentions are present
-	// so Feishu recognizes them and notifies the target bot.
-	hasMention := strings.Contains(content, "<at ") || strings.Contains(content, "@")
+	// messages sent by bots. Force MsgTypeText when a real mention is present
+	// (resolved to an <at user_id="..."> or <at id=...> tag) so Feishu
+	// recognizes it and notifies the target bot. Checking the resolved tag
+	// instead of a bare "@" avoids false positives on email addresses, URLs,
+	// and escaped characters.
+	hasMention := strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`)
 	if !containsMarkdown(content) || hasMention {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
