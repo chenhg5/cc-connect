@@ -461,6 +461,7 @@ func (p *Platform) uploadAttachment(ctx context.Context, space, filename, mimeTy
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("googlechat: upload: decode response: %w", err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	if result.AttachmentDataRef.ResourceName == "" {
 		return "", fmt.Errorf("googlechat: upload: empty resourceName in response")
 	}
