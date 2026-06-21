@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"strings"
 	"time"
@@ -39,6 +41,9 @@ const chatBotScope = "https://www.googleapis.com/auth/chat.bot"
 
 // chatAPIBase is the Chat REST API base; a var so tests can build URLs against it.
 var chatAPIBase = "https://chat.googleapis.com/v1/"
+
+// chatUploadBase is the Chat media-upload endpoint base; a var so tests can override it.
+var chatUploadBase = "https://chat.googleapis.com/upload/v1/"
 
 func init() {
 	core.RegisterPlatform("googlechat", New)
@@ -376,6 +381,148 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.post(ctx, rctx, content)
 }
+
+// uploadAttachment uploads raw bytes to the Chat media endpoint using a
+// multipart/related request and returns the attachmentDataRef resource name.
+func (p *Platform) uploadAttachment(ctx context.Context, space, filename, mimeType string, data []byte) (string, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	metaPart, err := mw.CreatePart(textproto.MIMEHeader{"Content-Type": {"application/json; charset=UTF-8"}})
+	if err != nil {
+		return "", fmt.Errorf("googlechat: upload: create metadata part: %w", err)
+	}
+	if err := json.NewEncoder(metaPart).Encode(map[string]string{"filename": filename}); err != nil {
+		return "", fmt.Errorf("googlechat: upload: encode metadata: %w", err)
+	}
+
+	mediaPart, err := mw.CreatePart(textproto.MIMEHeader{"Content-Type": {mimeType}})
+	if err != nil {
+		return "", fmt.Errorf("googlechat: upload: create media part: %w", err)
+	}
+	if _, err := mediaPart.Write(data); err != nil {
+		return "", fmt.Errorf("googlechat: upload: write media: %w", err)
+	}
+	mw.Close()
+
+	uploadURL := chatUploadBase + space + "/attachments:upload?uploadType=multipart"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	if err != nil {
+		return "", fmt.Errorf("googlechat: upload: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+
+	resp, err := p.botClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("googlechat: upload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("googlechat: upload: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var result struct {
+		AttachmentDataRef struct {
+			ResourceName string `json:"resourceName"`
+		} `json:"attachmentDataRef"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("googlechat: upload: decode response: %w", err)
+	}
+	if result.AttachmentDataRef.ResourceName == "" {
+		return "", fmt.Errorf("googlechat: upload: empty resourceName in response")
+	}
+	return result.AttachmentDataRef.ResourceName, nil
+}
+
+// buildAttachmentRequest builds the Chat REST API URL and JSON body to post a
+// message that references an already-uploaded attachment (by resource name).
+// Threading behaviour mirrors buildSendRequest.
+func buildAttachmentRequest(rc replyContext, resourceName string) (string, []byte, error) {
+	body := map[string]any{
+		"attachment": []map[string]any{
+			{"attachmentDataRef": map[string]any{"resourceName": resourceName}},
+		},
+	}
+	url := chatAPIBase + rc.space + "/messages"
+	if rc.thread != "" {
+		body["thread"] = map[string]any{"name": rc.thread}
+		url += "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return "", nil, fmt.Errorf("googlechat: marshal attachment body: %w", err)
+	}
+	return url, b, nil
+}
+
+// postAttachment uploads data then creates a Chat message carrying the
+// attachmentDataRef. Shared by SendImage and SendFile.
+func (p *Platform) postAttachment(ctx context.Context, rc replyContext, filename, mimeType string, data []byte) error {
+	resourceName, err := p.uploadAttachment(ctx, rc.space, filename, mimeType, data)
+	if err != nil {
+		return err
+	}
+	url, body, err := buildAttachmentRequest(rc, resourceName)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("googlechat: attachment message: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.botClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("googlechat: attachment message: send: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("googlechat: attachment message: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// SendImage uploads an image and posts it as a Chat message attachment.
+// Implements core.ImageSender.
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("googlechat: SendImage: invalid reply context type %T", rctx)
+	}
+	name := img.FileName
+	if name == "" {
+		name = "image.png"
+	}
+	mimeType := img.MimeType
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	return p.postAttachment(ctx, rc, name, mimeType, img.Data)
+}
+
+// SendFile uploads a file and posts it as a Chat message attachment.
+// Implements core.FileSender.
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("googlechat: SendFile: invalid reply context type %T", rctx)
+	}
+	name := file.FileName
+	if name == "" {
+		name = "attachment"
+	}
+	mimeType := file.MimeType
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return p.postAttachment(ctx, rc, name, mimeType, file.Data)
+}
+
+var _ core.ImageSender = (*Platform)(nil)
+var _ core.FileSender = (*Platform)(nil)
 
 func (p *Platform) Stop() error {
 	if p.cancel != nil {

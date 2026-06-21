@@ -172,6 +172,63 @@ func TestReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestBuildAttachmentRequest(t *testing.T) {
+	// Threaded reply: URL carries reply option, body carries thread + attachment.
+	u, body, err := buildAttachmentRequest(replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}, "ref/123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(u, chatAPIBase+"spaces/A/messages") {
+		t.Errorf("url = %q, want prefix %q", u, chatAPIBase+"spaces/A/messages")
+	}
+	parsed, _ := url.Parse(u)
+	if parsed.Query().Get("messageReplyOption") != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" {
+		t.Errorf("url = %q, want messageReplyOption query", u)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatal(err)
+	}
+	attachments, _ := b["attachment"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("body attachment count = %d, want 1", len(attachments))
+	}
+	att, _ := attachments[0].(map[string]any)
+	ref, _ := att["attachmentDataRef"].(map[string]any)
+	if ref["resourceName"] != "ref/123" {
+		t.Errorf("attachmentDataRef.resourceName = %v, want ref/123", ref["resourceName"])
+	}
+	thread, _ := b["thread"].(map[string]any)
+	if thread["name"] != "spaces/A/threads/T" {
+		t.Errorf("body thread = %+v", b["thread"])
+	}
+
+	// No thread: no reply option, no thread in body.
+	u2, body2, err := buildAttachmentRequest(replyContext{space: "spaces/A"}, "ref/456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(u2, "messageReplyOption") {
+		t.Errorf("unexpected messageReplyOption for top-level: %q", u2)
+	}
+	var b2 map[string]any
+	if err := json.Unmarshal(body2, &b2); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b2["thread"]; ok {
+		t.Errorf("unexpected thread for top-level reply: %+v", b2)
+	}
+	attachments2, _ := b2["attachment"].([]any)
+	if len(attachments2) != 1 {
+		t.Fatalf("body attachment count = %d, want 1", len(attachments2))
+	}
+	att2, _ := attachments2[0].(map[string]any)
+	ref2, _ := att2["attachmentDataRef"].(map[string]any)
+	if ref2["resourceName"] != "ref/456" {
+		t.Errorf("attachmentDataRef.resourceName = %v, want ref/456", ref2["resourceName"])
+	}
+}
+
 func TestBuildSendRequest(t *testing.T) {
 	// Threaded reply: URL carries the reply option, body carries the thread.
 	u, body, err := buildSendRequest(replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}, "hi")
