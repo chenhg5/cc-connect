@@ -156,6 +156,19 @@ func TestReconstructReplyCtx(t *testing.T) {
 	}
 }
 
+func TestFormattingInstructions(t *testing.T) {
+	p := newTestPlatform("*", "space")
+	s := p.FormattingInstructions()
+	if s == "" {
+		t.Fatal("FormattingInstructions() returned empty string")
+	}
+	for _, want := range []string{"*bold*", "_italic_", "##", "[text](url)", ">text", "|display text"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("FormattingInstructions() missing expected substring %q", want)
+		}
+	}
+}
+
 func TestBuildSendRequest(t *testing.T) {
 	// Threaded reply: URL carries the reply option, body carries the thread.
 	u, body, err := buildSendRequest(replyContext{space: "spaces/A", thread: "spaces/A/threads/T"}, "hi")
