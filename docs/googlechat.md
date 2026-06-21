@@ -156,9 +156,6 @@ credentials_file = "/Users/you/.config/cc-connect/cc-connect-bot-key.json"
 allow_from = "*"
 # "space" (default) | "thread" | "user"
 session_scope = "space"
-# Optional: only handle messages starting with this prefix (e.g. "claude:").
-# Leave empty to handle the whole message.
-# trigger = ""
 ```
 
 ### Options reference
@@ -169,7 +166,6 @@ session_scope = "space"
 | `credentials_file` | ✅ | Service-account JSON key, used to pull events and reply (`chat.bot`) |
 | `allow_from` | — | Comma-separated allowed sender IDs; `*` = all |
 | `session_scope` | — | `space` (default) / `thread` / `user` |
-| `trigger` | — | If set, only messages starting with the prefix are handled (prefix stripped) |
 
 ---
 

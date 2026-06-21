@@ -9,8 +9,8 @@ import (
 
 // newTestPlatform builds a Platform directly so tests can exercise parsing and
 // routing without a Pub/Sub client or service-account client.
-func newTestPlatform(allowFrom, trigger, scope string) *Platform {
-	return &Platform{allowFrom: allowFrom, trigger: trigger, sessionScope: scope}
+func newTestPlatform(allowFrom, scope string) *Platform {
+	return &Platform{allowFrom: allowFrom, sessionScope: scope}
 }
 
 // wrapEvent renders a Chat-app event as the Pub/Sub message payload the Chat app
@@ -41,7 +41,7 @@ func humanMessage(text, argumentText string) map[string]any {
 }
 
 func TestParseEvent_MentionMode(t *testing.T) {
-	p := newTestPlatform("*", "", "space")
+	p := newTestPlatform("*", "space")
 	line := messageEvent(t, humanMessage("@Claude summarize this", "summarize this"))
 
 	msg, ok := p.parseEvent(line)
@@ -64,7 +64,7 @@ func TestParseEvent_MentionMode(t *testing.T) {
 }
 
 func TestParseEvent_MentionModeFallsBackToText(t *testing.T) {
-	p := newTestPlatform("*", "", "space")
+	p := newTestPlatform("*", "space")
 	msg, ok := p.parseEvent(messageEvent(t, humanMessage("hello there", "")))
 	if !ok {
 		t.Fatal("expected message to be handled")
@@ -74,24 +74,8 @@ func TestParseEvent_MentionModeFallsBackToText(t *testing.T) {
 	}
 }
 
-func TestParseEvent_TriggerMode(t *testing.T) {
-	p := newTestPlatform("*", "claude:", "space")
-
-	msg, ok := p.parseEvent(messageEvent(t, humanMessage("claude: do the thing", "")))
-	if !ok {
-		t.Fatal("expected triggered message to be handled")
-	}
-	if msg.Content != "do the thing" {
-		t.Errorf("Content = %q, want trigger stripped", msg.Content)
-	}
-
-	if _, ok := p.parseEvent(messageEvent(t, humanMessage("no trigger here", ""))); ok {
-		t.Error("expected message without trigger to be ignored")
-	}
-}
-
 func TestParseEvent_SkipsNonHuman(t *testing.T) {
-	p := newTestPlatform("*", "", "space")
+	p := newTestPlatform("*", "space")
 	data := humanMessage("hi", "hi")
 	data["sender"] = map[string]any{"name": "users/bot", "type": "BOT"}
 
@@ -101,26 +85,26 @@ func TestParseEvent_SkipsNonHuman(t *testing.T) {
 }
 
 func TestParseEvent_IgnoresNonMessageType(t *testing.T) {
-	p := newTestPlatform("*", "", "space")
+	p := newTestPlatform("*", "space")
 	if _, ok := p.parseEvent(wrapEvent(t, "ADDED_TO_SPACE", humanMessage("hi", "hi"))); ok {
 		t.Error("expected non-MESSAGE event to be ignored")
 	}
 }
 
 func TestParseEvent_AllowFromEnforced(t *testing.T) {
-	p := newTestPlatform("users/999", "", "space")
+	p := newTestPlatform("users/999", "space")
 	if _, ok := p.parseEvent(messageEvent(t, humanMessage("hi", "hi"))); ok {
 		t.Error("expected unauthorized sender to be ignored")
 	}
 
-	p2 := newTestPlatform("users/123", "", "space")
+	p2 := newTestPlatform("users/123", "space")
 	if _, ok := p2.parseEvent(messageEvent(t, humanMessage("hi", "hi"))); !ok {
 		t.Error("expected authorized sender to be handled")
 	}
 }
 
 func TestParseEvent_DropsOldMessage(t *testing.T) {
-	p := newTestPlatform("*", "", "space")
+	p := newTestPlatform("*", "space")
 	data := humanMessage("hi", "hi")
 	data["createTime"] = "2000-01-01T00:00:00Z"
 	if _, ok := p.parseEvent(messageEvent(t, data)); ok {
@@ -138,7 +122,7 @@ func TestBuildSessionKey(t *testing.T) {
 		{"user", "spaces/A", "users/1", "spaces/A/threads/T", "googlechat:spaces/A:users/1"},
 	}
 	for _, c := range cases {
-		p := newTestPlatform("*", "", c.scope)
+		p := newTestPlatform("*", c.scope)
 		if got := p.buildSessionKey(c.space, c.user, c.thread); got != c.want {
 			t.Errorf("scope=%s buildSessionKey = %q, want %q", c.scope, got, c.want)
 		}
@@ -146,7 +130,7 @@ func TestBuildSessionKey(t *testing.T) {
 }
 
 func TestReconstructReplyCtx(t *testing.T) {
-	p := newTestPlatform("*", "", "space")
+	p := newTestPlatform("*", "space")
 	cases := []struct {
 		key           string
 		space, thread string

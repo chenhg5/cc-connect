@@ -37,6 +37,13 @@ import (
 // chatBotScope authorizes posting messages as the Chat app (app auth).
 const chatBotScope = "https://www.googleapis.com/auth/chat.bot"
 
+// sessionKeyPrefix and threadSep are used by both buildSessionKey and
+// ReconstructReplyCtx so the encode/decode pair stays in sync.
+const (
+	sessionKeyPrefix = "googlechat:"
+	threadSep        = ":t:"
+)
+
 // chatAPIBase is the Chat REST API base; a var so tests can build URLs against it.
 var chatAPIBase = "https://chat.googleapis.com/v1/"
 
@@ -56,7 +63,6 @@ type Platform struct {
 	projectID       string // parsed from subscription, for the Pub/Sub client
 	credentialsFile string // service-account key, used for both receive and send
 	allowFrom       string
-	trigger         string
 	sessionScope    string // "space" (default) | "thread" | "user"
 
 	botClient *http.Client // service-account authed client for sending
@@ -94,7 +100,6 @@ func New(opts map[string]any) (core.Platform, error) {
 	botClient := conf.Client(context.Background())
 
 	allowFrom, _ := opts["allow_from"].(string)
-	trigger, _ := opts["trigger"].(string)
 
 	core.CheckAllowFrom("googlechat", allowFrom)
 
@@ -103,7 +108,6 @@ func New(opts map[string]any) (core.Platform, error) {
 		projectID:       projectID,
 		credentialsFile: credentialsFile,
 		allowFrom:       allowFrom,
-		trigger:         trigger,
 		sessionScope:    normalizeSessionScope(opts["session_scope"]),
 		botClient:       botClient,
 	}, nil
@@ -131,6 +135,7 @@ func normalizeSessionScope(raw any) string {
 	case "space", "":
 		return "space"
 	default:
+		slog.Warn("googlechat: unknown session_scope, using \"space\"", "value", s)
 		return "space"
 	}
 }
@@ -244,7 +249,7 @@ func (p *Platform) parseEvent(data []byte) (*core.Message, bool) {
 		return nil, false
 	}
 
-	content, ok := p.extractContent(m)
+	content, ok := extractContent(m)
 	if !ok {
 		return nil, false
 	}
@@ -263,19 +268,9 @@ func (p *Platform) parseEvent(data []byte) (*core.Message, bool) {
 	}, true
 }
 
-// extractContent returns the prompt text for a message. With a trigger word
-// configured, only messages starting with it are handled and the prefix is
-// stripped. Otherwise argumentText is used, which Google already strips of the
-// @mention markup, falling back to text.
-func (p *Platform) extractContent(m chatAppMessage) (string, bool) {
-	if t := strings.TrimSpace(p.trigger); t != "" {
-		text := strings.TrimSpace(m.Text)
-		if !strings.HasPrefix(text, t) {
-			return "", false
-		}
-		content := strings.TrimSpace(strings.TrimPrefix(text, t))
-		return content, content != ""
-	}
+// extractContent returns the prompt text for a message. argumentText is used
+// (Google strips the @mention markup from it), falling back to text.
+func extractContent(m chatAppMessage) (string, bool) {
 	content := strings.TrimSpace(m.ArgumentText)
 	if content == "" {
 		content = strings.TrimSpace(m.Text)
@@ -293,13 +288,13 @@ func (p *Platform) buildSessionKey(space, user, thread string) string {
 	switch p.sessionScope {
 	case "thread":
 		if thread != "" {
-			return fmt.Sprintf("googlechat:%s:t:%s", space, thread)
+			return sessionKeyPrefix + space + threadSep + thread
 		}
-		return "googlechat:" + space
+		return sessionKeyPrefix + space
 	case "user":
-		return fmt.Sprintf("googlechat:%s:%s", space, user)
+		return sessionKeyPrefix + space + ":" + user
 	default:
-		return "googlechat:" + space
+		return sessionKeyPrefix + space
 	}
 }
 
@@ -308,12 +303,12 @@ func (p *Platform) buildSessionKey(space, user, thread string) string {
 // thread. Implements core.ReplyContextReconstructor.
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// googlechat:<space>  |  googlechat:<space>:t:<thread>  |  googlechat:<space>:<user>
-	rest, ok := strings.CutPrefix(sessionKey, "googlechat:")
+	rest, ok := strings.CutPrefix(sessionKey, sessionKeyPrefix)
 	if !ok {
 		return nil, fmt.Errorf("googlechat: invalid session key %q", sessionKey)
 	}
-	if idx := strings.Index(rest, ":t:"); idx != -1 {
-		return replyContext{space: rest[:idx], thread: rest[idx+3:]}, nil
+	if idx := strings.Index(rest, threadSep); idx != -1 {
+		return replyContext{space: rest[:idx], thread: rest[idx+len(threadSep):]}, nil
 	}
 	// User-scoped keys append ":<user>" where user is "users/<id>"; strip a
 	// trailing "users/..." segment to recover the bare space.
