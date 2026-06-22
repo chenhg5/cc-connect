@@ -26,6 +26,8 @@ func ParseCmdOpts(opts map[string]any, defaultBin string) (cmd string, extraArgs
 
 	if v, ok := opts["cli_path"].(string); ok && strings.TrimSpace(v) != "" {
 		slog.Warn("DEPRECATED: 'cli_path' is deprecated, use 'cmd' instead",
+			"deprecated_key", "cli_path",
+			"new_key", "cmd",
 			"value", v)
 		parts := strings.Fields(v)
 		return parts[0], parts[1:]
@@ -33,6 +35,8 @@ func ParseCmdOpts(opts map[string]any, defaultBin string) (cmd string, extraArgs
 
 	if v, ok := opts["command"].(string); ok && strings.TrimSpace(v) != "" {
 		slog.Warn("DEPRECATED: 'command' is deprecated, use 'cmd' instead",
+			"deprecated_key", "command",
+			"new_key", "cmd",
 			"value", v)
 		parts := strings.Fields(v)
 		return parts[0], parts[1:]

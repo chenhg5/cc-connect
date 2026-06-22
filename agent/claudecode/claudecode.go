@@ -134,6 +134,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	if cmdArgsFlag == "" {
 		if v, ok := opts["cli_args_flag"].(string); ok && v != "" {
 			slog.Warn("DEPRECATED: 'cli_args_flag' is deprecated, use 'cmd_args_flag' instead",
+				"deprecated_key", "cli_args_flag",
+				"new_key", "cmd_args_flag",
 				"value", v)
 			cmdArgsFlag = v
 		}
