@@ -405,6 +405,17 @@ type AgentSession interface {
 	Close() error
 }
 
+// UnsolicitedEventProducer is optionally implemented by sessions that need to
+// actively subscribe to an adapter-specific event source while no foreground
+// user turn is running.
+//
+// StartUnsolicitedEvents must return quickly. Any goroutines it starts should
+// emit into Events(), stop when ctx is cancelled, and avoid emitting after
+// cancellation.
+type UnsolicitedEventProducer interface {
+	StartUnsolicitedEvents(ctx context.Context) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

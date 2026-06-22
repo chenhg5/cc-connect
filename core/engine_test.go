@@ -13307,6 +13307,92 @@ func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []
 	}
 }
 
+type unsolicitedProducerTestSession struct {
+	*controllableAgentSession
+	started chan context.Context
+	err     error
+}
+
+func (s *unsolicitedProducerTestSession) StartUnsolicitedEvents(ctx context.Context) error {
+	select {
+	case s.started <- ctx:
+	default:
+	}
+	return s.err
+}
+
+func TestStartUnsolicitedReaderStartsOptionalProducer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	base := newControllableSession("unsol-producer")
+	sess := &unsolicitedProducerTestSession{
+		controllableAgentSession: base,
+		started:                  make(chan context.Context, 1),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	sessionKey := "test:producer:u1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, e.sessions, sessionKey, "")
+
+	var producerCtx context.Context
+	select {
+	case producerCtx = <-sess.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartUnsolicitedEvents was not called")
+	}
+
+	e.stopUnsolicitedReader(state)
+	select {
+	case <-producerCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("producer context was not cancelled when unsolicited reader stopped")
+	}
+}
+
+func TestStartUnsolicitedReaderProducerErrorDoesNotBlockReader(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	base := newControllableSession("unsol-producer-error")
+	sess := &unsolicitedProducerTestSession{
+		controllableAgentSession: base,
+		started:                  make(chan context.Context, 1),
+		err:                      errors.New("producer unavailable"),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	sessionKey := "test:producer-error:u1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+
+	e.startUnsolicitedReader(state, session, e.sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	select {
+	case <-sess.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartUnsolicitedEvents was not called")
+	}
+
+	sess.events <- Event{Type: EventResult, Content: "producer error did not block reader", Done: true}
+	sent := waitForPlatformSend(p, 1, 5*time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected unsolicited reader to continue after producer startup error")
+	}
+}
+
 // TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
 // goroutine relays EventResult content to the platform.
 func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {

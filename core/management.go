@@ -25,6 +25,8 @@ type ProjectSettingsUpdate struct {
 	WorkDir              *string
 	Mode                 *string
 	AgentType            *string
+	AttachServer         *bool
+	AttachServerPort     *int
 	ShowContextIndicator *bool
 	ShowWorkdirIndicator *bool
 	ReplyFooter          *bool
@@ -145,10 +147,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -716,6 +718,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			WorkDir              *string           `json:"work_dir"`
 			Mode                 *string           `json:"mode"`
 			AgentType            *string           `json:"agent_type"`
+			AttachServer         *bool             `json:"attach_server"`
+			AttachServerPort     *int              `json:"attach_server_port"`
 			ShowContextIndicator *bool             `json:"show_context_indicator"`
 			ShowWorkdirIndicator *bool             `json:"show_workdir_indicator"`
 			ReplyFooter          *bool             `json:"reply_footer"`
@@ -786,6 +790,9 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 			restartRequired = true
 		}
+		if body.AttachServer != nil || body.AttachServerPort != nil {
+			restartRequired = true
+		}
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
@@ -795,6 +802,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				WorkDir:              body.WorkDir,
 				Mode:                 body.Mode,
 				AgentType:            body.AgentType,
+				AttachServer:         body.AttachServer,
+				AttachServerPort:     body.AttachServerPort,
 				ShowContextIndicator: body.ShowContextIndicator,
 				ShowWorkdirIndicator: body.ShowWorkdirIndicator,
 				ReplyFooter:          body.ReplyFooter,
@@ -1905,10 +1914,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

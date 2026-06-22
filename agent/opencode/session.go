@@ -30,29 +30,46 @@ type opencodeSession struct {
 	mode              string
 	agentName         string
 	extraEnv          []string
+	attachURL         string
 	events            chan core.Event
 	chatID            atomic.Value // stores string — OpenCode session ID
 	ctx               context.Context
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
+	sendMu            sync.Mutex
+	sendCancel        context.CancelFunc
+	closeOnce         sync.Once
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	seenMu            sync.Mutex
+	seenMessages      map[string]struct{}
+	seenParts         map[string]struct{}
+	sseMu             sync.Mutex
+	sseMessages       map[string]opencodeSSEMessage
+	sseParts          map[string]opencodeSSEPart
+	ssePartOrder      map[string][]string
 }
 
-func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, agentName, resumeID string, extraEnv []string, attachURL string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
-		cmd:       cmd,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		agentName: agentName,
-		extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		cmd:          cmd,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		agentName:    agentName,
+		extraEnv:     extraEnv,
+		attachURL:    attachURL,
+		events:       make(chan core.Event, 64),
+		ctx:          sessionCtx,
+		cancel:       cancel,
+		seenMessages: make(map[string]struct{}),
+		seenParts:    make(map[string]struct{}),
+		sseMessages:  make(map[string]opencodeSSEMessage),
+		sseParts:     make(map[string]opencodeSSEPart),
+		ssePartOrder: make(map[string][]string),
 	}
 	s.alive.Store(true)
 
@@ -86,7 +103,12 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	slog.Debug("opencodeSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
-	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
+	sendCtx, sendCancel, err := s.startSend()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(sendCtx, s.cmd, args...)
 	cmd.Dir = s.workDir
 	env := os.Environ()
 	if len(s.extraEnv) > 0 {
@@ -96,6 +118,8 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		s.finishSend()
+		sendCancel()
 		return fmt.Errorf("opencodeSession: stdout pipe: %w", err)
 	}
 
@@ -103,14 +127,34 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	cmd.Stderr = &stderrBuf
 	cmd.Stdin = strings.NewReader(prompt)
 
+	s.wg.Add(1)
 	if err := cmd.Start(); err != nil {
+		s.wg.Done()
+		s.finishSend()
+		sendCancel()
 		return fmt.Errorf("opencodeSession: start: %w", err)
 	}
 
-	s.wg.Add(1)
-	go s.readLoop(cmd, stdout, &stderrBuf)
+	go s.readLoop(cmd, stdout, &stderrBuf, sendCancel)
 
 	return nil
+}
+
+func (s *opencodeSession) startSend() (context.Context, context.CancelFunc, error) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.sendCancel != nil {
+		return nil, nil, fmt.Errorf("session is busy")
+	}
+	sendCtx, cancel := context.WithCancel(s.ctx)
+	s.sendCancel = cancel
+	return sendCtx, cancel, nil
+}
+
+func (s *opencodeSession) finishSend() {
+	s.sendMu.Lock()
+	s.sendCancel = nil
+	s.sendMu.Unlock()
 }
 
 func (s *opencodeSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
@@ -157,6 +201,9 @@ func opencodeImageExt(mimeType string) string {
 func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatID string) []string {
 	args := []string{"run", "--format", "json"}
 
+	if s.attachURL != "" {
+		args = append(args, "--attach", s.attachURL)
+	}
 	if chatID != "" {
 		args = append(args, "--session", chatID)
 	}
@@ -189,8 +236,10 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	return args
 }
 
-func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
+func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, sendCancel context.CancelFunc) {
 	defer s.wg.Done()
+	defer sendCancel()
+	defer s.finishSend()
 	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
@@ -214,11 +263,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
-		}
+		s.emit(evt)
 		return
 	}
 
@@ -230,10 +275,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
+		s.emit(evt)
 		return
 	}
 
@@ -246,8 +288,23 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
-	s.sendEventResult()
+	// Emit EventResult after all steps are done and the process has finished writing.
+	sid := s.CurrentSessionID()
+	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", sid)
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	s.emit(evt)
+}
+
+func (s *opencodeSession) emit(evt core.Event) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	select {
+	case s.events <- evt:
+		return true
+	case <-s.ctx.Done():
+		return false
+	}
 }
 
 // OpenCode NDJSON event structure:
@@ -255,6 +312,8 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 //	{ "type": "text|tool_use|reasoning|step_start|step_finish",
 //	  "part": { "type": "text|tool|reasoning|step-start|step-finish", ... } }
 func (s *opencodeSession) handleEvent(raw map[string]any) {
+	s.markSeenFromRaw(raw)
+
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {
@@ -301,11 +360,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 
 	if text != "" {
 		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
-		}
+		s.emit(evt)
 	}
 }
 
@@ -329,24 +384,16 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 	if status == "completed" {
 		// OpenCode bundles call + result in one event; emit both for UI.
 		useEvt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
-		select {
-		case s.events <- useEvt:
-		case <-s.ctx.Done():
+		if !s.emit(useEvt) {
 			return
 		}
 
 		output, _ := state["output"].(string)
 		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
-		select {
-		case s.events <- resultEvt:
-		case <-s.ctx.Done():
-			return
-		}
+		s.emit(resultEvt)
 	} else {
 		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
+		if !s.emit(evt) {
 			return
 		}
 
@@ -360,11 +407,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 			if errMsg != "" {
 				slog.Info("opencodeSession: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
 				errEvt := core.Event{Type: core.EventText, Content: errMsg}
-				select {
-				case s.events <- errEvt:
-				case <-s.ctx.Done():
-					return
-				}
+				s.emit(errEvt)
 			}
 		}
 	}
@@ -403,11 +446,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 	text, _ := part["text"].(string)
 	if text != "" {
 		evt := core.Event{Type: core.EventThinking, Content: text}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
-		}
+		s.emit(evt)
 	}
 }
 
@@ -415,11 +454,7 @@ func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
-		return
-	}
+	s.emit(evt)
 }
 
 // extractErrorMessage tries to pull a human-readable message from various
@@ -525,6 +560,12 @@ func (s *opencodeSession) Alive() bool {
 func (s *opencodeSession) Close() error {
 	s.alive.Store(false)
 	s.cancel()
+	s.sendMu.Lock()
+	if s.sendCancel != nil {
+		s.sendCancel()
+	}
+	s.sendMu.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -532,9 +573,11 @@ func (s *opencodeSession) Close() error {
 	}()
 	select {
 	case <-done:
-		close(s.events)
+		s.closeOnce.Do(func() {
+			close(s.events)
+		})
 	case <-time.After(8 * time.Second):
-		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
+		slog.Warn("opencodeSession: close timed out, leaving events channel open")
 	}
 	return nil
 }

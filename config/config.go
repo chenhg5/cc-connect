@@ -3043,6 +3043,8 @@ type ProjectSettingsUpdate struct {
 	WorkDir              *string
 	Mode                 *string
 	AgentType            *string
+	AttachServer         *bool
+	AttachServerPort     *int
 	ShowContextIndicator *bool
 	ShowWorkdirIndicator *bool
 	ReplyFooter          *bool
@@ -3136,7 +3138,7 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			v := *update.InjectSender
 			proj.InjectSender = &v
 		}
-		if update.WorkDir != nil || update.Mode != nil {
+		if update.WorkDir != nil || update.Mode != nil || update.AttachServer != nil || update.AttachServerPort != nil {
 			if proj.Agent.Options == nil {
 				proj.Agent.Options = map[string]any{}
 			}
@@ -3156,6 +3158,16 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			} else {
 				proj.Agent.Options["mode"] = mode
 			}
+		}
+		if update.AttachServer != nil {
+			proj.Agent.Options["attach_server"] = *update.AttachServer
+		}
+		if update.AttachServerPort != nil {
+			port := *update.AttachServerPort
+			if port < 0 || port > 65535 {
+				port = 0
+			}
+			proj.Agent.Options["attach_server_port"] = port
 		}
 		if update.PlatformAllowFrom != nil {
 			for j := range proj.Platforms {
@@ -3210,6 +3222,12 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 			if mode, ok := p.Agent.Options["mode"].(string); ok && strings.TrimSpace(mode) != "" {
 				result["mode"] = mode
 			}
+			if attach, ok := p.Agent.Options["attach_server"].(bool); ok {
+				result["attach_server"] = attach
+			}
+			if port, ok := numericOptionToInt(p.Agent.Options["attach_server_port"]); ok {
+				result["attach_server_port"] = port
+			}
 		}
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
@@ -3240,6 +3258,23 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		return result
 	}
 	return nil
+}
+
+func numericOptionToInt(raw any) (int, bool) {
+	switch v := raw.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 // SaveProviderRefs updates provider_refs for a project.

@@ -2605,11 +2605,15 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 
 	show := true
 	hideWorkdir := false
+	attach := true
+	attachPort := 4097
 	wd := "/tmp/patched"
 	mode := "yolo"
 	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
 		WorkDir:              &wd,
 		Mode:                 &mode,
+		AttachServer:         &attach,
+		AttachServerPort:     &attachPort,
 		ShowContextIndicator: &show,
 		ShowWorkdirIndicator: &hideWorkdir,
 		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
@@ -2625,6 +2629,12 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	}
 	if stringMapValue(proj.Agent.Options, "mode") != mode {
 		t.Fatalf("mode = %q, want %q", stringMapValue(proj.Agent.Options, "mode"), mode)
+	}
+	if got, _ := proj.Agent.Options["attach_server"].(bool); !got {
+		t.Fatalf("attach_server = %v, want true", proj.Agent.Options["attach_server"])
+	}
+	if got, ok := numericOptionToInt(proj.Agent.Options["attach_server_port"]); !ok || got != attachPort {
+		t.Fatalf("attach_server_port = %v, want %d", proj.Agent.Options["attach_server_port"], attachPort)
 	}
 	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
 		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
@@ -2650,6 +2660,21 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	}
 	if details["work_dir"] != "/tmp/alpha" {
 		t.Fatalf("work_dir = %v", details["work_dir"])
+	}
+	attach := true
+	port := 4097
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		AttachServer:     &attach,
+		AttachServerPort: &port,
+	}); err != nil {
+		t.Fatalf("SaveProjectSettings attach fields: %v", err)
+	}
+	details = GetProjectConfigDetails("alpha")
+	if details["attach_server"] != true {
+		t.Fatalf("attach_server = %v", details["attach_server"])
+	}
+	if details["attach_server_port"] != port {
+		t.Fatalf("attach_server_port = %v, want %d", details["attach_server_port"], port)
 	}
 	pcs, ok := details["platform_configs"].([]map[string]any)
 	if !ok || len(pcs) < 2 {

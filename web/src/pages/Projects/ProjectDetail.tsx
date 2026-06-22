@@ -49,6 +49,8 @@ export default function ProjectDetail() {
   const [disabledCmds, setDisabledCmds] = useState('');
   const [workDir, setWorkDir] = useState('');
   const [agentMode, setAgentMode] = useState('');
+  const [attachServer, setAttachServer] = useState(false);
+  const [attachServerPort, setAttachServerPort] = useState('0');
   const [showCtxIndicator, setShowCtxIndicator] = useState(true);
   const [showWorkdirIndicator, setShowWorkdirIndicator] = useState(true);
   const [replyFooter, setReplyFooter] = useState(true);
@@ -135,6 +137,8 @@ export default function ProjectDetail() {
         setDisabledCmds(proj.value.settings?.disabled_commands?.join(', ') || '');
         setWorkDir(proj.value.work_dir || '');
         setAgentMode(proj.value.agent_mode || 'default');
+        setAttachServer(proj.value.attach_server === true);
+        setAttachServerPort(String(proj.value.attach_server_port ?? 0));
         setSelectedAgentType(proj.value.agent_type || '');
         setShowCtxIndicator(proj.value.show_context_indicator !== false);
         setShowWorkdirIndicator(proj.value.show_workdir_indicator !== false);
@@ -184,6 +188,9 @@ export default function ProjectDetail() {
         disabled_commands: disabledCmds.split(',').map(s => s.trim()).filter(Boolean),
         work_dir: workDir,
         mode: agentMode,
+        ...(selectedAgentType === 'opencode'
+          ? { attach_server: attachServer, attach_server_port: Number.parseInt(attachServerPort || '0', 10) || 0 }
+          : {}),
         ...(agentTypeChanged ? { agent_type: selectedAgentType } : {}),
         show_context_indicator: showCtxIndicator,
         show_workdir_indicator: showWorkdirIndicator,
@@ -526,6 +533,39 @@ export default function ProjectDetail() {
                 <option value="dontAsk">dontAsk</option>
               </select>
             </div>
+            {selectedAgentType === 'opencode' && (
+              <div className="space-y-3 border border-gray-200 dark:border-gray-800 rounded-lg p-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {t('projects.opencodeAttachServer', 'OpenCode attach server')}
+                    </label>
+                    <p className="text-[11px] text-gray-400 mt-0.5">
+                      {t('projects.opencodeAttachServerHint', 'Keep a local OpenCode server alive so background subagents survive after the main turn. Requires restart.')}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAttachServer(!attachServer)}
+                    className={cn('w-10 h-6 rounded-full transition-colors shrink-0', attachServer ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+                  >
+                    <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', attachServer ? 'translate-x-4' : 'translate-x-0')} />
+                  </button>
+                </div>
+                <Input
+                  label={t('projects.opencodeAttachServerPort', 'Attach server port')}
+                  type="number"
+                  min="0"
+                  max="65535"
+                  value={attachServerPort}
+                  onChange={(e) => setAttachServerPort(e.target.value)}
+                  placeholder="4097"
+                />
+                <p className="text-[11px] text-gray-400">
+                  {t('projects.opencodeAttachServerPortHint', '0 lets the OS choose a local port; set a fixed port such as 4097 to make it visible.')}
+                </p>
+              </div>
+            )}
           </div>
         </Card>
 

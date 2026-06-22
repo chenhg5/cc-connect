@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +36,8 @@ type Agent struct {
 	mode                 string
 	cmd                  string // CLI binary name, default "opencode"
 	agentName            string // passed as --agent to opencode (for plugin-defined agents)
+	attachServer         bool
+	attachServerPort     int
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -42,6 +46,8 @@ type Agent struct {
 	refreshingModelCache bool
 	refreshWg            sync.WaitGroup // tracks in-flight background model-cache refresh goroutines
 	mu                   sync.RWMutex
+	serverMu             sync.Mutex
+	server               *opencodeServer
 }
 
 type opencodePersistentModelCache struct {
@@ -72,6 +78,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		cmd = "opencode"
 	}
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
+	attachServer := parseAttachServerOption(opts["attach_server"])
+	attachServerPort := parseAttachServerPortOption(opts["attach_server_port"])
 	ccDataDir, _ := opts["cc_data_dir"].(string)
 	ccProject, _ := opts["cc_project"].(string)
 	modelCachePath := opencodeProjectModelCachePath(ccDataDir, ccProject)
@@ -90,6 +98,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:                 mode,
 		cmd:                  cmd,
 		agentName:            agentName,
+		attachServer:         attachServer,
+		attachServerPort:     attachServerPort,
 		activeIdx:            -1,
 		modelCachePath:       modelCachePath,
 		persistentModelCache: persistentModelCache,
@@ -455,8 +465,14 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.sessionEnv = env
+	changed := !stringSlicesEqual(a.sessionEnv, env)
+	if changed {
+		a.sessionEnv = append([]string(nil), env...)
+	}
+	a.mu.Unlock()
+	if changed {
+		a.stopAttachServer()
+	}
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
@@ -468,6 +484,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	agentName := a.agentName
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	attachServer := a.attachServer
+	attachServerPort := a.attachServerPort
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
@@ -475,7 +493,60 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newOpencodeSession(ctx, cmd, workDir, model, mode, agentName, sessionID, extraEnv)
+	attachURL := ""
+	if attachServer {
+		var err error
+		attachURL, err = a.ensureAttachServer(ctx, cmd, workDir, extraEnv, attachServerPort)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return newOpencodeSession(ctx, cmd, workDir, model, mode, agentName, sessionID, extraEnv, attachURL)
+}
+
+func parseAttachServerOption(raw any) bool {
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on", "auto", "enabled", "enable":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func parseAttachServerPortOption(raw any) int {
+	switch v := raw.(type) {
+	case int:
+		return normalizeAttachServerPort(v)
+	case int64:
+		return normalizeAttachServerPort(int(v))
+	case int32:
+		return normalizeAttachServerPort(int(v))
+	case float64:
+		return normalizeAttachServerPort(int(v))
+	case string:
+		port, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return normalizeAttachServerPort(port)
+	default:
+		return 0
+	}
+}
+
+func normalizeAttachServerPort(port int) int {
+	if port < 0 || port > 65535 {
+		return 0
+	}
+	return port
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.
@@ -487,7 +558,10 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listOpencodeSessions(cmd, workDir)
 }
 
-func (a *Agent) Stop() error { return nil }
+func (a *Agent) Stop() error {
+	a.stopAttachServer()
+	return nil
+}
 
 // DeleteSession implements core.SessionDeleter via `opencode session delete <id>`.
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
@@ -555,26 +629,59 @@ func (a *Agent) GlobalMemoryFile() string {
 
 func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.providers = providers
+	changed := !reflect.DeepEqual(a.providers, providers)
+	if changed {
+		a.providers = append([]core.ProviderConfig(nil), providers...)
+	}
+	a.mu.Unlock()
+	if changed {
+		a.stopAttachServer()
+	}
 }
 
 func (a *Agent) SetActiveProvider(name string) bool {
+	changed := false
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if name == "" {
-		a.activeIdx = -1
-		slog.Info("opencode: provider cleared")
+		changed = a.activeIdx != -1
+		if changed {
+			a.activeIdx = -1
+		}
+		a.mu.Unlock()
+		if changed {
+			slog.Info("opencode: provider cleared")
+			a.stopAttachServer()
+		}
 		return true
 	}
 	for i, p := range a.providers {
 		if p.Name == name {
-			a.activeIdx = i
-			slog.Info("opencode: provider switched", "provider", name)
+			changed = a.activeIdx != i
+			if changed {
+				a.activeIdx = i
+			}
+			a.mu.Unlock()
+			if changed {
+				slog.Info("opencode: provider switched", "provider", name)
+				a.stopAttachServer()
+			}
 			return true
 		}
 	}
+	a.mu.Unlock()
 	return false
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Agent) GetActiveProvider() *core.ProviderConfig {

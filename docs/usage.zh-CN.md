@@ -116,6 +116,16 @@ reset_on_idle_mins = 60
 | 默认 | `default` | 标准权限 |
 | YOLO | `yolo` | 跳过所有检查 |
 
+OpenCode 可以选择保持一个本机 `opencode serve` 常驻进程：
+
+```toml
+[projects.agent.options]
+attach_server = true
+attach_server_port = 0
+```
+
+当需要让 OpenCode background subagent 在主回合结束后继续运行时启用。只要项目/会话环境和当前 provider 不变，cc-connect 会复用该 server。如果这些设置实际变化，例如切换 provider、切换会话或修改项目选项，cc-connect 会重启 server，运行在其中的 background subagent 也会停止。
+
 ### 配置示例
 
 ```toml

@@ -3,12 +3,16 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -61,7 +65,7 @@ func TestOpencodeSessionEntry_Unmarshal(t *testing.T) {
 // the ContinueSession sentinel (__continue__) is not passed as a literal
 // session ID to the CLI. This was fixed in PR #249.
 func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", core.ContinueSession, nil)
+	s, err := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", "", core.ContinueSession, nil, "")
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -103,11 +107,12 @@ func TestOpencodeSessionStageImages(t *testing.T) {
 }
 
 func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
-	s := &opencodeSession{workDir: "/repo", model: "provider/model"}
+	s := &opencodeSession{workDir: "/repo", model: "provider/model", attachURL: "http://127.0.0.1:4097"}
 
 	got := s.buildRunArgs("describe these images", []string{"/tmp/a.png", "/tmp/b.jpg"}, "ses_123")
 	want := []string{
 		"run", "--format", "json",
+		"--attach", "http://127.0.0.1:4097",
 		"--session", "ses_123",
 		"--model", "provider/model",
 		"--dir", "/repo",
@@ -260,6 +265,7 @@ func TestHandleToolUsePermissionDeniedEmitsEventText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.alive.Store(true)
 	s.handleToolUse(raw)
 
 	var events []core.Event
@@ -294,6 +300,7 @@ func TestHandleToolUseCompletedDoesNotEmitExtraText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.alive.Store(true)
 	s.handleToolUse(raw)
 
 	var events []core.Event
@@ -324,6 +331,7 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.alive.Store(true)
 	s.handleToolUse(raw)
 
 	for len(s.events) > 0 {
@@ -334,5 +342,238 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 	}
 }
 
+func TestOpencodeSessionCloseIsIdempotent(t *testing.T) {
+	s, err := newOpencodeSession(context.Background(), "echo", t.TempDir(), "", "default", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestParseAttachServerOptions(t *testing.T) {
+	if !parseAttachServerOption(true) {
+		t.Fatal("parseAttachServerOption(true) = false, want true")
+	}
+	if !parseAttachServerOption("auto") {
+		t.Fatal(`parseAttachServerOption("auto") = false, want true`)
+	}
+	if parseAttachServerOption("off") {
+		t.Fatal(`parseAttachServerOption("off") = true, want false`)
+	}
+	if got := parseAttachServerPortOption(4097); got != 4097 {
+		t.Fatalf("parseAttachServerPortOption(4097) = %d, want 4097", got)
+	}
+	if got := parseAttachServerPortOption("49990"); got != 49990 {
+		t.Fatalf(`parseAttachServerPortOption("49990") = %d, want 49990`, got)
+	}
+	if got := parseAttachServerPortOption(70000); got != 0 {
+		t.Fatalf("parseAttachServerPortOption(70000) = %d, want 0", got)
+	}
+}
+
+func TestOpenCodeSSEWatcherEmitsAssistantStopMessage(t *testing.T) {
+	const sid = "ses_sse_emit"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/event" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_sse_emit","type":"text","text":"BACKGROUND_REPRO_DONE"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_1","sessionID":"ses_sse_emit","role":"assistant","finish":"stop"}}}`)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.StartUnsolicitedEvents(ctx); err != nil {
+		t.Fatalf("StartUnsolicitedEvents: %v", err)
+	}
+
+	select {
+	case evt := <-s.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want EventResult", evt.Type)
+		}
+		if evt.SessionID != sid {
+			t.Fatalf("SessionID = %q, want %q", evt.SessionID, sid)
+		}
+		if evt.Content != "BACKGROUND_REPRO_DONE" {
+			t.Fatalf("Content = %q", evt.Content)
+		}
+		if !evt.Done {
+			t.Fatal("Done = false, want true")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for unsolicited EventResult")
+	}
+}
+
+func TestOpenCodeSSEWatcherSkipsStdoutSeenPart(t *testing.T) {
+	const sid = "ses_sse_seen"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_existing","messageID":"msg_existing","sessionID":"ses_sse_seen","type":"text","text":"already sent"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_existing","sessionID":"ses_sse_seen","role":"assistant","finish":"stop"}}}`)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	s.markSeen("", "prt_existing")
+
+	if err := s.StartUnsolicitedEvents(ctx); err != nil {
+		t.Fatalf("StartUnsolicitedEvents: %v", err)
+	}
+
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("unexpected event for seen message: %#v", evt)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestOpenCodeSSEWatcherEmitsNewPartForStdoutSeenMessage(t *testing.T) {
+	const sid = "ses_sse_new_part"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_followup","messageID":"msg_existing","sessionID":"ses_sse_new_part","type":"text","text":"BACKGROUND_REPRO_DONE"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_existing","sessionID":"ses_sse_new_part","role":"assistant","finish":"stop"}}}`)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	s.handleEvent(map[string]any{
+		"type": "text",
+		"part": map[string]any{
+			"id":        "prt_existing",
+			"messageID": "msg_existing",
+			"sessionID": sid,
+			"type":      "text",
+			"text":      "already sent",
+		},
+	})
+	select {
+	case evt := <-s.Events():
+		if evt.Type != core.EventText || evt.Content != "already sent" {
+			t.Fatalf("stdout event = %#v", evt)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for stdout event")
+	}
+
+	if err := s.StartUnsolicitedEvents(ctx); err != nil {
+		t.Fatalf("StartUnsolicitedEvents: %v", err)
+	}
+
+	select {
+	case evt := <-s.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want EventResult", evt.Type)
+		}
+		if evt.Content != "BACKGROUND_REPRO_DONE" {
+			t.Fatalf("Content = %q", evt.Content)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for new SSE part")
+	}
+}
+
+func TestOpenCodeProducerHandlesEmptyAttachURL(t *testing.T) {
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", "ses_empty_attach", nil, "")
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.StartUnsolicitedEvents(context.Background()); err != nil {
+		t.Fatalf("StartUnsolicitedEvents: %v", err)
+	}
+}
+
+func TestOpenCodeProducerStopsOnContextCancel(t *testing.T) {
+	const sid = "ses_sse_cancel"
+	release := make(chan struct{})
+	connected := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		select {
+		case <-connected:
+		default:
+			close(connected)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.part.updated","properties":{"part":{"id":"prt_cancel","messageID":"msg_cancel","sessionID":"ses_sse_cancel","type":"text","text":"late"}}}`)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"message.updated","properties":{"info":{"id":"msg_cancel","sessionID":"ses_sse_cancel","role":"assistant","finish":"stop"}}}`)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := newOpencodeSession(context.Background(), "opencode", "", "", "default", "", sid, nil, server.URL)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.StartUnsolicitedEvents(ctx); err != nil {
+		t.Fatalf("StartUnsolicitedEvents: %v", err)
+	}
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSE client did not connect")
+	}
+	cancel()
+	close(release)
+
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("unexpected event after cancellation: %#v", evt)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+var _ core.UnsolicitedEventProducer = (*opencodeSession)(nil)
