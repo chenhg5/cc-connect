@@ -146,6 +146,18 @@ func writeTempAppendPromptFile(ccDataDir, content string) (string, error) {
 		_ = os.Remove(f.Name())
 		return "", err
 	}
+	// os.CreateTemp defaults to mode 0600 owned by the cc-connect process
+	// user (often root when launched by systemd). When the agent is spawned
+	// under run_as_user, the target user is different and gets EACCES on
+	// 0600 root-owned files (issue #1429). The shared prompt file already
+	// uses 0o644 (see ensureSharedSystemPromptFile → writeFileAtomic);
+	// the per-spawn temp file is just a superset of the shared content
+	// and is equally non-secret, so we mirror that mode here.
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("claudecode: chmod per-spawn prompt file 0o644: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(f.Name())
 		return "", err
@@ -1162,8 +1174,8 @@ func (cs *claudeSession) Close() error {
 	// descendants (e.g. MCP server bridges) a second chance to run cleanup
 	// handlers that respond to signals but not stdin EOF.
 	if err := signalProcessGroup(cs.cmd, syscall.SIGTERM); err != nil {
-			slog.Warn("claudeSession: signal SIGTERM", "error", err)
-		}
+		slog.Warn("claudeSession: signal SIGTERM", "error", err)
+	}
 
 	select {
 	case <-cs.done:

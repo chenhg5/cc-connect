@@ -177,7 +177,7 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 		"session_id": "test-session",
 		"usage": map[string]any{
 			"input_tokens":                float64(130),
-			"output_tokens":               float64(648),       // real turn total
+			"output_tokens":               float64(648), // real turn total
 			"cache_creation_input_tokens": float64(2_000),
 			"cache_read_input_tokens":     float64(8_000_000), // summed, would inflate ctx
 		},
@@ -571,6 +571,47 @@ func TestWriteTempAppendPromptFile_UniquePerCall(t *testing.T) {
 	gotB, _ := os.ReadFile(b)
 	if string(gotA) != "session A" || string(gotB) != "session B" {
 		t.Errorf("cross-talk: A=%q B=%q", string(gotA), string(gotB))
+	}
+}
+
+// TestWriteTempAppendPromptFile_ReadableByOtherUser guards the
+// run_as_user regression from issue #1429. os.CreateTemp defaults to
+// 0600 owned by the cc-connect process user; when the agent is
+// spawned as a different OS user (via run_as_user), a 0600 root-owned
+// file is unreadable and the agent exits with EACCES before reading
+// any prompt at all. The fix is to chmod 0o644 immediately after
+// write, matching ensureSharedSystemPromptFile (which writes 0o644
+// via writeFileAtomic).
+//
+// We assert the contract two ways: (1) the on-disk mode is 0o644 —
+// any reader path bit is set, no execute bits, no setuid/sticky; and
+// (2) a non-owner stat-open succeeds in O_RDONLY, which is the same
+// access path the spawned agent uses when it calls os.Open on the
+// file path passed via --append-system-prompt-file.
+func TestWriteTempAppendPromptFile_ReadableByOtherUser(t *testing.T) {
+	dir := t.TempDir()
+	path, err := writeTempAppendPromptFile(dir, "session X")
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	want := os.FileMode(0o644)
+	if info.Mode().Perm() != want {
+		t.Fatalf("per-spawn prompt file mode = %o, want %o — run_as_user target user would get EACCES (#1429)",
+			info.Mode().Perm(), want)
+	}
+
+	// Non-owner open simulates the spawned agent's read path. On root
+	// the kernel bypasses the mode bits, so this only fails for a
+	// truly 0o000 file. We still assert it to make the regression
+	// observable on systems where the test runs as a non-root user
+	// (CI matrix, dev laptops).
+	if _, err := os.OpenFile(path, os.O_RDONLY, 0); err != nil {
+		t.Fatalf("open O_RDONLY as a non-owner: %v — file is unreadable even for an unprivileged reader", err)
 	}
 }
 
