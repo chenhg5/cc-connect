@@ -42,8 +42,8 @@ type Agent struct {
 	codexHome       string
 	systemPrompt    string
 	appendPrompt    string
-	cliBin          string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cli_path after the binary
+	cmd             string   // CLI binary name, default "codex"
+	cliExtraArgs    []string // extra args parsed from cmd after the binary
 	providers       []core.ProviderConfig
 	activeIdx       int      // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
@@ -68,19 +68,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
-	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
-	cliBin := "codex"
-	var cliExtraArgs []string
-	if cliPath, _ := opts["cli_path"].(string); strings.TrimSpace(cliPath) != "" {
-		parts := strings.Fields(cliPath)
-		cliBin = parts[0]
-		if len(parts) > 1 {
-			cliExtraArgs = parts[1:]
-		}
-	}
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
 
-	if _, err := exec.LookPath(cliBin); err != nil {
-		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cliBin)
+	if _, err := exec.LookPath(cmd); err != nil {
+		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cmd)
 	}
 
 	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
@@ -110,7 +101,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		codexHome:       strings.TrimSpace(codexHome),
 		systemPrompt:    strings.TrimSpace(systemPrompt),
 		appendPrompt:    strings.TrimSpace(appendPrompt),
-		cliBin:          cliBin,
+		cmd:             cmd,
 		cliExtraArgs:    cliExtraArgs,
 		configEnv:       configEnv,
 		activeIdx:       -1,
@@ -438,7 +429,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
-	cliBin := a.cliBin
+	cliBin := a.cmd
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
 	// Order matters for MergeEnv override semantics (later wins):

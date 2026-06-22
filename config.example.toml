@@ -1736,7 +1736,7 @@ app_secret = "your-feishu-app-secret"
 # # Optional: override only if the `devin` binary is at a non-standard path.
 # # Always use an absolute path when running under launchd / systemd where
 # # $PATH is minimal (e.g. ~/.local/bin may not be included).
-# # command = "/Users/me/.local/bin/devin"
+# # cmd = "/Users/me/.local/bin/devin"
 # #
 # # Optional: initial permission mode applied to new sessions via
 # # session/set_mode. Valid ids: normal, ask, plan, accept-edits, bypass.
@@ -1776,7 +1776,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# command = "agent"
+# cmd = "agent"
 # args = ["acp"]
 # auth_method = "cursor_login"
 # display_name = "Cursor ACP"
@@ -1804,7 +1804,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# command = "openclaw"
+# cmd = "openclaw"
 # args = ["acp"]
 # # Remote gateway (use token-file on shared hosts — avoid --token in argv):
 # # args = ["acp", "--url", "wss://gateway-host:18789", "--token-file", "/path/to/gateway.token"]
@@ -1822,7 +1822,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# command = "traecli"
+# cmd = "traecli"
 # args = ["acp", "serve"]
 # display_name = "Trae CLI ACP"
 
@@ -1835,7 +1835,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# command = "coco"
+# cmd = "coco"
 # args = ["acp", "serve"]
 # display_name = "COCO ACP"
 
@@ -1850,10 +1850,10 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# command = "copilot"
+# cmd = "copilot"
 # args = ["--acp", "--stdio"]
 # display_name = "Copilot ACP"
-# # command = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
+# # cmd = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
 
 # [[projects.platforms]]
 # type = "telegram"
@@ -1967,7 +1967,7 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/code"
 # model = "gpt-4.1"           # or claude-sonnet-4.6, o3-mini, etc.
 # mode = "default"            # "default" or "bypassPermissions" (yolo)
-# cli_path = "copilot"        # CLI binary name or path (default: "copilot")
+# cmd = "copilot"              # CLI binary name or path (default: "copilot")
 #
 # [[projects.platforms]]
 # type = "telegram"

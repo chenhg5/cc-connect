@@ -22,13 +22,15 @@ func init() {
 
 // Agent drives the pi coding agent CLI (`pi --mode json --no-input`).
 type Agent struct {
-	cmd        string // path to pi binary
-	workDir    string
-	model      string
-	mode       string // "default" | "yolo"
-	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
-	sessionEnv []string
-	mu         sync.Mutex
+	cmd          string   // path to pi binary
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	workDir      string
+	model        string
+	mode         string // "default" | "yolo"
+	thinking     string // reasoning effort: off, minimal, low, medium, high, xhigh
+	sessionEnv   []string
+	mu           sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -40,10 +42,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "pi"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "pi")
 
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("pi: '%s' not found in PATH, install with: npm install -g @mariozechner/pi-coding-agent", cmd)
@@ -57,10 +56,12 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		cmd:     cmd,
-		workDir: workDir,
-		model:   model,
-		mode:    mode,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
 	}, nil
 }
 
@@ -74,7 +75,7 @@ func normalizeMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "pi" }
-func (a *Agent) CLIBinaryName() string  { return "pi" }
+func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Pi" }
 
 func (a *Agent) SetModel(model string) {
@@ -110,9 +111,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	thinking := a.thinking
-	extraEnv := append([]string{}, a.sessionEnv...)
+	extraArgs := append([]string{}, a.cliExtraArgs...)
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.sessionEnv...)
 	a.mu.Unlock()
-	return newPiSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
+	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

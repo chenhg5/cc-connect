@@ -337,7 +337,7 @@ func TestIFlowTurnTimerResetsOnPartialToolCompletion(t *testing.T) {
 }
 
 func TestIFlowSessionCustomToolTimeout(t *testing.T) {
-	sess, err := newIFlowSession(context.Background(), "echo", "/tmp", "", "yolo", "", nil, 300)
+	sess, err := newIFlowSession(context.Background(), "echo", nil, "/tmp", "", "yolo", "", nil, 300)
 	if err != nil {
 		t.Fatalf("newIFlowSession: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestIFlowSessionCustomToolTimeout(t *testing.T) {
 }
 
 func TestIFlowSessionDefaultToolTimeout(t *testing.T) {
-	sess, err := newIFlowSession(context.Background(), "echo", "/tmp", "", "yolo", "", nil, 0)
+	sess, err := newIFlowSession(context.Background(), "echo", nil, "/tmp", "", "yolo", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newIFlowSession: %v", err)
 	}
@@ -394,7 +394,7 @@ while :; do sleep 1; done
 		t.Fatalf("WriteFile fake iflow: %v", err)
 	}
 
-	sess, err := newIFlowSession(context.Background(), cmdPath, workDir, "", "default", "", nil, 0)
+	sess, err := newIFlowSession(context.Background(), cmdPath, nil, workDir, "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newIFlowSession: %v", err)
 	}
@@ -430,7 +430,7 @@ while :; do sleep 1; done
 }
 
 func TestIFlowSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newIFlowSession(context.Background(), "echo", "/tmp", "", "default", core.ContinueSession, nil, 0)
+	s, err := newIFlowSession(context.Background(), "echo", nil, "/tmp", "", "default", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newIFlowSession: %v", err)
 	}
