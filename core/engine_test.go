@@ -6911,6 +6911,23 @@ func waitForInteractiveStateRemoved(t *testing.T, e *Engine, key string) {
 	}
 }
 
+func waitForAgentSessionID(t *testing.T, session *Session, want string) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if got := session.GetAgentSessionID(); got == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("agent session id = %q, want %q", session.GetAgentSessionID(), want)
+		case <-ticker.C:
+		}
+	}
+}
+
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession    AgentSession
@@ -7131,17 +7148,8 @@ func TestProcessInteractiveMessage_SchedulesAgentSessionIdleCloseAfterCleanTurn(
 		ReplyCtx:   "ctx",
 	}, session, agent, e.sessions, "test:chat:user1", "", "")
 
-	time.Sleep(100 * time.Millisecond)
-
-	if got := session.GetAgentSessionID(); got != "result-session" {
-		t.Fatalf("agent session id = %q, want preserved result-session", got)
-	}
-	e.interactiveMu.Lock()
-	current := e.interactiveStates["test:chat:user1"]
-	e.interactiveMu.Unlock()
-	if current != nil {
-		t.Fatal("expected idle timeout cleanup to remove interactive state after clean turn")
-	}
+	waitForAgentSessionID(t, session, "result-session")
+	waitForInteractiveStateRemoved(t, e, "test:chat:user1")
 }
 
 // TestCleanupCAS_ConcurrentUnconditionalCloseOnce verifies that two concurrent
