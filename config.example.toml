@@ -47,6 +47,17 @@
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
 
+# Maximum size of a single attachment (in MiB) for `cc-connect send
+# --file/--image/--audio/--video` and the /send API. Default: 50 (i.e. 50 MiB).
+# Set 0 to keep the default. Raise it to send larger files; the /send request
+# body limit scales with this value to fit base64-encoded attachments.
+# Can also be overridden by the CC_MAX_ATTACHMENT_SIZE_MB env var (same MiB
+# unit; takes precedence over this option when set).
+# `cc-connect send` 单个附件的最大大小（单位 MiB）。默认 50（即 50 MiB），设 0 保持默认。
+# 调大可发送更大文件；/send 请求体上限会随之按 base64 膨胀自动放大。
+# 也可用环境变量 CC_MAX_ATTACHMENT_SIZE_MB 覆盖（同样单位 MiB；设置后优先级高于本配置项）。
+# max_attachment_size_mb = 50
+
 [log]
 level = "info" # debug, info, warn, error
 
@@ -1134,6 +1145,19 @@ app_secret = "your-feishu-app-secret"
 # group_reply_all = false                 # respond to all room messages without @mention / 群聊无需 @ 也响应
 # proxy = ""                              # optional HTTP/SOCKS5 proxy / 可选代理
 
+# Webex (Cisco) (uncomment to enable / 取消注释以启用)
+# 1. Create a bot at https://developer.webex.com/my-apps/new/bot
+#    在 https://developer.webex.com/my-apps/new/bot 创建机器人
+# 2. Copy the bot access token below / 复制 access token 到下方
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "webex"
+#
+# [projects.platforms.options]
+# token = "YOUR_WEBEX_BOT_ACCESS_TOKEN"   # from developer.webex.com (Bot)
+# allow_from = "you@cisco.com"            # comma-separated email allowlist / 逗号分隔的邮箱白名单
+
 # MAX messenger (uncomment to enable / 取消注释以启用)
 # 1. Create a bot via @MasterBot in MAX, get the access token
 #    在 MAX 中通过 @MasterBot 创建机器人，获取 access token
@@ -1477,6 +1501,21 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
+#
+# Optional: project system prompt / 可选：项目系统提示
+# Codex has no native system-prompt flag, so cc-connect injects this as a
+# preamble prepended to your first message of each new session (resumed
+# sessions are not re-injected).
+# Codex 没有原生的系统提示参数，cc-connect 会将其作为前导内容注入到每个新
+# 会话的第一条消息之前（恢复的会话不会重复注入）。
+# system_prompt = "You are a helpful AI assistant that specializes in Python development."
+#
+# Optional: additional project instructions / 可选：追加的项目指令
+# Appended after system_prompt in the same injected preamble. Can be used
+# alone or combined with system_prompt.
+# 追加在 system_prompt 之后，包含在同一段注入的前导内容中。可单独使用，也可与
+# system_prompt 同时使用。
+# append_system_prompt = "Always respond in Chinese and prefer concise answers."
 #
 # # Active provider / 当前激活的 provider
 # # provider = "openai"

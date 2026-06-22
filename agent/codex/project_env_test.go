@@ -96,3 +96,28 @@ func TestNew_NoEnvOpts(t *testing.T) {
 		t.Fatalf("expected 0 env vars, got %d: %v", len(agent.configEnv), agent.configEnv)
 	}
 }
+
+func TestNew_ParsesProjectPromptsFromOpts(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":             t.TempDir(),
+		"cli_path":             "go",
+		"system_prompt":        "You are Linear Reporter.",
+		"append_system_prompt": "Always use linear-bug-intake.",
+	}
+
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	agent := a.(*Agent)
+	agent.mu.RLock()
+	defer agent.mu.RUnlock()
+
+	if agent.systemPrompt != "You are Linear Reporter." {
+		t.Fatalf("systemPrompt = %q", agent.systemPrompt)
+	}
+	if agent.appendPrompt != "Always use linear-bug-intake." {
+		t.Fatalf("appendPrompt = %q", agent.appendPrompt)
+	}
+}

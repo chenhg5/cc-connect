@@ -702,6 +702,24 @@ func (s *acpSession) CurrentSessionID() string {
 	return s.currentACPSessionID()
 }
 
+// CancelTurn sends an ACP session/cancel notification to abort the current
+// turn while keeping the session alive. The agent should cancel the active
+// LLM request and persist state, then wait for the next user message on the
+// same connection. This is used by /stop instead of Close().
+func (s *acpSession) CancelTurn() error {
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return fmt.Errorf("acp: no active session to cancel")
+	}
+	if s.tr == nil {
+		return fmt.Errorf("acp: transport not available")
+	}
+	slog.Debug("acp: cancelling current turn", "session_id", sid)
+	return s.tr.sendNotification("session/cancel", map[string]any{
+		"sessionId": sid,
+	})
+}
+
 func (s *acpSession) Alive() bool {
 	return s.alive.Load()
 }

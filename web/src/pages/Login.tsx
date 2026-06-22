@@ -12,6 +12,7 @@ const languages = [
   { code: 'zh', label: '中' },
   { code: 'zh-TW', label: '繁' },
   { code: 'ja', label: '日' },
+  { code: 'ko', label: '한' },
   { code: 'es', label: 'ES' },
 ];
 

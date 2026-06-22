@@ -1,7 +1,13 @@
 # Changelog
 
+## Unreleased
+
 ### New Features
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
+
+### Fixed
+- **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
+- **feishu**: coalesce consecutive image messages from the same session into a single multi-image dispatch to fix first-image drop on batch sends (#1395). When the Feishu mobile client sends N images in quick succession, each image arrives as a separate `image` event with very close `create_time` values. Dispatching each immediately caused core/engine's `create_time` watermark (PR #1168) to drop the oldest image, so the agent only saw N-1 images. A per-session image buffer with a 150ms quiet window now merges the burst into one `core.Message` carrying all images, in send order. Single-image sends and quoted-image replies are unaffected.
 
 ## v1.3.3 (2026-06-15)
 
@@ -37,6 +43,8 @@ the full themed summary; per-beta details remain in the beta sections below.
   (#1361)
 - **core**: `/switch` no longer loses history; persist user msgs immediately; add CUJ
   test framework (#1348)
+- **core**: queued FIFO drains no longer drop earlier queued messages as stale just
+  because a later queued message has a higher `create_time` (#1286)
 - **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
 - **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
 
