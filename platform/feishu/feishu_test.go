@@ -1409,6 +1409,47 @@ func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_ok"}})
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		resolveMentions: true,
+		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
+		client:          lark.NewClient(appID, appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient:    lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+	p.chatMemberCache.Store(chatID, &chatMemberEntry{members: map[string]string{"BotA": "ou_bot_openid"}, fetchedAt: time.Now()})
+
+	ctx := context.Background()
+	rc := replyContext{chatID: chatID}
+	for _, tc := range []struct {
+		name        string
+		content     string
+		wantMsgType string
+	}{
+		{"email", "**bold** report sent to a@b.com", larkim.MsgTypeInteractive},
+		{"url", "see [docs](http://x@y.com/z)", larkim.MsgTypeInteractive},
+		{"mention", "hey @BotA review please", larkim.MsgTypeText},
+	} {
+		if err := p.SendWithStatusFooter(ctx, rc, tc.content, "done"); err != nil {
+			t.Fatalf("%s: SendWithStatusFooter error = %v", tc.name, err)
+		}
+		if gotMsgType != tc.wantMsgType {
+			t.Errorf("%s: msg_type = %q, want %q", tc.name, gotMsgType, tc.wantMsgType)
+		}
+		if tc.name == "mention" {
+			if !strings.Contains(gotContent, "ou_bot_openid") || !strings.Contains(gotContent, "done") {
+				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
+			}
+		}
+	}
+}
+
 // TestDispatchMessageCoalescesImageBatch covers issue #1395: when the Feishu
 // mobile client sends N images in quick succession, each image arrives as a
 // separate message event with very close create_time values. Dispatching each
@@ -1742,41 +1783,6 @@ func TestFlushImageBatchesStopsPendingTimers(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := &Platform{
-		platformName:    "feishu",
-		domain:          srv.URL,
-		appID:           appID,
-		appSecret:       appSecret,
-		resolveMentions: true,
-		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
-		client:          lark.NewClient(appID, appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
-		replayClient:    lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
-	}
-	p.chatMemberCache.Store(chatID, &chatMemberEntry{members: map[string]string{"BotA": "ou_bot_openid"}, fetchedAt: time.Now()})
-
-	ctx := context.Background()
-	rc := replyContext{chatID: chatID}
-	for _, tc := range []struct {
-		name        string
-		content     string
-		wantMsgType string
-	}{
-		{"email", "**bold** report sent to a@b.com", larkim.MsgTypeInteractive},
-		{"url", "see [docs](http://x@y.com/z)", larkim.MsgTypeInteractive},
-		{"mention", "hey @BotA review please", larkim.MsgTypeText},
-	} {
-		if err := p.SendWithStatusFooter(ctx, rc, tc.content, "done"); err != nil {
-			t.Fatalf("%s: SendWithStatusFooter error = %v", tc.name, err)
-		}
-		if gotMsgType != tc.wantMsgType {
-			t.Errorf("%s: msg_type = %q, want %q", tc.name, gotMsgType, tc.wantMsgType)
-		}
-		if tc.name == "mention" {
-			if !strings.Contains(gotContent, "ou_bot_openid") || !strings.Contains(gotContent, "done") {
-				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
-			}
-		}
-	}
 	received := make(chan *core.Message, 2)
 	p := &Platform{
 		platformName: "feishu",
