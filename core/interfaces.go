@@ -25,6 +25,21 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// ThreadTarget identifies the newly-created platform thread/topic lane that
+// should receive the prompt from a /thread command.
+type ThreadTarget struct {
+	SessionKey string
+	ReplyCtx   any
+}
+
+// ThreadCreator is an optional platform capability for creating a native
+// thread/topic from an incoming message reply context. The engine remains
+// platform-agnostic: platforms decide how to create the thread and how to
+// construct its isolated session key/reply context.
+type ThreadCreator interface {
+	CreateThread(ctx context.Context, replyCtx any) (ThreadTarget, error)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {

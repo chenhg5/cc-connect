@@ -5850,6 +5850,7 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"thread", "t"}, "thread"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -5881,6 +5882,41 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+}
+
+func (e *Engine) cmdThread(p Platform, msg *Message, args []string) {
+	prompt := strings.TrimSpace(strings.Join(args, " "))
+	if prompt == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgThreadUsage))
+		return
+	}
+	creator, ok := p.(ThreadCreator)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgThreadNotSupported))
+		return
+	}
+	target, err := creator.CreateThread(e.ctx, msg.ReplyCtx)
+	if err != nil {
+		slog.Error("thread: create failed", "platform", p.Name(), "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgThreadCreateFailed, err))
+		return
+	}
+	if target.SessionKey == "" || target.ReplyCtx == nil {
+		slog.Error("thread: platform returned invalid target", "platform", p.Name(), "session_key", target.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgThreadInvalidTarget))
+		return
+	}
+
+	threadMsg := *msg
+	threadMsg.SessionKey = target.SessionKey
+	threadMsg.ReplyCtx = target.ReplyCtx
+	threadMsg.Content = prompt
+	threadMsg.Images = nil
+	threadMsg.Files = nil
+	threadMsg.Audio = nil
+	threadMsg.ExtraContent = ""
+	threadMsg.Recalled = false
+	e.handleMessage(p, &threadMsg)
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -6099,6 +6135,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
+	case "thread":
+		e.cmdThread(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {

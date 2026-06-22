@@ -88,6 +88,78 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 	}
 }
 
+func TestCreateThreadRepliesInThreadAndReturnsIsolatedTarget(t *testing.T) {
+	const appID = "cli_thread_create"
+	const appSecret = "dummy"
+	const parentMessageID = "om_parent"
+	const chatID = "oc_chat"
+	const threadID = "omt_created"
+
+	var sawReplyInThread bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID+"/reply":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if !strings.Contains(string(body), `"reply_in_thread":true`) {
+				t.Fatalf("reply body = %s, want reply_in_thread=true", string(body))
+			}
+			sawReplyInThread = true
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"message_id": "om_seed",
+					"thread_id":  threadID,
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		threadIsolation: true,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	target, err := p.CreateThread(context.Background(), replyContext{
+		messageID:  parentMessageID,
+		chatID:     chatID,
+		sessionKey: "feishu:oc_chat:ou_user",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread() error = %v", err)
+	}
+	if !sawReplyInThread {
+		t.Fatal("reply API was not called with reply_in_thread=true")
+	}
+	if target.SessionKey != "feishu:oc_chat:root:omt_created" {
+		t.Fatalf("SessionKey = %q, want feishu:oc_chat:root:omt_created", target.SessionKey)
+	}
+	if rc, ok := target.ReplyCtx.(replyContext); !ok || rc.messageID != "om_seed" || rc.chatID != chatID || rc.sessionKey != target.SessionKey {
+		t.Fatalf("ReplyCtx = %#v, want seed replyContext for target", target.ReplyCtx)
+	}
+}
+
 func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
 	const appID = "cli_quote_image"
 	const appSecret = "secret-quote-image"

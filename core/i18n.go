@@ -379,31 +379,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -510,14 +510,18 @@ const (
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
-	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
-	MsgCommandDisabled   MsgKey = "command_disabled"
-	MsgAdminRequired     MsgKey = "admin_required"
-	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent            MsgKey = "ps_sent"
-	MsgPsSendFailed      MsgKey = "ps_send_failed"
-	MsgPsEmpty           MsgKey = "ps_empty"
-	MsgPsNoSession       MsgKey = "ps_no_session"
+	MsgBannedWordBlocked   MsgKey = "banned_word_blocked"
+	MsgCommandDisabled     MsgKey = "command_disabled"
+	MsgAdminRequired       MsgKey = "admin_required"
+	MsgRateLimited         MsgKey = "rate_limited"
+	MsgPsSent              MsgKey = "ps_sent"
+	MsgPsSendFailed        MsgKey = "ps_send_failed"
+	MsgPsEmpty             MsgKey = "ps_empty"
+	MsgPsNoSession         MsgKey = "ps_no_session"
+	MsgThreadUsage         MsgKey = "thread_usage"
+	MsgThreadNotSupported  MsgKey = "thread_not_supported"
+	MsgThreadCreateFailed  MsgKey = "thread_create_failed"
+	MsgThreadInvalidTarget MsgKey = "thread_invalid_target"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -584,6 +588,7 @@ const (
 	MsgBuiltinCmdDir       MsgKey = "dir"
 	MsgBuiltinCmdDiff      MsgKey = "diff"
 	MsgBuiltinCmdPs        MsgKey = "ps"
+	MsgBuiltinCmdThread    MsgKey = "thread"
 
 	MsgDiffEmpty       MsgKey = "diff_empty"
 	MsgDiffNoDiff2HTML MsgKey = "diff_no_diff2html"
@@ -1216,6 +1221,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
 			"/name [number] <text> — Name a session\n" +
 			"/current — Show active session\n" +
+			"/thread <message> — Create an isolated platform thread\n" +
 			"/history [n] — Show last n messages",
 		LangChinese: "**会话管理**\n" +
 			"/new [名称] — 创建新会话\n" +
@@ -1225,6 +1231,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
+			"/thread <消息> — 创建独立的话题会话\n" +
 			"/history [n] — 查看最近 n 条消息",
 		LangTraditionalChinese: "**會話管理**\n" +
 			"/new [名稱] — 建立新會話\n" +
@@ -1234,6 +1241,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
 			"/name [序號] <名稱> — 命名會話\n" +
 			"/current — 查看當前會話\n" +
+			"/thread <訊息> — 建立獨立的話題會話\n" +
 			"/history [n] — 查看最近 n 條訊息",
 		LangJapanese: "**セッション管理**\n" +
 			"/new [名前] — 新しいセッションを開始\n" +
@@ -1243,6 +1251,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
 			"/name [番号] <名前> — セッションに名前を付ける\n" +
 			"/current — 現在のセッションを表示\n" +
+			"/thread <メッセージ> — 分離されたプラットフォームスレッドを作成\n" +
 			"/history [n] — 直近 n 件のメッセージを表示",
 		LangSpanish: "**Gestión de sesiones**\n" +
 			"/new [nombre] — Iniciar nueva sesión\n" +
@@ -1252,6 +1261,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
 			"/name [número] <texto> — Nombrar sesión\n" +
 			"/current — Mostrar sesión activa\n" +
+			"/thread <mensaje> — Crear un hilo aislado\n" +
 			"/history [n] — Mostrar últimos n mensajes",
 	},
 	MsgHelpAgentSection: {
@@ -3381,6 +3391,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "現在実行中のタスクはありません。",
 		LangSpanish:            "No hay ninguna tarea en ejecución.",
 	},
+	MsgThreadUsage: {
+		LangEnglish:            "Usage: `/thread <message>`",
+		LangChinese:            "用法：`/thread <消息>`",
+		LangTraditionalChinese: "用法：`/thread <訊息>`",
+		LangJapanese:           "使い方：`/thread <メッセージ>`",
+		LangSpanish:            "Uso: `/thread <mensaje>`",
+	},
+	MsgThreadNotSupported: {
+		LangEnglish:            "This platform does not support creating threads.",
+		LangChinese:            "当前平台不支持创建话题。",
+		LangTraditionalChinese: "目前平台不支援建立話題。",
+		LangJapanese:           "このプラットフォームはスレッド作成に対応していません。",
+		LangSpanish:            "Esta plataforma no admite crear hilos.",
+	},
+	MsgThreadCreateFailed: {
+		LangEnglish:            "Failed to create thread: %v",
+		LangChinese:            "创建话题失败：%v",
+		LangTraditionalChinese: "建立話題失敗：%v",
+		LangJapanese:           "スレッドの作成に失敗しました：%v",
+		LangSpanish:            "Error al crear el hilo: %v",
+	},
+	MsgThreadInvalidTarget: {
+		LangEnglish:            "Thread was created but no isolated session target was returned.",
+		LangChinese:            "话题已创建，但没有返回独立会话目标。",
+		LangTraditionalChinese: "話題已建立，但沒有返回獨立會話目標。",
+		LangJapanese:           "スレッドは作成されましたが、分離されたセッション対象が返されませんでした。",
+		LangSpanish:            "El hilo se creó, pero no devolvió un destino de sesión aislado.",
+	},
 	MsgWhoamiTitle: {
 		LangEnglish:            "🪪 **Your Identity**",
 		LangChinese:            "🪪 **你的身份信息**",
@@ -3791,6 +3829,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "向正在執行的任務追加補充資訊",
 		LangJapanese:           "実行中のタスクに補足情報を送信",
 		LangSpanish:            "Enviar un P.S. a la tarea en curso",
+	},
+	MsgBuiltinCmdThread: {
+		LangEnglish:            "Create an isolated platform thread, arg: <message>",
+		LangChinese:            "创建独立的话题会话，参数: <消息>",
+		LangTraditionalChinese: "建立獨立的話題會話，參數: <訊息>",
+		LangJapanese:           "分離されたプラットフォームスレッドを作成、引数: <メッセージ>",
+		LangSpanish:            "Crear un hilo aislado, arg: <mensaje>",
 	},
 	MsgDiffEmpty: {
 		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",

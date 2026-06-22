@@ -72,6 +72,20 @@ func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) erro
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
 
+type threadCreatingPlatform struct {
+	stubPlatformEngine
+	createCalls  int
+	lastReplyCtx any
+	result       ThreadTarget
+	err          error
+}
+
+func (p *threadCreatingPlatform) CreateThread(ctx context.Context, replyCtx any) (ThreadTarget, error) {
+	p.createCalls++
+	p.lastReplyCtx = replyCtx
+	return p.result, p.err
+}
+
 type typingRecorderPlatform struct {
 	stubPlatformEngine
 	starts []any
@@ -232,6 +246,33 @@ func (s *resultAgentSession) Events() <-chan Event                              
 func (s *resultAgentSession) CurrentSessionID() string                             { return "result-session" }
 func (s *resultAgentSession) Alive() bool                                          { return true }
 func (s *resultAgentSession) Close() error                                         { return nil }
+
+type promptRecordingAgentSession struct {
+	sessionID string
+	prompts   chan string
+	events    chan Event
+}
+
+func newPromptRecordingAgentSession(sessionID string) *promptRecordingAgentSession {
+	return &promptRecordingAgentSession{
+		sessionID: sessionID,
+		prompts:   make(chan string, 1),
+		events:    make(chan Event, 1),
+	}
+}
+
+func (s *promptRecordingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.prompts <- prompt
+	s.events <- Event{Type: EventResult, Content: "thread done", Done: true}
+	return nil
+}
+func (s *promptRecordingAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *promptRecordingAgentSession) Events() <-chan Event     { return s.events }
+func (s *promptRecordingAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *promptRecordingAgentSession) Alive() bool              { return true }
+func (s *promptRecordingAgentSession) Close() error             { return nil }
 
 type stubLifecyclePlatform struct {
 	stubPlatformEngine
@@ -2524,6 +2565,110 @@ func TestEngine_DisabledCommandsWildcard(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用") {
 		t.Errorf("expected disabled message, got: %s", p.sent[0])
+	}
+}
+
+func TestCmdThreadCreatesIsolatedSessionWithoutTouchingParent(t *testing.T) {
+	threadSession := newPromptRecordingAgentSession("thread-agent-session")
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
+			if sessionID != "" {
+				t.Fatalf("thread turn started with resume session id %q, want empty new session", sessionID)
+			}
+			return threadSession, nil
+		},
+	}
+	p := &threadCreatingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		result: ThreadTarget{
+			SessionKey: "test:chat:root:thread-1",
+			ReplyCtx:   "thread-ctx",
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:chat:user-1",
+		Platform:   "test",
+		MessageID:  "m-parent",
+		UserID:     "user-1",
+		UserName:   "User",
+		Content:    "/thread build isolated feature",
+		ReplyCtx:   "parent-ctx",
+	})
+
+	if p.createCalls != 1 {
+		t.Fatalf("CreateThread calls = %d, want 1", p.createCalls)
+	}
+	if p.lastReplyCtx != "parent-ctx" {
+		t.Fatalf("CreateThread replyCtx = %v, want parent-ctx", p.lastReplyCtx)
+	}
+
+	select {
+	case prompt := <-threadSession.prompts:
+		if prompt != "build isolated feature" {
+			t.Fatalf("thread prompt = %q, want build isolated feature", prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("thread prompt was not sent to agent")
+	}
+
+	if parentID := e.sessions.ActiveSessionID("test:chat:user-1"); parentID != "" {
+		t.Fatalf("parent session was created/touched: active id %q", parentID)
+	}
+	if threadID := e.sessions.ActiveSessionID("test:chat:root:thread-1"); threadID == "" {
+		t.Fatal("thread session was not created")
+	}
+}
+
+func TestCmdThreadDoesNotInterruptBusyParentSession(t *testing.T) {
+	threadSession := newPromptRecordingAgentSession("thread-agent-session")
+	parentSession := newControllableSession("parent-agent-session")
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			return threadSession, nil
+		},
+	}
+	p := &threadCreatingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		result:             ThreadTarget{SessionKey: "test:chat:root:thread-2", ReplyCtx: "thread-ctx-2"},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	parentKey := "test:chat:user-1"
+	parent := e.sessions.GetOrCreateActive(parentKey)
+	if !parent.TryLock() {
+		t.Fatal("expected to lock parent session")
+	}
+	defer parent.UnlockWithoutUpdate()
+	e.interactiveMu.Lock()
+	e.interactiveStates[parentKey] = &interactiveState{agentSession: parentSession, platform: p, replyCtx: "parent-ctx"}
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: parentKey,
+		Platform:   "test",
+		MessageID:  "m-parent",
+		UserID:     "user-1",
+		UserName:   "User",
+		Content:    "/thread do independent work",
+		ReplyCtx:   "parent-ctx",
+	})
+
+	select {
+	case prompt := <-threadSession.prompts:
+		if prompt != "do independent work" {
+			t.Fatalf("thread prompt = %q, want do independent work", prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("thread prompt was not sent to agent")
+	}
+
+	if !parentSession.Alive() {
+		t.Fatal("parent agent session was interrupted by /thread")
+	}
+	if p.createCalls != 1 {
+		t.Fatalf("CreateThread calls = %d, want 1", p.createCalls)
 	}
 }
 
