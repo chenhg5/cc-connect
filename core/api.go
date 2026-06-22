@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+// DefaultMaxAttachmentSize is the default per-attachment size limit (50 MiB)
+// applied by the /send API and `cc-connect send` when max_attachment_size_mb
+// is unset. Exported so cmd/cc-connect can resolve the same default.
+const DefaultMaxAttachmentSize int64 = 50 << 20
+
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
 type APIServer struct {
@@ -26,7 +31,11 @@ type APIServer struct {
 	cron       *CronScheduler
 	timer      *TimerScheduler
 	relay      *RelayManager
-	mu         sync.RWMutex
+	// maxAttachmentBytes caps the raw size of a single attachment accepted by
+	// /send; the request body limit in handleSend is derived from it (base64
+	// expansion + envelope). Defaults to DefaultMaxAttachmentSize.
+	maxAttachmentBytes int64
+	mu                 sync.RWMutex
 }
 
 // SendRequest is the JSON body for POST /send.
@@ -72,10 +81,11 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	}
 
 	s := &APIServer{
-		socketPath: sockPath,
-		listener:   listener,
-		mux:        http.NewServeMux(),
-		engines:    make(map[string]*Engine),
+		socketPath:         sockPath,
+		listener:           listener,
+		mux:                http.NewServeMux(),
+		engines:            make(map[string]*Engine),
+		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
@@ -126,6 +136,39 @@ func (s *APIServer) SetTimerScheduler(ts *TimerScheduler) {
 	s.timer = ts
 }
 
+// SetMaxAttachmentSize overrides the per-attachment size limit (bytes) used by
+// /send. Non-positive values are ignored so the default is retained. Safe to
+// call at any time, including from the config reload path: it is guarded by
+// s.mu because handleSend reads the limit concurrently.
+func (s *APIServer) SetMaxAttachmentSize(bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bytes > 0 {
+		s.maxAttachmentBytes = bytes
+	}
+}
+
+// sendBodyEnvelope is the slack added on top of the base64-expanded attachment
+// limit when sizing the /send request body: it covers the JSON envelope (field
+// names, message text, metadata) and a few sub-limit attachments.
+const sendBodyEnvelope int64 = 8 << 20 // 8 MiB
+
+// sendBodyLimit returns the maximum accepted /send request body size in bytes.
+// It is derived from the per-attachment limit to accommodate base64 expansion
+// (~4/3) plus envelope slack, falling back to DefaultMaxAttachmentSize when no
+// limit has been set (e.g. APIServer zero value in tests). Callers in hot paths
+// (handleSend) run concurrently with SetMaxAttachmentSize, so the read is
+// guarded by s.mu.
+func (s *APIServer) sendBodyLimit() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	limit := s.maxAttachmentBytes
+	if limit <= 0 {
+		limit = DefaultMaxAttachmentSize
+	}
+	return limit*4/3 + sendBodyEnvelope
+}
+
 func (s *APIServer) Start() {
 	s.server = &http.Server{Handler: s.mux}
 	go func() {
@@ -161,9 +204,14 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxSendBody = 52 << 20 // 52 MB (slightly above max attachment to account for base64 overhead)
+	// Attachments travel base64-encoded inside the JSON body (~4/3 expansion)
+	// plus the request envelope, so size the reader to fit one max-size
+	// attachment with overhead to spare. The previous hard-coded 52 MB cap was
+	// smaller than a single 50 MB attachment after base64 encoding and would
+	// reject valid sends; deriving it from maxAttachmentBytes keeps the body
+	// limit in step with the configured attachment limit.
 	var req SendRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxSendBody)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, s.sendBodyLimit())).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}

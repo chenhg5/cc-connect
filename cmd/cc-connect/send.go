@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -172,19 +173,21 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		req.Message = strings.Join(positional, " ")
 	}
 
-	images, err := loadImageAttachments(imagePaths)
+	maxAtt := resolveMaxAttachmentSize(loadSendConfigBestEffort())
+
+	images, err := loadImageAttachments(imagePaths, maxAtt)
 	if err != nil {
 		return req, "", err
 	}
-	files, err := loadFileAttachments(filePaths)
+	files, err := loadFileAttachments(filePaths, maxAtt)
 	if err != nil {
 		return req, "", err
 	}
-	audioFiles, err := loadTypedFileAttachments(audioPaths, "audio")
+	audioFiles, err := loadTypedFileAttachments(audioPaths, "audio", maxAtt)
 	if err != nil {
 		return req, "", err
 	}
-	videoFiles, err := loadTypedFileAttachments(videoPaths, "video")
+	videoFiles, err := loadTypedFileAttachments(videoPaths, "video", maxAtt)
 	if err != nil {
 		return req, "", err
 	}
@@ -206,10 +209,10 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	return req, dataDir, nil
 }
 
-func loadImageAttachments(paths []string) ([]core.ImageAttachment, error) {
+func loadImageAttachments(paths []string, maxSize int64) ([]core.ImageAttachment, error) {
 	images := make([]core.ImageAttachment, 0, len(paths))
 	for _, path := range paths {
-		data, fileName, mimeType, err := readAttachment(path)
+		data, fileName, mimeType, err := readAttachment(path, maxSize)
 		if err != nil {
 			return nil, err
 		}
@@ -221,10 +224,10 @@ func loadImageAttachments(paths []string) ([]core.ImageAttachment, error) {
 	return images, nil
 }
 
-func loadFileAttachments(paths []string) ([]core.FileAttachment, error) {
+func loadFileAttachments(paths []string, maxSize int64) ([]core.FileAttachment, error) {
 	files := make([]core.FileAttachment, 0, len(paths))
 	for _, path := range paths {
-		data, fileName, mimeType, err := readAttachment(path)
+		data, fileName, mimeType, err := readAttachment(path, maxSize)
 		if err != nil {
 			return nil, err
 		}
@@ -233,10 +236,10 @@ func loadFileAttachments(paths []string) ([]core.FileAttachment, error) {
 	return files, nil
 }
 
-func loadTypedFileAttachments(paths []string, mediaType string) ([]core.FileAttachment, error) {
+func loadTypedFileAttachments(paths []string, mediaType string, maxSize int64) ([]core.FileAttachment, error) {
 	files := make([]core.FileAttachment, 0, len(paths))
 	for _, path := range paths {
-		data, fileName, mimeType, err := readAttachment(path)
+		data, fileName, mimeType, err := readAttachment(path, maxSize)
 		if err != nil {
 			return nil, err
 		}
@@ -271,17 +274,32 @@ func attachmentMatchesMediaType(mimeType, fileName, mediaType string) bool {
 	return false
 }
 
-const maxAttachmentSize = 50 << 20 // 50 MB
+// loadSendConfigBestEffort loads config.toml — resolved the same way the
+// daemon resolves it — so the standalone `cc-connect send` subcommand (a
+// separate process that otherwise has no config) can honour
+// max_attachment_size_mb. Errors are ignored and nil is returned, so a missing
+// or invalid config never breaks sending; the caller then falls back to the
+// env var / default via resolveMaxAttachmentSize.
+func loadSendConfigBestEffort() *config.Config {
+	cfg, err := config.Load(resolveConfigPath(""))
+	if err != nil {
+		return nil
+	}
+	return cfg
+}
 
-func readAttachment(path string) ([]byte, string, string, error) {
+// readAttachment reads a single attachment file, rejecting anything larger than
+// maxSize bytes (resolved by the caller from config/env/default). The limit is
+// enforced before the file is read into memory.
+func readAttachment(path string, maxSize int64) ([]byte, string, string, error) {
 	cleaned := filepath.Clean(path)
 
 	info, err := os.Stat(cleaned)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("read attachment %s: %w", path, err)
 	}
-	if info.Size() > maxAttachmentSize {
-		return nil, "", "", fmt.Errorf("attachment %s exceeds size limit (%d MB)", path, maxAttachmentSize>>20)
+	if info.Size() > maxSize {
+		return nil, "", "", fmt.Errorf("attachment %s exceeds size limit (%d MB)", path, maxSize>>20)
 	}
 
 	data, err := os.ReadFile(cleaned)

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -207,12 +208,13 @@ func TestDetectAttachmentMimeType_UsesExtensionFallback(t *testing.T) {
 }
 
 func TestReadAttachment_SizeLimit(t *testing.T) {
+	const limit int64 = 100 // tiny limit keeps the test fast and deterministic
 	dir := t.TempDir()
 	small := filepath.Join(dir, "small.txt")
 	if err := os.WriteFile(small, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := readAttachment(small); err != nil {
+	if _, _, _, err := readAttachment(small, limit); err != nil {
 		t.Fatalf("small file should succeed: %v", err)
 	}
 
@@ -221,12 +223,12 @@ func TestReadAttachment_SizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(maxAttachmentSize + 1); err != nil {
+	if err := f.Truncate(limit + 1); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
 	f.Close()
-	if _, _, _, err := readAttachment(big); err == nil {
+	if _, _, _, err := readAttachment(big, limit); err == nil {
 		t.Fatal("oversized file should be rejected")
 	}
 }
@@ -244,7 +246,7 @@ func TestReadAttachment_CleanPath(t *testing.T) {
 
 	// Path with ../ should still work after cleaning
 	dirty := filepath.Join(sub, "..", "sub", "test.txt")
-	data, name, _, err := readAttachment(dirty)
+	data, name, _, err := readAttachment(dirty, core.DefaultMaxAttachmentSize)
 	if err != nil {
 		t.Fatalf("readAttachment with dirty path: %v", err)
 	}
@@ -253,6 +255,39 @@ func TestReadAttachment_CleanPath(t *testing.T) {
 	}
 	if name != "test.txt" {
 		t.Errorf("unexpected filename: %q", name)
+	}
+}
+
+func TestResolveMaxAttachmentSize(t *testing.T) {
+	// Default when neither env nor config sets it.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "")
+	if got := resolveMaxAttachmentSize(nil); got != core.DefaultMaxAttachmentSize {
+		t.Fatalf("default = %d, want %d", got, core.DefaultMaxAttachmentSize)
+	}
+
+	cfg := &config.Config{MaxAttachmentSizeMB: 100}
+
+	// Config value (MiB → bytes) honoured when env is unset.
+	if got, want := resolveMaxAttachmentSize(cfg), int64(100)<<20; got != want {
+		t.Fatalf("from config = %d, want %d", got, want)
+	}
+
+	// Env var is MiB (same unit as the config field) and takes precedence.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "1024") // 1024 MiB = 1 GiB
+	if got, want := resolveMaxAttachmentSize(cfg), int64(1<<30); got != want {
+		t.Fatalf("env override = %d, want %d", got, want)
+	}
+
+	// Malformed env falls through to config rather than being fatal.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "not-a-number")
+	if got, want := resolveMaxAttachmentSize(cfg), int64(100)<<20; got != want {
+		t.Fatalf("malformed env should fall through to config = %d, want %d", got, want)
+	}
+
+	// Non-positive env also falls through.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "0")
+	if got, want := resolveMaxAttachmentSize(cfg), int64(100)<<20; got != want {
+		t.Fatalf("zero env should fall through to config = %d, want %d", got, want)
 	}
 }
 
