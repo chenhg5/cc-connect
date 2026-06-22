@@ -162,6 +162,106 @@ func TestTruncate(t *testing.T) {
 	assert.Equal(t, "hello worl...", truncate("hello world", 10))
 }
 
+// TestBuildArgs_QuietModeDoesNotPassQuietFlag is the regression test for issue #806.
+// Kimi CLI does not support --quiet and returns an error when it is passed.
+// Switching to /mode quiet must not produce a --quiet CLI flag.
+func TestBuildArgs_QuietModeDoesNotPassQuietFlag(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", "/tmp", "", "quiet", "", nil, 0)
+	require.NoError(t, err)
+	defer ks.Close()
+
+	args := ks.buildArgs("test prompt")
+
+	for _, arg := range args {
+		if arg == "--quiet" {
+			t.Errorf("buildArgs produced --quiet for quiet mode, Kimi CLI does not support this flag")
+		}
+	}
+}
+
+// TestBuildArgs_PlanModePassesPlanFlag ensures --plan is still passed in plan mode.
+func TestBuildArgs_PlanModePassesPlanFlag(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", "/tmp", "", "plan", "", nil, 0)
+	require.NoError(t, err)
+	defer ks.Close()
+
+	args := ks.buildArgs("test prompt")
+
+	hasPlan := false
+	for _, arg := range args {
+		if arg == "--plan" {
+			hasPlan = true
+		}
+		if arg == "--quiet" {
+			t.Error("plan mode should not pass --quiet")
+		}
+	}
+	if !hasPlan {
+		t.Error("plan mode should pass --plan to Kimi CLI")
+	}
+}
+
+// TestBuildArgs_DefaultModeHasNoExtraFlags verifies default mode only passes
+// the base flags and no mode-specific extras.
+func TestBuildArgs_DefaultModeHasNoExtraFlags(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", "/tmp/work", "kimi-k2", "default", "", nil, 0)
+	require.NoError(t, err)
+	defer ks.Close()
+
+	args := ks.buildArgs("hello")
+
+	// Must contain base flags
+	assertContainsArg(t, args, "--print")
+	assertContainsArg(t, args, "stream-json")
+	// Must NOT contain mode-specific flags
+	assertNotContainsArg(t, args, "--quiet")
+	assertNotContainsArg(t, args, "--plan")
+}
+
+// TestBuildArgs_ResumeSessionID checks that --resume is passed when a session ID exists.
+func TestBuildArgs_ResumeSessionID(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", "/tmp", "", "default", "session-abc", nil, 0)
+	require.NoError(t, err)
+	defer ks.Close()
+
+	args := ks.buildArgs("continue")
+
+	// Find --resume and its value
+	for i, arg := range args {
+		if arg == "--resume" && i+1 < len(args) {
+			if args[i+1] != "session-abc" {
+				t.Errorf("--resume value = %q, want %q", args[i+1], "session-abc")
+			}
+			return
+		}
+	}
+	t.Error("buildArgs should include --resume <session-id> when session ID is set")
+}
+
+func assertContainsArg(t *testing.T, args []string, want string) {
+	t.Helper()
+	for _, a := range args {
+		if a == want {
+			return
+		}
+	}
+	t.Errorf("args %v should contain %q", args, want)
+}
+
+func assertNotContainsArg(t *testing.T, args []string, unwanted string) {
+	t.Helper()
+	for _, a := range args {
+		if a == unwanted {
+			t.Errorf("args %v should NOT contain %q", args, unwanted)
+			return
+		}
+	}
+}
+
 func drainEvents(ch <-chan core.Event, max int) []core.Event {
 	var events []core.Event
 	timeout := time.After(500 * time.Millisecond)

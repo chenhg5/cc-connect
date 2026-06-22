@@ -28,7 +28,8 @@ func init() {
 //   - "default": standard mode (note: --print implicitly enables --yolo)
 //   - "yolo":    auto-approve all tool calls
 //   - "plan":    read-only plan mode
-//   - "quiet":   alias for --quiet (print + text + final-message-only)
+//   - "quiet":   suppress intermediate tool output; cc-connect buffers text until
+//                the final response (Kimi CLI does not have a --quiet flag)
 type Agent struct {
 	workDir    string
 	model      string

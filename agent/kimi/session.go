@@ -63,6 +63,35 @@ func newKimiSession(ctx context.Context, cmd, workDir, model, mode, resumeID str
 	return ks, nil
 }
 
+// buildArgs constructs the Kimi CLI argument slice for the given prompt.
+// It is a pure function (no side-effects) to make the arg construction testable.
+func (ks *kimiSession) buildArgs(prompt string) []string {
+	args := []string{
+		"--print",
+		"--output-format", "stream-json",
+	}
+
+	switch ks.mode {
+	case "plan":
+		args = append(args, "--plan")
+	// "quiet" mode is handled by cc-connect (buffering text until the final response)
+	// rather than by a CLI flag — Kimi CLI does not support --quiet and returns
+	// "Invalid value for --quiet: Quiet mode implies --output-format text" when passed.
+	}
+
+	if sid := ks.CurrentSessionID(); sid != "" {
+		args = append(args, "--resume", sid)
+	}
+	if ks.model != "" {
+		args = append(args, "--model", ks.model)
+	}
+	if ks.workDir != "" {
+		args = append(args, "--work-dir", ks.workDir)
+	}
+	args = append(args, "--prompt", prompt)
+	return args
+}
+
 func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !ks.alive.Load() {
 		return fmt.Errorf("session is closed")
@@ -122,30 +151,7 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
 
-	args := []string{
-		"--print",
-		"--output-format", "stream-json",
-	}
-
-	switch ks.mode {
-	case "plan":
-		args = append(args, "--plan")
-	case "quiet":
-		args = append(args, "--quiet")
-	}
-
-	sid := ks.CurrentSessionID()
-	if sid != "" {
-		args = append(args, "--resume", sid)
-	}
-	if ks.model != "" {
-		args = append(args, "--model", ks.model)
-	}
-	if ks.workDir != "" {
-		args = append(args, "--work-dir", ks.workDir)
-	}
-
-	args = append(args, "--prompt", fullPrompt)
+	args := ks.buildArgs(fullPrompt)
 
 	var cancel context.CancelFunc
 	var ctx context.Context
@@ -162,7 +168,7 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 		}
 	}()
 
-	slog.Debug("kimiSession: launching", "resume", sid != "", "args", core.RedactArgs(args))
+	slog.Debug("kimiSession: launching", "resume", ks.CurrentSessionID() != "", "args", core.RedactArgs(args))
 	cmd := exec.CommandContext(ctx, ks.cmd, args...)
 	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = ks.workDir
