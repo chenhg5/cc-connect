@@ -703,7 +703,7 @@ func TestLark_SessionKeyPrefix(t *testing.T) {
 	}
 }
 
-func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
+func TestLark_GroupMentionWithRootIDUsesMainChatSessionUntilThreadCreated(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
 	})
@@ -759,12 +759,158 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 	if receivedMsg == nil {
 		t.Fatal("handler not called")
 	}
-	if receivedMsg.SessionKey != "lark:oc_test:root:om_root" {
-		t.Fatalf("SessionKey = %q, want lark:oc_test:root:om_root", receivedMsg.SessionKey)
+	if receivedMsg.SessionKey != "lark:oc_test:ou_test" {
+		t.Fatalf("SessionKey = %q, want lark:oc_test:ou_test", receivedMsg.SessionKey)
+	}
+	rc, ok := receivedMsg.ReplyCtx.(replyContext)
+	if !ok {
+		t.Fatalf("ReplyCtx type = %T, want replyContext", receivedMsg.ReplyCtx)
+	}
+	if rc.sessionKey != "lark:oc_test:ou_test" {
+		t.Fatalf("replyContext.sessionKey = %q, want lark:oc_test:ou_test", rc.sessionKey)
+	}
+	if ip.shouldReplyInThread(rc) {
+		t.Fatal("ordinary group mention with root_id should not reply in thread before /thread creates one")
 	}
 }
 
-func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t *testing.T) {
+func TestLark_CreatedThreadRoutesP2PFollowupsWhenThreadIsolationDisabled(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": false,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform(lark) error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+
+	chatID := "oc_test"
+	threadID := "omt_created"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	threadKey := "lark:oc_test:root:omt_created"
+
+	ip.markCreatedThreadSession(threadKey)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_child"),
+				ThreadId:    &threadID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     stringPtr(`{"text":"@bot follow up"}`),
+				CreateTime:  &createText,
+				Mentions: []*larkim.MentionEvent{
+					{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("onMessage(follow-up) error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != threadKey {
+			t.Fatalf("SessionKey = %q, want %q", msg.SessionKey, threadKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for follow-up message")
+	}
+}
+
+func TestLark_GroupMentionWithThreadIDUsesMainChatSessionUntilThreadCreated(t *testing.T) {
+	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
+		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform(lark) error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+
+	chatID := "oc_test"
+	threadID := "omt_thread"
+	openID := "ou_test"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	msgCh := make(chan *core.Message, 2)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	dispatchThreadMessage := func(messageID, content string) {
+		t.Helper()
+		if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+			Event: &larkim.P2MessageReceiveV1Data{
+				Sender: &larkim.EventSender{
+					SenderId:   &larkim.UserId{OpenId: &openID},
+					SenderType: &senderType,
+				},
+				Message: &larkim.EventMessage{
+					MessageId:   &messageID,
+					ThreadId:    &threadID,
+					ChatId:      &chatID,
+					ChatType:    &chatType,
+					MessageType: &msgType,
+					Content:     &content,
+					CreateTime:  &createText,
+					Mentions: []*larkim.MentionEvent{
+						{Key: stringPtr("@bot"), Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}},
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("onMessage(%s) error = %v", messageID, err)
+		}
+	}
+
+	dispatchThreadMessage("om_child_1", `{"text":"@bot first"}`)
+	dispatchThreadMessage("om_child_2", `{"text":"@bot second"}`)
+
+	var got []*core.Message
+	for i := 0; i < 2; i++ {
+		select {
+		case msg := <-msgCh:
+			got = append(got, msg)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for message %d", i+1)
+		}
+	}
+
+	want := "lark:oc_test:ou_test"
+	if got[0].SessionKey != want || got[1].SessionKey != want {
+		t.Fatalf("SessionKeys = [%q, %q], want both %q", got[0].SessionKey, got[1].SessionKey, want)
+	}
+	for i, msg := range got {
+		rc, ok := msg.ReplyCtx.(replyContext)
+		if !ok {
+			t.Fatalf("message %d ReplyCtx type = %T, want replyContext", i, msg.ReplyCtx)
+		}
+		if ip.shouldReplyInThread(rc) {
+			t.Fatalf("message %d should not reply in thread before /thread creates one", i)
+		}
+	}
+}
+
+func TestLark_GroupReplyAllWithThreadIsolationUsesMainChatSessionWithoutMention(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
 		"group_reply_all": true, "thread_isolation": true,
@@ -809,15 +955,18 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 
 	select {
 	case receivedMsg := <-msgCh:
-		if receivedMsg.SessionKey != "lark:oc_test:root:om_root" {
-			t.Fatalf("SessionKey = %q, want lark:oc_test:root:om_root", receivedMsg.SessionKey)
+		if receivedMsg.SessionKey != "lark:oc_test:ou_test" {
+			t.Fatalf("SessionKey = %q, want lark:oc_test:ou_test", receivedMsg.SessionKey)
 		}
 		rc, ok := receivedMsg.ReplyCtx.(replyContext)
 		if !ok {
 			t.Fatalf("ReplyCtx type = %T, want replyContext", receivedMsg.ReplyCtx)
 		}
-		if rc.sessionKey != "lark:oc_test:root:om_root" {
-			t.Fatalf("replyContext.sessionKey = %q, want lark:oc_test:root:om_root", rc.sessionKey)
+		if rc.sessionKey != "lark:oc_test:ou_test" {
+			t.Fatalf("replyContext.sessionKey = %q, want lark:oc_test:ou_test", rc.sessionKey)
+		}
+		if ip.shouldReplyInThread(rc) {
+			t.Fatal("group_reply_all root message should not reply in thread before /thread creates one")
 		}
 		if rc.messageID != "om_root" {
 			t.Fatalf("replyContext.messageID = %q, want om_root", rc.messageID)
@@ -828,6 +977,9 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 }
 
 func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
+	createdThreadPlatform := &Platform{}
+	createdThreadPlatform.markCreatedThreadSession("feishu:oc_chat:root:omt_created")
+
 	tests := []struct {
 		name          string
 		platform      *Platform
@@ -835,16 +987,22 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 		wantThreading bool
 	}{
 		{
-			name:          "thread isolation enabled",
+			name:          "unregistered thread-shaped session key does not reply in thread",
 			platform:      &Platform{threadIsolation: true},
 			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root"},
-			wantThreading: true,
+			wantThreading: false,
 		},
 		{
 			name:          "thread isolation does not affect p2p session",
 			platform:      &Platform{threadIsolation: true},
 			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:ou_user"},
 			wantThreading: false,
+		},
+		{
+			name:          "created thread session key replies in thread even when global isolation disabled",
+			platform:      createdThreadPlatform,
+			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:omt_created"},
+			wantThreading: true,
 		},
 		{
 			name:          "plain reply remains non-threaded",

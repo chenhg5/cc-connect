@@ -30,6 +30,22 @@ const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
+type BusyInputMode string
+
+const (
+	BusyInputModeQueue     BusyInputMode = "queue"
+	BusyInputModeInterrupt BusyInputMode = "interrupt"
+)
+
+func normalizeBusyInputMode(mode BusyInputMode) BusyInputMode {
+	switch BusyInputMode(strings.ToLower(strings.TrimSpace(string(mode)))) {
+	case BusyInputModeInterrupt:
+		return BusyInputModeInterrupt
+	default:
+		return BusyInputModeQueue
+	}
+}
+
 // previewText truncates s to maxRunes runes for safe inclusion in debug logs.
 // Truncation uses runes (not bytes) so multi-byte characters render cleanly.
 // Newlines are replaced with literal "\n" to keep each log entry on one line.
@@ -245,6 +261,7 @@ type Engine struct {
 	eventIdleTimeout  time.Duration
 	maxTurnTime       time.Duration // absolute wall-clock cap per turn (0 = disabled)
 	maxQueuedMessages int
+	busyInputMode     BusyInputMode
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
@@ -270,8 +287,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -562,6 +579,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		busyInputMode:         BusyInputModeQueue,
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
 		shell:                 defaultShell(),
@@ -1120,6 +1138,12 @@ func (e *Engine) SetMaxQueuedMessages(n int) {
 	if n > 0 {
 		e.maxQueuedMessages = n
 	}
+}
+
+// SetBusyInputMode controls how ordinary messages are handled while a turn is busy.
+// The default is queue, preserving existing behavior.
+func (e *Engine) SetBusyInputMode(mode BusyInputMode) {
+	e.busyInputMode = normalizeBusyInputMode(mode)
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -2488,6 +2512,17 @@ func (e *Engine) waitForSessionLock(session *Session, timeout time.Duration) boo
 	}
 }
 
+func (e *Engine) interruptBusySession(interactiveKey string, session *Session) bool {
+	if interactiveKey == "" || session == nil {
+		return false
+	}
+	stopped := e.stopInteractiveSessionWithOptions(interactiveKey, false)
+	if stopped {
+		slog.Info("busy input interrupted running session", "interactive_key", interactiveKey)
+	}
+	return stopped
+}
+
 func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc {
 	ctx, cancel := context.WithCancel(e.ctx)
 	go func() {
@@ -2727,6 +2762,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
+		}
+		if e.busyInputMode == BusyInputModeInterrupt {
+			if e.interruptBusySession(interactiveKey, session) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBusyInterrupted))
+				if e.waitForSessionLock(session, recalledStopLockWait) {
+					goto sessionLocked
+				}
+				slog.Warn("busy interrupt requested but session lock did not release before timeout",
+					"session", msg.SessionKey, "interactive_key", interactiveKey)
+				return
+			}
 		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
@@ -5810,6 +5856,7 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"thread", "t"}, "thread"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -5841,6 +5888,41 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+}
+
+func (e *Engine) cmdThread(p Platform, msg *Message, args []string) {
+	prompt := strings.TrimSpace(strings.Join(args, " "))
+	if prompt == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgThreadUsage))
+		return
+	}
+	creator, ok := p.(ThreadCreator)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgThreadNotSupported))
+		return
+	}
+	target, err := creator.CreateThread(e.ctx, msg.ReplyCtx)
+	if err != nil {
+		slog.Error("thread: create failed", "platform", p.Name(), "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgThreadCreateFailed, err))
+		return
+	}
+	if target.SessionKey == "" || target.ReplyCtx == nil {
+		slog.Error("thread: platform returned invalid target", "platform", p.Name(), "session_key", target.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgThreadInvalidTarget))
+		return
+	}
+
+	threadMsg := *msg
+	threadMsg.SessionKey = target.SessionKey
+	threadMsg.ReplyCtx = target.ReplyCtx
+	threadMsg.Content = prompt
+	threadMsg.Images = nil
+	threadMsg.Files = nil
+	threadMsg.Audio = nil
+	threadMsg.ExtraContent = ""
+	threadMsg.Recalled = false
+	e.handleMessage(p, &threadMsg)
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -6059,6 +6141,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
+	case "thread":
+		e.cmdThread(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {

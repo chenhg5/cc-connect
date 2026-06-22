@@ -697,9 +697,12 @@ func main() {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
 		}
 
-		// Wire queue depth
+		// Wire queue behavior
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
 			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
+		}
+		if cfg.Queue.BusyInputMode != "" {
+			engine.SetBusyInputMode(core.BusyInputMode(cfg.Queue.BusyInputMode))
 		}
 
 		// Wire auto-compress settings

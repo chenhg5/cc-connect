@@ -88,6 +88,78 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 	}
 }
 
+func TestCreateThreadRepliesInThreadAndReturnsIsolatedTarget(t *testing.T) {
+	const appID = "cli_thread_create"
+	const appSecret = "dummy"
+	const parentMessageID = "om_parent"
+	const chatID = "oc_chat"
+	const threadID = "omt_created"
+
+	var sawReplyInThread bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case "/open-apis/im/v1/messages/" + parentMessageID + "/reply":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if !strings.Contains(string(body), `"reply_in_thread":true`) {
+				t.Fatalf("reply body = %s, want reply_in_thread=true", string(body))
+			}
+			sawReplyInThread = true
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"message_id": "om_seed",
+					"thread_id":  threadID,
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		threadIsolation: true,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	target, err := p.CreateThread(context.Background(), replyContext{
+		messageID:  parentMessageID,
+		chatID:     chatID,
+		sessionKey: "feishu:oc_chat:ou_user",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread() error = %v", err)
+	}
+	if !sawReplyInThread {
+		t.Fatal("reply API was not called with reply_in_thread=true")
+	}
+	if target.SessionKey != "feishu:oc_chat:root:omt_created" {
+		t.Fatalf("SessionKey = %q, want feishu:oc_chat:root:omt_created", target.SessionKey)
+	}
+	if rc, ok := target.ReplyCtx.(replyContext); !ok || rc.messageID != "om_seed" || rc.chatID != chatID || rc.sessionKey != target.SessionKey {
+		t.Fatalf("ReplyCtx = %#v, want seed replyContext for target", target.ReplyCtx)
+	}
+}
+
 func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
 	const appID = "cli_quote_image"
 	const appSecret = "secret-quote-image"
@@ -1160,13 +1232,17 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 		},
 	}
 
-	// Step 1: opening message @mentions the bot — establishes the thread.
-	if err := p.onMessage(context.Background(), buildEvent(rootMsgID, "text", `{"text":"@_user_1 看看这个"}`, botMention, "")); err != nil {
+	threadKey := "feishu:" + chatID + ":root:" + rootMsgID
+	p.markCreatedThreadSession(threadKey)
+
+	// Step 1: opening message @mentions the bot inside a thread that was
+	// already created by /thread — this establishes the active thread for
+	// attachment-only follow-ups.
+	if err := p.onMessage(context.Background(), buildEvent("om_thread_open", "text", `{"text":"@_user_1 看看这个"}`, botMention, rootMsgID)); err != nil {
 		t.Fatalf("onMessage(root) error = %v", err)
 	}
-	threadKey := "feishu:" + chatID + ":root:" + rootMsgID
 	if !p.isActiveThreadSession(threadKey) {
-		t.Fatalf("thread %q should be marked active after @bot text", threadKey)
+		t.Fatalf("thread %q should be marked active after @bot text in created thread", threadKey)
 	}
 	select {
 	case <-received:
@@ -1224,6 +1300,23 @@ func extractBasePlatform(p core.Platform) *Platform {
 		return ip.Platform
 	}
 	return nil
+}
+
+func TestNewPlatform_DefaultReactionEmojiKeepsCCConnectStatus(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":     "cli_test",
+		"app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil {
+		t.Fatal("expected *Platform or *interactivePlatform")
+	}
+	if fp.reactionEmoji != "OnIt" {
+		t.Fatalf("default reactionEmoji = %q, want OnIt", fp.reactionEmoji)
+	}
 }
 
 func TestNewPlatform_RequireMentionFalseAliasesGroupReplyAll(t *testing.T) {

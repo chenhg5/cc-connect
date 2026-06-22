@@ -167,6 +167,12 @@ type Platform struct {
 	// without requiring another @bot mention. Value is the last-seen time so
 	// stale entries can be expired by a future TTL sweep if needed.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+	// createdThreadSessions tracks native threads created explicitly by /thread.
+	// These are opt-in isolated sessions even when global thread_isolation is
+	// disabled, so follow-up messages in the same platform thread continue the
+	// /thread-created session without turning every existing thread into an
+	// isolated session.
+	createdThreadSessions sync.Map // sessionKey -> time.Time
 
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
@@ -3307,16 +3313,40 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 	return strings.TrimSpace(text)
 }
 
+func (p *Platform) threadSessionKey(chatID, threadID string) string {
+	return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, threadID)
+}
+
+func messageThreadRootID(msg *larkim.EventMessage) string {
+	if msg == nil {
+		return ""
+	}
+	rootID := stringValue(msg.ThreadId)
+	if rootID == "" {
+		rootID = stringValue(msg.RootId)
+	}
+	return rootID
+}
+
+func (p *Platform) markCreatedThreadSession(sessionKey string) {
+	if !isThreadSessionKey(sessionKey) {
+		return
+	}
+	p.createdThreadSessions.Store(sessionKey, time.Now())
+}
+
+func (p *Platform) isCreatedThreadSession(sessionKey string) bool {
+	_, ok := p.createdThreadSessions.Load(sessionKey)
+	return ok
+}
+
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
-	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
-		rootID := stringValue(msg.RootId)
-		if rootID == "" {
-			rootID = stringValue(msg.MessageId)
-		}
-		if rootID != "" {
-			return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
+	if rootID := messageThreadRootID(msg); rootID != "" {
+		sessionKey := p.threadSessionKey(chatID, rootID)
+		if p.isCreatedThreadSession(sessionKey) {
+			return sessionKey
 		}
 	}
 	if p.shareSessionInChannel {
@@ -3341,7 +3371,7 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
+	return p.isCreatedThreadSession(rc.sessionKey)
 }
 
 // shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
@@ -3367,6 +3397,74 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 		body.ReplyInThread(true)
 	}
 	return body.Build()
+}
+
+func (p *Platform) CreateThread(ctx context.Context, rctx any) (core.ThreadTarget, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return core.ThreadTarget{}, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.messageID == "" {
+		return core.ThreadTarget{}, fmt.Errorf("%s: messageID is empty, cannot create thread", p.tag())
+	}
+	if rc.chatID == "" {
+		return core.ThreadTarget{}, fmt.Errorf("%s: chatID is empty, cannot create thread", p.tag())
+	}
+
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypeText).
+			Content(`{"text":"⏳"}`).
+			ReplyInThread(true).
+			Build()).
+		Build()
+
+	var resp *larkim.ReplyMessageResp
+	err := p.withTransientRetry(ctx, "create thread", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "create thread", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			resp, err = client.Im.Message.Reply(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: create thread reply api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: create thread failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return core.ThreadTarget{}, err
+	}
+	if resp == nil || resp.Data == nil {
+		return core.ThreadTarget{}, fmt.Errorf("%s: create thread returned empty response", p.tag())
+	}
+
+	threadID := stringValue(resp.Data.ThreadId)
+	if threadID == "" {
+		threadID = stringValue(resp.Data.RootId)
+	}
+	if threadID == "" {
+		threadID = stringValue(resp.Data.MessageId)
+	}
+	if threadID == "" {
+		return core.ThreadTarget{}, fmt.Errorf("%s: create thread returned no thread id", p.tag())
+	}
+	messageID := stringValue(resp.Data.MessageId)
+	if messageID == "" {
+		messageID = rc.messageID
+	}
+	sessionKey := p.threadSessionKey(rc.chatID, threadID)
+	p.markCreatedThreadSession(sessionKey)
+	return core.ThreadTarget{
+		SessionKey: sessionKey,
+		ReplyCtx: replyContext{
+			messageID:  messageID,
+			chatID:     rc.chatID,
+			sessionKey: sessionKey,
+		},
+	}, nil
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {

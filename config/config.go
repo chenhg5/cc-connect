@@ -142,9 +142,10 @@ type CronConfig struct {
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
 }
 
-// QueueConfig controls the per-session message queue.
+// QueueConfig controls the per-session message queue and busy-message behavior.
 type QueueConfig struct {
-	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
+	MaxDepth      *int   `toml:"max_depth"`       // max queued messages per session; default 5
+	BusyInputMode string `toml:"busy_input_mode"` // "queue" (default) or "interrupt"
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -982,6 +983,11 @@ func (c *Config) validate() error {
 func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Queue.BusyInputMode)) {
+	case "", "queue", "interrupt":
+	default:
+		return fmt.Errorf("config: queue.busy_input_mode must be \"queue\" or \"interrupt\"")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
@@ -3484,6 +3490,11 @@ func GetGlobalSettings() map[string]any {
 		queueMax = *cfg.Queue.MaxDepth
 	}
 	result["queue_max_depth"] = queueMax
+	queueMode := strings.ToLower(strings.TrimSpace(cfg.Queue.BusyInputMode))
+	if queueMode == "" {
+		queueMode = "queue"
+	}
+	result["queue_busy_input_mode"] = queueMode
 	return result
 }
 
@@ -3502,6 +3513,7 @@ type GlobalSettingsUpdate struct {
 	RateLimitMax       *int    `json:"rate_limit_max_messages"`
 	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
 	QueueMaxDepth      *int    `json:"queue_max_depth"`
+	QueueBusyInputMode *string `json:"queue_busy_input_mode"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -3557,6 +3569,9 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.QueueMaxDepth != nil {
 		cfg.Queue.MaxDepth = u.QueueMaxDepth
+	}
+	if u.QueueBusyInputMode != nil {
+		cfg.Queue.BusyInputMode = strings.ToLower(strings.TrimSpace(*u.QueueBusyInputMode))
 	}
 	return saveConfig(cfg)
 }

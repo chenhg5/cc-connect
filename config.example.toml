@@ -153,6 +153,14 @@ level = "info" # debug, info, warn, error
 # 推荐值：30–60。默认 0（禁用）。
 # max_turn_time_mins = 0  # default: disabled / 默认禁用
 
+# Busy ordinary-message handling while an agent turn is already running.
+# 忙时普通消息处理方式：当上一轮 agent 任务仍在运行时，新普通消息如何处理。
+# [queue]
+# max_depth = 5                  # max queued messages per session / 每个会话最大排队消息数
+# busy_input_mode = "queue"       # "queue" (default) or "interrupt"
+#                                # queue: process after current task finishes / 当前任务结束后再处理
+#                                # interrupt: stop current task and process the new message / 打断当前任务并处理新消息
+
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.
@@ -1000,10 +1008,11 @@ app_secret = "your-feishu-app-secret"
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
-# share_session_in_channel = false  # If true, all users in a group share one agent session
-#                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
-# thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
-#                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
+# share_session_in_channel = false  # If true, all users in a group share one main-chat agent session
+#                                   # 设为 true 时，群聊主对话内所有用户共享同一个 Agent 会话
+# thread_isolation = false  # If true, created Feishu threads can admit attachment-only follow-ups without re-mentioning the bot.
+#                           # Native Feishu thread sessions are created explicitly with /thread or /t; incidental root/thread metadata does not trigger thread mode.
+#                           # 设为 true 时，已创建的飞书话题可接收不重复 @bot 的附件跟进；原生话题会话由 /thread 或 /t 显式创建。
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card

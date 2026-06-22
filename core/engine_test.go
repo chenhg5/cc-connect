@@ -72,6 +72,57 @@ func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) erro
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
 
+type threadCreatingPlatform struct {
+	stubPlatformEngine
+	createCalls  int
+	lastReplyCtx any
+	result       ThreadTarget
+	err          error
+}
+
+func (p *threadCreatingPlatform) CreateThread(ctx context.Context, replyCtx any) (ThreadTarget, error) {
+	p.createCalls++
+	p.lastReplyCtx = replyCtx
+	return p.result, p.err
+}
+
+type typingRecorderPlatform struct {
+	stubPlatformEngine
+	starts []any
+	stops  []any
+}
+
+func (p *typingRecorderPlatform) StartTyping(_ context.Context, replyCtx any) func() {
+	p.mu.Lock()
+	p.starts = append(p.starts, replyCtx)
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		p.stops = append(p.stops, replyCtx)
+		p.mu.Unlock()
+	}
+}
+
+func (p *typingRecorderPlatform) typingSnapshot() (starts []any, stops []any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	starts = append([]any(nil), p.starts...)
+	stops = append([]any(nil), p.stops...)
+	return starts, stops
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(message)
+}
+
 func (p *stubPlatformEngine) getSent() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -195,6 +246,33 @@ func (s *resultAgentSession) Events() <-chan Event                              
 func (s *resultAgentSession) CurrentSessionID() string                             { return "result-session" }
 func (s *resultAgentSession) Alive() bool                                          { return true }
 func (s *resultAgentSession) Close() error                                         { return nil }
+
+type promptRecordingAgentSession struct {
+	sessionID string
+	prompts   chan string
+	events    chan Event
+}
+
+func newPromptRecordingAgentSession(sessionID string) *promptRecordingAgentSession {
+	return &promptRecordingAgentSession{
+		sessionID: sessionID,
+		prompts:   make(chan string, 1),
+		events:    make(chan Event, 1),
+	}
+}
+
+func (s *promptRecordingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.prompts <- prompt
+	s.events <- Event{Type: EventResult, Content: "thread done", Done: true}
+	return nil
+}
+func (s *promptRecordingAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *promptRecordingAgentSession) Events() <-chan Event     { return s.events }
+func (s *promptRecordingAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *promptRecordingAgentSession) Alive() bool              { return true }
+func (s *promptRecordingAgentSession) Close() error             { return nil }
 
 type stubLifecyclePlatform struct {
 	stubPlatformEngine
@@ -1100,10 +1178,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -2487,6 +2565,110 @@ func TestEngine_DisabledCommandsWildcard(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用") {
 		t.Errorf("expected disabled message, got: %s", p.sent[0])
+	}
+}
+
+func TestCmdThreadCreatesIsolatedSessionWithoutTouchingParent(t *testing.T) {
+	threadSession := newPromptRecordingAgentSession("thread-agent-session")
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
+			if sessionID != "" {
+				t.Fatalf("thread turn started with resume session id %q, want empty new session", sessionID)
+			}
+			return threadSession, nil
+		},
+	}
+	p := &threadCreatingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		result: ThreadTarget{
+			SessionKey: "test:chat:root:thread-1",
+			ReplyCtx:   "thread-ctx",
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:chat:user-1",
+		Platform:   "test",
+		MessageID:  "m-parent",
+		UserID:     "user-1",
+		UserName:   "User",
+		Content:    "/thread build isolated feature",
+		ReplyCtx:   "parent-ctx",
+	})
+
+	if p.createCalls != 1 {
+		t.Fatalf("CreateThread calls = %d, want 1", p.createCalls)
+	}
+	if p.lastReplyCtx != "parent-ctx" {
+		t.Fatalf("CreateThread replyCtx = %v, want parent-ctx", p.lastReplyCtx)
+	}
+
+	select {
+	case prompt := <-threadSession.prompts:
+		if prompt != "build isolated feature" {
+			t.Fatalf("thread prompt = %q, want build isolated feature", prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("thread prompt was not sent to agent")
+	}
+
+	if parentID := e.sessions.ActiveSessionID("test:chat:user-1"); parentID != "" {
+		t.Fatalf("parent session was created/touched: active id %q", parentID)
+	}
+	if threadID := e.sessions.ActiveSessionID("test:chat:root:thread-1"); threadID == "" {
+		t.Fatal("thread session was not created")
+	}
+}
+
+func TestCmdThreadDoesNotInterruptBusyParentSession(t *testing.T) {
+	threadSession := newPromptRecordingAgentSession("thread-agent-session")
+	parentSession := newControllableSession("parent-agent-session")
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			return threadSession, nil
+		},
+	}
+	p := &threadCreatingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		result:             ThreadTarget{SessionKey: "test:chat:root:thread-2", ReplyCtx: "thread-ctx-2"},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	parentKey := "test:chat:user-1"
+	parent := e.sessions.GetOrCreateActive(parentKey)
+	if !parent.TryLock() {
+		t.Fatal("expected to lock parent session")
+	}
+	defer parent.UnlockWithoutUpdate()
+	e.interactiveMu.Lock()
+	e.interactiveStates[parentKey] = &interactiveState{agentSession: parentSession, platform: p, replyCtx: "parent-ctx"}
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: parentKey,
+		Platform:   "test",
+		MessageID:  "m-parent",
+		UserID:     "user-1",
+		UserName:   "User",
+		Content:    "/thread do independent work",
+		ReplyCtx:   "parent-ctx",
+	})
+
+	select {
+	case prompt := <-threadSession.prompts:
+		if prompt != "do independent work" {
+			t.Fatalf("thread prompt = %q, want do independent work", prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("thread prompt was not sent to agent")
+	}
+
+	if !parentSession.Alive() {
+		t.Fatal("parent agent session was interrupted by /thread")
+	}
+	if p.createCalls != 1 {
+		t.Fatalf("CreateThread calls = %d, want 1", p.createCalls)
 	}
 }
 
@@ -6842,6 +7024,7 @@ func TestHandlePendingPermission_CronFallback(t *testing.T) {
 // controllableAgentSession is an AgentSession stub whose session ID, liveness,
 // and events channel can be controlled by the test.
 type controllableAgentSession struct {
+	mu              sync.Mutex
 	sessionID       string
 	alive           bool
 	events          chan Event
@@ -6879,9 +7062,15 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 	return s.report, s.usageErr
 }
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
-func (s *controllableAgentSession) Alive() bool                    { return s.alive }
+func (s *controllableAgentSession) Alive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.alive
+}
 func (s *controllableAgentSession) Close() error {
+	s.mu.Lock()
 	s.alive = false
+	s.mu.Unlock()
 	close(s.events)
 	select {
 	case <-s.closed:
@@ -8075,7 +8264,9 @@ func newBlockingCloseSession(id string) *blockingCloseAgentSession {
 }
 
 func (s *blockingCloseAgentSession) Close() error {
+	s.mu.Lock()
 	s.alive = false
+	s.mu.Unlock()
 	select {
 	case s.closeStarted <- struct{}{}:
 	default:
@@ -9209,6 +9400,181 @@ func TestQueueMessage_NilAgentSession_DuringStartup(t *testing.T) {
 		t.Fatalf("queued content = %q, want %q", state.pendingMessages[0].content, "queued during startup")
 	}
 	state.mu.Unlock()
+}
+
+func TestBusyInputModeInterruptStopsCurrentSessionWithoutQueueing(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	running := newControllableSession("running")
+	next := newControllableSession("next")
+	startCalls := 0
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			startCalls++
+			if startCalls == 1 {
+				return running, nil
+			}
+			return next, nil
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBusyInputMode(BusyInputModeInterrupt)
+
+	key := "test:interrupt-user"
+	firstSession := e.sessions.GetOrCreateActive(key)
+	if !firstSession.TryLock() {
+		t.Fatal("expected to lock first session")
+	}
+
+	doneFirst := make(chan struct{})
+	go func() {
+		defer close(doneFirst)
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: key,
+			MessageID:  "m1",
+			UserID:     "u1",
+			UserName:   "User",
+			Platform:   "test",
+			Content:    "long running task",
+			ReplyCtx:   "ctx-1",
+		}, firstSession, agent, e.sessions, key, "", key)
+	}()
+
+	select {
+	case <-time.After(2 * time.Second):
+		// Expected: first turn is still waiting for agent events.
+	case <-doneFirst:
+		t.Fatal("first turn ended before interrupt")
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		MessageID:  "m2",
+		UserID:     "u1",
+		UserName:   "User",
+		Platform:   "test",
+		Content:    "new instruction",
+		ReplyCtx:   "ctx-2",
+	})
+
+	select {
+	case <-running.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt mode did not close the running agent session")
+	}
+
+	select {
+	case <-doneFirst:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first turn did not exit after interrupt")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[key]
+		e.interactiveMu.Unlock()
+		if state != nil {
+			state.mu.Lock()
+			queued := len(state.pendingMessages)
+			current := state.agentSession
+			state.mu.Unlock()
+			if queued != 0 {
+				t.Fatalf("interrupt mode queued %d messages, want 0", queued)
+			}
+			if current == next {
+				break
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("interrupt mode did not start processing the new message")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	sent := p.getSent()
+	gotInterruptAck := false
+	for _, line := range sent {
+		if line == e.i18n.T(MsgBusyInterrupted) {
+			gotInterruptAck = true
+		}
+		if strings.Contains(line, e.i18n.T(MsgMessageQueued)) {
+			t.Fatalf("interrupt mode should not send queued reply, got %v", sent)
+		}
+	}
+	if !gotInterruptAck {
+		t.Fatalf("interrupt mode should send interrupt ack %q, got %v", e.i18n.T(MsgBusyInterrupted), sent)
+	}
+}
+
+func TestBusyInputModeInterruptSwitchesProcessingIndicatorToNewMessage(t *testing.T) {
+	p := &typingRecorderPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	running := newControllableSession("running")
+	next := newControllableSession("next")
+	startCalls := 0
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			startCalls++
+			if startCalls == 1 {
+				return running, nil
+			}
+			return next, nil
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBusyInputMode(BusyInputModeInterrupt)
+
+	key := "test:interrupt-indicator"
+	firstSession := e.sessions.GetOrCreateActive(key)
+	if !firstSession.TryLock() {
+		t.Fatal("expected to lock first session")
+	}
+
+	doneFirst := make(chan struct{})
+	go func() {
+		defer close(doneFirst)
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: key,
+			MessageID:  "m1",
+			UserID:     "u1",
+			UserName:   "User",
+			Platform:   "test",
+			Content:    "long running task",
+			ReplyCtx:   "ctx-1",
+		}, firstSession, agent, e.sessions, key, "", key)
+	}()
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		starts, _ := p.typingSnapshot()
+		return len(starts) == 1 && starts[0] == "ctx-1"
+	}, "first message processing indicator did not start")
+
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		MessageID:  "m2",
+		UserID:     "u1",
+		UserName:   "User",
+		Platform:   "test",
+		Content:    "new instruction",
+		ReplyCtx:   "ctx-2",
+	})
+
+	select {
+	case <-running.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt mode did not close the running agent session")
+	}
+	select {
+	case <-doneFirst:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first turn did not exit after interrupt")
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		starts, stops := p.typingSnapshot()
+		return len(starts) >= 2 && starts[0] == "ctx-1" && starts[1] == "ctx-2" && len(stops) >= 1 && stops[0] == "ctx-1"
+	}, "interrupt did not move processing indicator from old message to new message")
 }
 
 // TestProcessInteractiveMessageWith_NilAgentSession_NoPanic is a regression
@@ -14944,8 +15310,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -14973,7 +15339,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
