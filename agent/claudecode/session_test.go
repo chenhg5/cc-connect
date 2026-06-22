@@ -248,6 +248,131 @@ func TestHandleResultNoUsage(t *testing.T) {
 	}
 }
 
+// TestHandleUserEmitsEventToolResult is a regression test for issue #459:
+// the Claude Code stream-json stream emits user messages whose `content`
+// array contains `tool_result` items. handleUser used to only log is_error
+// results; it now resolves the originating tool name from the
+// tool_use_id -> tool_name map populated by handleAssistant and forwards
+// each result as a core.EventToolResult so IM progress cards can show the
+// tool outcome (Codex/Gemini/OpenCode already do this).
+func TestHandleUserEmitsEventToolResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events:    make(chan core.Event, 16),
+		ctx:       ctx,
+		toolIDMap: make(map[string]string),
+	}
+	cs.alive.Store(true)
+
+	// First, simulate an assistant turn that used the "Bash" tool with id "tu-1".
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{
+					"type":  "tool_use",
+					"id":    "tu-1",
+					"name":  "Bash",
+					"input": map[string]any{"command": "ls"},
+				},
+			},
+		},
+	})
+
+	// Now a user turn carrying the tool_result for that call.
+	cs.handleUser(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": "tu-1",
+					"content":     "README.md\ncmd",
+				},
+			},
+		},
+	})
+
+	// Drain the tool_use event that handleAssistant emitted first.
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolUse {
+			t.Fatalf("first event type = %q, want %q", evt.Type, core.EventToolUse)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for EventToolUse")
+	}
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolResult {
+			t.Fatalf("event type = %q, want %q", evt.Type, core.EventToolResult)
+		}
+		if evt.ToolName != "Bash" {
+			t.Errorf("ToolName = %q, want %q", evt.ToolName, "Bash")
+		}
+		if evt.ToolResult != "README.md\ncmd" {
+			t.Errorf("ToolResult = %q, want %q", evt.ToolResult, "README.md\ncmd")
+		}
+		if evt.ToolStatus != "completed" {
+			t.Errorf("ToolStatus = %q, want %q", evt.ToolStatus, "completed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for EventToolResult")
+	}
+}
+
+// TestHandleUserToolResultArrayContent covers the array-shaped
+// tool_result.content that newer Claude Code versions emit, and confirms
+// is_error maps to ToolStatus="failed" and the flattened result string.
+func TestHandleUserToolResultArrayContent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events:    make(chan core.Event, 8),
+		ctx:       ctx,
+		toolIDMap: map[string]string{"tu-2": "Read"},
+	}
+	cs.alive.Store(true)
+
+	cs.handleUser(map[string]any{
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": "tu-2",
+					"is_error":    true,
+					"content": []any{
+						map[string]any{"type": "text", "text": "first part"},
+						map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "..."}},
+						map[string]any{"type": "text", "text": "second part"},
+					},
+				},
+			},
+		},
+	})
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolResult {
+			t.Fatalf("event type = %q, want %q", evt.Type, core.EventToolResult)
+		}
+		if evt.ToolName != "Read" {
+			t.Errorf("ToolName = %q, want %q", evt.ToolName, "Read")
+		}
+		if evt.ToolStatus != "failed" {
+			t.Errorf("ToolStatus = %q, want %q", evt.ToolStatus, "failed")
+		}
+		// Image blocks are skipped; only text blocks are flattened.
+		if evt.ToolResult != "first part\nsecond part" {
+			t.Errorf("ToolResult = %q, want %q", evt.ToolResult, "first part\nsecond part")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for EventToolResult")
+	}
+}
+
 func TestReadLoop_ChildHoldsStdoutPipe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

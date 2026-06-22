@@ -53,6 +53,14 @@ type claudeSession struct {
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
 
+	// toolIDMap remembers tool_use_id -> tool_name from the most recent
+	// assistant turn. Populated by handleAssistant on tool_use events and
+	// consumed by handleUser on tool_result events so EventToolResult can
+	// carry the originating tool name. Entries are cleared per user turn to
+	// avoid stale lookups across turns.
+	toolIDMapMu sync.RWMutex
+	toolIDMap   map[string]string
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -691,6 +699,15 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		switch contentType {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
+			toolUseID, _ := item["id"].(string)
+			if toolUseID != "" && toolName != "" {
+				cs.toolIDMapMu.Lock()
+				if cs.toolIDMap == nil {
+					cs.toolIDMap = make(map[string]string)
+				}
+				cs.toolIDMap[toolUseID] = toolName
+				cs.toolIDMapMu.Unlock()
+			}
 			if toolName == "AskUserQuestion" {
 				continue
 			}
@@ -738,13 +755,70 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			continue
 		}
 		contentType, _ := item["type"].(string)
-		if contentType == "tool_result" {
-			isError, _ := item["is_error"].(bool)
-			if isError {
-				result, _ := item["content"].(string)
-				slog.Debug("claudeSession: tool error", "content", result)
-			}
+		if contentType != "tool_result" {
+			continue
 		}
+		toolUseID, _ := item["tool_use_id"].(string)
+		cs.toolIDMapMu.RLock()
+		toolName := cs.toolIDMap[toolUseID]
+		cs.toolIDMapMu.RUnlock()
+
+		isError, _ := item["is_error"].(bool)
+		result := extractToolResultContent(item["content"])
+
+		status := "completed"
+		if isError {
+			status = "failed"
+			slog.Debug("claudeSession: tool error", "tool", toolName, "content", result)
+		}
+
+		evt := core.Event{
+			Type:       core.EventToolResult,
+			ToolName:   toolName,
+			ToolResult: result,
+			ToolStatus: status,
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
+	}
+}
+
+// extractToolResultContent flattens Claude Code tool_result.content into a
+// single string. The CLI emits it either as a plain string or as an array of
+// content blocks ({type:"text", text:"..."} or {type:"image", ...}); we only
+// surface the textual portion because the engine's EventToolResult is a
+// single string field and downstream UIs (IM progress cards) cannot render
+// images embedded in tool results.
+func extractToolResultContent(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, block := range v {
+			m, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			if t != "text" {
+				continue
+			}
+			text, _ := m["text"].(string)
+			if text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(text)
+		}
+		return b.String()
+	default:
+		return ""
 	}
 }
 
