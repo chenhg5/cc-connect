@@ -106,6 +106,7 @@ type Config struct {
 	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
+	Timer              TimerConfig             `toml:"timer"`
 	Queue              QueueConfig             `toml:"queue"`
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
@@ -141,6 +142,16 @@ type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
 }
+
+// TimerConfig controls one-shot timer behavior.
+type TimerConfig struct {
+	Enabled        *bool  `toml:"enabled"`          // default true; set to false to disable /timer command
+	Silent         *bool  `toml:"silent"`           // suppress timer fire notification; nil = inherit from [cron].silent
+	SessionMode    string `toml:"session_mode"`     // default session mode; "" = inherit from [cron].session_mode
+	MaxPendingJobs int    `toml:"max_pending_jobs"` // max pending (unfired) timers; 0 = default (50)
+}
+
+const DefaultTimerMaxPendingJobs = 50
 
 // QueueConfig controls the per-session message queue.
 type QueueConfig struct {
@@ -913,6 +924,42 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	}
 
 	return
+}
+
+// allowedShellBases lists base names (lowercase, without .exe) that are
+// accepted in the shell configuration. Any path whose base name matches
+// one of these entries (with or without .exe suffix) is allowed.
+var allowedShellBases = map[string]bool{
+	"sh":         true,
+	"bash":       true,
+	"zsh":        true,
+	"fish":       true,
+	"dash":       true,
+	"ksh":        true,
+	"cmd":        true,
+	"powershell": true,
+	"pwsh":       true,
+}
+
+// ValidateShellBinary checks whether the configured shell path refers to a
+// recognized shell. Returns nil if empty (platform default will be used) or
+// if the base name is on the allow list. Returns an error otherwise.
+func ValidateShellBinary(shell string) error {
+	if shell == "" {
+		return nil
+	}
+	base := filepath.Base(shell)
+	// On non-Windows, filepath.Base doesn't handle backslashes, so also try
+	// splitting on backslash for Windows-style paths in config files.
+	if idx := strings.LastIndex(base, "\\"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".exe")
+	if allowedShellBases[base] {
+		return nil
+	}
+	return fmt.Errorf("unsupported shell %q: allowed shells are sh, bash, zsh, fish, dash, ksh, cmd, powershell, pwsh", shell)
 }
 
 // EffectiveShell returns the shell binary, flag, and init command for the project.

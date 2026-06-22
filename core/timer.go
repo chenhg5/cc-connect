@@ -244,6 +244,7 @@ type TimerScheduler struct {
 	timers   map[string]*time.Timer // job ID → active timer
 	defaultSilent      bool
 	defaultSessionMode string
+	maxPendingJobs     int // 0 = use default (50)
 }
 
 // missedJobGracePeriod is how long after a missed fire time we still execute.
@@ -274,6 +275,19 @@ func (ts *TimerScheduler) SetDefaultSilent(silent bool) {
 // Must be called before Start (not safe for concurrent use).
 func (ts *TimerScheduler) SetDefaultSessionMode(mode string) {
 	ts.defaultSessionMode = NormalizeCronSessionMode(mode)
+}
+
+// SetMaxPendingJobs sets the maximum number of pending (unfired) timer jobs allowed.
+// Must be called before Start (not safe for concurrent use).
+func (ts *TimerScheduler) SetMaxPendingJobs(max int) {
+	ts.maxPendingJobs = max
+}
+
+func (ts *TimerScheduler) maxPending() int {
+	if ts.maxPendingJobs > 0 {
+		return ts.maxPendingJobs
+	}
+	return 50
 }
 
 // IsSilent returns whether the timer job should suppress the start notification.
@@ -334,6 +348,9 @@ func (ts *TimerScheduler) Stop() {
 func (ts *TimerScheduler) AddJob(job *TimerJob) error {
 	if err := validateTimerJob(job); err != nil {
 		return err
+	}
+	if pending := ts.store.ListPending(); len(pending) >= ts.maxPending() {
+		return fmt.Errorf("timer limit reached: %d pending jobs (max %d)", len(pending), ts.maxPending())
 	}
 	job.SessionMode = NormalizeCronSessionMode(job.SessionMode)
 	if err := ts.store.Add(job); err != nil {

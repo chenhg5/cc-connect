@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -187,9 +188,13 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 	defer audioResp.Body.Close()
 
-	wavData, err := io.ReadAll(audioResp.Body)
+	const maxTTSAudioSize = 20 * 1024 * 1024 // 20 MB
+	wavData, err := io.ReadAll(io.LimitReader(audioResp.Body, maxTTSAudioSize+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("qwen tts: read audio: %w", err)
+	}
+	if len(wavData) > maxTTSAudioSize {
+		return nil, "", fmt.Errorf("qwen tts: audio response exceeds %d bytes", maxTTSAudioSize)
 	}
 	return wavData, "wav", nil
 }
@@ -555,32 +560,57 @@ func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 		voice = e.Voice
 	}
 
-	// Build espeak command
-	args := []string{
-		"-v", voice,
-		"-w", "/dev/stdout", // write WAV to stdout (Unix-only; not supported on Windows)
+	if runtime.GOOS == "windows" {
+		return e.synthesizeViaTempFile(ctx, text, voice, opts.Speed)
 	}
 
-	// Add speed option if specified
+	args := []string{
+		"-v", voice,
+		"-w", "/dev/stdout",
+	}
 	if opts.Speed > 0 {
-		// espeak speed is in words per minute, default 160
-		// Convert speed multiplier (0.5-2.0) to wpm
 		wpm := int(160 * opts.Speed)
 		args = append(args, "-s", fmt.Sprintf("%d", wpm))
 	}
-
-	// Add text as argument
 	args = append(args, text)
 
-	// Execute espeak command
-	// Use Output() instead of CombinedOutput() to avoid mixing stderr warnings with audio data
 	cmd := exec.CommandContext(ctx, e.Path, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, "", fmt.Errorf("espeak: voice=%s text=%q: %w", voice, text, err)
 	}
-
 	return output, "wav", nil
+}
+
+func (e *EspeakTTS) synthesizeViaTempFile(ctx context.Context, text, voice string, speed float64) ([]byte, string, error) {
+	tmpFile, err := os.CreateTemp("", "espeak_tts_*.wav")
+	if err != nil {
+		return nil, "", fmt.Errorf("espeak: create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	args := []string{"-v", voice, "-w", tmpPath}
+	if speed > 0 {
+		wpm := int(160 * speed)
+		args = append(args, "-s", fmt.Sprintf("%d", wpm))
+	}
+	args = append(args, text)
+
+	cmd := exec.CommandContext(ctx, e.Path, args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, "", fmt.Errorf("espeak: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
+	}
+
+	audioData, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("espeak: read output file: %w", err)
+	}
+	if len(audioData) == 0 {
+		return nil, "", fmt.Errorf("espeak: produced empty audio file")
+	}
+	return audioData, "wav", nil
 }
 
 // ──────────────────────────────────────────────────────────────

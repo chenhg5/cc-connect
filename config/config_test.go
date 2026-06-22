@@ -3313,3 +3313,43 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestValidateShellBinary(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantErr bool
+	}{
+		{"", false},
+		{"sh", false},
+		{"bash", false},
+		{"/bin/bash", false},
+		{"/usr/local/bin/zsh", false},
+		{"fish", false},
+		{"dash", false},
+		{"ksh", false},
+		{"cmd", false},
+		{"cmd.exe", false},
+		{"powershell", false},
+		{"powershell.exe", false},
+		{"pwsh", false},
+		{"pwsh.exe", false},
+		{"C:\\Windows\\System32\\cmd.exe", false},
+		{"rm", true},
+		{"/bin/rm", true},
+		{"python", true},
+		{"node", true},
+		{"/usr/bin/env", true},
+		{"cat", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			err := ValidateShellBinary(tt.input)
+			if tt.wantErr && err == nil {
+				t.Errorf("ValidateShellBinary(%q) = nil, want error", tt.input)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ValidateShellBinary(%q) = %v, want nil", tt.input, err)
+			}
+		})
+	}
+}

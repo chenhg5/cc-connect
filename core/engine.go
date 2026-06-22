@@ -1605,152 +1605,11 @@ func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) erro
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
-
 	timeout := job.ExecutionTimeout()
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-
-	cmdLabel := truncateStr(job.Exec, 60)
-
-	ctx, cancel := context.WithTimeout(e.ctx, timeout)
-	defer cancel()
-
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	}
-	shellCmd.Dir = workDir
-
-	stdout, err := shellCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("shell: stdout pipe: %w", err)
-	}
-	stderr, err := shellCmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("shell: stderr pipe: %w", err)
-	}
-
-	if err := shellCmd.Start(); err != nil {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\nerror: failed to start: %v", cmdLabel, err))
-		return fmt.Errorf("shell: start: %w", err)
-	}
-
-	var mu sync.Mutex
-	var buf bytes.Buffer
-	doneCh := make(chan struct{})
-
-	readPipe := func(r io.Reader) {
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-		for scanner.Scan() {
-			mu.Lock()
-			if buf.Len() > 0 {
-				buf.WriteByte('\n')
-			}
-			buf.WriteString(scanner.Text())
-			mu.Unlock()
-		}
-	}
-	var pipeWg sync.WaitGroup
-	pipeWg.Add(2)
-	go func() { defer pipeWg.Done(); readPipe(stdout) }()
-	go func() { defer pipeWg.Done(); readPipe(stderr) }()
-
-	go func() {
-		pipeWg.Wait()
-		_ = shellCmd.Wait()
-		close(doneCh)
-	}()
-
-	select {
-	case <-doneCh:
-		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel)
-	case <-ctx.Done():
-		killAndWait(shellCmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
-		if output != "" {
-			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-		}
-		e.send(p, replyCtx, msg)
-		return fmt.Errorf("shell command timed out")
-	case <-time.After(quickFinishTimeout):
-	}
-
-	// Long-running command — try in-place updates
-	var previewHandle any
-	var useUpdate bool
-	if _, ok := p.(MessageUpdater); ok {
-		if starter, ok := p.(PreviewStarter); ok {
-			mu.Lock()
-			output := buf.String()
-			mu.Unlock()
-			progressMsg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
-			if output != "" {
-				progressMsg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-			}
-			handle, err := starter.SendPreviewStart(e.ctx, replyCtx, progressMsg)
-			if err == nil && handle != nil {
-				previewHandle = handle
-				useUpdate = true
-			}
-		}
-	}
-	if !useUpdate {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel))
-	}
-
-	updateDone := make(chan struct{})
-	if useUpdate {
-		go func() {
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					mu.Lock()
-					output := buf.String()
-					mu.Unlock()
-					msg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
-					if output != "" {
-						msg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-					}
-					_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-				case <-updateDone:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	select {
-	case <-doneCh:
-		close(updateDone)
-		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel, useUpdate, previewHandle)
-	case <-ctx.Done():
-		close(updateDone)
-		killAndWait(shellCmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
-		if output != "" {
-			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-		}
-		if useUpdate {
-			_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-		} else {
-			e.send(p, replyCtx, msg)
-		}
-		return fmt.Errorf("shell command timed out")
-	}
+	return e.executeScheduledShell(p, replyCtx, job.Exec, workDir, timeout)
 }
 
 func cronRunTitle(job *CronJob) string {
@@ -1783,18 +1642,23 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
-
 	timeout := job.ExecutionTimeout()
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	return e.executeScheduledShell(p, replyCtx, job.Exec, workDir, timeout)
+}
 
-	cmdLabel := truncateStr(job.Exec, 60)
+// executeScheduledShell is the shared implementation for both timer and cron
+// shell execution. It handles command lifecycle, pipe reading, progress
+// updates, and timeout handling.
+func (e *Engine) executeScheduledShell(p Platform, replyCtx any, execStr string, workDir string, timeout time.Duration) error {
+	cmdLabel := truncateStr(execStr, 60)
 
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
+	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, execStr)
 	shellCmd.Dir = workDir
 
 	stdout, err := shellCmd.StdoutPipe()
@@ -1827,10 +1691,8 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 			mu.Unlock()
 		}
 	}
-	// Use a WaitGroup so both pipe-reader goroutines drain completely before
-	// doneCh is closed. Without this, shellCmd.Wait() can return (closing the
-	// pipe write-ends) while the scanners still have unread data in the OS
-	// buffer, causing finishCronShell to read a truncated output.
+	// WaitGroup ensures both pipe-reader goroutines drain completely before
+	// doneCh is closed, preventing truncated output.
 	var pipeWg sync.WaitGroup
 	pipeWg.Add(2)
 	go func() { defer pipeWg.Done(); readPipe(stdout) }()
@@ -1842,7 +1704,6 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 		close(doneCh)
 	}()
 
-	// Wait briefly to see if the command finishes quickly
 	select {
 	case <-doneCh:
 		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel)
@@ -1858,10 +1719,8 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 		e.send(p, replyCtx, msg)
 		return fmt.Errorf("shell command timed out")
 	case <-time.After(quickFinishTimeout):
-		// Still running — fall through to progress mode
 	}
 
-	// Long-running command. Try in-place updates.
 	var previewHandle any
 	var useUpdate bool
 	if _, ok := p.(MessageUpdater); ok {

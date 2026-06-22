@@ -15305,3 +15305,239 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
 	}
 }
+
+// --- ExecuteTimerJob integration tests ---
+
+func TestExecuteTimerJob_MultiWorkspaceSessionKeyPrefix(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewTimerStore(dir)
+	if err != nil {
+		t.Fatalf("NewTimerStore() error = %v", err)
+	}
+	scheduler := NewTimerScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+	}
+	agentSession := newResultAgentSession("timer done")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.timerScheduler = scheduler
+
+	prefixedKey := "/home/user/workspace:slack:C001:U001"
+	job := &TimerJob{
+		ID:          "timer-ws-1",
+		SessionKey:  prefixedKey,
+		Prompt:      "workspace timer",
+		Description: "WS timer",
+		ScheduledAt: time.Now().Add(-time.Second),
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteTimerJob(job); err != nil {
+		t.Fatalf("ExecuteTimerJob() with workspace-prefixed key error = %v", err)
+	}
+
+	sent := platform.getSent()
+	if len(sent) < 1 {
+		t.Fatalf("expected at least one message sent, got %d", len(sent))
+	}
+
+	if job.SessionKey != prefixedKey {
+		t.Fatalf("job.SessionKey = %q, want unchanged %q", job.SessionKey, prefixedKey)
+	}
+}
+
+func TestExecuteTimerJob_ShellExecFailsOnBadCommand(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewTimerStore(dir)
+	if err != nil {
+		t.Fatalf("NewTimerStore() error = %v", err)
+	}
+	scheduler := NewTimerScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "telegram"},
+	}
+	agent := &resultAgent{session: newResultAgentSession("unused")}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.timerScheduler = scheduler
+	e.SetShell("/nonexistent-shell-binary", "-c", "")
+
+	job := &TimerJob{
+		ID:          "timer-bad-shell",
+		SessionKey:  "telegram:chat1:user1",
+		Exec:        "echo hello",
+		Description: "bad shell",
+		ScheduledAt: time.Now().Add(-time.Second),
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	err = e.ExecuteTimerJob(job)
+	if err == nil {
+		t.Fatalf("ExecuteTimerJob() expected error for bad shell, got nil")
+	}
+	if !strings.Contains(err.Error(), "start") {
+		t.Fatalf("ExecuteTimerJob() error = %q, want 'start' in error", err.Error())
+	}
+
+	sent := platform.getSent()
+	foundError := false
+	for _, msg := range sent {
+		if strings.Contains(msg, "❌") || strings.Contains(msg, "failed to start") {
+			foundError = true
+			break
+		}
+	}
+	if !foundError {
+		t.Fatalf("expected error message in sent, got: %v", sent)
+	}
+}
+
+func TestExecuteTimerJob_ExpandsSlashSkill(t *testing.T) {
+	skillRoot := t.TempDir()
+	writeSkillFile(t, filepath.Join(skillRoot, "check-status", "SKILL.md"), "Status check skill")
+
+	dir := t.TempDir()
+	store, err := NewTimerStore(dir)
+	if err != nil {
+		t.Fatalf("NewTimerStore() error = %v", err)
+	}
+	scheduler := NewTimerScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("skill result")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.timerScheduler = scheduler
+	e.skills.SetDirs([]string{skillRoot})
+
+	job := &TimerJob{
+		ID:          "timer-skill-1",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "/check-status weekly",
+		Description: "Weekly check",
+		ScheduledAt: time.Now().Add(-time.Second),
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteTimerJob(job); err != nil {
+		t.Fatalf("ExecuteTimerJob() error = %v", err)
+	}
+
+	if len(agentSession.sentPrompts) != 1 {
+		t.Fatalf("sentPrompts = %d, want 1: %#v", len(agentSession.sentPrompts), agentSession.sentPrompts)
+	}
+	got := agentSession.sentPrompts[0]
+	if !strings.Contains(got, "## Skill") {
+		t.Errorf("agent prompt should contain skill expansion, got: %s", got)
+	}
+	if !strings.Contains(got, "check-status") {
+		t.Errorf("agent prompt should contain skill name, got: %s", got)
+	}
+	if !strings.Contains(got, "weekly") {
+		t.Errorf("agent prompt should contain args 'weekly', got: %s", got)
+	}
+}
+
+func TestExecuteTimerJob_ShellUsesConfiguredShell(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewTimerStore(dir)
+	if err != nil {
+		t.Fatalf("NewTimerStore() error = %v", err)
+	}
+	scheduler := NewTimerScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "telegram"},
+	}
+	agent := &resultAgent{session: newResultAgentSession("unused")}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.timerScheduler = scheduler
+	e.SetShell("/bin/sh", "-c", "")
+
+	job := &TimerJob{
+		ID:          "timer-shell-cfg",
+		SessionKey:  "telegram:chat1:user1",
+		Exec:        "echo hello-timer",
+		Description: "shell test",
+		ScheduledAt: time.Now().Add(-time.Second),
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteTimerJob(job); err != nil {
+		t.Fatalf("ExecuteTimerJob() error = %v", err)
+	}
+
+	sent := platform.getSent()
+	foundOutput := false
+	for _, msg := range sent {
+		if strings.Contains(msg, "hello-timer") {
+			foundOutput = true
+			break
+		}
+	}
+	if !foundOutput {
+		t.Fatalf("expected 'hello-timer' in output messages, got: %v", sent)
+	}
+}
+
+func TestTimerScheduler_MaxPendingJobsEnforced(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewTimerStore(dir)
+	if err != nil {
+		t.Fatalf("NewTimerStore() error = %v", err)
+	}
+	scheduler := NewTimerScheduler(store)
+	scheduler.SetMaxPendingJobs(3)
+
+	for i := 0; i < 3; i++ {
+		job := &TimerJob{
+			ID:          fmt.Sprintf("job-%d", i),
+			SessionKey:  "telegram:chat:user",
+			Prompt:      "test",
+			ScheduledAt: time.Now().Add(time.Hour),
+			CreatedAt:   time.Now(),
+		}
+		if err := scheduler.AddJob(job); err != nil {
+			t.Fatalf("AddJob(%d) unexpected error: %v", i, err)
+		}
+	}
+
+	overflowJob := &TimerJob{
+		ID:          "job-overflow",
+		SessionKey:  "telegram:chat:user",
+		Prompt:      "overflow",
+		ScheduledAt: time.Now().Add(time.Hour),
+		CreatedAt:   time.Now(),
+	}
+	err = scheduler.AddJob(overflowJob)
+	if err == nil {
+		t.Fatalf("AddJob(overflow) expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timer limit reached") {
+		t.Fatalf("AddJob(overflow) error = %q, want 'timer limit reached'", err.Error())
+	}
+}

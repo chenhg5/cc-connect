@@ -577,6 +577,10 @@ func main() {
 
 		// Wire shell configuration
 		shell, shellFlag, shellProfile := config.EffectiveShell(cfg, &proj)
+		if err := config.ValidateShellBinary(shell); err != nil {
+			slog.Warn("invalid shell configuration, falling back to default", "project", proj.Name, "error", err)
+			shell, shellFlag, shellProfile = config.EffectiveShell(&config.Config{}, nil)
+		}
 		engine.SetShell(shell, shellFlag, shellProfile)
 
 		// Wire hooks
@@ -993,13 +997,22 @@ func main() {
 		slog.Warn("timer store unavailable", "error", err)
 	}
 	var timerSched *core.TimerScheduler
-	if timerStore != nil {
+	timerEnabled := cfg.Timer.Enabled == nil || *cfg.Timer.Enabled
+	if timerStore != nil && timerEnabled {
 		timerSched = core.NewTimerScheduler(timerStore)
-		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
+		// Timer-specific silent/session_mode, fallback to cron settings for backward compat
+		if cfg.Timer.Silent != nil {
+			timerSched.SetDefaultSilent(*cfg.Timer.Silent)
+		} else if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			timerSched.SetDefaultSilent(true)
 		}
-		if cfg.Cron.SessionMode != "" {
+		if cfg.Timer.SessionMode != "" {
+			timerSched.SetDefaultSessionMode(cfg.Timer.SessionMode)
+		} else if cfg.Cron.SessionMode != "" {
 			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		}
+		if cfg.Timer.MaxPendingJobs > 0 {
+			timerSched.SetMaxPendingJobs(cfg.Timer.MaxPendingJobs)
 		}
 		for i, e := range engines {
 			timerSched.RegisterEngine(cfg.Projects[i].Name, e)

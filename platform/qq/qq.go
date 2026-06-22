@@ -703,6 +703,8 @@ func stripCQCodes(s string) string {
 	return result.String()
 }
 
+const maxDownloadSize = 100 * 1024 * 1024 // 100 MB
+
 func downloadLargeFile(url string) ([]byte, string, error) {
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Get(url)
@@ -715,9 +717,12 @@ func downloadLargeFile(url string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if len(data) > maxDownloadSize {
+		return nil, "", fmt.Errorf("file exceeds max download size (%d bytes)", maxDownloadSize)
 	}
 
 	mime := resp.Header.Get("Content-Type")
@@ -727,6 +732,8 @@ func downloadLargeFile(url string) ([]byte, string, error) {
 	return data, mime, nil
 }
 
+const maxMediaDownloadSize = 20 * 1024 * 1024 // 20 MB for images/audio
+
 func downloadFile(url string) ([]byte, string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
@@ -735,9 +742,12 @@ func downloadFile(url string) ([]byte, string, error) {
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaDownloadSize+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if len(data) > maxMediaDownloadSize {
+		return nil, "", fmt.Errorf("media exceeds max download size (%d bytes)", maxMediaDownloadSize)
 	}
 
 	mime := resp.Header.Get("Content-Type")

@@ -362,7 +362,13 @@ func (cs *cursorSession) handleInteractionQuery(raw map[string]any) {
 	}
 
 	// Store pending query so RespondPermission can write the right response.
+	// If a previous query is still pending (unlikely—Cursor blocks waiting for
+	// a response—but possible under network lag), deny it first to unblock the
+	// CLI before accepting the new one.
 	cs.pendingMu.Lock()
+	if prev := cs.pending; prev != nil {
+		cs.writeInteractionResponse(prev.id, prev.queryType, false, "superseded by new permission request")
+	}
 	cs.pending = &pendingInteractionQuery{id: queryID, queryType: queryType}
 	cs.pendingMu.Unlock()
 
