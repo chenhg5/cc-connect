@@ -161,21 +161,25 @@ MiniMax-M3 pushes the frontier of coding and agentic AI, with a 1M-token context
 </p>
 
 
-## 🆕 What’s New in v1.3.3
+## 🆕 What’s New in v1.4.0-beta.1
 
-First stable of the 1.3.3 series — stabilizes beta.1 → beta.5 (≈ 235 PRs since v1.3.2) plus 7 post-beta fixes. Highlights:
+First beta of the v1.4.0 series — 22 PRs since v1.3.4, with **two new platforms** joining the family. Also rolls in the v1.3.4 Windows-cmdline hotfix via PR #1378.
 
-- **New agents** — Devin CLI, Google Antigravity (`agy`), GitHub Copilot CLI as first-class agents (#672, #1123, #865). Hardened Cursor / OpenCode / Qoder / Kimi / Pi coverage.
-- **Platform expansion** — QQ (OneBot) file send & receive (#323), QQ Bot inline keyboards (#1131), WeCom `SendFile` in WebSocket (#1199), Feishu audio + video native media (#1202), Slack Assistant API (#844), MAX webhook delivery (#818), DingTalk @mentions / richText / image / file inbound (#1188, #828, #1357), broader Weibo DM, WPS Xiezuo (金山协作).
-- **Long-running turn hardening** — new `max_turn_time_mins` wall-clock cap with soft-stop + force-kill + auto-resume so a long bash / test command can no longer lock a session indefinitely (#1091).
-- **New core commands** — `/timer` (one-shot delayed task), `/cancel` (interrupt current turn), `/ps` (replaces `/btw`, kept as alias), `cron add --silent`, agent-driven TTS.
-- **Multi-user / permissions** — reply-to-unauthorized-IM-senders option, `@Bot/permit` ≡ `/permit` keyword matching, Bridge requires token when enabled.
-- **Provider ecosystem** — NekoCode, VisionCoder, AIHubMix, MiniMax M3 presets; Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks; Codex `request_user_input` app-server events; configurable `shell` + shell profile for `exec`.
-- **Observability** — blackbox testing framework (P0/P1/P2 + config-switch matrix), CUJ test framework, provider-resume regression suite for codex/opencode/kimi, Pi context-usage reporter in reply footer.
+- **New platforms** — **Cisco Webex** first-class adapter (#1402, @bryantbarzola); **Matrix with E2EE** end-to-end-encrypted room support (#834, @rablwupei). cc-connect now ships 15 chat platforms.
+- **Slack streaming + aggregated turn card** — live streaming preview while the agent is thinking, collapses into a single turn card on completion (#1333).
+- **Feishu rich card upgrades** — `after_click` card replacement for `cmd:` action handlers (#1299); batch images dispatched as one multi-image message so the first image of N is no longer dropped (#1408 carrying #1395).
+- **Codex per-config prompts** — `system_prompt` / `append_system_prompt` now honoured for the codex agent, matching claudecode (#1345).
+- **Korean (ko) i18n** — Web admin UI now ships Korean alongside zh / en / ja (#1343).
+- **Claude Code plugins via `plugin_dir`** — load Claude Code plugins by pointing at a directory (#1325).
+- **Operational knobs** — `max_attachment_size_mb` for `cc-connect send` outbound size cap (#1392); `CC_LOG_MAX_BACKUPS` env var for daemon log rotation (#1260).
+- **acp graceful `/stop`** — new `AgentSessionCanceller` interface lets ACP agents stop cleanly (#1275).
+- **Reliability fixes** — workspace model persistence (#1372); core queued messages drain strictly FIFO so older queued items are no longer dropped as stale (#1286); workspace binding + run_as_user fixes (#1315, #1316); claudecode mid-turn compaction keeps the turn alive (#1272); cron permission lookup with composite keys (#1067).
+- **Skill discovery hardened** — only depth-1 `SKILL.md` is registered; nested SKILL.md files are treated as assets, fixing 101 phantom slash-commands from `frontend-design` skill (#1317 carrying #1304).
+- **Windows cmdline hotfix on main** — v1.3.4's `--append-system-prompt-file` fix is now on main via #1378. Windows + claudecode users are unblocked here without needing the v1.3.4 hotfix branch.
 
-⚠️ **Behavior changes (action may be required)**: Telegram/Discord `progress_style` defaults to `compact` (set `legacy` to revert); QQ Bot default `intents` now include `INTERACTION_CREATE` (custom values must include `1<<26`); DingTalk `msgtype=file` inbound now reaches the agent; engine permission keywords are @mention-tolerant; `reset_on_idle_mins` defaults to 30 min; Bridge with no token configured refuses to start. See `changelogs/v1.3.3.md` for the full themed summary.
+⚠️ **Behavior changes**: None. All new config options are optional with safe defaults. Existing v1.3.4 configs upgrade as-is.
 
-No breaking changes. Coming from a v1.3.3-beta.*, this is a small fix-only upgrade.
+Full themed summary with credits: `changelogs/v1.4.0-beta.1.md`. The v1.3.4 Windows hotfix is documented in `changelogs/v1.3.4.md`.
 
 
 ## 🧩 Platform feature snapshot

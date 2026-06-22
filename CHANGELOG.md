@@ -1,10 +1,77 @@
 # Changelog
 
-## Unreleased
+## v1.4.0-beta.1 (2026-06-22)
+
+First beta of the v1.4.0 series. **Two new platforms join the family** (Cisco Webex, Matrix with E2EE) plus broader configurability for claudecode/codex, Korean i18n, and a batch of fixes carried forward from late v1.3 development.
+
+The `v1.3.4` Windows-cmdline hotfix (released 2026-06-16 from `release/v1.3.4`) is also rolled into this branch via PR #1378.
+
+See `changelogs/v1.4.0-beta.1.md` for the full themed summary with credits.
+
+### New Platforms
+- **Cisco Webex** — first-class Webex Teams adapter with bot identity, message routing, and reply support (#1402).
+- **Matrix (with E2EE)** — first-class Matrix adapter including end-to-end encrypted room support (#834).
+
+### Features
+- **Slack streaming preview + aggregated turn card**: live streaming preview while the agent is thinking, collapses into a single aggregated turn card on completion (#1333).
+- **Feishu after_click card replacement for `cmd:` actions**: rich cards can now replace their content after a button click for `cmd:` action handlers (#1299).
+- **Codex custom `system_prompt` / `append_system_prompt` config**: codex agent now honours per-config `system_prompt` and `append_system_prompt` like claudecode does (#1345).
+- **Korean (ko) i18n**: Web admin UI now ships Korean translations alongside zh/en/ja (#1343).
+- **`plugin_dir` for Claude Code plugins**: claudecode agent supports loading plugins via `--plugin-dir`, exposed as a new `plugin_dir` config option (#1325).
+- **`max_attachment_size_mb` for `cc-connect send`**: configurable upper bound for outbound attachment size; default preserved (#1392).
+- **`CC_LOG_MAX_BACKUPS` env var**: control daemon log rotation backup count via env (#1260).
 
 ### Fixed
-- **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
-- **feishu**: coalesce consecutive image messages from the same session into a single multi-image dispatch to fix first-image drop on batch sends (#1395). When the Feishu mobile client sends N images in quick succession, each image arrives as a separate `image` event with very close `create_time` values. Dispatching each immediately caused core/engine's `create_time` watermark (PR #1168) to drop the oldest image, so the agent only saw N-1 images. A per-session image buffer with a 150ms quiet window now merges the burst into one `core.Message` carrying all images, in send order. Single-image sends and quoted-image replies are unaffected.
+- **claudecode (Windows cmdline limit)**: file-based system prompt delivery via `--append-system-prompt-file` lands on main (port of the v1.3.4 hotfix). Windows users on claudecode are no longer affected by the cmd.exe 8192-byte cmdline limit (#1378 porting #1376).
+- **feishu (batch images dropped)**: coalesce consecutive image messages from the same session into a single multi-image dispatch (150 ms quiet window) so first-image-of-N is no longer dropped by the `create_time` watermark from PR #1168 (#1408 carrying #1395).
+- **feishu (markdown text_color)**: keep `text_color` on `plain_text` elements only; removing it from `markdown` elements fixes rendering glitches (#1278).
+- **workspace model persistence**: workspace-level model selections now persist across restarts instead of resetting to default (#1372).
+- **acp graceful `/stop`**: new `AgentSessionCanceller` interface lets `/stop` shut a session down gracefully via ACP (#1275).
+- **core FIFO drain**: queued messages now drain strictly in FIFO order, preventing earlier queued messages from being dropped as stale when a later one has a higher `create_time` (#1286).
+- **skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files are treated as skill assets and ignored, matching Claude Code CLI conventions. Previously, nested SKILL.md leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1317 carrying #1304).
+- **engine workspace binding under `run_as_user`**: keep workspace binding even when the supervisor cannot stat it under `run_as_user` (#1316).
+- **runas workspace**: run the agent in its own workspace under `run_as_user` (#1315).
+- **claudecode mid-turn compaction**: keep the turn running when a compaction event arrives mid-turn (fixes #481) (#1272).
+- **cron permission lookup with composite keys**: pending permission lookup for cron sessions now resolves correctly when the key is composite (#1067).
+
+### Tests
+- Regression test for issue #814 — verifies queued messages use their own `replyCtx` via the outer drain (#1261).
+
+### Docs
+- Remove four lapsed sponsor entries from README sponsor section (#1404).
+
+### Behavior Changes
+None. Existing configs upgrade without changes. New config options (`plugin_dir`, `max_attachment_size_mb`, codex `system_prompt`/`append_system_prompt`, `CC_LOG_MAX_BACKUPS`) are all optional with safe defaults.
+
+### Breaking Changes
+None.
+
+## v1.3.4 (2026-06-16) — Windows hotfix
+
+Emergency single-fix release for a Windows-only regression introduced in v1.3.3.
+**Upgrade strongly recommended for Windows users running the claudecode agent.**
+Linux / macOS and non-claudecode users are unaffected by the v1.3.3 bug and may
+upgrade at leisure. No config changes required. See `changelogs/v1.3.4.md` for the
+full root-cause writeup and verification notes.
+
+### Fixed
+- **Windows: all messages silently never reply on v1.3.3** ([#1376](https://github.com/chenhg5/cc-connect/issues/1376)).
+  Root cause: v1.3.3 expanded `core.AgentSystemPrompt()` from 2707 → 9055 bytes,
+  which busted Windows `cmd.exe`'s 8192-byte command-line limit when cc-connect
+  spawned `claude.exe` with `--append-system-prompt <inline 9KB>`. Fix: pass the
+  prompt to `claude.exe` via `--append-system-prompt-file <path>` instead of inline
+  (single shared file at `<data_dir>/agent-prompts/cc-connect-system.md` for the
+  99% path; per-spawn temp file for the 1% edge cases like Slack / Weixin / MAX /
+  user-configured `append_system_prompt`). Prompt content is **identical** to
+  v1.3.3 — only the delivery mechanism changed.
+
+### Scope
+3 files changed, +323/-9, all in `agent/claudecode/`. No changes elsewhere.
+
+### Credits
+Reporters [@secountAiAccount](https://github.com/secountAiAccount) and
+[@softxyz1](https://github.com/softxyz1) for unblocking us within hours of v1.3.3
+going stable.
 
 ## v1.3.3 (2026-06-15)
 

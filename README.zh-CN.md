@@ -160,21 +160,25 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 </p>
 
 
-## 🆕 v1.3.3 更新了什么
+## 🆕 v1.4.0-beta.1 更新了什么
 
-1.3.3 系列首个正式版 —— 把 beta.1 → beta.5（自 v1.3.2 起约 235 个 PR）与 7 个 post-beta 修复一并稳定下来。亮点：
+v1.4.0 系列首个 beta —— 自 v1.3.4 起 22 个 PR，**两个新平台**加入家族。同时把 v1.3.4 的 Windows 命令行修复通过 PR #1378 回流到 main。
 
-- **新增 Agent** — Devin CLI、Google Antigravity (`agy`)、GitHub Copilot CLI 均为一等公民 agent (#672, #1123, #865)；Cursor / OpenCode / Qoder / Kimi / Pi 覆盖大幅加强。
-- **平台能力扩展** — QQ (OneBot) 文件收发 (#323)、QQ Bot 内联键盘 (#1131)、企业微信 WebSocket `SendFile` (#1199)、飞书原生音视频附件 (#1202)、Slack Assistant API (#844)、MAX webhook 投递模式 (#818)、钉钉 @mention / richText / 图片 / 文件入站 (#1188, #828, #1357)、微博私信能力扩充、WPS 协作（金山协作）。
-- **长任务保护** — 新增 `max_turn_time_mins` 绝对墙钟上限，软停 + 强杀 + 下一条消息自动 `--resume`，避免长跑的 bash / test 命令把 session 永久锁住 (#1091)。
-- **新核心命令** — `/timer`（一次性延时任务）、`/cancel`（中断当前 turn）、`/ps`（替代 `/btw`，`/btw` 保留为别名）、`cron add --silent`、agent 主动 TTS 输出。
-- **多用户 / 权限** — 可选「回复未授权 IM 发件人」、`@Bot/permit` ≡ `/permit` 关键字匹配、Bridge 启用时必须配置 token。
-- **Provider 生态** — 新增 NekoCode、VisionCoder、AIHubMix、MiniMax M3 预设；Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks；Codex `request_user_input` app-server 事件；可配置 `shell` 与 shell profile。
-- **可观测性** — Blackbox 测试框架（P0/P1/P2 + config-switch 矩阵）、CUJ 测试框架、codex/opencode/kimi 的 provider-resume 回归套件、Pi 在 reply footer 输出 context 用量。
+- **新增平台** — **Cisco Webex** 一等公民适配器 (#1402, @bryantbarzola)；**Matrix（含 E2EE）** 端到端加密房间支持 (#834, @rablwupei)。cc-connect 内置平台数达到 15 个。
+- **Slack 流式预览 + 聚合 turn 卡片** — agent 思考期间显示实时流式预览，turn 结束后折叠为单张聚合卡片 (#1333)。
+- **飞书富卡片升级** — `cmd:` action handler 支持点击后替换卡片内容 (#1299)；批量图片合并为一条多图消息，不再被 `create_time` watermark 丢掉第一张 (#1408 携带 #1395)。
+- **Codex per-config prompt** — codex agent 现在也支持 `system_prompt` / `append_system_prompt`，跟 claudecode 对齐 (#1345)。
+- **韩语 (ko) i18n** — Web 管理后台增加韩语，已覆盖 zh / en / ja / ko (#1343)。
+- **Claude Code 插件加载** — 新增 `plugin_dir` 配置项，直接指向插件目录加载 (#1325)。
+- **运维参数** — `cc-connect send` 增加 `max_attachment_size_mb` 上限配置 (#1392)；daemon 日志轮转支持 `CC_LOG_MAX_BACKUPS` 环境变量 (#1260)。
+- **acp 优雅 `/stop`** — 新增 `AgentSessionCanceller` 接口，让 ACP agent 可以干净停止 (#1275)。
+- **可靠性修复** — workspace 模型选择跨重启持久化 (#1372)；core 队列消息严格 FIFO drain，旧消息不再被新消息的 `create_time` 误判为 stale 而丢弃 (#1286)；`run_as_user` 下的 workspace 绑定 + workspace 启动修复 (#1315, #1316)；claudecode 中途遇到 compaction 事件不再终止 turn (#1272)；cron session 复合 key 的权限查找修复 (#1067)。
+- **Skill 发现加固** — 只注册 depth-1 `SKILL.md`，嵌套的 SKILL.md 当作 skill 资产忽略，修复了 `frontend-design` skill 泄漏 101 个幻影 slash 命令的问题 (#1317 携带 #1304)。
+- **Windows 命令行修复回流 main** — v1.3.4 的 `--append-system-prompt-file` 修复通过 #1378 上 main。Windows + claudecode 用户在 v1.4.0 上直接可用，不再依赖 v1.3.4 hotfix 分支。
 
-⚠️ **行为变更（可能需要改配置）**：Telegram / Discord `progress_style` 默认值改为 `compact`（设回 `legacy` 可还原）；QQ Bot 默认 `intents` 现在包含 `INTERACTION_CREATE`，若自定义 `intents` 需手动包含 `1<<26`；钉钉 `msgtype=file` 入站现在送达 agent；引擎权限关键字容忍 @mention；`reset_on_idle_mins` 默认值改为 30 分钟；Bridge 未配置 token 时拒绝启动。完整主题汇总见 `changelogs/v1.3.3.md`。
+⚠️ **行为变更**：无。所有新配置项均为可选且有安全默认值。v1.3.4 已有配置可直接升级。
 
-无任何破坏性变更（No breaking changes）。从任意 v1.3.3-beta.\* 升级到 v1.3.3 是 fix-only 的小升级。
+完整主题汇总（含致谢）见 `changelogs/v1.4.0-beta.1.md`。v1.3.4 的 Windows 命令行修复另见 `changelogs/v1.3.4.md`。
 
 
 ## 🧩 平台能力一览
