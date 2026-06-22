@@ -511,6 +511,7 @@ cc-connect send --tts "你好"
 - `--image` 和 `--file` 都可以重复传多个。
 - `--tts` 用当前 TTS provider 合成并发送语音，适合用户自然要求“发语音”的场景。
 - `attachment_send = "off"` 只会关闭附件回传，普通文本回复仍然正常。
+- 单个附件默认上限 50 MiB；可用 `max_attachment_size_mb` 配置（或环境变量 `CC_MAX_ATTACHMENT_SIZE_MB`，同样单位 MiB）。
 - 这个命令是给“生成后的附件回传”用的，不是给普通文本回复用的。
 
 📖 **完整文档：** [docs/usage.zh-CN.md](docs/usage.zh-CN.md)

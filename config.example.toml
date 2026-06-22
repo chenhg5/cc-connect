@@ -47,6 +47,17 @@
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
 
+# Maximum size of a single attachment (in MiB) for `cc-connect send
+# --file/--image/--audio/--video` and the /send API. Default: 50 (i.e. 50 MiB).
+# Set 0 to keep the default. Raise it to send larger files; the /send request
+# body limit scales with this value to fit base64-encoded attachments.
+# Can also be overridden by the CC_MAX_ATTACHMENT_SIZE_MB env var (same MiB
+# unit; takes precedence over this option when set).
+# `cc-connect send` 单个附件的最大大小（单位 MiB）。默认 50（即 50 MiB），设 0 保持默认。
+# 调大可发送更大文件；/send 请求体上限会随之按 base64 膨胀自动放大。
+# 也可用环境变量 CC_MAX_ATTACHMENT_SIZE_MB 覆盖（同样单位 MiB；设置后优先级高于本配置项）。
+# max_attachment_size_mb = 50
+
 [log]
 level = "info" # debug, info, warn, error
 
@@ -1118,6 +1129,19 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false        # share one agent session per room / 房间内所有用户共享会话
 # group_reply_all = false                 # respond to all room messages without @mention / 群聊无需 @ 也响应
 # proxy = ""                              # optional HTTP/SOCKS5 proxy / 可选代理
+
+# Webex (Cisco) (uncomment to enable / 取消注释以启用)
+# 1. Create a bot at https://developer.webex.com/my-apps/new/bot
+#    在 https://developer.webex.com/my-apps/new/bot 创建机器人
+# 2. Copy the bot access token below / 复制 access token 到下方
+# Connection: WebSocket — no public URL required / 无需公网地址
+
+# [[projects.platforms]]
+# type = "webex"
+#
+# [projects.platforms.options]
+# token = "YOUR_WEBEX_BOT_ACCESS_TOKEN"   # from developer.webex.com (Bot)
+# allow_from = "you@cisco.com"            # comma-separated email allowlist / 逗号分隔的邮箱白名单
 
 # MAX messenger (uncomment to enable / 取消注释以启用)
 # 1. Create a bot via @MasterBot in MAX, get the access token

@@ -1265,3 +1265,410 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
 	}
 }
+
+// TestDispatchMessageCoalescesImageBatch covers issue #1395: when the Feishu
+// mobile client sends N images in quick succession, each image arrives as a
+// separate message event with very close create_time values. Dispatching each
+// immediately caused core/engine's create_time watermark (PR #1168) to drop
+// the oldest image, so the agent only saw N-1 images. After the fix, all N
+// images within imageBatchWindow should be coalesced into ONE dispatched
+// core.Message with N image attachments.
+func TestDispatchMessageCoalescesImageBatch(t *testing.T) {
+	const appID = "cli_batch_img"
+	const appSecret = "secret-batch-img"
+	const chatID = "oc_batch"
+	const userID = "ou_user"
+
+	tests := []struct {
+		name      string
+		imageKeys []string
+		wantCount int
+		wantMsgs  int
+	}{
+		{name: "2 images", imageKeys: []string{"img_1", "img_2"}, wantCount: 2, wantMsgs: 1},
+		{name: "3 images", imageKeys: []string{"img_a", "img_b", "img_c"}, wantCount: 3, wantMsgs: 1},
+		{name: "4 images", imageKeys: []string{"i1", "i2", "i3", "i4"}, wantCount: 4, wantMsgs: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Per-image payload bytes so we can verify order preservation.
+			imageBytes := map[string][]byte{}
+			for i, k := range tc.imageKeys {
+				imageBytes[k] = []byte{0x89, 'P', 'N', 'G', byte(i + 1), '\r', '\n', 0x1a, '\n'}
+			}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+				case strings.Contains(r.URL.Path, "/resources/"):
+					key := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+					data, ok := imageBytes[key]
+					if !ok {
+						t.Fatalf("unexpected image key %q", key)
+					}
+					w.Header().Set("Content-Type", "image/png")
+					if _, err := w.Write(data); err != nil {
+						t.Fatalf("write image: %v", err)
+					}
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+				}
+			}))
+			defer srv.Close()
+
+			received := make(chan *core.Message, tc.wantCount+1)
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				dedup:        &core.MessageDedup{},
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(_ core.Platform, msg *core.Message) {
+					received <- msg
+				},
+				imageBatch: make(map[string]*imageBatchEntry),
+			}
+
+			sessionKey := "feishu:" + chatID + ":" + userID
+			for i, key := range tc.imageKeys {
+				msgID := "om_img_" + strconv.Itoa(i)
+				content := `{"image_key":"` + key + `"}`
+				p.dispatchMessage(
+					context.Background(),
+					"image",
+					content,
+					nil,
+					msgID,
+					sessionKey,
+					userID,
+					chatID,
+					replyContext{messageID: msgID, chatID: chatID, sessionKey: sessionKey},
+					"", // no parentID so we exercise the batch path
+					int64(1710000000000+i),
+				)
+			}
+
+			// Collect dispatched messages with a generous timeout that comfortably
+			// exceeds imageBatchWindow (150ms) but still finishes the test quickly.
+			var dispatched []*core.Message
+			deadline := time.After(2 * time.Second)
+			for len(dispatched) < tc.wantMsgs {
+				select {
+				case msg := <-received:
+					dispatched = append(dispatched, msg)
+				case <-deadline:
+					t.Fatalf("got %d messages, want %d (timeout)", len(dispatched), tc.wantMsgs)
+				}
+			}
+
+			// Allow late stragglers to surface so we can fail loudly if batching
+			// leaked more than one dispatch.
+			select {
+			case extra := <-received:
+				t.Fatalf("unexpected extra dispatched message %q with %d images", extra.MessageID, len(extra.Images))
+			case <-time.After(imageBatchWindow + 100*time.Millisecond):
+			}
+
+			if len(dispatched) != 1 {
+				t.Fatalf("dispatched %d messages, want exactly 1 (batch should coalesce)", len(dispatched))
+			}
+			msg := dispatched[0]
+			if len(msg.Images) != tc.wantCount {
+				t.Fatalf("merged message has %d images, want %d", len(msg.Images), tc.wantCount)
+			}
+			for i, img := range msg.Images {
+				want := imageBytes[tc.imageKeys[i]]
+				if string(img.Data) != string(want) {
+					t.Errorf("image[%d] data = %x, want %x (order must match send order)", i, img.Data, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDispatchMessageSingleImageRegression ensures the single-image path still
+// works after introducing the image-batch buffer (issue #1395). A single image
+// must still produce one dispatched core.Message.
+func TestDispatchMessageSingleImageRegression(t *testing.T) {
+	const appID = "cli_single_img"
+	const appSecret = "secret-single-img"
+	const imageKey = "img_single"
+
+	imageBytes := []byte{0x89, 'P', 'N', 'G', 'S', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageBytes); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		dedup:        &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"image",
+		`{"image_key":"`+imageKey+`"}`,
+		nil,
+		"om_single",
+		"feishu:oc_single:ou_user",
+		"ou_user",
+		"oc_single",
+		replyContext{messageID: "om_single", chatID: "oc_single", sessionKey: "feishu:oc_single:ou_user"},
+		"", 0,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.MessageID != "om_single" {
+			t.Errorf("MessageID = %q, want om_single", msg.MessageID)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("len(Images) = %d, want 1", len(msg.Images))
+		}
+		if string(msg.Images[0].Data) != string(imageBytes) {
+			t.Fatal("image data did not match downloaded resource")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for single image to dispatch")
+	}
+}
+
+// TestDispatchMessageQuotedImageNotBatched ensures that quoted (parentID != "")
+// images still follow the legacy synchronous path: one dispatched message per
+// image, with quoted context attached. Batching must not affect this code path.
+func TestDispatchMessageQuotedImageNotBatched(t *testing.T) {
+	const appID = "cli_quoted_img"
+	const appSecret = "secret-quoted-img"
+	const parentMessageID = "om_parent_quoted"
+	const imageKey = "img_quoted"
+
+	imageData := []byte{0x89, 'P', 'N', 'G', 'Q', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"msg_type":  "text",
+							"parent_id": "",
+							"sender":    map[string]any{"id": "", "sender_type": "user"},
+							"body":      map[string]any{"content": `{"text":"请看图"}`},
+						},
+					},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageData); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"image",
+		`{"image_key":"`+imageKey+`"}`,
+		nil,
+		"om_quoted_child",
+		"feishu:oc_chat:ou_user",
+		"ou_user",
+		"oc_chat",
+		replyContext{messageID: "om_quoted_child", chatID: "oc_chat", sessionKey: "feishu:oc_chat:ou_user"},
+		parentMessageID, 0,
+	)
+
+	select {
+	case msg := <-got:
+		if len(msg.Images) != 1 {
+			t.Fatalf("quoted image path: len(Images) = %d, want 1 (no batching)", len(msg.Images))
+		}
+		if !strings.Contains(msg.ExtraContent, "请看图") {
+			t.Fatalf("ExtraContent = %q, want quoted text context", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for quoted image to dispatch")
+	}
+}
+
+// TestFlushImageBatchesStopsPendingTimers ensures Stop()-style flush
+// synchronously dispatches all buffered images without losing any.
+func TestFlushImageBatchesStopsPendingTimers(t *testing.T) {
+	const appID = "cli_flush"
+	const appSecret = "secret-flush"
+	const imageKey = "img_flush"
+
+	imageBytes := []byte{0x89, 'P', 'N', 'G', 'F', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageBytes); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 2)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		dedup:        &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	// Buffer a single image but DON'T wait for the timer — instead flush manually.
+	p.bufferImage("feishu:oc_flush:ou_user", &imageBatchEntry{
+		sessionKey:   "feishu:oc_flush:ou_user",
+		userID:       "ou_user",
+		chatName:     "oc_flush",
+		rctx:         replyContext{messageID: "om_flush", chatID: "oc_flush", sessionKey: "feishu:oc_flush:ou_user"},
+		images:       []core.ImageAttachment{{MimeType: "image/png", Data: imageBytes}},
+		messageIDs:   []string{"om_flush"},
+		createTimeMs: 1710000000000,
+	})
+
+	// Confirm the buffer is populated and the timer is pending.
+	p.imageBatchMu.Lock()
+	if len(p.imageBatch) != 1 {
+		p.imageBatchMu.Unlock()
+		t.Fatalf("imageBatch size = %d, want 1 before flush", len(p.imageBatch))
+	}
+	p.imageBatchMu.Unlock()
+
+	p.flushImageBatches()
+
+	// After flush, the map must be empty AND no timer should be left pending.
+	p.imageBatchMu.Lock()
+	batchSize := len(p.imageBatch)
+	p.imageBatchMu.Unlock()
+	if batchSize != 0 {
+		t.Fatalf("imageBatch size = %d after flushImageBatches, want 0", batchSize)
+	}
+
+	select {
+	case msg := <-received:
+		if len(msg.Images) != 1 {
+			t.Fatalf("flushed message has %d images, want 1", len(msg.Images))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for flushed batch to dispatch")
+	}
+
+	// No additional dispatches after flush.
+	select {
+	case extra := <-received:
+		t.Fatalf("unexpected extra message after flush: %+v", extra)
+	case <-time.After(imageBatchWindow + 100*time.Millisecond):
+	}
+}
+
+// TestFlushImageBatchesEmptySafe ensures flushImageBatches is a safe no-op
+// when nothing is buffered (e.g. Stop() called on an idle platform).
+func TestFlushImageBatchesEmptySafe(t *testing.T) {
+	p := &Platform{
+		platformName: "feishu",
+		imageBatch:   make(map[string]*imageBatchEntry),
+	}
+	// Should not panic, should not block.
+	p.flushImageBatches()
+}
