@@ -35,10 +35,10 @@ func init() {
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
 	workDir          string
-	cliBin           string   // CLI binary name or path (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	cmd              string   // CLI binary name (default: "claude")
+	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
 	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
 	reasoningEffort  string // "low" | "medium" | "high" | "max"
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
@@ -129,18 +129,17 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
-	cliBin := "claude"
-	var cliExtraArgs []string
-	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
-		// NOTE: paths containing spaces are not supported because Fields
-		// splits on whitespace. Use a symlink or wrapper script instead.
-		parts := strings.Fields(cliPath)
-		cliBin = parts[0]
-		if len(parts) > 1 {
-			cliExtraArgs = parts[1:]
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "claude")
+	cmdArgsFlag, _ := opts["cmd_args_flag"].(string)
+	if cmdArgsFlag == "" {
+		if v, ok := opts["cli_args_flag"].(string); ok && v != "" {
+			slog.Warn("DEPRECATED: 'cli_args_flag' is deprecated, use 'cmd_args_flag' instead",
+				"deprecated_key", "cli_args_flag",
+				"new_key", "cmd_args_flag",
+				"value", v)
+			cmdArgsFlag = v
 		}
 	}
-	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
@@ -216,8 +215,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	// skip the supervisor-side LookPath check and let spawn fail loudly
 	// at runtime if the target doesn't have claude installed.
 	if !spawnOpts.IsolationMode() {
-		if _, err := exec.LookPath(cliBin); err != nil {
-			return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install it first", cliBin)
+		if _, err := exec.LookPath(cmd); err != nil {
+			return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install it first", cmd)
 		}
 	}
 
@@ -248,9 +247,9 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	return &Agent{
 		workDir:          workDir,
-		cliBin:           cliBin,
+		cmd:              cmd,
 		cliExtraArgs:     cliExtraArgs,
-		cliArgsFlag:      cliArgsFlag,
+		cmdArgsFlag:      cmdArgsFlag,
 		model:            model,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
@@ -308,7 +307,7 @@ func normalizePermissionMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "claudecode" }
-func (a *Agent) CLIBinaryName() string  { return a.cliBin }
+func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -527,7 +526,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -815,7 +814,7 @@ func (a *Agent) GetRunAsEnv() []string {
 // must propagate to per-workspace agent instances created lazily by
 // core.Engine.getOrCreateWorkspaceAgent. Without this snapshot, the engine
 // constructs workspace agents from a fresh opts map and silently drops
-// every claudecode field except mode/model — so cli_path, allowed_tools,
+// every claudecode field except mode/model — so cmd, allowed_tools,
 // and friends would only take effect on the project-level agent.
 //
 // Runtime-only state (providers, sessionEnv, providerProxy, platformPrompt)
@@ -842,11 +841,11 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		}
 		opts["env"] = envMap
 	}
-	if cliPath := snapshotCLIPath(a.cliBin, a.cliExtraArgs); cliPath != "" {
-		opts["cli_path"] = cliPath
+	if cliPath := snapshotCmdPath(a.cmd, a.cliExtraArgs); cliPath != "" {
+		opts["cmd"] = cliPath
 	}
-	if a.cliArgsFlag != "" {
-		opts["cli_args_flag"] = a.cliArgsFlag
+	if a.cmdArgsFlag != "" {
+		opts["cmd_args_flag"] = a.cmdArgsFlag
 	}
 	if a.model != "" {
 		opts["model"] = a.model
@@ -875,22 +874,22 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	return opts
 }
 
-// snapshotCLIPath rebuilds the cli_path opts string from cliBin and the
+// snapshotCmdPath rebuilds the cmd opts string from cmd and the
 // extra-args tail captured at construction. Returns "" when only the
 // default "claude" binary is in use, so we don't pollute the workspace
 // opts with a redundant default.
-func snapshotCLIPath(cliBin string, cliExtraArgs []string) string {
+func snapshotCmdPath(cmd string, cliExtraArgs []string) string {
 	// Normalise empty to the default binary so we can reason about extra args.
-	if cliBin == "" {
-		cliBin = "claude"
+	if cmd == "" {
+		cmd = "claude"
 	}
-	if cliBin == "claude" && len(cliExtraArgs) == 0 {
+	if cmd == "claude" && len(cliExtraArgs) == 0 {
 		return "" // default binary, no extra args — no need to persist
 	}
 	if len(cliExtraArgs) == 0 {
-		return cliBin
+		return cmd
 	}
-	return cliBin + " " + strings.Join(cliExtraArgs, " ")
+	return cmd + " " + strings.Join(cliExtraArgs, " ")
 }
 
 // stringsToAny copies a []string into a fresh []any so it round-trips

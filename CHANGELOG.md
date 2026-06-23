@@ -9,6 +9,7 @@
 - **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
 - **Feishu: tighter `@` mention detection in `SendWithStatusFooter` / `buildReplyContent`** — a bare `@` inside an email address, URL, or escaped character no longer false-positives as a mention. Mention detection now checks for the resolved `<at user_id="...">` tag instead of a substring match, so card rendering (and the notation-style status footer) is preserved for content that merely contains `@`. Real `@mentions` still force `MsgTypeText` so Feishu fires the mention event (#1341).
 - **feishu**: coalesce consecutive image messages from the same session into a single multi-image dispatch to fix first-image drop on batch sends (#1395). When the Feishu mobile client sends N images in quick succession, each image arrives as a separate `image` event with very close `create_time` values. Dispatching each immediately caused core/engine's `create_time` watermark (PR #1168) to drop the oldest image, so the agent only saw N-1 images. A per-session image buffer with a 150ms quiet window now merges the burst into one `core.Message` carrying all images, in send order. Single-image sends and quoted-image replies are unaffected.
+- **core**: queue post-restart notification and dispatch on platform ready (#1383). Previously `/restart` sent the success notification immediately after engine startup, racing the platform's async connect window (Telegram: ~2.6s). On a not-yet-ready platform the send was silently dropped at debug log level. The notify is now queued on the engine and dispatched when the target platform reaches `OnPlatformReady`, with bounded retry (3 attempts, 0/500/1500 ms backoff) on transient send failure. Failed sends log at warn level. A 10s safety timeout drops the notify with a warning if the target platform never reaches ready, so startup is never blocked indefinitely. Also covers Discord / Weixin / Matrix (other AsyncRecoverablePlatform implementations) for free.
 
 ## v1.3.3 (2026-06-15)
 
@@ -46,6 +47,8 @@ the full themed summary; per-beta details remain in the beta sections below.
   test framework (#1348)
 - **core**: queued FIFO drains no longer drop earlier queued messages as stale just
   because a later queued message has a higher `create_time` (#1286)
+- **core**: make `/history` entry truncation configurable via
+  `[display].history_max_len`, defaulting to 1000; `0` disables truncation (#1291)
 - **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
 - **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
 

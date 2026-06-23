@@ -5,7 +5,7 @@
     "providers": "제공업체",
     "sessions": "세션",
     "chat": "채팅",
-    "cron": "Cron",
+    "cron": "예약 작업",
     "bridge": "브리지",
     "skills": "스킬",
     "system": "시스템"

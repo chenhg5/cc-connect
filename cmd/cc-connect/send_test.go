@@ -77,6 +77,26 @@ func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
 	}
 }
 
+func TestParseSendArgs_WorkDirOption(t *testing.T) {
+	workDir := t.TempDir()
+
+	req, _, err := parseSendArgs([]string{"--cwd", workDir, "--message", "please check"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if got := req.WorkDir; got != workDir {
+		t.Fatalf("WorkDir = %q, want %q", got, workDir)
+	}
+
+	req, _, err = parseSendArgs([]string{"--work-dir", workDir, "please check"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error for --work-dir: %v", err)
+	}
+	if got := req.WorkDir; got != workDir {
+		t.Fatalf("WorkDir from --work-dir = %q, want %q", got, workDir)
+	}
+}
+
 // TestParseSendArgs_AudioPopulatesAudios is the regression for
 // t-20260615-cqjbk1: --audio and --video must NOT land in req.Files
 // (which would route them through SendFile and skip

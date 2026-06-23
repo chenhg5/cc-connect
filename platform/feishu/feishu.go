@@ -181,16 +181,55 @@ type Platform struct {
 	// message) caused the first (oldest create_time) image to be dropped by
 	// core/engine's create_time watermark (PR #1168), so only N-1 images were
 	// ever delivered to the agent (issue #1395).
-	imageBatchMu sync.Mutex
-	imageBatch   map[string]*imageBatchEntry
+	imageBatchMu     sync.Mutex
+	imageBatch       map[string]*imageBatchEntry
+	imageBatchWindow time.Duration // quiet period before flushing a batch; 0 means use defaultImageBatchWindow
 }
 
-// imageBatchWindow is the quiet period after the last image in a session
-// before the buffered batch is dispatched as a single multi-image message.
-// 150ms comfortably covers Feishu mobile's batch-send timing (typically
-// <100ms between images) while staying responsive for sequential single
-// image sends.
-const imageBatchWindow = 150 * time.Millisecond
+// defaultImageBatchWindow is the quiet period after the last image in a
+// session before the buffered batch is dispatched as a single multi-image
+// message. 500ms covers real-world mobile sending intervals (we've observed
+// ~330ms between consecutive sends from the Feishu mobile client when a user
+// taps "send" repeatedly) while remaining responsive for sequential single
+// image sends. Operators that need a longer or shorter window can override
+// it via the platform option `image_batch_window_ms`.
+const defaultImageBatchWindow = 500 * time.Millisecond
+
+// batchWindow returns the effective image-batch coalesce window for this
+// Platform. Tests and zero-initialised Platforms fall back to the default so
+// they never schedule a zero-duration timer (which would fire immediately and
+// defeat batching).
+func (p *Platform) batchWindow() time.Duration {
+	if p.imageBatchWindow > 0 {
+		return p.imageBatchWindow
+	}
+	return defaultImageBatchWindow
+}
+
+// coerceMilliseconds normalises numeric TOML values (which decode as int64 or
+// float64) into an integer millisecond count.
+func coerceMilliseconds(v any) (int64, error) {
+	switch x := v.(type) {
+	case int:
+		return int64(x), nil
+	case int32:
+		return int64(x), nil
+	case int64:
+		return x, nil
+	case uint:
+		return int64(x), nil
+	case uint32:
+		return int64(x), nil
+	case uint64:
+		return int64(x), nil
+	case float32:
+		return int64(x), nil
+	case float64:
+		return int64(x), nil
+	default:
+		return 0, fmt.Errorf("expected number, got %T", v)
+	}
+}
 
 // imageBatchEntry holds image data accumulated for one session while we wait
 // to see if more images are coming. timer is stopped and replaced on every
@@ -315,6 +354,18 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard = v
 	}
 
+	imageBatchWindow := defaultImageBatchWindow
+	if raw, ok := opts["image_batch_window_ms"]; ok {
+		ms, err := coerceMilliseconds(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: invalid image_batch_window_ms %v: %w", name, raw, err)
+		}
+		if ms < 0 {
+			return nil, fmt.Errorf("%s: image_batch_window_ms must be >= 0, got %d", name, ms)
+		}
+		imageBatchWindow = time.Duration(ms) * time.Millisecond
+	}
+
 	// Webhook mode configuration (for Lark international version)
 	port, _ := opts["port"].(string)
 	if port == "" {
@@ -358,6 +409,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		peerBots:                   peerBots,
 		mentionMap:                 mentionMap,
 		imageBatch:                 make(map[string]*imageBatchEntry),
+		imageBatchWindow:           imageBatchWindow,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -1085,13 +1137,13 @@ func (p *Platform) bufferImage(sessionKey string, entry *imageBatchEntry) {
 			existing.createTimeMs = entry.createTimeMs
 		}
 		ref := existing
-		existing.timer = time.AfterFunc(imageBatchWindow, func() {
+		existing.timer = time.AfterFunc(p.batchWindow(), func() {
 			p.flushImageBatchByRef(sessionKey, ref)
 		})
 	} else {
 		// Start a fresh batch with its own timer.
 		ref := entry
-		entry.timer = time.AfterFunc(imageBatchWindow, func() {
+		entry.timer = time.AfterFunc(p.batchWindow(), func() {
 			p.flushImageBatchByRef(sessionKey, ref)
 		})
 		p.imageBatch[sessionKey] = entry

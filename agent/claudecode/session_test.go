@@ -582,6 +582,129 @@ func makeFiller(n int) string {
 	return string(b)
 }
 
+// TestHandleUserEmitsToolResult is a regression test for the bug where
+// claudeSession.handleUser silently dropped tool_result content blocks
+// (only logging when is_error=true) instead of emitting EventToolResult.
+// Without this event, engine never sees tool output and the Feishu/Slack/
+// Discord progress card never renders tool results — only the final
+// assistant text reaches the user.
+//
+// Cases covered:
+//  - string content (plain text result)
+//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+//  - is_error=true (exit code 1, success=false)
+func TestHandleUserEmitsToolResult(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         map[string]any
+		wantResult  string
+		wantCode    int
+		wantSuccess bool
+	}{
+		{
+			name: "string content",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":          "tool_result",
+							"tool_use_id":   "toolu_abc",
+							"is_error":      false,
+							"content":       "command output here",
+						},
+					},
+				},
+			},
+			wantResult:  "command output here",
+			wantCode:    0,
+			wantSuccess: true,
+		},
+		{
+			name: "array content",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_def",
+							"is_error":    false,
+							"content": []any{
+								map[string]any{"type": "text", "text": "line one"},
+								map[string]any{"type": "text", "text": "line two"},
+							},
+						},
+					},
+				},
+			},
+			wantResult:  "line one\nline two",
+			wantCode:    0,
+			wantSuccess: true,
+		},
+		{
+			name: "error result",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_err",
+							"is_error":    true,
+							"content":     "boom",
+						},
+					},
+				},
+			},
+			wantResult:  "boom",
+			wantCode:    1,
+			wantSuccess: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cs := &claudeSession{
+				events: make(chan core.Event, 4),
+				ctx:    ctx,
+			}
+			cs.alive.Store(true)
+
+			cs.handleUser(tc.raw)
+
+			select {
+			case evt := <-cs.events:
+				if evt.Type != core.EventToolResult {
+					t.Fatalf("event type = %q, want %q", evt.Type, core.EventToolResult)
+				}
+				if evt.ToolResult != tc.wantResult {
+					t.Errorf("ToolResult = %q, want %q", evt.ToolResult, tc.wantResult)
+				}
+				if evt.ToolExitCode == nil || *evt.ToolExitCode != tc.wantCode {
+					got := -1
+					if evt.ToolExitCode != nil {
+						got = *evt.ToolExitCode
+					}
+					t.Errorf("ToolExitCode = %d, want %d", got, tc.wantCode)
+				}
+				if evt.ToolSuccess == nil || *evt.ToolSuccess != tc.wantSuccess {
+					got := false
+					if evt.ToolSuccess != nil {
+						got = *evt.ToolSuccess
+					}
+					t.Errorf("ToolSuccess = %v, want %v", got, tc.wantSuccess)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for EventToolResult — handleUser dropped the tool_result")
+			}
+		})
+	}
+}
+
 func helperCommand(ctx context.Context, mode string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcess", "--", mode)
 	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")

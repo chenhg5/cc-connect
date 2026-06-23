@@ -25,6 +25,7 @@ import (
 // with --session for conversation continuity.
 type opencodeSession struct {
 	cmd               string
+	extraArgs         []string // extra args from cmd, prepended before opencode args
 	workDir           string
 	model             string
 	mode              string
@@ -40,11 +41,12 @@ type opencodeSession struct {
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 }
 
-func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
 		cmd:       cmd,
+		extraArgs: extraArgs,
 		workDir:   workDir,
 		model:     model,
 		mode:      mode,
@@ -155,7 +157,7 @@ func opencodeImageExt(mimeType string) string {
 }
 
 func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatID string) []string {
-	args := []string{"run", "--format", "json"}
+	args := append(append([]string{}, s.extraArgs...), "run", "--format", "json")
 
 	if chatID != "" {
 		args = append(args, "--session", chatID)

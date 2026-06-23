@@ -229,7 +229,7 @@ func TestAgent_ListSessions(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{cliBin: "copilot"}
+	a := &Agent{cmd: "copilot"}
 	if got := a.CLIBinaryName(); got != "copilot" {
 		t.Fatalf("CLIBinaryName() = %q, want copilot", got)
 	}
@@ -243,7 +243,7 @@ func TestAgent_CLIDisplayName(t *testing.T) {
 }
 
 func TestAgent_WorkspaceAgentOptions(t *testing.T) {
-	a := &Agent{mode: "bypassPermissions", model: "gpt-4o", cliBin: "copilot"}
+	a := &Agent{mode: "bypassPermissions", model: "gpt-4o", cmd: "copilot"}
 	opts := a.WorkspaceAgentOptions()
 	if opts["mode"] != "bypassPermissions" {
 		t.Fatalf("mode = %v, want bypassPermissions", opts["mode"])
@@ -251,16 +251,16 @@ func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 	if opts["model"] != "gpt-4o" {
 		t.Fatalf("model = %v, want gpt-4o", opts["model"])
 	}
-	// cliBin is "copilot" (default) so cli_path should not be set
-	if _, ok := opts["cli_path"]; ok {
-		t.Fatal("cli_path should not be set for default binary name")
+	// cmd is "copilot" (default) so cmd should not be set
+	if _, ok := opts["cmd"]; ok {
+		t.Fatal("cmd should not be set for default binary name")
 	}
 
 	// Custom CLI path should be included
-	a2 := &Agent{mode: "default", cliBin: "/custom/copilot"}
+	a2 := &Agent{mode: "default", cmd: "/custom/copilot"}
 	opts2 := a2.WorkspaceAgentOptions()
-	if opts2["cli_path"] != "/custom/copilot" {
-		t.Fatalf("cli_path = %v, want /custom/copilot", opts2["cli_path"])
+	if opts2["cmd"] != "/custom/copilot" {
+		t.Fatalf("cmd = %v, want /custom/copilot", opts2["cmd"])
 	}
 }
 
@@ -270,7 +270,7 @@ func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 
 // TestAgent_ListSessions_NoBinary verifies graceful nil return when binary is missing.
 func TestAgent_ListSessions_NoBinary(t *testing.T) {
-	a := &Agent{cliBin: "copilot-nonexistent-xyz", workDir: "."}
+	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
 	sessions, err := a.ListSessions(context.Background())
 	if err != nil {
 		t.Fatalf("ListSessions with missing binary returned error: %v", err)
@@ -282,7 +282,7 @@ func TestAgent_ListSessions_NoBinary(t *testing.T) {
 
 // TestAgent_DeleteSession_NoBinary verifies graceful nil return when binary is missing.
 func TestAgent_DeleteSession_NoBinary(t *testing.T) {
-	a := &Agent{cliBin: "copilot-nonexistent-xyz", workDir: "."}
+	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
 	if err := a.DeleteSession(context.Background(), "some-session-id"); err != nil {
 		t.Fatalf("DeleteSession with missing binary returned error: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestAgent_DeleteSession_NoBinary(t *testing.T) {
 
 // TestAgent_DeleteSession_EmptyID verifies empty session ID returns nil immediately.
 func TestAgent_DeleteSession_EmptyID(t *testing.T) {
-	a := &Agent{cliBin: "copilot-nonexistent-xyz", workDir: "."}
+	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
 	if err := a.DeleteSession(context.Background(), ""); err != nil {
 		t.Fatalf("DeleteSession with empty ID returned error: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestAgent_ListSessions_RPC(t *testing.T) {
 
 	// Point agent at the test binary itself acting as a mock copilot
 	a := &Agent{
-		cliBin:  bin,
+		cmd:  bin,
 		workDir: ".",
 	}
 
@@ -341,7 +341,7 @@ func TestAgent_DeleteSession_RPC(t *testing.T) {
 	}
 
 	a := &Agent{
-		cliBin:  bin,
+		cmd:  bin,
 		workDir: ".",
 	}
 

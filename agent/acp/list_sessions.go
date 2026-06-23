@@ -67,7 +67,8 @@ type acpSessionListEntry struct {
 // and starts its readLoop. The caller owns the returned `teardown`
 // func and must invoke it to reap the child process.
 func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.Buffer, func(), error) {
-	cmd := exec.CommandContext(ctx, a.command, a.args...)
+	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
+	cmd := exec.CommandContext(ctx, a.cmd, allArgs...)
 	cmd.Dir = cwd
 	cmd.Env = core.MergeEnv(os.Environ(), a.extraEnv)
 
@@ -83,7 +84,7 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.
 	cmd.Stderr = io.MultiWriter(&stderrBuf)
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", a.command, err)
+		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", a.cmd, err)
 	}
 
 	// The server-request handler needs to reference `tr` itself in order
@@ -210,7 +211,7 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		return nil, err
 	}
 	if len(init.AgentCapabilities.SessionCapabilities.List) == 0 {
-		slog.Info("acp: session/list unsupported by agent, caching for fast-path", "command", a.command)
+		slog.Info("acp: session/list unsupported by agent, caching for fast-path", "command", a.cmd)
 		a.listUnsupported.Store(true)
 		return nil, nil
 	}

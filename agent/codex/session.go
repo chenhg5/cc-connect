@@ -30,8 +30,8 @@ type codexSession struct {
 	mode           string
 	baseURL        string   // provider base URL; passed as -c openai_base_url=<url>
 	modelProvider  string   // Codex model_provider name; passed as -c model_provider=<name>
-	cliBin         string   // CLI binary, default "codex"
-	cliExtraArgs   []string // extra args from cli_path, prepended before exec args
+	cmd            string   // CLI binary, default "codex"
+	cliExtraArgs   []string // extra args from cmd, prepended before exec args
 	extraEnv       []string
 	promptPreamble string
 	events         chan core.Event
@@ -97,7 +97,7 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 		mode:           mode,
 		baseURL:        baseURL,
 		modelProvider:  modelProvider,
-		cliBin:         cliBin,
+		cmd:            cliBin,
 		cliExtraArgs:   cliExtraArgs,
 		extraEnv:       extraEnv,
 		promptPreamble: buildCodexPromptPreamble(systemPrompt, appendPrompt),
@@ -141,7 +141,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
 	}
 
-	bin := cs.cliBin
+	bin := cs.cmd
 	if bin == "" {
 		bin = "codex"
 	}

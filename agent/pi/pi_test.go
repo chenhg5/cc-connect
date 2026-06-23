@@ -121,7 +121,7 @@ func TestNew_DefaultCmd(t *testing.T) {
 // ── Agent interface methods ──────────────────────────────────
 
 func TestAgent_NameAndDisplay(t *testing.T) {
-	a := &Agent{}
+	a := &Agent{cmd: "pi"}
 	if a.Name() != "pi" {
 		t.Errorf("Name() = %q", a.Name())
 	}
@@ -645,11 +645,11 @@ func TestCleanAttachments_NonexistentDir(t *testing.T) {
 
 func TestPiSessionAttachmentDirsAreIsolated(t *testing.T) {
 	workDir := t.TempDir()
-	s1, err := newPiSession(context.Background(), "pi", workDir, "", "", "", "", nil)
+	s1, err := newPiSession(context.Background(), "pi", nil, workDir, "", "", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := newPiSession(context.Background(), "pi", workDir, "", "", "", "", nil)
+	s2, err := newPiSession(context.Background(), "pi", nil, workDir, "", "", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1186,7 +1186,7 @@ func TestHandleMessageEnd_UserRole(t *testing.T) {
 // ── piSession lifecycle ──────────────────────────────────────
 
 func TestPiSession_NewWithResumeID(t *testing.T) {
-	s, err := newPiSession(context.Background(), "echo", "/tmp", "model", "default", "", "resume-id", nil)
+	s, err := newPiSession(context.Background(), "echo", nil, "/tmp", "model", "default", "", "resume-id", nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}
@@ -1202,7 +1202,7 @@ func TestPiSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 	// Claude Code to pick up the latest CLI session via --continue. Agents that
 	// don't support --continue must treat it as "" (fresh session), otherwise
 	// they pass the literal "__continue__" as a session ID which always fails.
-	s, err := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", core.ContinueSession, nil)
+	s, err := newPiSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}
@@ -1214,7 +1214,7 @@ func TestPiSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 }
 
 func TestPiSession_NewWithoutResumeID(t *testing.T) {
-	s, err := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
+	s, err := newPiSession(context.Background(), "echo", nil, "/tmp", "", "default", "", "", nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}
@@ -1226,7 +1226,7 @@ func TestPiSession_NewWithoutResumeID(t *testing.T) {
 }
 
 func TestPiSession_SendWhenClosed(t *testing.T) {
-	s, _ := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
+	s, _ := newPiSession(context.Background(), "echo", nil, "/tmp", "", "default", "", "", nil)
 	s.Close()
 
 	err := s.Send("hello", nil, nil)
@@ -1255,7 +1255,7 @@ func TestPiSession_Events(t *testing.T) {
 }
 
 func TestPiSession_Close(t *testing.T) {
-	s, _ := newPiSession(context.Background(), "echo", "/tmp", "", "default", "", "", nil)
+	s, _ := newPiSession(context.Background(), "echo", nil, "/tmp", "", "default", "", "", nil)
 
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -1363,7 +1363,7 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	line1, _ := json.Marshal(sessionEvent)
 	line2, _ := json.Marshal(textEvent)
 
-	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	s, err := newPiSession(context.Background(), "sh", nil, "/tmp", "", "default", "", "", nil)
 	if err != nil {
 		t.Fatalf("newPiSession: %v", err)
 	}

@@ -1447,6 +1447,72 @@ func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
 			}
 		}
+func TestNewPlatform_ImageBatchWindow(t *testing.T) {
+	// Default: 500ms when option omitted.
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":     "cli_test",
+		"app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil {
+		t.Fatal("expected *Platform or *interactivePlatform")
+	}
+	if fp.imageBatchWindow != defaultImageBatchWindow {
+		t.Errorf("default imageBatchWindow = %v, want %v", fp.imageBatchWindow, defaultImageBatchWindow)
+	}
+
+	// Custom value (int64, mirrors how TOML decodes integers).
+	p, err = newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": int64(1200),
+	})
+	if err != nil {
+		t.Fatalf("newPlatform with custom window error: %v", err)
+	}
+	fp = extractBasePlatform(p)
+	if want := 1200 * time.Millisecond; fp.imageBatchWindow != want {
+		t.Errorf("custom imageBatchWindow = %v, want %v", fp.imageBatchWindow, want)
+	}
+
+	// Zero is allowed (effectively disables coalescing) but still passes
+	// validation; batchWindow() will substitute the default at call time so
+	// timers never fire instantly.
+	p, err = newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": 0,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform with zero window error: %v", err)
+	}
+	fp = extractBasePlatform(p)
+	if fp.imageBatchWindow != 0 {
+		t.Errorf("imageBatchWindow = %v, want 0", fp.imageBatchWindow)
+	}
+	if fp.batchWindow() != defaultImageBatchWindow {
+		t.Errorf("batchWindow() with zero field = %v, want %v (fallback)", fp.batchWindow(), defaultImageBatchWindow)
+	}
+
+	// Negative is rejected.
+	if _, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": -1,
+	}); err == nil {
+		t.Error("expected error for negative image_batch_window_ms, got nil")
+	}
+
+	// Non-numeric is rejected.
+	if _, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": "200",
+	}); err == nil {
+		t.Error("expected error for string image_batch_window_ms, got nil")
 	}
 }
 
@@ -1455,7 +1521,7 @@ func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 // separate message event with very close create_time values. Dispatching each
 // immediately caused core/engine's create_time watermark (PR #1168) to drop
 // the oldest image, so the agent only saw N-1 images. After the fix, all N
-// images within imageBatchWindow should be coalesced into ONE dispatched
+// images within the image batch window should be coalesced into ONE dispatched
 // core.Message with N image attachments.
 func TestDispatchMessageCoalescesImageBatch(t *testing.T) {
 	const appID = "cli_batch_img"
@@ -1546,7 +1612,7 @@ func TestDispatchMessageCoalescesImageBatch(t *testing.T) {
 			}
 
 			// Collect dispatched messages with a generous timeout that comfortably
-			// exceeds imageBatchWindow (150ms) but still finishes the test quickly.
+			// exceeds the configured image-batch window but still finishes quickly.
 			var dispatched []*core.Message
 			deadline := time.After(2 * time.Second)
 			for len(dispatched) < tc.wantMsgs {
@@ -1563,7 +1629,7 @@ func TestDispatchMessageCoalescesImageBatch(t *testing.T) {
 			select {
 			case extra := <-received:
 				t.Fatalf("unexpected extra dispatched message %q with %d images", extra.MessageID, len(extra.Images))
-			case <-time.After(imageBatchWindow + 100*time.Millisecond):
+			case <-time.After(p.batchWindow() + 100*time.Millisecond):
 			}
 
 			if len(dispatched) != 1 {
@@ -1842,7 +1908,7 @@ func TestFlushImageBatchesStopsPendingTimers(t *testing.T) {
 	select {
 	case extra := <-received:
 		t.Fatalf("unexpected extra message after flush: %+v", extra)
-	case <-time.After(imageBatchWindow + 100*time.Millisecond):
+	case <-time.After(p.batchWindow() + 100*time.Millisecond):
 	}
 }
 
