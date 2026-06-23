@@ -419,6 +419,15 @@ func (s *piSession) forwardConfirm(id string, raw map[string]any) {
 	s.extMethod[requestID] = "confirm"
 	s.extPendingMu.Unlock()
 
+	questionText := title
+	if message != "" {
+		if questionText != "" {
+			questionText = questionText + ": " + message
+		} else {
+			questionText = message
+		}
+	}
+
 	evt := core.Event{
 		Type:     core.EventPermissionRequest,
 		RequestID: requestID,
@@ -429,6 +438,15 @@ func (s *piSession) forwardConfirm(id string, raw map[string]any) {
 			"message": message,
 			"method":  "confirm",
 		},
+		Questions: []core.UserQuestion{{
+			Question: questionText,
+			Header:   "Confirm",
+			Options: []core.UserQuestionOption{
+				{Label: "Yes"},
+				{Label: "No"},
+			},
+			MultiSelect: false,
+		}},
 	}
 	select {
 	case s.events <- evt:
@@ -477,6 +495,16 @@ func (s *piSession) forwardSelect(id string, raw map[string]any) {
 		}
 	}
 
+	// Convert raw string options to UserQuestionOption so cc-connect renders
+	// them as a rich button card (AskUserQuestion flow) instead of a plain
+	// permission prompt. Label carries the option's value verbatim so that
+	// resolveAskQuestionAnswer → result.Message maps back to the same string
+	// the extension passed in.
+	userOpts := make([]core.UserQuestionOption, 0, len(opts))
+	for _, o := range opts {
+		userOpts = append(userOpts, core.UserQuestionOption{Label: o})
+	}
+
 	requestID := fmt.Sprintf("pi_ext_%s", id)
 
 	s.extPendingMu.Lock()
@@ -484,6 +512,11 @@ func (s *piSession) forwardSelect(id string, raw map[string]any) {
 	s.extPendingRev[requestID] = id
 	s.extMethod[requestID] = "select"
 	s.extPendingMu.Unlock()
+
+	questionText := title
+	if questionText == "" {
+		questionText = "Select an option"
+	}
 
 	evt := core.Event{
 		Type:     core.EventPermissionRequest,
@@ -495,6 +528,12 @@ func (s *piSession) forwardSelect(id string, raw map[string]any) {
 			"options": opts,
 			"method":  "select",
 		},
+		Questions: []core.UserQuestion{{
+			Question:    questionText,
+			Header:      "Select",
+			Options:     userOpts,
+			MultiSelect: false,
+		}},
 	}
 	select {
 	case s.events <- evt:
@@ -704,6 +743,31 @@ func (s *piSession) handleAgentEnd(raw map[string]any) {
 	}
 }
 
+// lastAskQuestionAnswer extracts the most recently collected answer from
+// UpdatedInput.answers (the shape produced by buildAskQuestionResponse).
+// extension_select / extension_confirm ride the AskUserQuestion flow, so
+// the user's choice ends up here rather than in result.Message.
+// Returns "" if the structure is missing or empty.
+func lastAskQuestionAnswer(updatedInput map[string]any) string {
+	if updatedInput == nil {
+		return ""
+	}
+	answers, _ := updatedInput["answers"].(map[string]any)
+	if answers == nil {
+		return ""
+	}
+	// answers is keyed by question text. We don't have the question text
+	// here, so just return the last value (stable across the small maps
+	// the AskUserQuestion flow produces — typically 1 entry).
+	var last string
+	for _, v := range answers {
+		if s, ok := v.(string); ok {
+			last = s
+		}
+	}
+	return last
+}
+
 // ── RespondPermission ───────────────────────────────────────
 
 func (s *piSession) RespondPermission(requestID string, result core.PermissionResult) error {
@@ -745,12 +809,31 @@ func (s *piSession) RespondPermission(requestID string, result core.PermissionRe
 			"id":   extID,
 		}
 		if result.Behavior == "allow" {
-			resp["value"] = result.Message
+			// select goes through the AskUserQuestion flow, where the user's
+			// choice lives in UpdatedInput.answers (built by
+			// buildAskQuestionResponse). Map it back to the option's value.
+			resp["value"] = lastAskQuestionAnswer(result.UpdatedInput)
 		} else {
 			resp["cancelled"] = true
 		}
 	case "confirm":
-		fallthrough
+		// confirm also goes through the AskUserQuestion flow (Yes/No buttons).
+		// Behavior=allow means the user picked; inspect the answer to decide
+		// between confirmed=true and cancelled=true.
+		ans := strings.ToLower(strings.TrimSpace(lastAskQuestionAnswer(result.UpdatedInput)))
+		if result.Behavior == "allow" && (ans == "yes" || ans == "true" || ans == "ok" || ans == "confirm") {
+			resp = map[string]any{
+				"type":      "extension_ui_response",
+				"id":        extID,
+				"confirmed": true,
+			}
+		} else {
+			resp = map[string]any{
+				"type":      "extension_ui_response",
+				"id":        extID,
+				"cancelled": true,
+			}
+		}
 	default:
 		resp = map[string]any{
 			"type":      "extension_ui_response",

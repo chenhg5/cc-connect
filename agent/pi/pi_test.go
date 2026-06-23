@@ -1364,6 +1364,140 @@ func TestPiSession_RespondPermission(t *testing.T) {
 	}
 }
 
+// ── forwardSelect / forwardConfirm: Questions wiring ────────
+
+func TestForwardSelect_PopulatesQuestions(t *testing.T) {
+	s := newTestSession(true) // rpc mode
+	defer s.cancel()
+
+	s.forwardSelect("sel-1", map[string]any{
+		"title":   "Pick a color",
+		"options": []any{"Red", "Green", "Blue"},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	evt := evts[0]
+	if evt.Type != core.EventPermissionRequest {
+		t.Fatalf("expected EventPermissionRequest, got %s", evt.Type)
+	}
+	if evt.ToolName != "extension_select" {
+		t.Errorf("ToolName = %q, want extension_select", evt.ToolName)
+	}
+	if len(evt.Questions) != 1 {
+		t.Fatalf("expected 1 question, got %d", len(evt.Questions))
+	}
+	q := evt.Questions[0]
+	if q.Question != "Pick a color" {
+		t.Errorf("Question = %q, want %q", q.Question, "Pick a color")
+	}
+	if q.MultiSelect {
+		t.Error("MultiSelect should be false for select")
+	}
+	if len(q.Options) != 3 {
+		t.Fatalf("expected 3 options, got %d", len(q.Options))
+	}
+	wantLabels := []string{"Red", "Green", "Blue"}
+	for i, opt := range q.Options {
+		if opt.Label != wantLabels[i] {
+			t.Errorf("option[%d].Label = %q, want %q", i, opt.Label, wantLabels[i])
+		}
+	}
+}
+
+func TestForwardSelect_EmptyTitleUsesDefault(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+
+	s.forwardSelect("sel-2", map[string]any{
+		"options": []any{"only"},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	if evts[0].Questions[0].Question != "Select an option" {
+		t.Errorf("Question = %q, want %q", evts[0].Questions[0].Question, "Select an option")
+	}
+}
+
+func TestForwardConfirm_PopulatesYesNo(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+
+	s.forwardConfirm("cfm-1", map[string]any{
+		"title":   "Allow rm -rf?",
+		"message": "This is destructive",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	evt := evts[0]
+	if evt.ToolName != "extension_confirm" {
+		t.Errorf("ToolName = %q, want extension_confirm", evt.ToolName)
+	}
+	if len(evt.Questions) != 1 {
+		t.Fatalf("expected 1 question, got %d", len(evt.Questions))
+	}
+	q := evt.Questions[0]
+	if len(q.Options) != 2 {
+		t.Fatalf("expected 2 options, got %d", len(q.Options))
+	}
+	if q.Options[0].Label != "Yes" || q.Options[1].Label != "No" {
+		t.Errorf("Options = [%q, %q], want [Yes, No]", q.Options[0].Label, q.Options[1].Label)
+	}
+	if q.Question != "Allow rm -rf?: This is destructive" {
+		t.Errorf("Question = %q, want combined title+message", q.Question)
+	}
+}
+
+func TestForwardConfirm_MessageOnly(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+
+	s.forwardConfirm("cfm-2", map[string]any{
+		"message": "Allow this?",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	if evts[0].Questions[0].Question != "Allow this?" {
+		t.Errorf("Question = %q, want %q", evts[0].Questions[0].Question, "Allow this?")
+	}
+}
+
+// ── lastAskQuestionAnswer helper ───────────────────────────
+
+func TestLastAskQuestionAnswer(t *testing.T) {
+	tests := []struct {
+		name string
+		in   map[string]any
+		want string
+	}{
+		{"nil", nil, ""},
+		{"no answers key", map[string]any{"foo": "bar"}, ""},
+		{"empty answers", map[string]any{"answers": map[string]any{}}, ""},
+		{"single answer", map[string]any{"answers": map[string]any{"Q?": "Yes"}}, "Yes"},
+		{"multiple answers picks last", map[string]any{"answers": map[string]any{"Q1?": "A", "Q2?": "B"}}, "B"},
+		{"non-string value ignored", map[string]any{"answers": map[string]any{"Q?": 42}}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lastAskQuestionAnswer(tt.in)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPiSession_Events(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()

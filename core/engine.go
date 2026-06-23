@@ -5113,7 +5113,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventPermissionRequest:
-			isAskQuestion := event.ToolName == "AskUserQuestion" && len(event.Questions) > 0
+			// extension_select / extension_confirm are Pi extension UI requests
+			// routed via the AskUserQuestion rich-card path. The pi session
+			// adapter populates event.Questions so they render as button cards
+			// (same UX as Claude Code's AskUserQuestion).
+			isAskQuestion := (event.ToolName == "AskUserQuestion" ||
+				event.ToolName == "extension_select" ||
+				event.ToolName == "extension_confirm") && len(event.Questions) > 0
 
 			state.mu.Lock()
 			autoApprove := state.approveAll
