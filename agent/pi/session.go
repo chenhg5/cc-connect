@@ -189,12 +189,12 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 			continue
 		}
 
+		s.handleEvent(raw)
+
 		if firstLine {
 			firstLine = false
 			close(s.rpcReady)
 		}
-
-		s.handleEvent(raw)
 	}
 
 	// Process exited
