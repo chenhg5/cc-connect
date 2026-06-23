@@ -95,6 +95,43 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentOptions_RpcPropagates(t *testing.T) {
+	// Regression test: rpc must propagate to per-workspace agents
+	// reconstructed by the engine in multi-workspace mode. Without
+	// WorkspaceAgentOptions(), engine.go's getOrCreateWorkspaceAgent
+	// would silently drop `rpc = true` and the per-workspace agent
+	// would default to JSON mode.
+	a := &Agent{rpc: true, cmd: "echo", thinking: "high"}
+	got := a.WorkspaceAgentOptions()
+
+	if got["rpc"] != true {
+		t.Errorf("expected rpc=true in snapshot, got %v", got["rpc"])
+	}
+	if got["thinking"] != "high" {
+		t.Errorf("expected thinking=high in snapshot, got %v", got["thinking"])
+	}
+	if _, ok := got["work_dir"]; ok {
+		t.Errorf("work_dir must not be in snapshot (engine sets it per-workspace)")
+	}
+}
+
+func TestWorkspaceAgentOptions_DefaultsOmitted(t *testing.T) {
+	// Default cmd ("pi") and unset rpc/thinking should be omitted so the
+	// snapshot is a minimal delta on top of the project-level opts.
+	a := &Agent{cmd: "pi", rpc: false, thinking: ""}
+	got := a.WorkspaceAgentOptions()
+
+	if _, ok := got["cmd"]; ok {
+		t.Errorf("default cmd should be omitted, got %v", got["cmd"])
+	}
+	if _, ok := got["rpc"]; ok {
+		t.Errorf("rpc=false should be omitted, got %v", got["rpc"])
+	}
+	if _, ok := got["thinking"]; ok {
+		t.Errorf("empty thinking should be omitted, got %v", got["thinking"])
+	}
+}
+
 func TestNew_CmdNotFound(t *testing.T) {
 	_, err := New(map[string]any{"cmd": "nonexistent-binary-xyz-12345"})
 	if err == nil {

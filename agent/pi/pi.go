@@ -83,6 +83,28 @@ func (a *Agent) Name() string           { return "pi" }
 func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Pi" }
 
+// WorkspaceAgentOptions implements core.WorkspaceAgentOptionSnapshotter.
+// It returns the user-configured options that must propagate to per-workspace
+// agents reconstructed by the engine in multi-workspace mode. work_dir is
+// intentionally omitted — the engine sets the target workspace. sessionEnv is
+// also omitted (runtime-only). model and mode are copied by the engine via
+// GetModel/GetMode, so we don't repeat them here.
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	opts := map[string]any{}
+	if a.cmd != "" && a.cmd != "pi" {
+		opts["cmd"] = a.cmd
+	}
+	if a.rpc {
+		opts["rpc"] = true
+	}
+	if a.thinking != "" {
+		opts["thinking"] = a.thinking
+	}
+	return opts
+}
+
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
