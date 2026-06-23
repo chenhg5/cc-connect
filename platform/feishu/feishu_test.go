@@ -1382,7 +1382,7 @@ func TestResolveMentions_MarkdownForcesTextFormat(t *testing.T) {
 
 // TestSendWithStatusFooter_NoFallbackOnNonMentionAt: a bare
 // "@" that is NOT a mention (email, URL) must not degrade SendWithStatusFooter
-// to plain Send — the interactive card must be preserved. 
+// to plain Send — the interactive card must be preserved.
 func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 	const appID = "cli_footer_at"
 	const appSecret = "secret"
@@ -1447,6 +1447,9 @@ func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
 			}
 		}
+	}
+}
+
 func TestNewPlatform_ImageBatchWindow(t *testing.T) {
 	// Default: 500ms when option omitted.
 	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
