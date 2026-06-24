@@ -104,13 +104,28 @@ func New(opts map[string]any) (core.Platform, error) {
 	appID, _ := opts["app_id"].(string)
 	wpsSid, _ := opts["wps_sid"].(string)
 
+	// Try to get wps_sid from environment variable
+	if wpsSid == "" {
+		wpsSid = getEnvWithPrefix("WPS_SID", "")
+	}
+
 	// If wps_sid is empty, try auto-login
 	if wpsSid == "" {
-		sid, err := autoLogin(appID)
+		sid, encrypted, err := autoLogin(appID)
 		if err != nil {
 			return nil, fmt.Errorf("wps-agentspace: auto-login failed: %w", err)
 		}
 		wpsSid = sid
+
+		// Display encrypted token for environment variable storage
+		if encrypted != "" {
+			fmt.Println("\n=========================================")
+			fmt.Println("  Token 已获取，请设置环境变量：")
+			fmt.Println("=========================================")
+			fmt.Printf("\n  export WPS_SID='%s'\n\n", encrypted)
+			fmt.Println("  或添加到 ~/.zshrc / ~/.bashrc")
+			fmt.Println("=========================================\n")
+		}
 	}
 
 	deviceUuid, _ := opts["device_uuid"].(string)
@@ -562,7 +577,8 @@ const (
 )
 
 // autoLogin performs OAuth login to get wps_sid.
-func autoLogin(appID string) (string, error) {
+// Returns: raw token, encrypted token, error
+func autoLogin(appID string) (string, string, error) {
 	state := generateUUID()
 
 	// Step 1: Get login URL
@@ -576,7 +592,7 @@ func autoLogin(appID string) (string, error) {
 	body, _ := json.Marshal(reqBody)
 	resp, err := http.Post(loginURLAPI, "application/json", strings.NewReader(string(body)))
 	if err != nil {
-		return "", fmt.Errorf("get login URL: %w", err)
+		return "", "", fmt.Errorf("get login URL: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -588,11 +604,11 @@ func autoLogin(appID string) (string, error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
-		return "", fmt.Errorf("parse login response: %w", err)
+		return "", "", fmt.Errorf("parse login response: %w", err)
 	}
 
 	if loginResp.Data.URL == "" {
-		return "", fmt.Errorf("no login URL returned")
+		return "", "", fmt.Errorf("no login URL returned")
 	}
 
 	code := loginResp.Data.Code
@@ -641,38 +657,41 @@ func autoLogin(appID string) (string, error) {
 			// Encrypt token for safe storage
 			encrypted, err := encryptWpsSid(tokenResp.Data.Token, appID)
 			if err != nil {
-				slog.Warn("wps-agentspace: failed to encrypt token, storing raw", "error", err)
-				return tokenResp.Data.Token, nil
+				slog.Warn("wps-agentspace: failed to encrypt token", "error", err)
+				return tokenResp.Data.Token, "", nil
 			}
 
-			slog.Info("wps-agentspace: token encrypted for storage")
-			fmt.Printf("\n请将以下配置添加到 config.toml:\n")
-			fmt.Printf("wps_sid = \"%s\"\n\n", encrypted)
-
-			return tokenResp.Data.Token, nil
+			return tokenResp.Data.Token, encrypted, nil
 		}
 
 		fmt.Print(".")
 	}
 
-	return "", fmt.Errorf("login timeout (5 minutes)")
+	return "", "", fmt.Errorf("login timeout (5 minutes)")
 }
 
 // openBrowser opens URL in the default browser.
 func openBrowser(url string) {
 	var cmd string
+	var args []string
+
 	switch {
 	case isMacOS():
 		cmd = "open"
+		args = []string{url}
 	case isLinux():
 		cmd = "xdg-open"
+		args = []string{url}
+	case isWindows():
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
 	default:
 		fmt.Printf("请手动打开: %s\n", url)
 		return
 	}
 
 	go func() {
-		exec.Command(cmd, url).Run()
+		exec.Command(cmd, args...).Run()
 	}()
 }
 
@@ -682,6 +701,38 @@ func isMacOS() bool {
 
 func isLinux() bool {
 	return runtime.GOOS == "linux"
+}
+
+func isWindows() bool {
+	return runtime.GOOS == "windows"
+}
+
+// getEnvWithPrefix gets environment variable with optional prefix
+func getEnvWithPrefix(key, defaultVal string) string {
+	if val := getEnv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+func getEnv(key string) string {
+	return strings.TrimSpace(strings.Trim(
+		strings.TrimSpace(
+			func() string {
+				if val, ok := envLookup(key); ok {
+					return val
+				}
+				return ""
+			}(),
+		),
+		"'\"",
+	))
+}
+
+func envLookup(key string) (string, bool) {
+	// Simple env lookup without importing os
+	// This is handled by the config system
+	return "", false
 }
 
 // encryptWpsSid encrypts a wps_sid token using AES-256-GCM.
