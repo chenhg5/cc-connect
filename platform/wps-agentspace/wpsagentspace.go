@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -101,8 +103,14 @@ func init() {
 func New(opts map[string]any) (core.Platform, error) {
 	appID, _ := opts["app_id"].(string)
 	wpsSid, _ := opts["wps_sid"].(string)
+
+	// If wps_sid is empty, try auto-login
 	if wpsSid == "" {
-		return nil, fmt.Errorf("wps-agentspace: wps_sid is required")
+		sid, err := autoLogin(appID)
+		if err != nil {
+			return nil, fmt.Errorf("wps-agentspace: auto-login failed: %w", err)
+		}
+		wpsSid = sid
 	}
 
 	deviceUuid, _ := opts["device_uuid"].(string)
@@ -541,12 +549,128 @@ func (p *Platform) writeLoop(conn *websocket.Conn) {
 // --- Crypto utilities ---
 
 const (
-	aesAlg       = "aes-256-gcm"
-	keyLength    = 32
-	ivLength     = 12
-	saltLength   = 16
+	aesAlg           = "aes-256-gcm"
+	keyLength        = 32
+	ivLength         = 12
+	saltLength       = 16
 	defaultKeySource = "openclaw_agentspace"
+
+	// OAuth endpoints
+	loginURLAPI  = "https://agentspace.wps.cn/v7/devhub/users/login_url"
+	userTokenAPI = "https://agentspace.wps.cn/v7/devhub/users/user_token"
+	userInfoAPI  = "https://agentspace.wps.cn/v7/devhub/users/current"
 )
+
+// autoLogin performs OAuth login to get wps_sid.
+func autoLogin(appID string) (string, error) {
+	state := generateUUID()
+
+	// Step 1: Get login URL
+	slog.Info("wps-agentspace: starting auto-login...")
+
+	reqBody := map[string]string{"state": state}
+	if appID != "" {
+		reqBody["app_id"] = appID
+	}
+
+	body, _ := json.Marshal(reqBody)
+	resp, err := http.Post(loginURLAPI, "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return "", fmt.Errorf("get login URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var loginResp struct {
+		Data struct {
+			Code  string `json:"code"`
+			URL   string `json:"url"`
+			AppID string `json:"app_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+		return "", fmt.Errorf("parse login response: %w", err)
+	}
+
+	if loginResp.Data.URL == "" {
+		return "", fmt.Errorf("no login URL returned")
+	}
+
+	code := loginResp.Data.Code
+	respAppID := loginResp.Data.AppID
+	if respAppID != "" {
+		appID = respAppID
+	}
+
+	// Step 2: Open browser
+	slog.Info("wps-agentspace: opening browser for login...")
+	fmt.Printf("\n请在浏览器中登录 WPS 账号:\n%s\n\n", loginResp.Data.URL)
+	openBrowser(loginResp.Data.URL)
+
+	// Step 3: Poll for token
+	slog.Info("wps-agentspace: waiting for login (polling every 3s, max 5 min)...")
+	deadline := time.Now().Add(5 * time.Minute)
+
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+
+		pollBody, _ := json.Marshal(map[string]string{
+			"app_id": appID,
+			"code":   code,
+			"state":  state,
+		})
+
+		resp, err := http.Post(userTokenAPI, "application/json", strings.NewReader(string(pollBody)))
+		if err != nil {
+			continue
+		}
+
+		var tokenResp struct {
+			Data struct {
+				Token string `json:"token"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
+		if tokenResp.Data.Token != "" {
+			slog.Info("wps-agentspace: login successful!")
+			return tokenResp.Data.Token, nil
+		}
+
+		fmt.Print(".")
+	}
+
+	return "", fmt.Errorf("login timeout (5 minutes)")
+}
+
+// openBrowser opens URL in the default browser.
+func openBrowser(url string) {
+	var cmd string
+	switch {
+	case isMacOS():
+		cmd = "open"
+	case isLinux():
+		cmd = "xdg-open"
+	default:
+		fmt.Printf("请手动打开: %s\n", url)
+		return
+	}
+
+	go func() {
+		exec.Command(cmd, url).Run()
+	}()
+}
+
+func isMacOS() bool {
+	return runtime.GOOS == "darwin"
+}
+
+func isLinux() bool {
+	return runtime.GOOS == "linux"
+}
 
 // decryptWpsSid decrypts an OpenClaw-encrypted token.
 func decryptWpsSid(encrypted, appId string) (string, error) {
