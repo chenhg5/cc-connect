@@ -817,9 +817,7 @@ func writeFile(path string, data string) error {
 	return os.WriteFile(path, []byte(data), 0644)
 }
 
-func statFile(path string) (os.FileInfo, error) {
-	return os.Stat(path)
-}
+
 
 // getEnvWithPrefix gets environment variable
 func getEnvWithPrefix(key, defaultVal string) string {
