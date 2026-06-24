@@ -600,7 +600,7 @@ func autoLogin(appID string) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("get login URL: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var loginResp struct {
 		Data struct {
