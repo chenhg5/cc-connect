@@ -471,15 +471,6 @@ func (s *piSession) forwardConfirm(id string, raw map[string]any) {
 	s.extMethod[requestID] = "confirm"
 	s.extPendingMu.Unlock()
 
-	questionText := title
-	if message != "" {
-		if questionText != "" {
-			questionText = questionText + ": " + message
-		} else {
-			questionText = message
-		}
-	}
-
 	evt := core.Event{
 		Type:     core.EventPermissionRequest,
 		RequestID: requestID,
@@ -490,15 +481,12 @@ func (s *piSession) forwardConfirm(id string, raw map[string]any) {
 			"message": message,
 			"method":  "confirm",
 		},
-		Questions: []core.UserQuestion{{
-			Question: questionText,
-			Header:   "Confirm",
-			Options: []core.UserQuestionOption{
-				{Label: "Yes"},
-				{Label: "No"},
-			},
-			MultiSelect: false,
-		}},
+		// extension_confirm is treated as a regular permission request by
+		// the engine (Allow/Deny card), NOT an AskUserQuestion button card.
+		// Extensions use ctx.ui.confirm() to ask the user for permission on
+		// a tool call (e.g. permission-gate on Bash). Routing it through the
+		// AskUserQuestion flow produced a Yes/No question card, which
+		// doesn't match the UX of other agents' permission prompts.
 	}
 	select {
 	case s.events <- evt:
@@ -870,23 +858,13 @@ func (s *piSession) RespondPermission(requestID string, result core.PermissionRe
 			resp["cancelled"] = true
 		}
 	case "confirm":
-		// confirm also goes through the AskUserQuestion flow (Yes/No buttons).
-		// Behavior=allow means the user picked; inspect the answer to decide
-		// between confirmed=true and cancelled=true.
-		ans := strings.ToLower(strings.TrimSpace(lastAskQuestionAnswer(result.UpdatedInput)))
-		if result.Behavior == "allow" && (ans == "yes" || ans == "true" || ans == "ok" || ans == "confirm") {
-			resp = map[string]any{
-				"type":      "extension_ui_response",
-				"id":        extID,
-				"confirmed": true,
-			}
-		} else {
-			resp = map[string]any{
-				"type":      "extension_ui_response",
-				"id":        extID,
-				"cancelled": true,
-			}
-		}
+		// extension_confirm goes through the regular permission flow, not the
+		// AskUserQuestion flow, so the engine sends plain "allow"/"deny"
+		// PermissionResults (no UpdatedInput.answers). Forward as the default
+		// case: confirmed=Behavior=="allow", else confirmed=false (pgate's
+		// ctx.ui.confirm resolves false for both "deny" and "no confirmation",
+		// which is what we want).
+		fallthrough
 	default:
 		resp = map[string]any{
 			"type":      "extension_ui_response",

@@ -6779,6 +6779,181 @@ func TestHandlePendingPermission_AskUserQuestion_SkipsPermFlow(t *testing.T) {
 	}
 }
 
+// TestHandlePendingPermission_ExtensionConfirm_AllowIsPermissionAllow is a
+// regression test for the fcb1beae regression: extension_confirm events
+// (forwarded by the pi session for ctx.ui.confirm, used by extensions like
+// permission-gate to ask the user for tool-use permission) must be handled
+// as a regular permission request. "allow" / "deny" / "allow all" must be
+// interpreted as permission decisions, NOT as free-text answers to a
+// AskUserQuestion-style Yes/No question.
+//
+// The bug: fcb1beae routed extension_confirm through the AskUserQuestion
+// flow (populated Questions=[{Yes, No}] in forwardConfirm). That made the
+// engine render a Yes/No question card on Feishu instead of an Allow/Deny
+// permission card, breaking the UX for permission-gate and any other
+// extension that uses ctx.ui.confirm for permission decisions.
+func TestHandlePendingPermission_ExtensionConfirm_AllowIsPermissionAllow(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "pi_ext_cfm-1",
+			ToolName:  "extension_confirm",
+			ToolInput: map[string]any{
+				"title":   "Command needs confirmation",
+				"message": "rm -rf /tmp/foo",
+				"method":  "confirm",
+			},
+			// No Questions field — extension_confirm must NOT carry one.
+			// Questions: nil,
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	// User clicks "allow" — must be treated as permission allow, not as a
+	// free-text answer to a Yes/No question.
+	if !e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "allow",
+		ReplyCtx:   "ctx",
+	}, "allow", "") {
+		t.Fatal("expected handlePendingPermission to return true")
+	}
+
+	if rec.calls != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1", rec.calls)
+	}
+	if rec.lastResult.Behavior != "allow" {
+		t.Fatalf("Behavior = %q, want %q (extension_confirm must treat 'allow' as permission allow)", rec.lastResult.Behavior, "allow")
+	}
+	if _, ok := rec.lastResult.UpdatedInput["answers"]; ok {
+		t.Errorf("UpdatedInput must not carry AskUserQuestion answers, got %v", rec.lastResult.UpdatedInput)
+	}
+
+	state.mu.Lock()
+	if state.pending != nil {
+		t.Error("expected pending to be cleared after 'allow'")
+	}
+	state.mu.Unlock()
+}
+
+// TestHandlePendingPermission_ExtensionConfirm_DenyIsPermissionDeny covers
+// the deny half of the same regression: "deny" must produce Behavior="deny"
+// and clear the pending state.
+func TestHandlePendingPermission_ExtensionConfirm_DenyIsPermissionDeny(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "pi_ext_cfm-1",
+			ToolName:  "extension_confirm",
+			ToolInput: map[string]any{
+				"title":   "Command needs confirmation",
+				"message": "rm -rf /tmp/foo",
+				"method":  "confirm",
+			},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	if !e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "deny",
+		ReplyCtx:   "ctx",
+	}, "deny", "") {
+		t.Fatal("expected handlePendingPermission to return true")
+	}
+
+	if rec.lastResult.Behavior != "deny" {
+		t.Fatalf("Behavior = %q, want %q", rec.lastResult.Behavior, "deny")
+	}
+}
+
+// TestHandlePendingPermission_ExtensionSelect_StillRoutedAsAskUserQuestion
+// is the counterpart guard test: extension_select (used by the questionnaire
+// extension in RPC mode) MUST still be routed through the AskUserQuestion
+// flow, with its Questions field preserved. This test exists so that a future
+// refactor of the AskUserQuestion detection doesn't accidentally pull
+// extension_select back into the regular permission path and break the
+// button-card UX for questionnaire / multi-choice prompts.
+func TestHandlePendingPermission_ExtensionSelect_StillRoutedAsAskUserQuestion(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending: &pendingPermission{
+			RequestID: "pi_ext_sel-1",
+			ToolName:  "extension_select",
+			ToolInput: map[string]any{
+				"title":   "Pick a color",
+				"options": []any{"Red", "Green", "Blue"},
+				"method":  "select",
+			},
+			Questions: []UserQuestion{{
+				Question: "Pick a color",
+				Header:   "Select",
+				Options: []UserQuestionOption{
+					{Label: "Red"},
+					{Label: "Green"},
+					{Label: "Blue"},
+				},
+				MultiSelect: false,
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	// "allow" must be treated as a free-text answer to the question, NOT as
+	// a permission allow. If this assertion fails, the engine has pulled
+	// extension_select back into the regular permission path.
+	if !e.handlePendingPermission(p, &Message{
+		SessionKey: "test:chat:user1",
+		UserID:     "user1",
+		Content:    "allow",
+		ReplyCtx:   "ctx",
+	}, "allow", "") {
+		t.Fatal("expected handlePendingPermission to return true")
+	}
+
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected answers in updatedInput (AskUserQuestion flow), got %v", rec.lastResult.UpdatedInput)
+	}
+	if answers["Pick a color"] != "allow" {
+		t.Errorf("expected answer 'allow' preserved as free text, got %v", answers["Pick a color"])
+	}
+	// The decisive signal that this is the AskUserQuestion path (not the
+	// regular permission path) is the presence of an "answers" key in
+	// UpdatedInput. extension_select must take this path; extension_confirm
+	// (the regression) must NOT. If a future refactor ever strips
+	// extension_select out of the AskUserQuestion list, this test catches it.
+}
+
 // TestHandlePendingPermission_CronFallback verifies that the fallback path
 // in handlePendingPermission can locate a pending permission stored under a
 // cron composite key ("sessionKey#cron:sid") when the callback uses the

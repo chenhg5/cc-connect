@@ -5113,13 +5113,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventPermissionRequest:
-			// extension_select / extension_confirm are Pi extension UI requests
-			// routed via the AskUserQuestion rich-card path. The pi session
-			// adapter populates event.Questions so they render as button cards
-			// (same UX as Claude Code's AskUserQuestion).
+			// extension_select is a Pi extension UI request routed via the
+			// AskUserQuestion rich-card path. The pi session adapter populates
+			// event.Questions so it renders as a button card (same UX as Claude
+			// Code's AskUserQuestion).
+			//
+			// extension_confirm is intentionally NOT in this list: extensions
+			// use ctx.ui.confirm() to ask the user for permission on a tool
+			// call (e.g. permission-gate on Bash), and the engine must render
+			// it as a regular permission request (Allow/Deny) so the UX
+			// matches other agents. See forwardConfirm in agent/pi/session.go.
 			isAskQuestion := (event.ToolName == "AskUserQuestion" ||
-				event.ToolName == "extension_select" ||
-				event.ToolName == "extension_confirm") && len(event.Questions) > 0
+				event.ToolName == "extension_select") && len(event.Questions) > 0
 
 			state.mu.Lock()
 			autoApprove := state.approveAll

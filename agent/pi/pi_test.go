@@ -1424,7 +1424,11 @@ func TestForwardSelect_EmptyTitleUsesDefault(t *testing.T) {
 	}
 }
 
-func TestForwardConfirm_PopulatesYesNo(t *testing.T) {
+// TestForwardConfirm_RoutesAsRegularPermission verifies that extension_confirm
+// is forwarded as a regular permission request (no Questions field) so the
+// engine renders an Allow/Deny card rather than a Yes/No question card. This
+// matches the UX of other agents' permission prompts.
+func TestForwardConfirm_RoutesAsRegularPermission(t *testing.T) {
 	s := newTestSession(true)
 	defer s.cancel()
 
@@ -1438,21 +1442,21 @@ func TestForwardConfirm_PopulatesYesNo(t *testing.T) {
 		t.Fatalf("expected 1 event, got %d", len(evts))
 	}
 	evt := evts[0]
+	if evt.Type != core.EventPermissionRequest {
+		t.Fatalf("Type = %s, want EventPermissionRequest", evt.Type)
+	}
 	if evt.ToolName != "extension_confirm" {
 		t.Errorf("ToolName = %q, want extension_confirm", evt.ToolName)
 	}
-	if len(evt.Questions) != 1 {
-		t.Fatalf("expected 1 question, got %d", len(evt.Questions))
+	if len(evt.Questions) != 0 {
+		t.Errorf("Questions = %d, want 0 (extension_confirm must NOT route through AskUserQuestion)", len(evt.Questions))
 	}
-	q := evt.Questions[0]
-	if len(q.Options) != 2 {
-		t.Fatalf("expected 2 options, got %d", len(q.Options))
+	if evt.ToolInput != "Allow rm -rf?: This is destructive" {
+		t.Errorf("ToolInput = %q, want %q", evt.ToolInput, "Allow rm -rf?: This is destructive")
 	}
-	if q.Options[0].Label != "Yes" || q.Options[1].Label != "No" {
-		t.Errorf("Options = [%q, %q], want [Yes, No]", q.Options[0].Label, q.Options[1].Label)
-	}
-	if q.Question != "Allow rm -rf?: This is destructive" {
-		t.Errorf("Question = %q, want combined title+message", q.Question)
+	raw := evt.ToolInputRaw
+	if raw["title"] != "Allow rm -rf?" || raw["message"] != "This is destructive" || raw["method"] != "confirm" {
+		t.Errorf("ToolInputRaw = %v, want title/message/method set", raw)
 	}
 }
 
@@ -1468,8 +1472,15 @@ func TestForwardConfirm_MessageOnly(t *testing.T) {
 	if len(evts) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(evts))
 	}
-	if evts[0].Questions[0].Question != "Allow this?" {
-		t.Errorf("Question = %q, want %q", evts[0].Questions[0].Question, "Allow this?")
+	evt := evts[0]
+	if evt.ToolName != "extension_confirm" {
+		t.Errorf("ToolName = %q, want extension_confirm", evt.ToolName)
+	}
+	if len(evt.Questions) != 0 {
+		t.Errorf("Questions = %d, want 0", len(evt.Questions))
+	}
+	if evt.ToolInput != ": Allow this?" {
+		t.Errorf("ToolInput = %q, want %q", evt.ToolInput, ": Allow this?")
 	}
 }
 
