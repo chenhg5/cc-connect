@@ -20,6 +20,32 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// ── capped stderr writer ────────────────────────────────────
+
+// cappedStderrWriter wraps a bytes.Buffer with a maximum size to prevent
+// unbounded growth from stderr output in long-running RPC sessions.
+// Writes beyond the cap are silently discarded.
+type cappedStderrWriter struct {
+	buf bytes.Buffer
+}
+
+const maxStderrSize = 64 * 1024
+
+func (w *cappedStderrWriter) Write(p []byte) (int, error) {
+	if w.buf.Len() >= maxStderrSize {
+		return len(p), nil
+	}
+	n := maxStderrSize - w.buf.Len()
+	if len(p) > n {
+		p = p[:n]
+	}
+	return w.buf.Write(p)
+}
+
+func (w *cappedStderrWriter) String() string {
+	return w.buf.String()
+}
+
 // piSession manages a multi-turn pi coding agent conversation.
 // In "json" mode (default): each Send() spawns `pi --mode json` as a one-shot
 // process. No extension_ui support, no permission forwarding.
@@ -50,10 +76,11 @@ type piSession struct {
 	lastUsage  *core.ContextUsage
 
 	// RPC-only fields (nil/zero when rpc=false)
-	rpcCmd   *exec.Cmd
-	rpcStdin io.WriteCloser
-	stderrBuf bytes.Buffer
-	rpcReady chan struct{} // closed after first JSON line from Pi
+	rpcCmd     *exec.Cmd
+	rpcStdin   io.WriteCloser
+	rpcStdinMu sync.Mutex
+	stderrBuf  cappedStderrWriter
+	rpcReady   chan struct{} // closed after first JSON line from Pi
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
@@ -151,6 +178,8 @@ func (s *piSession) startRPC(resumeID string) error {
 	}
 	cmd.Stderr = &s.stderrBuf
 
+	prepareCmdForKill(cmd)
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
@@ -163,7 +192,10 @@ func (s *piSession) startRPC(resumeID string) error {
 
 func (s *piSession) killRPC() {
 	if s.rpcCmd != nil && s.rpcCmd.Process != nil {
-		_ = s.rpcCmd.Process.Kill()
+		if err := forceKillCmd(s.rpcCmd); err != nil {
+			slog.Warn("piSession: kill rpc process", "error", err)
+		}
+		_, _ = s.rpcCmd.Process.Wait()
 	}
 }
 
@@ -197,7 +229,8 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 		}
 	}
 
-	// Process exited
+	// Process exited — reap the child and signal the engine.
+	// killRPC (now with Wait()) ensures the zombie is collected.
 	s.killRPC()
 
 	if err := scanner.Err(); err != nil {
@@ -208,6 +241,21 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 		case <-s.ctx.Done():
 		}
 	}
+
+	// Signal process death to the engine (unless Close() already did).
+	// Following the claudecode finishReadLoop pattern: always set alive=false,
+	// and emit EventError with the captured stderr when present.
+	// All writes to s.events happen before the deferred wg.Done(), so
+	// Close()'s wg.Wait() → close(s.events) is correctly ordered.
+	stderrMsg := strings.TrimSpace(s.stderrBuf.String())
+	if stderrMsg != "" {
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s", stderrMsg)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+	}
+	s.alive.Store(false)
 }
 
 // ── Send ─────────────────────────────────────────────────────
@@ -339,7 +387,9 @@ func (s *piSession) sendRPC(prompt string) error {
 	b = append(b, '\n')
 
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(b))
+	s.rpcStdinMu.Lock()
 	_, err = s.rpcStdin.Write(b)
+	s.rpcStdinMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("piSession: write stdin: %w", err)
 	}
@@ -384,6 +434,8 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	// Informational — no events produced
 	case "agent_start", "turn_start", "turn_end", "message_start", "extension_error":
+	default:
+		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw", raw)
 	}
 }
 
@@ -756,16 +808,17 @@ func lastAskQuestionAnswer(updatedInput map[string]any) string {
 	if answers == nil {
 		return ""
 	}
-	// answers is keyed by question text. We don't have the question text
-	// here, so just return the last value (stable across the small maps
-	// the AskUserQuestion flow produces — typically 1 entry).
-	var last string
+	if len(answers) > 1 {
+		slog.Warn("piSession: unexpected multiple answers in AskUserQuestion", "count", len(answers))
+	}
+	// answers is keyed by question text, typically containing 1 entry from
+	// the AskUserQuestion flow. Return the first string value found.
 	for _, v := range answers {
 		if s, ok := v.(string); ok {
-			last = s
+			return s
 		}
 	}
-	return last
+	return ""
 }
 
 // ── RespondPermission ───────────────────────────────────────
@@ -849,7 +902,9 @@ func (s *piSession) RespondPermission(requestID string, result core.PermissionRe
 	b = append(b, '\n')
 
 	slog.Debug("piSession: sending extension_ui_response", "id", extID, "behavior", result.Behavior)
+	s.rpcStdinMu.Lock()
 	_, err = s.rpcStdin.Write(b)
+	s.rpcStdinMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("piSession: write extension_ui_response: %w", err)
 	}

@@ -1485,12 +1485,20 @@ func TestLastAskQuestionAnswer(t *testing.T) {
 		{"no answers key", map[string]any{"foo": "bar"}, ""},
 		{"empty answers", map[string]any{"answers": map[string]any{}}, ""},
 		{"single answer", map[string]any{"answers": map[string]any{"Q?": "Yes"}}, "Yes"},
-		{"multiple answers picks last", map[string]any{"answers": map[string]any{"Q1?": "A", "Q2?": "B"}}, "B"},
+		{"multiple answers returns any value", map[string]any{"answers": map[string]any{"Q1?": "A", "Q2?": "B"}}, ""},
 		{"non-string value ignored", map[string]any{"answers": map[string]any{"Q?": 42}}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := lastAskQuestionAnswer(tt.in)
+			if tt.name == "multiple answers returns any value" {
+				// Map iteration is non-deterministic; the function logs a
+				// warning and returns the first string value found.
+				if got != "A" && got != "B" {
+					t.Errorf("got %q, want A or B", got)
+				}
+				return
+			}
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
