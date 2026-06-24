@@ -1786,7 +1786,7 @@ func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 
 // TestResolveMentions_MarkdownContent verifies that @name inside markdown
 // content (which would trigger MsgTypeInteractive) is still resolved to the
-// MsgTypeText at syntax (<at user_id="...">name</at>). 
+// MsgTypeText at syntax (<at user_id="...">name</at>).
 func TestResolveMentions_MarkdownContent(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
