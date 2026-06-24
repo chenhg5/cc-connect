@@ -203,7 +203,7 @@ func (s *piSession) killRPC() {
 // One instance runs for the lifetime of the RPC process.
 func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 	defer s.wg.Done()
-	defer stdout.Close()
+	defer func() { _ = stdout.Close() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)

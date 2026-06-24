@@ -1662,7 +1662,7 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	}
 	go func() {
 		_, _ = w.Write([]byte(allData))
-		w.Close()
+		_ = w.Close()
 	}()
 
 	// Prevent close from trying to kill a process
