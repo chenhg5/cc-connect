@@ -1706,6 +1706,64 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Using Pi / 项目：使用 Pi (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: npm install -g @mariozechner/pi-coding-agent
+# 需要安装：npm install -g @mariozechner/pi-coding-agent
+# Pi is an AI coding agent that speaks two protocols to cc-connect:
+# Pi 是 AI 编程 agent，通过两种协议与 cc-connect 通信：
+#
+#   - "json" mode (default): one-shot `pi --mode json` per turn. No UI
+#     forwarding — any tool call that needs permission is silently
+#     rejected. Use this only if you never need to ask the user anything.
+#     "json" 模式（默认）：每个回合跑一次 `pi --mode json` 进程。
+#     不转发 UI 交互——任何需要权限的工具调用都会被静默拒绝。
+#     仅在你不需要问用户任何东西时使用。
+#
+#   - "rpc" mode: persistent `pi --mode rpc` process talking JSONL over
+#     stdin/stdout. The engine intercepts Pi's extension_ui_request events
+#     and surfaces them as permission / question cards on the messaging
+#     platform. The user's decision is piped back to Pi via
+#     extension_ui_response. **This is the mode you want.**
+#     "rpc" 模式：常驻 `pi --mode rpc` 进程，通过 stdin/stdout 走 JSONL
+#     协议。引擎会截获 Pi 的 extension_ui_request 事件，并在消息平台上
+#     渲染为权限 / 询问卡片。用户的决策通过 extension_ui_response 回写到
+#     Pi。**这是你想要的模式。**
+#
+# Pi extensions that need user interaction must use the standard UI methods
+# (ctx.ui.confirm, ctx.ui.select, ctx.ui.input) so cc-connect can intercept
+# them. If you write your own extensions, do NOT roll custom stdin prompts —
+# they will be invisible to cc-connect and silently dropped.
+# 需要与用户交互的 Pi 扩展必须使用标准 UI 方法（ctx.ui.confirm、
+# ctx.ui.select、ctx.ui.input），cc-connect 才能截获。如果你自己写
+# 扩展，不要自己往 stdin 里塞 prompt——cc-connect 看不到，会被静默丢弃。
+#
+# Configuration options:
+# - rpc = true|false: enable RPC mode (default: false)
+# - mode = "default"|"yolo": permission behavior
+# - thinking = "off"|"minimal"|"low"|"medium"|"high"|"xhigh"
+# - model = "provider/model" (optional; falls back to settings.json)
+
+# [[projects]]
+# name = "my-pi-project"
+#
+# [projects.agent]
+# type = "pi"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# rpc = true                  # enable RPC mode for UI forwarding / 启用 RPC 模式以转发 UI
+# mode = "default"            # "default" | "yolo"
+# thinking = "high"           # optional / 可选
+# # model = "anthropic/claude-sonnet-4-20250514"  # optional / 可选
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
 # =============================================================================
 # Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
