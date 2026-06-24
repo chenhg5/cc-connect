@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -117,14 +118,19 @@ func New(opts map[string]any) (core.Platform, error) {
 		}
 		wpsSid = sid
 
-		// Display encrypted token for environment variable storage
+		// Auto-save to config file
 		if encrypted != "" {
-			fmt.Println("\n=========================================")
-			fmt.Println("  Token 已获取，请设置环境变量：")
-			fmt.Println("=========================================")
-			fmt.Printf("\n  export WPS_SID='%s'\n\n", encrypted)
-			fmt.Println("  或添加到 ~/.zshrc / ~/.bashrc")
-			fmt.Println("=========================================\n")
+			saved := saveToConfig(appID, encrypted)
+			if saved {
+				fmt.Println("\n✓ Token 已自动保存到配置文件")
+			} else {
+				fmt.Println("\n=========================================")
+				fmt.Println("  Token 已获取，请设置环境变量：")
+				fmt.Println("=========================================")
+				fmt.Printf("\n  export WPS_SID='%s'\n\n", encrypted)
+				fmt.Println("  或添加到 ~/.zshrc / ~/.bashrc")
+				fmt.Println("=========================================\n")
+			}
 		}
 	}
 
@@ -707,32 +713,120 @@ func isWindows() bool {
 	return runtime.GOOS == "windows"
 }
 
-// getEnvWithPrefix gets environment variable with optional prefix
+// saveToConfig saves token to cc-connect config file
+func saveToConfig(appID, encryptedToken string) bool {
+	// Find config file
+	configPath := findConfigFile()
+	if configPath == "" {
+		return false
+	}
+
+	// Read existing config
+	data, err := readFile(configPath)
+	if err != nil {
+		slog.Warn("wps-agentspace: failed to read config", "error", err)
+		return false
+	}
+
+	// Simple string replacement to add/update wps_sid
+	// This is a basic implementation - in production you'd use a TOML parser
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.Contains(line, "wps_sid") && strings.Contains(line, "=") {
+			lines[i] = fmt.Sprintf(`wps_sid = "%s"  # auto-saved`, encryptedToken)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		// Find the wps-agentspace options section and add wps_sid
+		for i, line := range lines {
+			if strings.Contains(line, "type = \"wps-agentspace\"") {
+				// Find the options section after this
+				for j := i + 1; j < len(lines); j++ {
+					if strings.Contains(lines[j], "[projects.platforms.options]") {
+						// Insert wps_sid after this line
+						newLines := make([]string, len(lines)+1)
+						copy(newLines, lines[:j+1])
+						newLines[j+1] = fmt.Sprintf(`wps_sid = "%s"  # auto-saved`, encryptedToken)
+						copy(newLines[j+2:], lines[j+1:])
+						lines = newLines
+						found = true
+						break
+					}
+				}
+				break
+			}
+		}
+	}
+
+	if !found {
+		return false
+	}
+
+	// Write back
+	err = writeFile(configPath, strings.Join(lines, "\n"))
+	if err != nil {
+		slog.Warn("wps-agentspace: failed to write config", "error", err)
+		return false
+	}
+
+	return true
+}
+
+// findConfigFile finds the cc-connect config file
+func findConfigFile() string {
+	// Check common locations
+	locations := []string{
+		"config.toml",
+		"~/.cc-connect/config.toml",
+	}
+
+	for _, loc := range locations {
+		expanded := expandPath(loc)
+		if fileExists(expanded) {
+			return expanded
+		}
+	}
+	return ""
+}
+
+func expandPath(path string) string {
+	if strings.HasPrefix(path, "~") {
+		home := os.Getenv("HOME")
+		if home == "" {
+			home = os.Getenv("USERPROFILE")
+		}
+		return strings.Replace(path, "~", home, 1)
+	}
+	return path
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func readFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+func writeFile(path string, data string) error {
+	return os.WriteFile(path, []byte(data), 0644)
+}
+
+func statFile(path string) (os.FileInfo, error) {
+	return os.Stat(path)
+}
+
+// getEnvWithPrefix gets environment variable
 func getEnvWithPrefix(key, defaultVal string) string {
-	if val := getEnv(key); val != "" {
-		return val
+	if val := os.Getenv(key); val != "" {
+		return strings.TrimSpace(strings.Trim(val, "'\""))
 	}
 	return defaultVal
-}
-
-func getEnv(key string) string {
-	return strings.TrimSpace(strings.Trim(
-		strings.TrimSpace(
-			func() string {
-				if val, ok := envLookup(key); ok {
-					return val
-				}
-				return ""
-			}(),
-		),
-		"'\"",
-	))
-}
-
-func envLookup(key string) (string, bool) {
-	// Simple env lookup without importing os
-	// This is handled by the config system
-	return "", false
 }
 
 // encryptWpsSid encrypts a wps_sid token using AES-256-GCM.
