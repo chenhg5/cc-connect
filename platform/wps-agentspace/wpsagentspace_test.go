@@ -1,6 +1,7 @@
 package wpsagentspace
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -90,4 +91,37 @@ func TestGetWSURL(t *testing.T) {
 			t.Errorf("getWSURL() with appID=%q = %q, want %q", tt.appID, got, tt.want)
 		}
 	}
+}
+
+func TestEncryptDecryptWpsSid(t *testing.T) {
+	originalSid := "test-wps-sid-example-value-for-testing"
+	appId := "test-app-id-12345"
+
+	// Encrypt
+	encrypted, err := encryptWpsSid(originalSid, appId)
+	if err != nil {
+		t.Fatalf("encryptWpsSid() error: %v", err)
+	}
+
+	t.Logf("Original: %s", originalSid)
+	t.Logf("Encrypted: %s", encrypted)
+
+	// Verify format (salt:iv:authTag:ciphertext)
+	parts := strings.Split(encrypted, ":")
+	if len(parts) != 4 {
+		t.Fatalf("encryptWpsSid() invalid format, got %d parts", len(parts))
+	}
+
+	// Decrypt
+	decrypted, err := decryptWpsSid(encrypted, appId)
+	if err != nil {
+		t.Fatalf("decryptWpsSid() error: %v", err)
+	}
+
+	if decrypted != originalSid {
+		t.Errorf("decryptWpsSid() = %q, want %q", decrypted, originalSid)
+	}
+
+	t.Logf("Decrypted: %s", decrypted)
+	t.Log("✓ Encrypt/Decrypt round-trip successful")
 }
