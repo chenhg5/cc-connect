@@ -637,6 +637,18 @@ func autoLogin(appID string) (string, error) {
 
 		if tokenResp.Data.Token != "" {
 			slog.Info("wps-agentspace: login successful!")
+
+			// Encrypt token for safe storage
+			encrypted, err := encryptWpsSid(tokenResp.Data.Token, appID)
+			if err != nil {
+				slog.Warn("wps-agentspace: failed to encrypt token, storing raw", "error", err)
+				return tokenResp.Data.Token, nil
+			}
+
+			slog.Info("wps-agentspace: token encrypted for storage")
+			fmt.Printf("\n请将以下配置添加到 config.toml:\n")
+			fmt.Printf("wps_sid = \"%s\"\n\n", encrypted)
+
 			return tokenResp.Data.Token, nil
 		}
 
@@ -670,6 +682,61 @@ func isMacOS() bool {
 
 func isLinux() bool {
 	return runtime.GOOS == "linux"
+}
+
+// encryptWpsSid encrypts a wps_sid token using AES-256-GCM.
+func encryptWpsSid(wpsSid, appId string) (string, error) {
+	if wpsSid == "" {
+		return "", fmt.Errorf("wpsSid cannot be empty")
+	}
+
+	keySource := appId
+	if keySource == "" {
+		keySource = defaultKeySource
+	}
+
+	// Generate random salt and IV
+	salt := make([]byte, saltLength)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+
+	iv := make([]byte, ivLength)
+	if _, err := rand.Read(iv); err != nil {
+		return "", fmt.Errorf("generate iv: %w", err)
+	}
+
+	// Derive key using scrypt
+	key, err := scrypt.Key([]byte(keySource), salt, 16384, 8, 1, keyLength)
+	if err != nil {
+		return "", fmt.Errorf("derive key: %w", err)
+	}
+
+	// Create AES-GCM cipher
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("aes cipher: %w", err)
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("gcm: %w", err)
+	}
+
+	// Encrypt
+	ciphertext := aesGCM.Seal(nil, iv, []byte(wpsSid), nil)
+
+	// Split ciphertext and auth tag
+	authTag := ciphertext[len(ciphertext)-aesGCM.Overhead():]
+	ciphertext = ciphertext[:len(ciphertext)-aesGCM.Overhead()]
+
+	// Return format: salt:iv:authTag:ciphertext
+	return fmt.Sprintf("%s:%s:%s:%s",
+		hex.EncodeToString(salt),
+		hex.EncodeToString(iv),
+		hex.EncodeToString(authTag),
+		hex.EncodeToString(ciphertext),
+	), nil
 }
 
 // decryptWpsSid decrypts an OpenClaw-encrypted token.
