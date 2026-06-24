@@ -129,7 +129,7 @@ func New(opts map[string]any) (core.Platform, error) {
 				fmt.Println("=========================================")
 				fmt.Printf("\n  export WPS_SID='%s'\n\n", encrypted)
 				fmt.Println("  或添加到 ~/.zshrc / ~/.bashrc")
-				fmt.Println("=========================================\n")
+				fmt.Println("=========================================")
 			}
 		}
 	}
@@ -213,7 +213,7 @@ func (p *Platform) Stop() error {
 		}
 		p.mu.Lock()
 		if p.conn != nil {
-			p.conn.Close()
+			_ = p.conn.Close()
 		}
 		p.mu.Unlock()
 	})
@@ -302,7 +302,7 @@ func (p *Platform) connect(ctx context.Context) error {
 			p.conn = nil
 		}
 		p.mu.Unlock()
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	// Send init
@@ -353,7 +353,7 @@ func (p *Platform) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.writeJSON("ping", pingData{
+			_ = p.writeJSON("ping", pingData{
 				DeviceUUID: p.deviceUuid,
 				DeviceName: p.deviceName,
 				Timestamp:  time.Now().UnixMilli(),
@@ -369,7 +369,7 @@ func (p *Platform) readLoop(conn *websocket.Conn, ctx context.Context) error {
 			return nil
 		}
 
-		conn.SetReadDeadline(time.Now().Add(readDeadline))
+		_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
 
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -521,7 +521,7 @@ func (p *Platform) sendText(chatID, content string, rc *replyContext) error {
 
 // sendTyping sends a typing indicator.
 func (p *Platform) sendTyping(chatID string) {
-	p.writeJSON("typing", typingData{
+	_ = p.writeJSON("typing", typingData{
 		ChatID:     chatID,
 		DeviceUUID: p.deviceUuid,
 		DeviceName: p.deviceName,
@@ -652,10 +652,10 @@ func autoLogin(appID string) (string, string, error) {
 			} `json:"data"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if tokenResp.Data.Token != "" {
 			slog.Info("wps-agentspace: login successful!")
@@ -697,7 +697,7 @@ func openBrowser(url string) {
 	}
 
 	go func() {
-		exec.Command(cmd, args...).Run()
+		_ = exec.Command(cmd, args...).Run()
 	}()
 }
 
