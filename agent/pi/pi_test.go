@@ -1313,6 +1313,143 @@ func newFakeRPCSession(t *testing.T, sessionID, cmd, workDir string) *piSession 
 
 // ── piSession lifecycle ──────────────────────────────────────
 
+// newFakeRPCSessionRealistic creates a piSession backed by a fake pi script
+// that mimics the *actual* Pi RPC protocol observed in the pi source tree:
+// it pushes a non-session event (extension_ui_request) on stdout first, then
+// reads stdin and replies to {"type":"get_state"} with the canonical
+// {"type":"response", "command":"get_state", "data":{"sessionId":...}} shape.
+//
+// This is the protocol real pi uses today; the legacy "session" push event
+// is NOT part of it, so tests built on the old newFakeRPCSession would not
+// have caught the missing-session-id bug.
+//
+// newFakeRPCSessionRealistic exercises the full startRPC → writeRPCCommand →
+// readLoopRPC → handleEvent → close(rpcReady) chain by going through
+// newPiSession, so callers can observe what the engine sees.
+func newFakeRPCSessionRealistic(t *testing.T, sessionID string) *piSession {
+	t.Helper()
+	// Write the script to a temp file so we don't have to fight shell
+	// quoting inside Go string literals.
+	scriptPath := filepath.Join(t.TempDir(), "fake-pi.sh")
+	// Push a non-session event first, then loop reading stdin. When we see
+	// the get_state probe we respond with a real get_state response.
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+echo '{"type":"extension_ui_request","id":"ext-init","method":"setStatus","statusKey":"plan-mode"}'
+while IFS= read -r line; do
+    case "$line" in
+        *get_state*)
+            cat <<EOF
+{"id":"cc-connect-state-probe","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s","sessionFile":"/tmp/fake.jsonl"}}
+EOF
+            ;;
+    esac
+done
+`, sessionID)
+	if err := os.WriteFile(scriptPath, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake script: %v", err)
+	}
+
+	s, err := newPiSession(context.Background(), scriptPath, nil, t.TempDir(), "", "", "", true, "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession (realistic fake): %v", err)
+	}
+	return s
+}
+
+func TestPiSession_RPC_StartupProbeStoresSessionID(t *testing.T) {
+	// Regression: real Pi does not push a "session" event on stdout — only
+	// extension_ui_request events arrive first. Session id is only available
+	// via the response to the get_state command that startRPC writes. Before
+	// this fix CurrentSessionID() would stay empty even after rpcReady fired,
+	// because rpcReady was closed on the first line (which was the
+	// extension_ui_request), before the get_state response arrived.
+	s := newFakeRPCSessionRealistic(t, "session-from-get-state")
+	defer s.Close()
+
+	if got := s.CurrentSessionID(); got != "session-from-get-state" {
+		t.Errorf("CurrentSessionID() = %q, want %q (get_state probe did not populate session id)", got, "session-from-get-state")
+	}
+}
+
+func TestPiSession_RPC_StartupProbe_HandlesFailureResponse(t *testing.T) {
+	// Pi may respond to get_state with success=false (e.g. protocol error).
+	// handleEvent must log a warning and leave sessionID empty instead of
+	// panicking or storing junk. rpcReady therefore does not close, and the
+	// constructor returns the standard 30s "did not become ready" error.
+	scriptPath := filepath.Join(t.TempDir(), "fake-pi.sh")
+	scriptBody := `#!/bin/sh
+echo '{"type":"extension_ui_request","id":"ext-init","method":"setStatus","statusKey":"plan-mode"}'
+while IFS= read -r line; do
+    case "$line" in
+        *get_state*)
+            echo '{"id":"cc-connect-state-probe","type":"response","command":"get_state","success":false,"error":"session not available"}'
+            ;;
+    esac
+done
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake script: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	s, err := newPiSession(ctx, scriptPath, nil, t.TempDir(), "", "", "", true, "", nil)
+	if err == nil {
+		defer s.Close()
+		t.Fatalf("newPiSession succeeded (id=%q); failure response should leave session id empty and time out", s.CurrentSessionID())
+	}
+	if !strings.Contains(err.Error(), "did not become ready") &&
+		!strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestPiSession_RPC_StartupProbe_DoesNotCloseOnExtensionUI(t *testing.T) {
+	// Variant: the fake pi script emits extension_ui_request events forever
+	// without ever responding to get_state. rpcReady must NOT close (the
+	// session id never arrives), and the constructor must time out instead
+	// of returning early with an empty id.
+	scriptPath := filepath.Join(t.TempDir(), "fake-pi.sh")
+	scriptBody := `#!/bin/sh
+i=0
+echo '{"type":"extension_ui_request","id":"e0","method":"setStatus","statusKey":"plan-mode"}'
+while IFS= read -r line; do
+    i=$((i+1))
+    echo "{\"type\":\"extension_ui_request\",\"id\":\"e$i\",\"method\":\"setStatus\",\"statusKey\":\"plan-mode\"}"
+done
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake script: %v", err)
+	}
+
+	// Bound the wait: if the fix is wrong (rpcReady closed too early on the
+	// extension_ui_request), newPiSession returns within milliseconds with
+	// CurrentSessionID()=="". A correct fix keeps rpcReady open until the
+	// get_state response arrives, which never does here, so we hit a
+	// timeout — but well before the default 30s.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	s, err := newPiSession(ctx, scriptPath, nil, t.TempDir(), "", "", "", true, "", nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		defer s.Close()
+		t.Fatalf("newPiSession succeeded (id=%q) after %v; should have waited for get_state", s.CurrentSessionID(), elapsed)
+	}
+	// The error message is either the 30s timeout ("did not become ready")
+	// or our 3s ctx cancellation ("context cancelled") — both are valid
+	// proofs that rpcReady did not close prematurely on the first line.
+	if !strings.Contains(err.Error(), "did not become ready") &&
+		!strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if elapsed > 4*time.Second {
+		t.Errorf("newPiSession took %v; rpcReady should not have closed on the extension_ui_request first line", elapsed)
+	}
+}
+
 func TestPiSession_NewWithResumeID(t *testing.T) {
 	s := newFakeRPCSession(t, "test-sess-id", "", t.TempDir())
 	defer s.Close()

@@ -80,13 +80,30 @@ type piSession struct {
 	rpcStdin   io.WriteCloser
 	rpcStdinMu sync.Mutex
 	stderrBuf  cappedStderrWriter
-	rpcReady   chan struct{} // closed after first JSON line from Pi
+	rpcReady   chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
 	extPending    map[string]string // Pi ext_ui_id -> cc-conn RequestID
 	extPendingRev map[string]string // cc-conn RequestID -> Pi ext_ui_id
 	extMethod     map[string]string // cc-conn RequestID -> method ("confirm"|"input"|"select")
+}
+
+// stateProbeID is the request id used for the get_state probe that startRPC
+// writes to Pi's stdin immediately after spawning the process. Pi's RPC
+// protocol does not push session metadata on the stdout stream — the only
+// way to learn the session id is to send {"type":"get_state"} and parse the
+// matching response. By using a fixed sentinel id we can match the response
+// unambiguously even if other commands are in flight.
+const stateProbeID = "cc-connect-state-probe"
+
+// sessionIDReady reports whether the session id has been observed on the
+// pi side and stored. Used by readLoopRPC to decide when it is safe to
+// close rpcReady so callers (newPiSession, the engine) can read
+// CurrentSessionID() without racing the startup probe.
+func (s *piSession) sessionIDReady() bool {
+	v, _ := s.sessionID.Load().(string)
+	return v != ""
 }
 
 // ── Constructor ──────────────────────────────────────────────
@@ -187,6 +204,27 @@ func (s *piSession) startRPC(resumeID string) error {
 	s.wg.Add(1)
 	go s.readLoopRPC(stdout)
 
+	// Pi's RPC protocol does not push a "session" event on stdout — the only
+	// way to learn the session id is to send {"type":"get_state"} and parse
+	// the matching response in handleEvent. We probe immediately after spawn
+	// so that newPiSession's wait on rpcReady only unblocks once the id has
+	// been stored. readLoopRPC closes rpcReady as soon as sessionIDReady()
+	// flips to true (which happens after handleEvent processes the response),
+	// so callers can safely read CurrentSessionID() the moment rpcReady fires.
+	//
+	// If the probe write fails, the session is unrecoverable: without the
+	// session id we cannot resume after /stop, which is the very bug we are
+	// fixing. Bail out immediately and let the caller surface the error
+	// instead of waiting for the 30s rpcReady timeout.
+	if err := s.writeRPCCommand(map[string]any{
+		"type": "get_state",
+		"id":   stateProbeID,
+	}); err != nil {
+		slog.Warn("piSession: failed to write get_state probe; aborting RPC start", "error", err)
+		s.killRPC()
+		return fmt.Errorf("piSession: write get_state probe: %w", err)
+	}
+
 	return nil
 }
 
@@ -208,7 +246,16 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
-	firstLine := true
+	// rpcReady is closed exactly once, after handleEvent stores the session
+	// id from the get_state probe that startRPC wrote. We cannot use the
+	// first line as the trigger: the first line is usually an
+	// extension_ui_request from a running extension (plan-mode, presets,
+	// etc.) and would fire before the session id arrives, letting callers
+	// observe an empty CurrentSessionID(). handleEvent always runs before
+	// this check, so the moment we close rpcReady the id is guaranteed to
+	// be loaded — that's the same invariant the previous fix (which used
+	// the first line) tried to establish, just bound to the right event.
+	stateFetched := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -223,8 +270,8 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 
 		s.handleEvent(raw)
 
-		if firstLine {
-			firstLine = false
+		if !stateFetched && s.sessionIDReady() {
+			stateFetched = true
 			close(s.rpcReady)
 		}
 	}
@@ -372,6 +419,26 @@ func (s *piSession) sendJSON(prompt string) error {
 	return nil
 }
 
+// writeRPCCommand marshals cmd as a single JSONL line and writes it to the
+// RPC process's stdin under rpcStdinMu. Used by both sendRPC (for "prompt"
+// commands during a turn) and startRPC (for the startup "get_state" probe
+// that fetches the session id before callers are released).
+func (s *piSession) writeRPCCommand(cmd map[string]any) error {
+	b, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("piSession: marshal command: %w", err)
+	}
+	b = append(b, '\n')
+
+	s.rpcStdinMu.Lock()
+	_, err = s.rpcStdin.Write(b)
+	s.rpcStdinMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("piSession: write stdin: %w", err)
+	}
+	return nil
+}
+
 // sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
 // Events are read asynchronously by readLoopRPC, including agent_end which
 // triggers EventResult.
@@ -380,21 +447,8 @@ func (s *piSession) sendRPC(prompt string) error {
 		"type":    "prompt",
 		"message": prompt,
 	}
-	b, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("piSession: marshal prompt: %w", err)
-	}
-	b = append(b, '\n')
-
-	slog.Debug("piSession: sending RPC prompt", "bytes", len(b))
-	s.rpcStdinMu.Lock()
-	_, err = s.rpcStdin.Write(b)
-	s.rpcStdinMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("piSession: write stdin: %w", err)
-	}
-
-	return nil
+	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
+	return s.writeRPCCommand(cmd)
 }
 
 // ── Event Handling (shared by both modes) ───────────────────
@@ -404,8 +458,39 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	switch eventType {
 	case "session":
+		// Kept as a defensive fallback: if a future Pi RPC build starts
+		// pushing {"type":"session",...} on stdout (mirroring its on-disk
+		// jsonl format), we capture the id. Today Pi only sends the id in
+		// response to get_state, which is handled by the "response" branch
+		// below. See stateProbeID for the full rationale.
 		if id, ok := raw["id"].(string); ok && id != "" {
 			s.sessionID.Store(id)
+		}
+
+	case "response":
+		// Startup probe response: matches the get_state request id set by
+		// startRPC. Stores sessionId so readLoopRPC can close rpcReady and
+		// the engine can persist it via the next EventResult.SessionID.
+		if id, _ := raw["id"].(string); id == stateProbeID {
+			success, _ := raw["success"].(bool)
+			if !success {
+				errMsg, _ := raw["error"].(string)
+				slog.Warn("piSession: get_state probe returned failure; session id will be empty",
+					"error", errMsg, "raw", raw)
+				break
+			}
+			data, ok := raw["data"].(map[string]any)
+			if !ok {
+				slog.Warn("piSession: get_state probe response missing data field; session id will be empty", "raw", raw)
+				break
+			}
+			sid, _ := data["sessionId"].(string)
+			if sid == "" {
+				slog.Warn("piSession: get_state probe data.sessionId is empty", "raw", raw)
+				break
+			}
+			s.sessionID.Store(sid)
+			slog.Debug("piSession: state probe stored sessionId", "sessionId", sid)
 		}
 
 	case "message_update":
