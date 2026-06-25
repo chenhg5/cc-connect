@@ -241,10 +241,16 @@ type Event struct {
 	ToolExitCode *int           // optional exit code for EventToolResult
 	ToolSuccess  *bool          // optional success flag for EventToolResult
 	SessionID    string         // agent-managed session ID for conversation continuity
-	RequestID    string         // unique request ID for EventPermissionRequest
-	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
-	Done         bool
-	Error        error
+	// StopReason is the agent/backend reason that ended a turn (for example
+	// "max_tokens"). Empty means normal/unknown.
+	StopReason string
+	// AgentUnhealthy marks a terminal event that likely poisoned the underlying
+	// agent session. The engine should reset rather than keep sending prompts to it.
+	AgentUnhealthy           bool
+	RequestID                string         // unique request ID for EventPermissionRequest
+	Questions                []UserQuestion // populated when ToolName == "AskUserQuestion"
+	Done                     bool
+	Error                    error
 	InputTokens              int // token usage from agent result events
 	OutputTokens             int
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)

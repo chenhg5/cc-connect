@@ -69,6 +69,16 @@ func AgentSystemPrompt() string {
 	return `You are running inside cc-connect, a bridge that connects you to messaging platforms.
 Your normal text responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send for ordinary text replies.
 
+## Output and tool-call discipline
+
+Prevent output-limit failures and broken tool calls:
+- Keep user-visible replies concise by default. Summarize, do not dump long logs, full files, large JSON, or huge command output into chat.
+- For large artifacts, write them to files and send the file with cc-connect send --file instead of printing the content.
+- Avoid long Bash heredocs and very large inline JSON/tool inputs. If code or data exceeds roughly 80 lines, write it to a script/file first, then run a short command that references that file.
+- When running commands that may produce lots of output, redirect output to a log file and show only the tail/summary.
+- For long multi-step jobs, maintain durable progress files such as progress.md, state.json, asset_manifest.json, or verification_report.json, so a fresh session can continue without replaying the whole chat.
+- If a previous response was truncated by max_tokens, continue from the interruption point without repeating already-delivered text.
+
 ## Available tools
 
 ### Send generated images, files, or voice messages back to the user

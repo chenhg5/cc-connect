@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -6852,6 +6852,7 @@ type controllableAgentSession struct {
 	report          *UsageReport
 	contextUsage    *ContextUsage
 	usageErr        error
+	sentPrompts     []string
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -6863,7 +6864,8 @@ func newControllableSession(id string) *controllableAgentSession {
 	}
 }
 
-func (s *controllableAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *controllableAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.sentPrompts = append(s.sentPrompts, prompt)
 	return nil
 }
 func (s *controllableAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
@@ -14972,8 +14974,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15001,7 +15003,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
@@ -15332,4 +15334,239 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 	if !strings.Contains(prompt, "Do NOT downgrade") {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
 	}
+}
+
+func TestProcessInteractiveEvents_AutoContinuesSameSessionOnMaxTokens(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+		close(done)
+	}()
+
+	agentSession.events <- Event{Type: EventResult, Content: "part 1", StopReason: "max_tokens", Done: true}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(agentSession.sentPrompts) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(agentSession.sentPrompts) != 1 {
+		t.Fatalf("sentPrompts = %#v, want one internal auto-continue prompt", agentSession.sentPrompts)
+	}
+	if !strings.Contains(agentSession.sentPrompts[0], "max_tokens") {
+		t.Fatalf("auto-continue prompt = %q, want mention max_tokens", agentSession.sentPrompts[0])
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: "part 2", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not finish after normal continuation result")
+	}
+
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "part 1") || !strings.Contains(joined, "part 2") {
+		t.Fatalf("sent = %#v, want both partial and continuation output", sent)
+	}
+	if !strings.Contains(joined, "output limit") {
+		t.Fatalf("sent = %#v, want output-limit auto-continue notice", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_UnhealthyResultResetsSessionInsteadOfEmptyResponse(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	session.SetAgentSessionID("poisoned", e.agent.Name())
+	agentSession := newControllableSession("poisoned")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Done: true, AgentUnhealthy: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("agent_session_id = %q, want cleared", got)
+	}
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one reset notice", sent)
+	}
+	if strings.Contains(sent[0], "empty response") || strings.Contains(sent[0], "空响应") {
+		t.Fatalf("sent reset notice should not be empty response placeholder: %#v", sent)
+	}
+	if !strings.Contains(sent[0], "reset") && !strings.Contains(sent[0], "重置") {
+		t.Fatalf("sent = %#v, want reset notice", sent)
+	}
+}
+
+func TestUnsolicitedReader_UnhealthyResultResetsSession(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	session.SetAgentSessionID("poisoned-bg", e.agent.Name())
+	agentSession := newControllableSession("poisoned-bg")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go e.runUnsolicitedReader(ctx, cancel, done, state, agentSession, session, e.sessions, sessionKey, "")
+
+	agentSession.events <- Event{Type: EventResult, Done: true, AgentUnhealthy: true}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("unsolicited reader did not stop after unhealthy result")
+	}
+
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("agent_session_id = %q, want cleared", got)
+	}
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one reset notice", sent)
+	}
+	if !strings.Contains(sent[0], "reset") && !strings.Contains(sent[0], "重置") {
+		t.Fatalf("sent = %#v, want reset notice", sent)
+	}
+}
+
+func TestRecoveryHandoffInjectedOnceAfterUnhealthyReset(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agent := &controllableAgent{}
+	dataDir := t.TempDir()
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(dataDir, "sessions.json"), LangEnglish)
+	e.SetDataDir(dataDir)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	session.SetAgentSessionID("poisoned", agent.Name())
+	session.AddHistory("user", "请继续生成报告，并已经创建了 draft.md")
+	session.AddHistory("assistant", "已完成 draft.md 的第一版，下一步应检查并补充摘要。")
+	for i := 0; i < 18; i++ {
+		session.AddHistory("user", fmt.Sprintf("中间进度消息 %02d", i))
+	}
+	session.AddHistory("assistant", "第 21 条附近的关键上下文：保留 older-context-marker")
+
+	oldAgentSession := newControllableSession("poisoned")
+	state := &interactiveState{
+		agentSession: oldAgentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	oldAgentSession.events <- Event{
+		Type:           EventResult,
+		Done:           true,
+		AgentUnhealthy: true,
+		StopReason:     "max_tokens",
+		Metadata:       map[string]any{"hard_recovery": "truncated_tool_call"},
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+
+	fresh := newControllableSession("fresh")
+	agent.nextSession = fresh
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   "test",
+		MessageID:  "m2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		ReplyCtx:   "ctx-2",
+		Content:    "继续刚才的任务",
+	}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, msg, session, agent, e.sessions, sessionKey, "", "")
+		close(done)
+	}()
+
+	waitForPromptCount(t, fresh, 1)
+	firstPrompt := fresh.sentPrompts[0]
+	if !strings.Contains(firstPrompt, "Recovery handoff") {
+		t.Fatalf("first prompt did not include recovery handoff:\n%s", firstPrompt)
+	}
+	if !strings.Contains(firstPrompt, "请继续生成报告") || !strings.Contains(firstPrompt, "draft.md") {
+		t.Fatalf("recovery handoff missing prior session history:\n%s", firstPrompt)
+	}
+	if !strings.Contains(firstPrompt, "older-context-marker") {
+		t.Fatalf("recovery handoff should include useful context older than 12 entries:\n%s", firstPrompt)
+	}
+	if !strings.Contains(firstPrompt, "truncated_tool_call") || !strings.Contains(firstPrompt, "max_tokens") {
+		t.Fatalf("recovery handoff missing failure reason:\n%s", firstPrompt)
+	}
+	fresh.events <- Event{Type: EventResult, Content: "ok", Done: true}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first recovery turn did not finish")
+	}
+
+	msg2 := &Message{
+		SessionKey: sessionKey,
+		Platform:   "test",
+		MessageID:  "m3",
+		UserID:     "user1",
+		UserName:   "Alice",
+		ReplyCtx:   "ctx-3",
+		Content:    "再继续一步",
+	}
+	done2 := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, msg2, session, agent, e.sessions, sessionKey, "", "")
+		close(done2)
+	}()
+	waitForPromptCount(t, fresh, 2)
+	secondPrompt := fresh.sentPrompts[1]
+	if strings.Contains(secondPrompt, "Recovery handoff") {
+		t.Fatalf("recovery handoff should be consumed once, got second prompt:\n%s", secondPrompt)
+	}
+	fresh.events <- Event{Type: EventResult, Content: "ok2", Done: true}
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second turn did not finish")
+	}
+}
+
+func waitForPromptCount(t *testing.T, s *controllableAgentSession, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(s.sentPrompts) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("sentPrompts = %d, want at least %d: %#v", len(s.sentPrompts), want, s.sentPrompts)
 }

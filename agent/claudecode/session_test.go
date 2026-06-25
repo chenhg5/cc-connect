@@ -177,7 +177,7 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 		"session_id": "test-session",
 		"usage": map[string]any{
 			"input_tokens":                float64(130),
-			"output_tokens":               float64(648),       // real turn total
+			"output_tokens":               float64(648), // real turn total
 			"cache_creation_input_tokens": float64(2_000),
 			"cache_read_input_tokens":     float64(8_000_000), // summed, would inflate ctx
 		},
@@ -590,9 +590,41 @@ func makeFiller(n int) string {
 // assistant text reaches the user.
 //
 // Cases covered:
-//  - string content (plain text result)
-//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
-//  - is_error=true (exit code 1, success=false)
+//   - string content (plain text result)
+//   - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+//   - is_error=true (exit code 1, success=false)
+
+func TestHandleUserNoVisibleOutputMetaMarksSessionUnhealthy(t *testing.T) {
+	cs := &claudeSession{
+		events: make(chan core.Event, 1),
+		ctx:    context.Background(),
+	}
+
+	cs.handleUser(map[string]any{
+		"type":   "user",
+		"isMeta": true,
+		"message": map[string]any{
+			"role":    "user",
+			"content": "[Your previous response had no visible output. Please continue and produce a user-visible response.]",
+		},
+	})
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want EventResult", evt.Type)
+		}
+		if !evt.Done || !evt.AgentUnhealthy {
+			t.Fatalf("event = %+v, want done unhealthy result", evt)
+		}
+		if got := evt.Metadata["hard_recovery"]; got != "no_visible_output_meta" {
+			t.Fatalf("metadata hard_recovery = %v, want no_visible_output_meta", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected unhealthy event for no-visible-output meta prompt")
+	}
+}
+
 func TestHandleUserEmitsToolResult(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -608,10 +640,10 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
 				"message": map[string]any{
 					"content": []any{
 						map[string]any{
-							"type":          "tool_result",
-							"tool_use_id":   "toolu_abc",
-							"is_error":      false,
-							"content":       "command output here",
+							"type":        "tool_result",
+							"tool_use_id": "toolu_abc",
+							"is_error":    false,
+							"content":     "command output here",
 						},
 					},
 				},
@@ -732,5 +764,110 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(0)
 	default:
 		os.Exit(2)
+	}
+}
+
+func TestHandleResultPropagatesMaxTokensStopReason(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 4), ctx: ctx}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleResult(map[string]any{
+		"type":        "result",
+		"stop_reason": "max_tokens",
+		"session_id":  "test-session",
+		"usage": map[string]any{
+			"input_tokens":  float64(10),
+			"output_tokens": float64(20),
+		},
+	})
+
+	evt := <-cs.events
+	if evt.StopReason != "max_tokens" {
+		t.Fatalf("StopReason = %q, want max_tokens", evt.StopReason)
+	}
+	if evt.AgentUnhealthy {
+		t.Fatal("plain max_tokens result should not be marked unhealthy")
+	}
+}
+
+func TestHandleAssistantUnparsedToolInputMarksNextResultUnhealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 8), ctx: ctx}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleAssistant(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"content": []any{map[string]any{
+				"type": "tool_use",
+				"name": "Bash",
+				"input": map[string]any{
+					"__unparsedToolInput": map[string]any{"raw": "{\"command\": \"python3 - <<'PY'"},
+				},
+			}},
+		},
+	})
+	<-cs.events // tool_use event
+	cs.handleResult(map[string]any{"type": "result", "stop_reason": "max_tokens"})
+
+	evt := <-cs.events
+	if !evt.AgentUnhealthy {
+		t.Fatalf("AgentUnhealthy = false, want true; metadata=%v", evt.Metadata)
+	}
+}
+
+func TestHandleUserInputValidationErrorMarksNextResultUnhealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 8), ctx: ctx}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleUser(map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"content": []any{map[string]any{
+				"type":     "tool_result",
+				"is_error": true,
+				"content":  "<tool_use_error>InputValidationError: Bash was called with input that could not be parsed as JSON due to truncated output.</tool_use_error>",
+			}},
+		},
+	})
+	<-cs.events // tool_result event
+	cs.handleResult(map[string]any{"type": "result"})
+
+	evt := <-cs.events
+	if !evt.AgentUnhealthy {
+		t.Fatalf("AgentUnhealthy = false, want true; metadata=%v", evt.Metadata)
+	}
+}
+
+func TestHandleResultZeroTokenEmptyMarksUnhealthy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 4), ctx: ctx}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleResult(map[string]any{
+		"type": "result",
+		"usage": map[string]any{
+			"input_tokens":  float64(0),
+			"output_tokens": float64(0),
+		},
+	})
+
+	evt := <-cs.events
+	if !evt.AgentUnhealthy {
+		t.Fatalf("AgentUnhealthy = false, want true; metadata=%v", evt.Metadata)
 	}
 }
