@@ -1023,6 +1023,10 @@ app_secret = "your-feishu-app-secret"
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
+# thread_isolation_black_group = ""  # When thread_isolation=true, comma-separated group chat_ids that should keep normal replies
+#                                    # thread_isolation=true 时，逗号分隔的群聊 chat_id 黑名单；命中后仍使用普通回复
+# thread_isolation_white_group = ""  # When thread_isolation=false, comma-separated group chat_ids that should use threaded replies
+#                                    # thread_isolation=false 时，逗号分隔的群聊 chat_id 白名单；命中后使用话题回复
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
