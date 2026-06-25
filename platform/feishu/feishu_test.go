@@ -1060,6 +1060,22 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 			t.Fatal("thread should be active after mark")
 		}
 	})
+
+	t.Run("thread isolation enabled but blacklisted group is no-op", func(t *testing.T) {
+		p := &Platform{threadIsolation: true, threadIsolationBlackGroup: "oc_chat"}
+		p.markThreadSessionActive(threadKey)
+		if p.isActiveThreadSession(threadKey) {
+			t.Fatal("blacklisted group should not record active thread session")
+		}
+	})
+
+	t.Run("thread isolation disabled but whitelisted group records thread", func(t *testing.T) {
+		p := &Platform{threadIsolationWhiteGroup: "oc_chat"}
+		p.markThreadSessionActive(threadKey)
+		if !p.isActiveThreadSession(threadKey) {
+			t.Fatal("whitelisted group should record active thread session")
+		}
+	})
 }
 
 // TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention covers the fix
