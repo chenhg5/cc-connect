@@ -1396,7 +1396,7 @@ done
 
 	s, err := newPiSession(ctx, scriptPath, nil, t.TempDir(), "", "", "", true, "", nil)
 	if err == nil {
-		defer s.Close()
+		defer func() { _ = s.Close() }()
 		t.Fatalf("newPiSession succeeded (id=%q); failure response should leave session id empty and time out", s.CurrentSessionID())
 	}
 	if !strings.Contains(err.Error(), "did not become ready") &&
@@ -1435,7 +1435,7 @@ done
 	s, err := newPiSession(ctx, scriptPath, nil, t.TempDir(), "", "", "", true, "", nil)
 	elapsed := time.Since(start)
 	if err == nil {
-		defer s.Close()
+		defer func() { _ = s.Close() }()
 		t.Fatalf("newPiSession succeeded (id=%q) after %v; should have waited for get_state", s.CurrentSessionID(), elapsed)
 	}
 	// The error message is either the 30s timeout ("did not become ready")
@@ -1452,7 +1452,7 @@ done
 
 func TestPiSession_NewWithResumeID(t *testing.T) {
 	s := newFakeRPCSession(t, "test-sess-id", "", t.TempDir())
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if s.CurrentSessionID() != "test-sess-id" {
 		t.Errorf("sessionID = %q, want %q", s.CurrentSessionID(), "test-sess-id")
