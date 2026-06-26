@@ -2172,10 +2172,6 @@ func (env *cujEnv) streamingPlat() *cujStreamingPlatform {
 // Tests use this to drive multi-event turns such as
 // "text → permission request → (test resolves) → text → result"
 // which a single nextEventOverride cannot express.
-type nextSessionEventsHook struct {
-	events  []Event
-	delayMs int
-}
 
 func (a *cujAgent) setNextSessionEvents(events []Event, delayMs int) {
 	a.mu.Lock()
