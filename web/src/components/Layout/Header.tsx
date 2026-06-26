@@ -14,6 +14,7 @@ const languages = [
   { code: 'ja', label: '日本語' },
   { code: 'ko', label: '한국어' },
   { code: 'es', label: 'ES' },
+  { code: 'ru', label: 'RU' },
 ];
 
 export default function Header() {
