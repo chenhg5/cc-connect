@@ -115,6 +115,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		if strings.TrimSpace(baseURL) == "" && strings.TrimSpace(registerURL) == "" {
 			return nil, fmt.Errorf("cloud_web: base_url or register_url is required for gateway transport")
 		}
+		if strings.TrimSpace(registerURL) != "" && strings.TrimSpace(publicURL) == "" {
+			return nil, fmt.Errorf("cloud_web: public_url is required when register_url is set for gateway transport")
+		}
 		tp = newGatewayTransport(baseURL, token, name, project, listen, webhookPath, registerURL, publicURL, sendPath)
 	}
 
@@ -358,7 +361,7 @@ func (p *Platform) handleCardAction(raw []byte) {
 		default:
 			return
 		}
-		p.dispatchAsMessage(ca.SessionKey, rc, responseText)
+		p.dispatchAsPermissionResponse(ca.SessionKey, rc, responseText)
 		return
 	}
 	if strings.HasPrefix(ca.Action, "askq:") {
@@ -431,6 +434,30 @@ func (p *Platform) dispatchAsMessage(sessionKey string, rc replyContext, content
 		UserName:   "System",
 		Content:    content,
 		ReplyCtx:   rc,
+	}
+	go h(p, msg)
+}
+
+// dispatchAsPermissionResponse is the permission-callback sibling of
+// dispatchAsMessage. It sets IsPermissionResponse so the engine can drop
+// stale clicks (e.g. tapping an old "Allow" card after the session reset)
+// instead of letting the literal "allow"/"deny" string reach the agent
+// prompt stream. Mirrors the feishu/qqbot/telegram/bridge convention.
+func (p *Platform) dispatchAsPermissionResponse(sessionKey string, rc replyContext, content string) {
+	p.mu.RLock()
+	h := p.handler
+	p.mu.RUnlock()
+	if h == nil {
+		return
+	}
+	msg := &core.Message{
+		SessionKey:           sessionKey,
+		Platform:             p.name,
+		UserID:               "system",
+		UserName:             "System",
+		Content:              content,
+		ReplyCtx:             rc,
+		IsPermissionResponse: true,
 	}
 	go h(p, msg)
 }

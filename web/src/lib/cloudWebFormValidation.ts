@@ -78,6 +78,11 @@ export function validateCloudWebForm(values: Record<string, unknown>): CloudWebV
       if (!baseUrl && !registerUrl) {
         return { messageKey: 'setup.cloudWeb.urlRequiredGateway' };
       }
+      // Mirror backend New(): register_url requires public_url so the gateway
+      // can reach the cc-connect webhook callback.
+      if (registerUrl && !publicUrl) {
+        return { messageKey: 'setup.cloudWeb.publicUrlRequiredGateway' };
+      }
       if (baseUrl && !isHttpBaseUrl(baseUrl)) {
         return { messageKey: 'setup.cloudWeb.invalidHttpUrl', fieldLabelKey: 'fields.apiBaseUrl' };
       }

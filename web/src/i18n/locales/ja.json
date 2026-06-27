@@ -233,7 +233,8 @@
       "urlRequiredLongPoll": "Long poll では API ベース URL が必要です",
       "urlRequiredGateway": "Gateway では API ベース URL または登録 URL のいずれかが必要です",
       "invalidHttpUrl": "{{field}} は有効な http(s) URL または host[:port] である必要があります",
-      "invalidWsUrl": "WebSocket URL は ws:// または wss:// で始める必要があります"
+      "invalidWsUrl": "WebSocket URL は ws:// または wss:// で始める必要があります",
+      "publicUrlRequiredGateway": "登録 URL を設定する場合は公開 Webhook URL が必須です"
     }
   },
   "fields": {

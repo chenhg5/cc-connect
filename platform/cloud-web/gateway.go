@@ -158,7 +158,10 @@ func (t *gatewayTransport) register(ctx context.Context) (map[string]bool, error
 
 func (t *gatewayTransport) authenticate(r *http.Request) bool {
 	if t.token == "" {
-		return true
+		// Fail closed: a gateway transport without a configured token must
+		// reject all inbound webhooks rather than accept anything. New()
+		// already enforces a non-empty token; this is a defense-in-depth guard.
+		return false
 	}
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(t.token)) == 1

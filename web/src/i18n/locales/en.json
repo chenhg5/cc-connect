@@ -233,7 +233,8 @@
       "urlRequiredLongPoll": "Long poll transport requires API base URL",
       "urlRequiredGateway": "Gateway transport requires API base URL or Register URL (at least one)",
       "invalidHttpUrl": "{{field}} must be a valid http(s) URL or host[:port]",
-      "invalidWsUrl": "WebSocket URL must start with ws:// or wss://"
+      "invalidWsUrl": "WebSocket URL must start with ws:// or wss://",
+      "publicUrlRequiredGateway": "Public webhook URL is required when Register URL is set"
     }
   },
   "fields": {
