@@ -325,7 +325,7 @@ func (hm *HookManager) executeHTTPDecision(h *HookConfig, event HookEvent, consu
 			"url", h.URL, "reason", parsed.Reason,
 		)
 	}
-	return HookDecision{Handled: parsed.Handled, Reason: parsed.Reason}
+	return HookDecision(parsed)
 }
 
 // eventToEnv converts a HookEvent to environment variables for shell hooks.
