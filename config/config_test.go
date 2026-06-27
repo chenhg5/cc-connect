@@ -662,6 +662,28 @@ func TestLoad_MissingEnvPlaceholderBecomesEmptyString(t *testing.T) {
 	}
 }
 
+func TestLoad_HookConsumeResponse(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+
+[[hooks]]
+event = "message.received"
+type = "http"
+url = "http://127.0.0.1:8090/hook"
+consume_response = true
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Hooks) != 1 {
+		t.Fatalf("hooks len = %d, want 1", len(cfg.Hooks))
+	}
+	if !cfg.Hooks[0].ConsumeResponse {
+		t.Fatal("consume_response was not loaded")
+	}
+}
+
 func TestListProjects(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 

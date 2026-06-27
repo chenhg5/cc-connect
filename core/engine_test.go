@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1100,10 +1102,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -14972,8 +14974,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15001,7 +15003,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
@@ -15331,5 +15333,84 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 	// doesn't silently downgrade --audio/--video to --file.
 	if !strings.Contains(prompt, "Do NOT downgrade") {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
+	}
+}
+
+func TestHandleMessage_MessageReceivedConsumableHookHandledSkipsDefaultProcessing(t *testing.T) {
+	var hookCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hookCalls.Add(1)
+		_, _ = w.Write([]byte(`{"handled":true,"reason":"workbench"}`))
+	}))
+	defer srv.Close()
+
+	startCh := make(chan struct{}, 1)
+	agent := &controllableAgent{
+		startSessionFn: func(context.Context, string) (AgentSession, error) {
+			startCh <- struct{}{}
+			return newResultAgentSession("agent reply"), nil
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetBannedWords([]string{"blocked"})
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: "message.received", Type: "http", URL: srv.URL, ConsumeResponse: true},
+	}, "sh", "-c", ""))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "blocked",
+		ReplyCtx:   "ctx",
+	})
+
+	if hookCalls.Load() != 1 {
+		t.Fatalf("hook calls = %d, want 1", hookCalls.Load())
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("sent replies = %#v, want none after handled hook", got)
+	}
+	select {
+	case <-startCh:
+		t.Fatal("agent started even though message.received hook handled the message")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleMessage_MessageReceivedConsumableHookUnhandledContinuesDefaultProcessing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"handled":false}`))
+	}))
+	defer srv.Close()
+
+	startCh := make(chan struct{}, 1)
+	agent := &controllableAgent{
+		startSessionFn: func(context.Context, string) (AgentSession, error) {
+			startCh <- struct{}{}
+			return newResultAgentSession("agent reply"), nil
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: "message.received", Type: "http", URL: srv.URL, ConsumeResponse: true},
+	}, "sh", "-c", ""))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	})
+
+	select {
+	case <-startCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not start after unhandled hook response")
 	}
 }

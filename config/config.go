@@ -167,12 +167,13 @@ type BridgeConfig struct {
 
 // HookConfig is a single event hook rule.
 type HookConfig struct {
-	Event   string `toml:"event"`             // event name or "*"
-	Type    string `toml:"type"`              // "command" or "http"
-	Command string `toml:"command,omitempty"` // shell command (type=command)
-	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
-	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
-	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
+	Event           string `toml:"event"`                      // event name or "*"
+	Type            string `toml:"type"`                       // "command" or "http"
+	Command         string `toml:"command,omitempty"`          // shell command (type=command)
+	URL             string `toml:"url,omitempty"`              // HTTP endpoint (type=http)
+	Timeout         int    `toml:"timeout,omitempty"`          // seconds; 0 = default
+	Async           *bool  `toml:"async,omitempty"`            // nil = true (async by default)
+	ConsumeResponse bool   `toml:"consume_response,omitempty"` // HTTP hook may handle and consume the event response
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
