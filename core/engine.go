@@ -15435,12 +15435,6 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	}
 	session := sessions.GetOrCreateActive(relaySessionKey)
 
-	// FIXME: Reasonix sessions started via relay always return "" for
-	// CurrentSessionID(), so saveRelaySessionID never persists the ID.
-	// Every relay starts a fresh reasonix serve session, losing multi-turn
-	// context. Fix: either make Reasonix generate a stable session ID, or
-	// have HandleRelay assign its own session ID for relay sessions.
-
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,

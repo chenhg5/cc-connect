@@ -442,6 +442,9 @@ func TestReasonixSession_Send_CompactCommand(t *testing.T) {
 
 func TestReasonixSession_httpPost_ErrorIncludesBody(t *testing.T) {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /new", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("POST /submit", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		// Write an error body that should be included in the error message

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -123,6 +124,13 @@ type reasonixSession struct {
 func newSession(ctx context.Context, serveURL, workDir, sessionID, mode string, sessionEnv []string) (*reasonixSession, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
+	// Generate a client-side session ID when none is provided (e.g. relay
+	// sessions). This ID is returned by CurrentSessionID() and persisted by
+	// saveRelaySessionID, enabling multi-turn relay context.
+	if sessionID == "" {
+		sessionID = newReasonixSessionID()
+	}
+
 	s := &reasonixSession{
 		serveURL:     serveURL,
 		workDir:      workDir,
@@ -144,14 +152,15 @@ func newSession(ctx context.Context, serveURL, workDir, sessionID, mode string, 
 	}
 	s.alive.Store(true)
 
-	// Start fresh session on reasonix if sessionID is empty or 'new'
-	if sessionID == "" || sessionID == "new" {
-		if err := s.httpPost("/new", nil); err != nil {
-			cancel()
-			return nil, fmt.Errorf("reasonix: new session: %w", err)
-		}
-		slog.Info("reasonix: created new session")
+	// Start fresh session on reasonix serve.
+	// Note: the sessionID generated above is a client-side identifier for
+	// relay persistence. reasonix serve's /new creates its own server-side
+	// session; the SSE events carry the server-side session ID separately.
+	if err := s.httpPost("/new", nil); err != nil {
+		cancel()
+		return nil, fmt.Errorf("reasonix: new session: %w", err)
 	}
+	slog.Info("reasonix: created new session", "session_id", sessionID)
 
 	// Start SSE reader in background
 	readerCtx, readerCancel := context.WithCancel(ctx)
@@ -159,6 +168,18 @@ func newSession(ctx context.Context, serveURL, workDir, sessionID, mode string, 
 	go s.readLoop(readerCtx)
 
 	return s, nil
+}
+
+// newReasonixSessionID generates a unique client-side session ID (UUID v4 style)
+// for relay sessions that don't have a pre-existing agent session ID.
+func newReasonixSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("reasonix-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("rs-%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // ── core.AgentSession implementation ─────────────────────────────
@@ -301,10 +322,6 @@ func (s *reasonixSession) Events() <-chan core.Event {
 }
 
 func (s *reasonixSession) CurrentSessionID() string {
-	// FIXME: When started by HandleRelay with empty session ID, this returns "",
-	// causing relay session IDs to never be persisted. Multi-turn relay context
-	// is lost. Fix: generate a unique session ID in newSession() when sessionID
-	// is empty, similar to how Copilot generates newCopilotSessionID().
 	return s.sessionID
 }
 
