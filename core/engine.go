@@ -10181,6 +10181,8 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			sb.WriteString("\n\n")
 		}
 		sb.WriteString(e.i18n.T(MsgProviderListTitle))
+		var buttons [][]ButtonOption
+		var row []ButtonOption
 		for _, prov := range providers {
 			marker := "  "
 			if current != nil && prov.Name == current.Name {
@@ -10194,9 +10196,29 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 				detail += " [" + prov.Model + "]"
 			}
 			sb.WriteString(fmt.Sprintf("%s%s\n", marker, detail))
+
+			label := prov.Name
+			if current != nil && prov.Name == current.Name {
+				label = "▶ " + label
+			}
+			row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/provider switch %s", prov.Name)})
+			if len(row) >= 3 {
+				buttons = append(buttons, row)
+				row = nil
+			}
+		}
+		if len(row) > 0 {
+			buttons = append(buttons, row)
+		}
+		if current != nil {
+			// Mirror /model's layout: every switchable state gets a Clear
+			// button on its own row, so the user can drop back to the
+			// default provider without typing the full command. The Clear
+			// handler is the existing "clear"/"reset"/"none" subcommand.
+			buttons = append(buttons, []ButtonOption{{Text: "Clear", Data: "cmd:/provider clear"}})
 		}
 		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
-		e.reply(p, msg.ReplyCtx, sb.String())
+		e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 		return
 	}
 

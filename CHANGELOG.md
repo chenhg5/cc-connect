@@ -9,6 +9,7 @@
 
 ### Added
 - **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
+- **/provider: inline buttons on button-capable platforms** (#1460). `/provider` now mirrors `/model`: on platforms without card support but with inline-button support, it emits one button per provider (3 per row) whose Data dispatches to the existing `/provider switch <name>` handler, plus a Clear button on its own row when a provider is active. The active provider's button label is prefixed with `▶` to match the text-body marker. The card-mode branch (`supportsCards`) is unchanged so Feishu/QQBot/DingTalk-style rich cards stay consistent across platforms; plain-text platforms fall back via `replyWithButtons` → `reply` exactly like `/model`. New tests cover the inline-button path, the active marker, the no-active Clear-button suppression, and the 3-per-row layout. The legacy plain-text test still passes unchanged.
 
 ### Fixed
 - **Feishu recall fallback probes**: throttle repeated active-message recall checks so long-running turns do not continuously call platform message APIs.
