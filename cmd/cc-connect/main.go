@@ -486,8 +486,15 @@ func main() {
 		if hf, ok := proj.Agent.Options["handoff_file"].(string); ok && hf != "" {
 			engine.SetHandoffFile(hf)
 		}
-		if n, ok := proj.Agent.Options["on_mention_context"].(int64); ok && n > 0 {
-			engine.SetOnMentionContextN(int(n))
+		switch nv := proj.Agent.Options["on_mention_context"].(type) {
+		case int64:
+			if nv > 0 {
+				engine.SetOnMentionContextN(int(nv))
+			}
+		case int:
+			if nv > 0 {
+				engine.SetOnMentionContextN(nv)
+			}
 		}
 		if absCfg, err := filepath.Abs(configPath); err == nil {
 			engine.SetConfigPath(absCfg)

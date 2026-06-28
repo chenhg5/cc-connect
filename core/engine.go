@@ -2950,8 +2950,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	// On-mention context injection: aggregate recent seat history when message contains '@'.
-	if e.onMentionContextN > 0 && e.dataDir != "" && strings.Contains(msg.Content, "@") {
+	// On-mention context injection: aggregate recent seat history when bot was @-mentioned.
+	if e.onMentionContextN > 0 && e.dataDir != "" && msg.WasMentioned {
 		sessionsDir := filepath.Join(e.dataDir, "sessions")
 		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN); len(entries) > 0 {
 			if groupCtx := formatGroupContext(entries, e.onMentionContextN); groupCtx != "" {

@@ -204,6 +204,9 @@ type Message struct {
 	// the engine stores it as a pending reaction attached to this session and
 	// returns immediately — the message is never forwarded to the agent.
 	ReactionEmoji string
+	// WasMentioned is set by platforms when the message explicitly @-mentioned
+	// this bot by name before the mention was stripped from Content.
+	WasMentioned bool
 }
 
 // EventType distinguishes different kinds of agent output.

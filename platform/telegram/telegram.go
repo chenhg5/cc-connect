@@ -523,15 +523,17 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			slog.Error("telegram: download photo failed", "error", err)
 			return
 		}
+		mentioned := botName != "" && strings.Contains(msg.Caption, "@"+botName)
 		caption := stripBotMention(msg.Caption, botName)
 		p.dispatchMessage(&core.Message{
-			SessionKey: sessionKey, Platform: "telegram",
+			SessionKey:   sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
-			Content:    caption,
-			MessageID:  strconv.Itoa(msg.ID),
-			ChannelKey: channelKey,
-			Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
-			ReplyCtx:   rctx,
+			Content:      caption,
+			MessageID:    strconv.Itoa(msg.ID),
+			ChannelKey:   channelKey,
+			Images:       []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+			ReplyCtx:     rctx,
+			WasMentioned: mentioned,
 		}, msg)
 		return
 	}
@@ -596,15 +598,17 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			slog.Error("telegram: download document failed", "error", err)
 			return
 		}
+		mentioned := botName != "" && strings.Contains(msg.Caption, "@"+botName)
 		caption := stripBotMention(msg.Caption, botName)
 		p.dispatchMessage(&core.Message{
-			SessionKey: sessionKey, Platform: "telegram",
+			SessionKey:   sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
-			Content:    caption,
-			MessageID:  strconv.Itoa(msg.ID),
-			ChannelKey: channelKey,
-			Files:      []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
-			ReplyCtx:   rctx,
+			Content:      caption,
+			MessageID:    strconv.Itoa(msg.ID),
+			ChannelKey:   channelKey,
+			Files:        []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
+			ReplyCtx:     rctx,
+			WasMentioned: mentioned,
 		}, msg)
 		return
 	}
@@ -632,15 +636,17 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		return
 	}
 
+	mentioned := botName != "" && strings.Contains(msg.Text, "@"+botName)
 	text := stripBotMention(msg.Text, botName)
 	slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
 	p.dispatchMessage(&core.Message{
-		SessionKey: sessionKey, Platform: "telegram",
+		SessionKey:   sessionKey, Platform: "telegram",
 		UserID: userID, UserName: userName, ChatName: chatName,
-		Content:    text,
-		MessageID:  strconv.Itoa(msg.ID),
-		ChannelKey: channelKey,
-		ReplyCtx:   rctx,
+		Content:      text,
+		MessageID:    strconv.Itoa(msg.ID),
+		ChannelKey:   channelKey,
+		ReplyCtx:     rctx,
+		WasMentioned: mentioned,
 	}, msg)
 }
 
