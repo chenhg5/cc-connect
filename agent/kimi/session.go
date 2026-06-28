@@ -21,40 +21,44 @@ import (
 )
 
 // kimSession manages multi-turn conversations with the Kimi CLI.
-// Each Send() launches a new `kimi --print --output-format stream-json` process
-// with --resume for conversation continuity.
+// Each Send() launches a new `kimi --prompt` process (with `--print
+// --output-format stream-json` when the installed binary still supports
+// --print) and uses --resume for conversation continuity. The exact flag
+// surface is decided by the Agent's one-shot probe; see kimiFlagSupport.
 type kimiSession struct {
-	cmd       string
-	extraArgs []string // extra args from cmd, prepended before kimi args
-	workDir   string
-	model     string
-	mode      string
-	timeout   time.Duration
-	extraEnv  []string
-	events    chan core.Event
-	sessionID atomic.Value // stores string — Kimi session ID
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
+	cmd         string
+	extraArgs   []string // extra args from cmd, prepended before kimi args
+	workDir     string
+	model       string
+	mode        string
+	timeout     time.Duration
+	extraEnv    []string
+	flagSupport kimiFlagSupport
+	events      chan core.Event
+	sessionID   atomic.Value // stores string — Kimi session ID
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	alive       atomic.Bool
 
 	pendingMsgs []string // buffered assistant text messages
 }
 
-func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*kimiSession, error) {
+func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration, flagSupport kimiFlagSupport) (*kimiSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	ks := &kimiSession{
-		cmd:       cmd,
-		extraArgs: extraArgs,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		timeout:   timeout,
-	extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		cmd:         cmd,
+		extraArgs:   extraArgs,
+		workDir:     workDir,
+		model:       model,
+		mode:        mode,
+		timeout:     timeout,
+		extraEnv:    extraEnv,
+		flagSupport: flagSupport,
+		events:      make(chan core.Event, 64),
+		ctx:         sessionCtx,
+		cancel:      cancel,
 	}
 	ks.alive.Store(true)
 
@@ -63,6 +67,39 @@ func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir
 	}
 
 	return ks, nil
+}
+
+// buildArgs constructs the Kimi CLI argument slice for a single non-interactive
+// turn. Extracted from Send() so the version-aware flag selection can be unit
+// tested without launching the CLI. The `--print` flag is only emitted when
+// the locally installed binary advertises it in `kimi --help`; the newer Kimi
+// Code CLI dropped that flag and rejects it outright (see issue #1456).
+func (ks *kimiSession) buildArgs(prompt string) []string {
+	args := append([]string{}, ks.extraArgs...)
+	if ks.flagSupport.Print {
+		args = append(args, "--print")
+	}
+	args = append(args, "--output-format", "stream-json")
+
+	switch ks.mode {
+	case "plan":
+		args = append(args, "--plan")
+	case "quiet":
+		args = append(args, "--quiet")
+	}
+
+	if sid := ks.CurrentSessionID(); sid != "" {
+		args = append(args, "--resume", sid)
+	}
+	if ks.model != "" {
+		args = append(args, "--model", ks.model)
+	}
+	if ks.workDir != "" {
+		args = append(args, "--work-dir", ks.workDir)
+	}
+
+	args = append(args, "--prompt", prompt)
+	return args
 }
 
 func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
@@ -124,30 +161,7 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
 
-	args := append(append([]string{}, ks.extraArgs...),
-		"--print",
-		"--output-format", "stream-json",
-	)
-
-	switch ks.mode {
-	case "plan":
-		args = append(args, "--plan")
-	case "quiet":
-		args = append(args, "--quiet")
-	}
-
-	sid := ks.CurrentSessionID()
-	if sid != "" {
-		args = append(args, "--resume", sid)
-	}
-	if ks.model != "" {
-		args = append(args, "--model", ks.model)
-	}
-	if ks.workDir != "" {
-		args = append(args, "--work-dir", ks.workDir)
-	}
-
-	args = append(args, "--prompt", fullPrompt)
+	args := ks.buildArgs(fullPrompt)
 
 	var cancel context.CancelFunc
 	var ctx context.Context
@@ -164,7 +178,10 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 		}
 	}()
 
-	slog.Debug("kimiSession: launching", "resume", sid != "", "args", core.RedactArgs(args))
+	slog.Debug("kimiSession: launching",
+		"resume", ks.CurrentSessionID() != "",
+		"supports_print", ks.flagSupport.Print,
+		"args", core.RedactArgs(args))
 	cmd := exec.CommandContext(ctx, ks.cmd, args...)
 	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = ks.workDir
@@ -435,7 +452,11 @@ func (ks *kimiSession) flushPendingAsText() {
 	}
 }
 
-// RespondPermission is a no-op — Kimi CLI permissions are handled via --print (implicit --yolo).
+// RespondPermission is a no-op — Kimi CLI auto-approves tool calls in
+// non-interactive mode. The legacy kimi-cli triggers this via --print's
+// implicit --yolo; the newer Kimi Code CLI does it implicitly when invoked
+// with --prompt (its "auto" permission default). Either way, cc-connect
+// never sees an interactive permission request from Kimi.
 func (ks *kimiSession) RespondPermission(_ string, _ core.PermissionResult) error {
 	return nil
 }

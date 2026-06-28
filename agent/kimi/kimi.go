@@ -22,10 +22,17 @@ func init() {
 	core.RegisterAgent("kimi", New)
 }
 
-// Agent drives Kimi Code CLI using --print --output-format stream-json.
+// Agent drives Kimi Code CLI in non-interactive mode via `--prompt` (and,
+// when supported by the installed binary, `--print --output-format stream-json`).
+//
+// The legacy kimi-cli requires the `--print` flag for `--output-format` to
+// take effect, while the newer Kimi Code CLI removed `--print` entirely and
+// uses `--prompt` alone to enter non-interactive mode (see #1456). We probe
+// `kimi --help` once at construction to detect which surface is installed and
+// adapt the args we pass at Send() time.
 //
 // Modes:
-//   - "default": standard mode (note: --print implicitly enables --yolo)
+//   - "default": standard mode (non-interactive `--prompt` auto-approves tools)
 //   - "yolo":    auto-approve all tool calls
 //   - "plan":    read-only plan mode
 //   - "quiet":   alias for --quiet (print + text + final-message-only)
@@ -40,6 +47,7 @@ type Agent struct {
 	providers    []core.ProviderConfig
 	activeIdx    int // -1 = no provider set
 	sessionEnv   []string
+	flagSupport  kimiFlagSupport // detected once at New() via `kimi --help`
 	mu           sync.RWMutex
 }
 
@@ -75,6 +83,11 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("kimi: %q CLI not found in PATH, install with: pip install kimi-cli", cmd)
 	}
 
+	// Probe once so Send() can build args that match the installed CLI
+	// surface (see #1456). The probe has its own timeout; failures fall
+	// back to assuming the modern CLI (no --print).
+	flagSupport := probeKimiFlags(context.Background(), cmd, 5*time.Second)
+
 	return &Agent{
 		workDir:      workDir,
 		model:        model,
@@ -84,6 +97,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		configEnv:    core.ParseConfigEnv(opts),
 		timeout:      timeout,
 		activeIdx:    -1,
+		flagSupport:  flagSupport,
 	}, nil
 }
 
@@ -165,6 +179,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	flagSupport := a.flagSupport
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
@@ -172,7 +187,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newKimiSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
+	return newKimiSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout, flagSupport)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
