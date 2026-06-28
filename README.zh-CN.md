@@ -87,6 +87,11 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 </tr>
 
 <tr>
+<td width="150"><a href="https://unity2.ai/register?source=ccconnect"><img src="assets/sponsors/unity2ai.png" alt="Unity2.ai" width="120"></a></td>
+<td>感谢 Unity2.ai 赞助了本项目！Unity2.ai 是面向个人开发者、团队和企业的高性能 AI 模型 API 中转平台，长期服务国内头部企业，日均承载超 300 亿 token 调用，支持 5000 RPM 级高并发。支持余额计费、首充赠额、组合订阅、企业开票和专属对接。通过 <a href="https://unity2.ai/register?source=ccconnect">此链接</a> 注册可领取 $2 余额，加入官方群再送 $10 余额，最高可领 $12 免费额度。</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
 <td>感谢 AnyRoute.io 对本项目的赞助！AnyRoute.io 是集 Claude Code、Codex 最新模型于一体、可靠稳定高效的 API 中转站，价格透明，最低低至官方 0.7 折，支持开票和企业高并发。通过 <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">此链接</a> 注册即可开始使用。</td>
 </tr>

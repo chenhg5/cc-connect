@@ -88,6 +88,11 @@ MiniMax-M3 pushes the frontier of coding and agentic AI, with a 1M-token context
 </tr>
 
 <tr>
+<td width="150"><a href="https://unity2.ai/register?source=ccconnect"><img src="assets/sponsors/unity2ai.png" alt="Unity2.ai" width="120"></a></td>
+<td>Thanks to Unity2.ai for sponsoring this project! Unity2.ai is a high-performance AI model API relay platform for individual developers, teams, and enterprises. Long-term service for top domestic enterprises, daily traffic exceeding 30 billion tokens, supporting up to 5000 RPM high concurrency. Offers balance billing, first-top-up bonus, combo subscriptions, enterprise invoicing, and dedicated integration. Register via <a href="https://unity2.ai/register?source=ccconnect">this link</a> to claim $2 credit, join the official group for an additional $10 credit — up to $12 in free credits!</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
 <td>Thanks to AnyRoute.io for sponsoring this project! AnyRoute.io is a reliable, stable, and efficient API relay platform integrating the latest Claude Code and Codex models. Transparent pricing with rates as low as 93% off official prices (just 0.7x), supports invoicing and enterprise-grade high-concurrency usage. Register via <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">this link</a> to get started.</td>
 </tr>

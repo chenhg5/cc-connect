@@ -52,8 +52,8 @@ func TestWorkspaceAgentOptions(t *testing.T) {
 	}
 	opts := snapshotter.WorkspaceAgentOptions()
 
-	if got, _ := opts["command"].(string); got != "true" {
-		t.Fatalf("command = %q, want true", got)
+	if got, _ := opts["cmd"].(string); got != "true" {
+		t.Fatalf("cmd = %q, want true", got)
 	}
 	gotArgs, _ := opts["args"].([]string)
 	if len(gotArgs) != 2 || gotArgs[0] != "--acp" || gotArgs[1] != "--stdio" {

@@ -497,7 +497,7 @@ func TestComputeLineDiff(t *testing.T) {
 }
 
 func TestGeminiSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newGeminiSession(context.Background(), "echo", "/tmp", "", "default", core.ContinueSession, nil, 0)
+	s, err := newGeminiSession(context.Background(), "echo", nil, "/tmp", "", "default", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newGeminiSession: %v", err)
 	}

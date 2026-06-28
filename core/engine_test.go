@@ -12528,6 +12528,34 @@ func TestEstimateTokensWithPendingAssistant(t *testing.T) {
 	}
 }
 
+func TestTruncateHistoryEntry(t *testing.T) {
+	if got := truncateHistoryEntry("abcdef", 3); got != "abc..." {
+		t.Fatalf("truncateHistoryEntry ascii = %q, want %q", got, "abc...")
+	}
+	if got := truncateHistoryEntry("你好世界", 2); got != "你好..." {
+		t.Fatalf("truncateHistoryEntry unicode = %q, want %q", got, "你好...")
+	}
+	if got := truncateHistoryEntry("👨‍👩‍👧 中文", 2); got != "👨‍..." || !utf8.ValidString(got) {
+		t.Fatalf("truncateHistoryEntry emoji = %q, want valid UTF-8 %q", got, "👨‍...")
+	}
+	if got := truncateHistoryEntry("abcdef", 0); got != "abcdef" {
+		t.Fatalf("truncateHistoryEntry disabled = %q, want original", got)
+	}
+}
+
+func TestEngineHistoryEntryMaxLen(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	if got := e.historyEntryMaxLen(); got != defaultHistoryMaxLen {
+		t.Fatalf("default historyEntryMaxLen = %d, want %d", got, defaultHistoryMaxLen)
+	}
+
+	limit := 0
+	e.SetDisplayConfig(DisplayCfg{HistoryMaxLen: &limit})
+	if got := e.historyEntryMaxLen(); got != 0 {
+		t.Fatalf("configured historyEntryMaxLen = %d, want 0", got)
+	}
+}
+
 type recordingTTS struct {
 	mu    sync.Mutex
 	text  string

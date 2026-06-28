@@ -133,7 +133,7 @@ func TestAgent_Name(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{}
+	a := &Agent{cmd: "qodercli"}
 	if got := a.CLIBinaryName(); got != "qodercli" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "qodercli")
 	}
