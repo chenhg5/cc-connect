@@ -200,6 +200,10 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+	// ReactionEmoji carries a Telegram emoji reaction from the user. When set,
+	// the engine stores it as a pending reaction attached to this session and
+	// returns immediately — the message is never forwarded to the agent.
+	ReactionEmoji string
 }
 
 // EventType distinguishes different kinds of agent output.

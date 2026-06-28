@@ -264,6 +264,11 @@ func defaultNewBot(token string, onUpdate func(context.Context, *models.Update),
 	opts := []tgbot.Option{
 		tgbot.WithDefaultHandler(handler),
 		tgbot.WithNotAsyncHandlers(),
+		tgbot.WithAllowedUpdates(tgbot.AllowedUpdates{
+			models.AllowedUpdateMessage,
+			models.AllowedUpdateCallbackQuery,
+			models.AllowedUpdateMessageReaction,
+		}),
 	}
 	if httpClient != nil {
 		opts = append(opts, tgbot.WithHTTPClient(60*time.Second, httpClient))
@@ -401,10 +406,54 @@ func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 		return
 	}
 
+	if update.MessageReaction != nil {
+		p.handleMessageReaction(ctx, update.MessageReaction)
+		return
+	}
+
 	if update.Message == nil {
 		return
 	}
 	p.handleMessage(ctx, update.Message)
+}
+
+func (p *Platform) handleMessageReaction(ctx context.Context, reaction *models.MessageReactionUpdated) {
+	if reaction.User == nil {
+		return // anonymous or channel reaction, skip
+	}
+	userID := strconv.FormatInt(reaction.User.ID, 10)
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug("telegram: reaction from unauthorized user", "user", userID)
+		return
+	}
+	if len(reaction.NewReaction) == 0 {
+		return // reaction removed, nothing to carry forward
+	}
+	first := reaction.NewReaction[0]
+	if first.Type != models.ReactionTypeTypeEmoji || first.ReactionTypeEmoji == nil {
+		return // custom emoji or paid reaction, skip
+	}
+	emoji := first.ReactionTypeEmoji.Emoji
+
+	sessionKey := p.buildSessionKey(reaction.Chat.ID, 0, reaction.User.ID)
+
+	p.mu.RLock()
+	handler := p.handler
+	p.mu.RUnlock()
+	if handler == nil {
+		return
+	}
+
+	ts := time.Unix(int64(reaction.Date), 0)
+	handler(p, &core.Message{
+		SessionKey:        sessionKey,
+		Platform:          "telegram",
+		UserID:            userID,
+		UserName:          strings.TrimSpace(reaction.User.FirstName + " " + reaction.User.LastName),
+		MessageID:         strconv.Itoa(reaction.MessageID),
+		ReactionEmoji:     emoji,
+		UserMessageTimeMs: ts.UnixMilli(),
+	})
 }
 
 func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {

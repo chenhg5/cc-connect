@@ -16,6 +16,15 @@ import (
 // to use --continue (resume most recent session) instead of a specific session ID.
 const ContinueSession = "__continue__"
 
+// PendingReaction records a single emoji reaction from an admin user.
+// Reactions are carried forward and prepended to the next real message sent
+// to the same seat.
+type PendingReaction struct {
+	Emoji     string    `json:"emoji"`
+	MessageID int       `json:"message_id"`
+	When      time.Time `json:"when"`
+}
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID                  string         `json:"id"`
@@ -39,6 +48,9 @@ type Session struct {
 	// processes an actual incoming user message. It is used by reset_on_idle_mins
 	// so that automated activity cannot prevent idle session rotation.
 	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
+	// PendingReactions holds emoji reactions from the admin user that will be
+	// prepended to the next real message as context.
+	PendingReactions []PendingReaction `json:"pending_reactions,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -163,6 +175,30 @@ func (s *Session) GetUpdatedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.UpdatedAt
+}
+
+// AddReaction appends a pending emoji reaction. Capped at 3; oldest is
+// dropped when the cap is exceeded.
+func (s *Session) AddReaction(r PendingReaction) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const maxPending = 3
+	s.PendingReactions = append(s.PendingReactions, r)
+	if len(s.PendingReactions) > maxPending {
+		s.PendingReactions = s.PendingReactions[len(s.PendingReactions)-maxPending:]
+	}
+}
+
+// DrainReactions atomically returns all pending reactions and clears the slice.
+func (s *Session) DrainReactions() []PendingReaction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.PendingReactions) == 0 {
+		return nil
+	}
+	r := s.PendingReactions
+	s.PendingReactions = nil
+	return r
 }
 
 // SetActiveProvider atomically records the provider name the user last

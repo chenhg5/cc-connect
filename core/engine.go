@@ -2683,6 +2683,22 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	// Reaction signal: store for carry-forward, do not forward to agent.
+	if msg.ReactionEmoji != "" {
+		session := e.sessions.GetOrCreateActive(msg.SessionKey)
+		msgID := 0
+		if msg.MessageID != "" {
+			_, _ = fmt.Sscanf(msg.MessageID, "%d", &msgID)
+		}
+		when := time.Now()
+		if msg.UserMessageTimeMs > 0 {
+			when = time.UnixMilli(msg.UserMessageTimeMs)
+		}
+		session.AddReaction(PendingReaction{Emoji: msg.ReactionEmoji, MessageID: msgID, When: when})
+		e.sessions.Save()
+		return
+	}
+
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -2896,6 +2912,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+
+	// Prepend pending reactions to the message content.
+	if reactions := session.DrainReactions(); len(reactions) > 0 {
+		reactionLine := formatPendingReactions(reactions)
+		if msg.Content != "" {
+			msg.Content = reactionLine + "\n" + msg.Content
+		} else {
+			msg.Content = reactionLine
+		}
+		sessions.Save()
+	}
+
 	// Ensure an interactiveState entry exists before taking the session lock.
 	// Without this, concurrent messages can observe the session as busy during
 	// startup but still find no state to queue into.
