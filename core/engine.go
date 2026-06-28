@@ -6378,19 +6378,25 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentPromptPreview = previewText(prompt, 300)
 		state.mu.Unlock()
 
-		if state.agentSession == nil || !state.agentSession.Alive() {
+		state.mu.Lock()
+		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
+		state.mu.Unlock()
+		if as == nil || !as.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
 
-		as := state.agentSession // capture before drain/gap to avoid race with cleanup
 		drainEvents(as.Events())
 
 		session.AddHistory("user", queued.content)
 
 		sendDone := make(chan error, 1)
 		go func() {
+			if as == nil {
+				sendDone <- fmt.Errorf("agent session became nil")
+				return
+			}
 			sendDone <- as.Send(prompt, queued.images, queued.files)
 		}()
 
