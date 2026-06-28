@@ -2217,7 +2217,11 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessage(targetPlatform, msg, session)
+	effectivePlatform := targetPlatform
+	if silent {
+		effectivePlatform = &mutePlatform{targetPlatform}
+	}
+	e.processInteractiveMessage(effectivePlatform, msg, session)
 	return nil
 }
 
@@ -3657,11 +3661,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
-	// Persist user message immediately so crashes between user input and
-	// assistant reply don't lose it (the assistant-side Save below depends
-	// on the turn completing without a process crash).
-	sessions.Save()
+	if !msg.DropReply {
+		session.AddHistory("user", msg.Content)
+		// Persist user message immediately so crashes between user input and
+		// assistant reply don't lose it (the assistant-side Save below depends
+		// on the turn completing without a process crash).
+		sessions.Save()
+	}
 
 	// Use the agent override when available (multi-workspace mode)
 	var agentOverride Agent
@@ -5393,8 +5399,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   3. trailing marker with empty strip result   → fully silent
 			// History records the ORIGINAL baseResponse so the agent retains context of its own
 			// decision; only the outbound platform text gets rewritten/suppressed.
-			session.AddHistory("assistant", baseResponse)
-			sessions.Save()
+			if !dropReply {
+				session.AddHistory("assistant", baseResponse)
+				sessions.Save()
+			}
 
 			isSilent := isSilentReply(baseResponse) || dropReply
 			if !isSilent {
@@ -5868,11 +5876,13 @@ channelClosed:
 		state.mu.Unlock()
 
 		fullResponse := strings.Join(textParts, "")
-		session.AddHistory("assistant", fullResponse)
-		// Persist immediately — this path runs on abnormal channel close,
-		// so deferring the save until the next foreground turn risks losing
-		// the partial assistant response if the process exits next.
-		sessions.Save()
+		if !dropReply {
+			session.AddHistory("assistant", fullResponse)
+			// Persist immediately — this path runs on abnormal channel close,
+			// so deferring the save until the next foreground turn risks losing
+			// the partial assistant response if the process exits next.
+			sessions.Save()
+		}
 
 		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
 		if isSilentReply(fullResponse) || dropReply {
