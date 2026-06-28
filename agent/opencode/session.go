@@ -125,6 +125,16 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 			prompt += "\n## cc-connect send\n" +
 				fmt.Sprintf("To send files/images back: %s send --file /path/to/file\n", ccBin)
 		}
+
+		// Load seat-specific persona file: {workDir}/{project}.md
+		// Allows per-seat persona instructions without hardcoding seat names.
+		// File is optional — silently skipped if absent.
+		if project != "" && s.workDir != "" {
+			personaFile := filepath.Join(s.workDir, project+".md")
+			if data, err := os.ReadFile(personaFile); err == nil {
+				prompt += "\n\n" + strings.TrimSpace(string(data)) + "\n"
+			}
+		}
 	}
 
 	if len(files) > 0 {

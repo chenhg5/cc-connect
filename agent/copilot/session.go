@@ -782,6 +782,16 @@ func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, fil
 				"\nYou may repeat --image / --file multiple times.\n" +
 				"After --tts or --audio, reply ONLY with NO_REPLY unless a text confirmation was also requested.\n"
 		}
+
+		// Load seat-specific persona file: {workDir}/{project}.md
+		// Allows per-seat persona instructions (e.g. chef-seat.md for chef-seat)
+		// without hardcoding seat names. File is optional — silently skipped if absent.
+		if project != "" && cs.workDir != "" {
+			personaFile := filepath.Join(cs.workDir, project+".md")
+			if data, err := os.ReadFile(personaFile); err == nil {
+				prompt += "\n\n" + strings.TrimSpace(string(data)) + "\n"
+			}
+		}
 	}
 
 	// Handle images: save to temp dir and append file references
