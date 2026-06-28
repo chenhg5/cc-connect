@@ -486,6 +486,7 @@ type queuedMessage struct {
 	fromVoice         bool
 	userID            string
 	userName          string // sender's display name for sender injection
+	chatName          string // human-readable chat/group name for usage reporting
 	msgPlatform       string // platform name for sender injection
 	msgSessionKey     string // session key for extracting chat ID
 	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
@@ -498,6 +499,9 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	currentMessageID       string
+	currentTurnUserID      string
+	currentTurnUserName    string
+	currentTurnChatName    string
 	workspaceDir           string
 	agent                  Agent
 	mu                     sync.Mutex
@@ -3052,6 +3056,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		fromVoice:         msg.FromVoice,
 		userID:            msg.UserID,
 		userName:          msg.UserName,
+		chatName:          msg.ChatName,
 		msgPlatform:       msg.Platform,
 		msgSessionKey:     msg.SessionKey,
 		channelKey:        msg.ChannelKey,
@@ -3596,6 +3601,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.currentTurnUserID = msg.UserID
+	state.currentTurnUserName = msg.UserName
+	state.currentTurnChatName = msg.ChatName
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -5353,6 +5361,33 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
 			)
+			// Best-effort: report this turn's token usage to external observers
+			// (dashboards/telemetry). The bridge server is the process-wide
+			// singleton, so broadcast for EVERY turn regardless of which IM
+			// platform ran it. Failures here must never affect the turn.
+			if globalBridgeServer != nil {
+				state.mu.Lock()
+				usagePlatform := state.platform
+				usageUserID := state.currentTurnUserID
+				usageUserName := state.currentTurnUserName
+				usageChatName := state.currentTurnChatName
+				state.mu.Unlock()
+				if usagePlatform != nil {
+					globalBridgeServer.BroadcastUsage(TurnUsage{
+						SessionKey:               sessionKey,
+						Platform:                 usagePlatform.Name(),
+						AgentType:                e.AgentTypeName(),
+						TurnID:                   msgID,
+						UserID:                   usageUserID,
+						UserName:                 usageUserName,
+						ChatName:                 usageChatName,
+						InputTokens:              event.InputTokens,
+						OutputTokens:             event.OutputTokens,
+						CacheReadInputTokens:     event.CacheReadInputTokens,
+						CacheCreationInputTokens: event.CacheCreationInputTokens,
+					})
+				}
+			}
 			// DEBUG: full assistant response for in-depth debugging.
 			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
 				slog.Debug("turn response",
@@ -5571,6 +5606,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
+				state.currentTurnUserID = queued.userID
+				state.currentTurnUserName = queued.userName
+				state.currentTurnChatName = queued.chatName
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
@@ -5904,6 +5942,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
+		state.currentTurnUserID = queued.userID
+		state.currentTurnUserName = queued.userName
+		state.currentTurnChatName = queued.chatName
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()

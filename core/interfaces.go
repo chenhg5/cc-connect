@@ -25,6 +25,23 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// TurnUsage captures a single turn's token consumption, reported to usage
+// observers. It intentionally carries NO message content, so it is safe to
+// forward to external monitoring/telemetry surfaces.
+type TurnUsage struct {
+	SessionKey               string `json:"session_key"`
+	Platform                 string `json:"platform"`
+	AgentType                string `json:"agent_type,omitempty"`
+	TurnID                   string `json:"turn_id,omitempty"`
+	UserID                   string `json:"user_id,omitempty"`
+	UserName                 string `json:"user_name,omitempty"`
+	ChatName                 string `json:"chat_name,omitempty"`
+	InputTokens              int    `json:"input_tokens"`
+	OutputTokens             int    `json:"output_tokens"`
+	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int    `json:"cache_creation_input_tokens"`
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {

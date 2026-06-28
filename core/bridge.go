@@ -34,6 +34,12 @@ type BridgeServer struct {
 	mu       sync.RWMutex
 	adapters map[string]*bridgeAdapter // platform name → adapter
 
+	// observers receive usage-only events for ALL platforms (no message
+	// content), letting external dashboards/telemetry track per-turn token
+	// consumption across every adapter and runtime without joining reply
+	// routing. They never appear in adapters and are not reply targets.
+	observers map[*bridgeAdapter]struct{}
+
 	enginesMu sync.RWMutex
 	engines   map[string]*bridgeEngineRef // project name → engine ref
 }
@@ -103,6 +109,11 @@ type bridgeRegister struct {
 	Capabilities []string       `json:"capabilities"`
 	Project      string         `json:"project,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
+	// ObserveUsage registers this connection as a usage-only observer instead
+	// of a platform adapter. The observer receives per-turn token usage for
+	// every platform/runtime and never participates in reply routing. When
+	// true, Platform is informational (used only for logging).
+	ObserveUsage bool `json:"observe_usage,omitempty"`
 }
 
 type bridgeMessage struct {
@@ -162,6 +173,12 @@ func NewBridgeServerInsecure(port int, token, path string, corsOrigins []string)
 	return newBridgeServer(port, token, path, corsOrigins, true)
 }
 
+// globalBridgeServer is the process-wide bridge instance, set by newBridgeServer.
+// Exactly one bridge server is created at startup and shared across all engines,
+// so the engine can read this to broadcast per-turn usage to observers for EVERY
+// turn — not just the ones routed through a bridge-backed platform.
+var globalBridgeServer *BridgeServer
+
 func newBridgeServer(port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
 	if port <= 0 {
 		port = 9810
@@ -183,15 +200,18 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		slog.Warn("bridge: running in INSECURE mode without authentication - only use for local development!")
 	}
 
-	return &BridgeServer{
+	bs := &BridgeServer{
 		port:        port,
 		token:       token,
 		path:        path,
 		corsOrigins: corsOrigins,
 		insecure:    insecure,
 		adapters:    make(map[string]*bridgeAdapter),
+		observers:   make(map[*bridgeAdapter]struct{}),
 		engines:     make(map[string]*bridgeEngineRef),
 	}
+	globalBridgeServer = bs
+	return bs
 }
 
 // NewPlatform creates a BridgePlatform for a specific project engine.
@@ -779,6 +799,44 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		return
 	}
 
+	if reg.Platform == "" && reg.ObserveUsage {
+		// Pure usage observer (no platform): a monitoring-only client that
+		// receives per-turn token usage for ALL platforms but never joins
+		// reply routing. Adapters that also want usage telemetry register
+		// normally with a platform AND observe_usage:true (additive, below).
+		// Usage events carry no message content.
+		obs := &bridgeAdapter{
+			conn:   conn,
+			server: bs,
+		}
+		bs.mu.Lock()
+		bs.observers[obs] = struct{}{}
+		bs.mu.Unlock()
+
+		if err := writeJSON(conn, &obs.writeMu, map[string]any{"type": "register_ack", "ok": true, "observer": true}); err != nil {
+			slog.Debug("bridge: write observer ack failed", "error", err)
+			return
+		}
+		slog.Info("bridge: usage observer registered")
+
+		defer func() {
+			bs.mu.Lock()
+			delete(bs.observers, obs)
+			bs.mu.Unlock()
+			slog.Info("bridge: usage observer disconnected")
+		}()
+
+		// Observers only listen; read & discard so disconnects are detected.
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
+				return
+			}
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}
+
 	if reg.Platform == "" {
 		if err := writeJSON(conn, nil, map[string]any{"type": "register_ack", "ok": false, "error": "platform name is required"}); err != nil {
 			slog.Debug("bridge: write register ack failed", "error", err)
@@ -807,9 +865,18 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		slog.Info("bridge: replaced existing adapter", "platform", reg.Platform)
 	}
 	bs.adapters[reg.Platform] = adapter
+	// Additive usage subscription: an adapter may also observe per-turn
+	// token usage for all platforms on the same connection.
+	if reg.ObserveUsage {
+		bs.observers[adapter] = struct{}{}
+	}
 	bs.mu.Unlock()
 
-	if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true}); err != nil {
+	ack := map[string]any{"type": "register_ack", "ok": true}
+	if reg.ObserveUsage {
+		ack["observer"] = true
+	}
+	if err := writeJSON(conn, &adapter.writeMu, ack); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
 		return
 	}
@@ -821,13 +888,14 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		}
 	}
 
-	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities)
+	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities, "observe_usage", reg.ObserveUsage)
 
 	defer func() {
 		bs.mu.Lock()
 		if bs.adapters[reg.Platform] == adapter {
 			delete(bs.adapters, reg.Platform)
 		}
+		delete(bs.observers, adapter) // no-op if not subscribed
 		bs.mu.Unlock()
 		slog.Info("bridge: adapter disconnected", "platform", reg.Platform)
 	}()
@@ -1308,6 +1376,53 @@ func (bs *BridgeServer) sendToAdapter(platform string, msg map[string]any) error
 		return fmt.Errorf("bridge: adapter %q not connected", platform)
 	}
 	return writeJSON(a.conn, &a.writeMu, msg)
+}
+
+// BroadcastUsage fans a best-effort usage-only event (token counts, NO message
+// content) to every registered usage observer. It is called by the engine at
+// turn-complete for EVERY turn regardless of which IM platform ran it, via the
+// package-level globalBridgeServer. Observers are snapshotted under the read
+// lock and written outside it (mirroring sendToAdapter) so a slow or dead
+// observer connection cannot block registration or other observers.
+func (bs *BridgeServer) BroadcastUsage(usage TurnUsage) {
+	msg := map[string]any{
+		"type":                        "usage",
+		"session_key":                 usage.SessionKey,
+		"platform":                    usage.Platform,
+		"input_tokens":                usage.InputTokens,
+		"output_tokens":               usage.OutputTokens,
+		"cache_read_input_tokens":     usage.CacheReadInputTokens,
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+		"ts":                          time.Now().Unix(),
+	}
+	if usage.AgentType != "" {
+		msg["agent_type"] = usage.AgentType
+	}
+	if usage.TurnID != "" {
+		msg["turn_id"] = usage.TurnID
+	}
+	if usage.UserID != "" {
+		msg["user_id"] = usage.UserID
+	}
+	if usage.UserName != "" {
+		msg["user_name"] = usage.UserName
+	}
+	if usage.ChatName != "" {
+		msg["chat_name"] = usage.ChatName
+	}
+
+	bs.mu.RLock()
+	observers := make([]*bridgeAdapter, 0, len(bs.observers))
+	for obs := range bs.observers {
+		observers = append(observers, obs)
+	}
+	bs.mu.RUnlock()
+
+	for _, obs := range observers {
+		if err := writeJSON(obs.conn, &obs.writeMu, msg); err != nil {
+			slog.Debug("bridge: usage observer write failed", "error", err)
+		}
+	}
 }
 
 func bridgeMetadataStringListContains(metadata map[string]any, key, want string) bool {
