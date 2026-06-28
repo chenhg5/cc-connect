@@ -469,7 +469,8 @@ type Engine struct {
 	// can invoke `cc-connect relay send --config <path>` without hardcoding paths.
 	configPath string
 
-	handoffFile string // path to inject into cold-start sessions; empty = disabled
+	handoffFile       string // path to inject into cold-start sessions; empty = disabled
+	onMentionContextN int    // N seat messages to prepend on @-mention; 0 = disabled
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -1320,6 +1321,10 @@ func (e *Engine) SetConfigPath(path string) {
 
 func (e *Engine) SetHandoffFile(path string) {
 	e.handoffFile = path
+}
+
+func (e *Engine) SetOnMentionContextN(n int) {
+	e.onMentionContextN = n
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -2940,6 +2945,20 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 					msg.Content = handoffBlock + "\n---\n" + msg.Content
 				} else {
 					msg.Content = handoffBlock
+				}
+			}
+		}
+	}
+
+	// On-mention context injection: aggregate recent seat history when message contains '@'.
+	if e.onMentionContextN > 0 && e.dataDir != "" && strings.Contains(msg.Content, "@") {
+		sessionsDir := filepath.Join(e.dataDir, "sessions")
+		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN); len(entries) > 0 {
+			if groupCtx := formatGroupContext(entries, e.onMentionContextN); groupCtx != "" {
+				if msg.Content != "" {
+					msg.Content = groupCtx + "\n---\n" + msg.Content
+				} else {
+					msg.Content = groupCtx
 				}
 			}
 		}
