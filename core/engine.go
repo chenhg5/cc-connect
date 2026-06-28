@@ -2936,8 +2936,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	// Cold-start handoff injection: prepend on first message of a new session.
+	// History length is the authoritative sentinel: the agent may pre-populate
+	// AgentSessionID at startup even with no session file, so checking only
+	// history avoids a false negative on that path.
 	if e.handoffFile != "" {
-		if len(session.GetHistory(1)) == 0 && session.GetAgentSessionID() == "" {
+		if len(session.GetHistory(1)) == 0 {
 			if data, readErr := os.ReadFile(e.handoffFile); readErr == nil && len(data) > 0 {
 				base := filepath.Base(e.handoffFile)
 				handoffBlock := "[Handoff: " + base + "]\n" + strings.TrimSpace(string(data))
@@ -2946,6 +2949,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				} else {
 					msg.Content = handoffBlock
 				}
+				slog.Info("handoff injected", "file", e.handoffFile, "session", msg.SessionKey)
+			} else if readErr != nil {
+				slog.Warn("handoff file not readable", "file", e.handoffFile, "error", readErr)
 			}
 		}
 	}
