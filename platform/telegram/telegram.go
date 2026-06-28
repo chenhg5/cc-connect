@@ -819,6 +819,9 @@ func (p *Platform) botUsername() string {
 	return p.selfUser.Username
 }
 
+// BotUsername implements core.BotUsernameProvider.
+func (p *Platform) BotUsername() string { return p.botUsername() }
+
 func (p *Platform) hasEverConnected() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

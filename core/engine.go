@@ -1297,6 +1297,21 @@ func (e *Engine) RelayManager() *RelayManager {
 	return e.relayManager
 }
 
+// BotUsernameForPlatform returns the bot's own username on the given platform,
+// or "" if the platform is not found or does not implement BotUsernameProvider.
+// Used by RelayManager to build @-mention handback messages.
+func (e *Engine) BotUsernameForPlatform(platformName string) string {
+	for _, p := range e.platforms {
+		if p.Name() != platformName {
+			continue
+		}
+		if ub, ok := p.(BotUsernameProvider); ok {
+			return ub.BotUsername()
+		}
+	}
+	return ""
+}
+
 func (e *Engine) SetDirHistory(dh *DirHistory) {
 	e.dirHistory = dh
 }

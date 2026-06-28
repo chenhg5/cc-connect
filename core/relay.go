@@ -320,6 +320,18 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
 	}
 
+	// Auto-ack: immediately confirm receipt before work starts so Boss and
+	// the source engine know the relay was picked up.
+	if targetEngine != nil && visibility != RelayVisibilityNone {
+		ackSummary := req.Message
+		if runes := []rune(ackSummary); len(runes) > 80 {
+			ackSummary = string(runes[:80]) + "…"
+		}
+		ackSummary = strings.ReplaceAll(ackSummary, "\n", " ")
+		ack := fmt.Sprintf("[%s] ✅ received — implementing: %s", toName, ackSummary)
+		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, ack)
+	}
+
 	// Execute relay: inject message into target engine and collect response
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
@@ -330,8 +342,17 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	// Post the response to the group chat for visibility.
+	// If the source engine exposes its bot username (Telegram), prefix with
+	// @<username> so Telegram routes the handback as an @-mention to the source
+	// engine — that way the source agent (Chef) receives the result directly
+	// without needing to poll or manually close the loop.
 	if targetEngine != nil && visibility != RelayVisibilityNone {
 		label := relayVisibilityResponseLabel(visibility, toName, response)
+		if sourceEngine != nil {
+			if srcUsername := sourceEngine.BotUsernameForPlatform(platform); srcUsername != "" {
+				label = "@" + srcUsername + " " + label
+			}
+		}
 		slog.Info("relay: posting response visibility", "to", toName, "response_len", len(response))
 		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
 	}

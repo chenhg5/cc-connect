@@ -176,8 +176,12 @@ func TestRelayManager_DefaultVisibilityEchoesFullMessages(t *testing.T) {
 	if len(sourceSent) != 1 || sourceSent[0] != "[source-bot → target-bot] please ask target" {
 		t.Fatalf("source sent = %#v, want full relay request", sourceSent)
 	}
-	if len(targetSent) != 1 || targetSent[0] != "[target-bot] target says long answer" {
-		t.Fatalf("target sent = %#v, want full relay response", targetSent)
+	wantTargetFull := []string{
+		"[target-bot] ✅ received — implementing: please ask target",
+		"[target-bot] target says long answer",
+	}
+	if len(targetSent) != 2 || targetSent[0] != wantTargetFull[0] || targetSent[1] != wantTargetFull[1] {
+		t.Fatalf("target sent = %#v, want ack then full relay response", targetSent)
 	}
 }
 
@@ -190,8 +194,12 @@ func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
 	if len(sourceSent) != 1 || sourceSent[0] != "[source-bot → target-bot] relay request sent" {
 		t.Fatalf("source sent = %#v, want summary relay request", sourceSent)
 	}
-	if len(targetSent) != 1 || targetSent[0] != "[target-bot] relay response ready (23 chars)" {
-		t.Fatalf("target sent = %#v, want summary relay response", targetSent)
+	wantTargetSummary := []string{
+		"[target-bot] ✅ received — implementing: please ask target",
+		"[target-bot] relay response ready (23 chars)",
+	}
+	if len(targetSent) != 2 || targetSent[0] != wantTargetSummary[0] || targetSent[1] != wantTargetSummary[1] {
+		t.Fatalf("target sent = %#v, want ack then summary relay response", targetSent)
 	}
 }
 

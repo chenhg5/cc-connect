@@ -55,6 +55,12 @@ type FormattingInstructionProvider interface {
 	FormattingInstructions() string
 }
 
+// BotUsernameProvider is an optional interface for platforms that can expose
+// their own bot username. Used by the relay manager to build @-mention handbacks.
+type BotUsernameProvider interface {
+	BotUsername() string
+}
+
 // PlatformPromptInjector is an optional interface for agents that can receive
 // platform-specific prompt fragments (e.g., formatting instructions).
 // The engine calls this before StartSession when the platform provides formatting.
