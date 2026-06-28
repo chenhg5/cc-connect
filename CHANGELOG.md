@@ -21,6 +21,7 @@ See `changelogs/v1.4.0-beta.2.md` for the full themed summary with credits.
 - **core post-restart notification**: queue post-restart notification and dispatch on platform ready (#1388, @chenhg5).
 - **claudecode progress card**: emit `EventToolResult` so tool output reaches the progress card (#1407, @coolrockin).
 - **dingtalk stream panic**: recover panic in DingTalk `StreamClient` `processLoop` to prevent process crash on closed channel (#1390, fix for issue reported by @gd0094).
+- **claudecode run_as_user EACCES**: fix per-spawn system-prompt temp file `EACCES` under `run_as_user` (#1429). The per-spawn temp file written by `writeTempAppendPromptFile` inherited `os.CreateTemp`'s `0600` mode owned by the cc-connect process user (often root under systemd). When the agent was spawned under a different `run_as_user`, it could not read the file and exited before any prompt was loaded. The file is now `chmod 0o644` immediately after write, matching the shared `ensureSharedSystemPromptFile` path. Prompt content is non-secret (a superset of the already-shared base prompt), so `0644` is consistent with the shared file. Does not affect the shared-file path (already `0644` since #1376) or the daemon-mode path resolution (#1419) (#1433, @chenhg5).
 
 ## v1.4.0-beta.1 (2026-06-22)
 
