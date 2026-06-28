@@ -2964,7 +2964,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// On-mention context injection: aggregate recent seat history when bot was @-mentioned.
 	if e.onMentionContextN > 0 && e.dataDir != "" && msg.WasMentioned {
 		sessionsDir := filepath.Join(e.dataDir, "sessions")
-		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN); len(entries) > 0 {
+		chatID := extractSessionChatID(msg.SessionKey)
+		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN, chatID); len(entries) > 0 {
 			if groupCtx := formatGroupContext(entries, e.onMentionContextN); groupCtx != "" {
 				if msg.Content != "" {
 					msg.Content = groupCtx + "\n---\n" + msg.Content
