@@ -170,7 +170,7 @@ func TestBuildArgs_NoPrintSupportOmitsPrintFlag(t *testing.T) {
 	ctx := context.Background()
 	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{Print: false})
 	require.NoError(t, err)
-	defer ks.Close()
+	defer func() { _ = ks.Close() }()
 
 	args := ks.buildArgs("hello")
 
@@ -191,7 +191,7 @@ func TestBuildArgs_PrintSupportIncludesPrintFlag(t *testing.T) {
 	ctx := context.Background()
 	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{Print: true})
 	require.NoError(t, err)
-	defer ks.Close()
+	defer func() { _ = ks.Close() }()
 
 	args := ks.buildArgs("hello")
 	assert.Contains(t, args, "--print")
@@ -205,7 +205,7 @@ func TestBuildArgs_PlanMode(t *testing.T) {
 	ctx := context.Background()
 	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "kimi-k2", "plan", "", nil, 0, kimiFlagSupport{Print: false})
 	require.NoError(t, err)
-	defer ks.Close()
+	defer func() { _ = ks.Close() }()
 
 	args := ks.buildArgs("plan this")
 	assert.Contains(t, args, "--plan")
@@ -219,7 +219,7 @@ func TestBuildArgs_ResumeSession(t *testing.T) {
 	ctx := context.Background()
 	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "sess-xyz", nil, 0, kimiFlagSupport{Print: false})
 	require.NoError(t, err)
-	defer ks.Close()
+	defer func() { _ = ks.Close() }()
 
 	args := ks.buildArgs("continue")
 	resumeIdx := -1
