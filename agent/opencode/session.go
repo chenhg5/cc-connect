@@ -73,7 +73,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	// CompareAndSwap (not Load/Store) atomically claims the slot — two concurrent
 	// Send() calls can't both run the injection.
 	if s.identityInjected.CompareAndSwap(false, true) {
-		var project, sessionKey, ccBin, ccDataDir, relayTarget string
+		var project, sessionKey, ccBin, ccDataDir, ccPersonasDir, relayTarget string
 		for _, kv := range s.sessionEnv {
 			if idx := strings.IndexByte(kv, '='); idx >= 0 {
 				switch kv[:idx] {
@@ -85,6 +85,8 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 					ccBin = kv[idx+1:]
 				case "CC_DATA_DIR":
 					ccDataDir = kv[idx+1:]
+				case "CC_PERSONAS_DIR":
+					ccPersonasDir = kv[idx+1:]
 				case "CC_RELAY_TARGET":
 					relayTarget = kv[idx+1:]
 				}
@@ -126,13 +128,20 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 				fmt.Sprintf("To send files/images back: %s send --file /path/to/file\n", ccBin)
 		}
 
-		// Load seat-specific persona file: {workDir}/{project}.md
-		// Allows per-seat persona instructions without hardcoding seat names.
+		// Load seat-specific persona file from CC_PERSONAS_DIR (e.g. data/personas/chef-seat.md).
+		// Falls back to {workDir}/{project}.md for backwards compatibility.
 		// File is optional — silently skipped if absent.
-		if project != "" && s.workDir != "" {
-			personaFile := filepath.Join(s.workDir, project+".md")
-			if data, err := os.ReadFile(personaFile); err == nil {
-				prompt += "\n\n" + strings.TrimSpace(string(data)) + "\n"
+		if project != "" {
+			personaFile := ""
+			if ccPersonasDir != "" {
+				personaFile = filepath.Join(ccPersonasDir, project+".md")
+			} else if s.workDir != "" {
+				personaFile = filepath.Join(s.workDir, project+".md")
+			}
+			if personaFile != "" {
+				if data, err := os.ReadFile(personaFile); err == nil {
+					prompt += "\n\n" + strings.TrimSpace(string(data)) + "\n"
+				}
 			}
 		}
 	}
