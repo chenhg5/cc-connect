@@ -418,22 +418,28 @@ func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 }
 
 func (p *Platform) handleMessageReaction(ctx context.Context, reaction *models.MessageReactionUpdated) {
+	slog.Debug("telegram: reaction update received", "chat", reaction.Chat.ID, "msg", reaction.MessageID)
 	if reaction.User == nil {
+		slog.Debug("telegram: reaction has no user (channel/anonymous), skipping")
 		return // anonymous or channel reaction, skip
 	}
 	userID := strconv.FormatInt(reaction.User.ID, 10)
+	slog.Info("telegram: reaction received", "user", userID, "chat", reaction.Chat.ID, "msg", reaction.MessageID, "new_reactions", len(reaction.NewReaction))
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("telegram: reaction from unauthorized user", "user", userID)
 		return
 	}
 	if len(reaction.NewReaction) == 0 {
+		slog.Debug("telegram: reaction removed (empty NewReaction), skipping")
 		return // reaction removed, nothing to carry forward
 	}
 	first := reaction.NewReaction[0]
 	if first.Type != models.ReactionTypeTypeEmoji || first.ReactionTypeEmoji == nil {
+		slog.Debug("telegram: non-emoji reaction (custom/paid), skipping", "type", first.Type)
 		return // custom emoji or paid reaction, skip
 	}
 	emoji := first.ReactionTypeEmoji.Emoji
+	slog.Info("telegram: reaction emoji captured", "emoji", emoji, "user", userID)
 
 	sessionKey := p.buildSessionKey(reaction.Chat.ID, 0, reaction.User.ID)
 
