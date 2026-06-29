@@ -966,6 +966,249 @@ func TestCUJ_C3_DefaultModeDenyStopsToolExecution(t *testing.T) {
 }
 
 // ===========================================================================
+// CUJ-I5 · When the agent emits AskUserQuestion with multiple options, the
+// user sees a card with: (1) a full-width markdown numbered list
+// (label — description), and (2) a row of equal-width buttons labeled with
+// the option INDEX (1, 2, 3, ...). Clicking button N resolves the index
+// back to the original label and forwards it as the answer to the agent.
+//
+// SPOTLIGHT: This locks down the AskUserQuestion card layout fix. Previously
+// each option was rendered as a CardListItem whose Feishu mapping is a
+// 5/12-weighted left column. Long descriptions wrapped to 10–20+ narrow
+// lines. Mobile Feishu buttons only fit ~2–3 chars, so label strings like
+// "PostgreSQL" were truncated. Both fixed by switching to a full-width
+// markdown list + index-labeled buttons.
+// ===========================================================================
+func TestCUJ_I5_AskUserQuestionCardButtonsResolveToLabel(t *testing.T) {
+	key := "test:askq:user1"
+
+	// Platform: Feishu-like, supports cards.
+	p := &stubAskQuestionRichCardPlatform{
+		stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+	}
+
+	// Agent session: blocking Send so the test can drive events synchronously.
+	// Wrap with recordingSessionWrapper so we can capture the RespondPermission
+	// call (the engine delivers the resolved label to the agent via this path).
+	sess := newBlockingSendSession("askq-f1")
+	rec := &recordingSessionWrapper{inner: sess}
+
+	e := NewEngine("test", &controllableAgent{nextSession: rec}, []Platform{p}, "", LangEnglish)
+
+	// Manual state setup: route the event loop / Send through our blocking
+	// session, and make state.agentSession the recorder so the click action
+	// captures the permission result.
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- sess.Send("initial prompt", nil, nil) }()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m-askq-f1",
+			time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach blocking wait")
+	}
+
+	// === ACTION 1 — agent prompts with a 4-option question.
+	// The user sees the resulting card; the layout itself is the regression
+	// surface this CUJ locks down.
+	qs := []UserQuestion{{
+		Question: "Which database?",
+		Header:   "Setup",
+		Options: []UserQuestionOption{
+			{Label: "PostgreSQL", Description: "Recommended for production"},
+			{Label: "SQLite", Description: "Lightweight file-based"},
+			{Label: "MySQL", Description: "Popular open-source"},
+			{Label: "MongoDB", Description: "Document store"},
+		},
+		MultiSelect: false,
+	}}
+	sess.events <- Event{
+		Type:      EventPermissionRequest,
+		RequestID: `"askq-f1-req"`,
+		ToolName:  "AskUserQuestion",
+		ToolInput: `{"questions":[{"id":"database","question":"Which database?"}]}`,
+		ToolInputRaw: map[string]any{
+			"questions": []any{map[string]any{"id": "database", "question": "Which database?"}},
+		},
+		Questions: qs,
+	}
+
+	// === ASSERTION 1 — user saw a card with the new layout.
+	card := waitForSentCard(t, &p.stubCardPlatform)
+	if card.Header == nil || card.Header.Color != "blue" {
+		t.Fatalf("card header = %#v, want blue AskUserQuestion card", card.Header)
+	}
+
+	// Each option description must appear in a full-width markdown block
+	// so long text wraps across the whole card, not a narrow 5/12 column.
+	md := concatCardMarkdown(card)
+	for _, want := range []string{
+		"Recommended for production",
+		"Lightweight file-based",
+		"Popular open-source",
+		"Document store",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("card markdown missing description %q (long options must not be wrapped into a narrow column)", want)
+		}
+	}
+	for i, elem := range card.Elements {
+		if _, ok := elem.(CardListItem); ok {
+			t.Errorf("card element %d must not be CardListItem (causes narrow-column wrap)", i)
+		}
+	}
+
+	// Buttons must be split across rows of at most 3 with equal columns,
+	// and labeled with the option INDEX (not the label string).
+	var rows []CardActions
+	for _, elem := range card.Elements {
+		if a, ok := elem.(CardActions); ok {
+			rows = append(rows, a)
+		}
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 button rows for 4 options, got %d", len(rows))
+	}
+	for i, row := range rows {
+		if row.Layout != CardActionLayoutEqualColumns {
+			t.Errorf("button row %d layout = %q, want %q", i, row.Layout, CardActionLayoutEqualColumns)
+		}
+	}
+	wantTexts := []string{"1", "2", "3", "4"}
+	wantValues := []string{"askq:0:1", "askq:0:2", "askq:0:3", "askq:0:4"}
+	wantLabels := []string{"PostgreSQL", "SQLite", "MySQL", "MongoDB"}
+	idx := 0
+	for ri, row := range rows {
+		for bi, btn := range row.Buttons {
+			if btn.Text != wantTexts[idx] {
+				t.Errorf("row %d btn %d Text = %q, want %q (button label must be option INDEX, not Label — long labels break mobile Feishu)",
+					ri, bi, btn.Text, wantTexts[idx])
+			}
+			if btn.Value != wantValues[idx] {
+				t.Errorf("row %d btn %d Value = %q, want %q", ri, bi, btn.Value, wantValues[idx])
+			}
+			if got := btn.Extra["askq_label"]; got != wantLabels[idx] {
+				t.Errorf("row %d btn %d Extra.askq_label = %q, want %q (label must remain in callback metadata for analytics/logging)",
+					ri, bi, got, wantLabels[idx])
+			}
+			idx++
+		}
+	}
+
+	// === ACTION 2 — user clicks button "2" (SQLite).
+	// Drive via ReceiveMessage as platforms do. Feishu translates the card
+	// action callback into a synthesized message WITHOUT IsPermissionResponse
+	// (only `perm:` callbacks set that flag — see platform/feishu/feishu.go
+	// ~line 815 for the `askq:` path).
+	p.clearSent()
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		UserID:     "user1",
+		Platform:   "feishu",
+		MessageID:  "msg-click-2",
+		Content:    "askq:0:2",
+		ReplyCtx:   "ctx",
+	})
+
+	// === ASSERTION 2 — user saw feedback with the resolved label.
+	sent := p.getSent()
+	if !anyMessageContains(sent, "SQLite") {
+		t.Errorf("user did not see resolved label 'SQLite' in feedback. sent: %v", sent)
+	}
+	if !anyMessageContains(sent, "Which database?") {
+		t.Errorf("user did not see the question in feedback. sent: %v", sent)
+	}
+
+	// === ASSERTION 3 — agent was told the user picked "SQLite" (index 2).
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.permCalls) != 1 {
+		t.Fatalf("RespondPermission calls = %d, want 1 (engine must forward the resolved label)",
+			len(rec.permCalls))
+	}
+	if rec.permCalls[0].RequestID != `"askq-f1-req"` {
+		t.Errorf("RequestID = %q, want %q", rec.permCalls[0].RequestID, `"askq-f1-req"`)
+	}
+	res := rec.permCalls[0].Result
+	if res.Behavior != "allow" {
+		t.Errorf("Behavior = %q, want %q", res.Behavior, "allow")
+	}
+	answers, ok := res.UpdatedInput["answers"].(map[string]any)
+	if !ok {
+		t.Fatalf("UpdatedInput.answers missing or wrong type: %+v", res.UpdatedInput)
+	}
+	if got := answers["Which database?"]; got != "SQLite" {
+		t.Errorf("answers[%q] = %v, want %q (numeric index 2 must resolve to label)",
+			"Which database?", got, "SQLite")
+	}
+
+	// === ACTION 3 — agent proceeds to next turn normally (the resolved
+	// permission unblocks the session; the engine must continue consuming
+	// events and not exit early).
+	close(sess.unblock)
+	sess.events <- Event{Type: EventResult, Content: "ok", Done: true}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete after click (session should be unblocked)")
+	}
+}
+
+// recordingSessionWrapper wraps an AgentSession and records RespondPermission
+// calls. Used by CUJ tests to verify what was forwarded to the agent while
+// keeping the inner session alive for Send / Events / Close.
+type recordingSessionWrapper struct {
+	inner AgentSession
+
+	mu        sync.Mutex
+	permCalls []recordingPermCall
+}
+
+type recordingPermCall struct {
+	RequestID string
+	Result    PermissionResult
+}
+
+func (s *recordingSessionWrapper) Send(prompt string, imgs []ImageAttachment, files []FileAttachment) error {
+	return s.inner.Send(prompt, imgs, files)
+}
+func (s *recordingSessionWrapper) RespondPermission(id string, res PermissionResult) error {
+	s.mu.Lock()
+	s.permCalls = append(s.permCalls, recordingPermCall{RequestID: id, Result: res})
+	s.mu.Unlock()
+	return s.inner.RespondPermission(id, res)
+}
+func (s *recordingSessionWrapper) Events() <-chan Event     { return s.inner.Events() }
+func (s *recordingSessionWrapper) CurrentSessionID() string { return s.inner.CurrentSessionID() }
+func (s *recordingSessionWrapper) Alive() bool              { return s.inner.Alive() }
+func (s *recordingSessionWrapper) Close() error             { return s.inner.Close() }
+
+func anyMessageContains(messages []string, needle string) bool {
+	for _, m := range messages {
+		if strings.Contains(m, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// ===========================================================================
 // CUJ-G3 · After a platform reports its WS connection went down and then
 // came back, the engine re-initializes platform capabilities (command
 // menu re-registration) AND user messages continue to be processed.
