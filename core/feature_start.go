@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -78,11 +79,14 @@ func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
 
 	boardStore := NewFeatureBoardStore(chef.dataDir)
 	repoWorktree := chef.commandWorkDir(chef.agent, msg)
+	seatNames := chef.featureSeatNames()
 	task, err := boardStore.Create(
 		opts.Title,
 		featureChefSeat,
 		repoWorktree,
 		"Chef scope feature and decide whether counsel/dev/reviewer seats are needed.",
+		msg.SessionKey,
+		seatNames,
 	)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ feature board write failed: %v", err))
@@ -90,27 +94,17 @@ func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
 	}
 
 	refreshed := []string{}
-	warnings := []string{}
 	if _, err := chef.refreshFeatureSeatSession(msg, task); err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Chef refresh failed: %v", err))
 		return
 	}
+	if err := boardStore.MarkSeatRefreshed(task.TaskID, featureChefSeat, msg.SessionKey); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ feature board update failed: %v", err))
+		return
+	}
 	refreshed = append(refreshed, featureChefSeat)
 
-	for _, target := range opts.refreshTargets() {
-		engine := chef.featureEngineByName(target)
-		if engine == nil {
-			warnings = append(warnings, fmt.Sprintf("%s not running", target))
-			continue
-		}
-		if _, err := engine.refreshFeatureSeatSession(msg, task); err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s refresh failed: %v", target, err))
-			continue
-		}
-		refreshed = append(refreshed, target)
-	}
-
-	packet := chef.buildFeatureStartPacket(task, boardStore.Path(), opts, refreshed, warnings)
+	packet := chef.buildFeatureStartPacket(task, boardStore.Path(), opts, refreshed, pendingFeatureSeats(seatNames, featureChefSeat))
 	if err := chef.injectFeatureStartPacket(chefPlatform, msg, packet); err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Chef cold-start packet failed: %v", err))
 		return
@@ -122,27 +116,11 @@ func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
 
 	reply := fmt.Sprintf("✅ Feature started: %s\nTask: `%s`\nBoard: `%s`\nRefreshed: %s",
 		task.Title, task.TaskID, boardStore.Path(), strings.Join(refreshed, ", "))
-	if len(warnings) > 0 {
-		reply += "\nWarnings: " + strings.Join(warnings, "; ")
-	}
+	reply += "\nLazy refresh pending: " + strings.Join(pendingFeatureSeats(seatNames, featureChefSeat), ", ")
 	if opts.Risk {
 		reply += "\nRisk flag: counsel-seat audit requested through relay."
 	}
 	e.reply(p, msg.ReplyCtx, reply)
-}
-
-func (opts featureStartOptions) refreshTargets() []string {
-	var targets []string
-	if opts.Impl {
-		targets = append(targets, featureImplSeat)
-	}
-	if opts.Risk {
-		targets = append(targets, featureCounselSeat)
-	}
-	if opts.Review {
-		targets = append(targets, featureReviewSeat)
-	}
-	return targets
 }
 
 func (e *Engine) featureChefEngine() *Engine {
@@ -162,6 +140,41 @@ func (e *Engine) featureEngineByName(name string) *Engine {
 	return e.relayManager.Engine(name)
 }
 
+func (e *Engine) featureSeatNames() []string {
+	seen := map[string]bool{}
+	if e != nil && strings.TrimSpace(e.name) != "" {
+		seen[e.name] = true
+	}
+	if e != nil && e.relayManager != nil {
+		for _, name := range e.relayManager.ListEngineNames() {
+			if strings.TrimSpace(name) != "" {
+				seen[name] = true
+			}
+		}
+	}
+	if !seen[featureChefSeat] {
+		seen[featureChefSeat] = true
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func pendingFeatureSeats(seatNames []string, refreshedSeat string) []string {
+	var pending []string
+	for _, name := range seatNames {
+		if name == refreshedSeat || strings.TrimSpace(name) == "" {
+			continue
+		}
+		pending = append(pending, name)
+	}
+	sort.Strings(pending)
+	return pending
+}
+
 func (e *Engine) platformByName(name string) Platform {
 	for _, p := range e.platforms {
 		if p.Name() == name {
@@ -172,23 +185,26 @@ func (e *Engine) platformByName(name string) Platform {
 }
 
 func (e *Engine) refreshFeatureSeatSession(msg *Message, task *FeatureTask) (*Session, error) {
+	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	return e.refreshFeatureSeatSessionForKey(sessions, msg.SessionKey, e.interactiveKeyForSessionKey(msg.SessionKey), task)
+}
+
+func (e *Engine) refreshFeatureSeatSessionForKey(sessions *SessionManager, sessionKey, interactiveKey string, task *FeatureTask) (*Session, error) {
 	if e == nil {
 		return nil, fmt.Errorf("engine is nil")
 	}
-	_, sessions := e.sessionContextForKey(msg.SessionKey)
 	if sessions == nil {
 		return nil, fmt.Errorf("session manager is nil")
 	}
-	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey)
 
-	old := sessions.GetOrCreateActive(msg.SessionKey)
+	old := sessions.GetOrCreateActive(sessionKey)
 	old.SetAgentSessionID("", "")
 	old.ClearHistory()
 	sessions.Save()
 
 	name := fmt.Sprintf("feature-start %s %s", task.TaskID, task.Title)
-	return sessions.NewSession(msg.SessionKey, name), nil
+	return sessions.NewSession(sessionKey, name), nil
 }
 
 func (e *Engine) injectFeatureStartPacket(p Platform, msg *Message, packet string) error {
@@ -208,7 +224,7 @@ func (e *Engine) injectFeatureStartPacket(p Platform, msg *Message, packet strin
 	return nil
 }
 
-func (e *Engine) buildFeatureStartPacket(task *FeatureTask, boardPath string, opts featureStartOptions, refreshed, warnings []string) string {
+func (e *Engine) buildFeatureStartPacket(task *FeatureTask, boardPath string, opts featureStartOptions, refreshed, pending []string) string {
 	nexusRoot := e.featureNexusRoot()
 	wakePath := filepath.Join(nexusRoot, "WAKE.md")
 	handoffPath := filepath.Join(nexusRoot, "HANDOFF.md")
@@ -232,13 +248,16 @@ func (e *Engine) buildFeatureStartPacket(task *FeatureTask, boardPath string, op
 	b.WriteString("Context files:\n")
 	b.WriteString(fmt.Sprintf("- WAKE: %s\n", wakePath))
 	b.WriteString(fmt.Sprintf("- HANDOFF: %s\n\n", handoffPath))
-	b.WriteString("Refresh flags:\n")
+	b.WriteString("Feature context loading:\n")
+	b.WriteString("- Chef is refreshed immediately because Chef is the entry point.\n")
+	b.WriteString("- Other seats are marked stale-for-this-feature and will be refreshed lazily on first actual use, mention, or relay.\n")
+	b.WriteString("- Lazy refresh must attach this feature context to the first real task; it must not create a standalone task for unused seats.\n")
 	b.WriteString(fmt.Sprintf("- --impl: %t\n", opts.Impl))
 	b.WriteString(fmt.Sprintf("- --risk: %t\n", opts.Risk))
 	b.WriteString(fmt.Sprintf("- --review: %t\n", opts.Review))
 	b.WriteString(fmt.Sprintf("- refreshed seats: %s\n", strings.Join(refreshed, ", ")))
-	if len(warnings) > 0 {
-		b.WriteString(fmt.Sprintf("- warnings: %s\n", strings.Join(warnings, "; ")))
+	if len(pending) > 0 {
+		b.WriteString(fmt.Sprintf("- lazy-refresh pending seats: %s\n", strings.Join(pending, ", ")))
 	}
 	b.WriteString("\nInstructions:\n")
 	b.WriteString("- Scope the feature before implementation.\n")
@@ -250,10 +269,10 @@ func (e *Engine) buildFeatureStartPacket(task *FeatureTask, boardPath string, op
 		b.WriteString("- Risk flag is set: wait for or request counsel-seat adversarial audit before pushing implementation forward.\n")
 	}
 	if opts.Impl {
-		b.WriteString("- Impl flag is set: dev-deepseek has been refreshed and may be used when implementation starts.\n")
+		b.WriteString("- Impl flag is set: dev-deepseek should be considered when implementation starts; it will refresh lazily on first actual use.\n")
 	}
 	if opts.Review {
-		b.WriteString("- Review flag is set: reviewer-seat has been refreshed and may be used when review starts.\n")
+		b.WriteString("- Review flag is set: reviewer-seat should be considered when review starts; it will refresh lazily on first actual use.\n")
 	}
 	return b.String()
 }
@@ -268,6 +287,72 @@ func (e *Engine) featureNexusRoot() string {
 		return filepath.Dir(configPath)
 	}
 	return ""
+}
+
+func (e *Engine) applyLazyFeatureContextToMessage(msg *Message, sessions *SessionManager, interactiveKey string) (*Session, bool, error) {
+	if e == nil || msg == nil || sessions == nil || strings.TrimSpace(e.dataDir) == "" {
+		return nil, false, nil
+	}
+	store := NewFeatureBoardStore(e.dataDir)
+	task, shouldRefresh, err := store.ActiveTaskForSeat(e.name)
+	if err != nil || !shouldRefresh {
+		return nil, shouldRefresh, err
+	}
+	session, err := e.refreshFeatureSeatSessionForKey(sessions, msg.SessionKey, interactiveKey, task)
+	if err != nil {
+		return nil, true, err
+	}
+	if err := store.MarkSeatRefreshed(task.TaskID, e.name, msg.SessionKey); err != nil {
+		return nil, true, err
+	}
+	msg.Content = e.prependFeatureContext(task, store.Path(), msg.Content)
+	slog.Info("feature-start: lazy refreshed seat", "project", e.name, "task_id", task.TaskID, "session", msg.SessionKey)
+	return session, true, nil
+}
+
+func (e *Engine) applyLazyFeatureContextToRelayMessage(sessions *SessionManager, relaySessionKey, sourceSessionKey string, message *string) error {
+	if e == nil || sessions == nil || message == nil || strings.TrimSpace(e.dataDir) == "" {
+		return nil
+	}
+	store := NewFeatureBoardStore(e.dataDir)
+	task, shouldRefresh, err := store.ActiveTaskForSeat(e.name)
+	if err != nil || !shouldRefresh {
+		return err
+	}
+	if _, err := e.refreshFeatureSeatSessionForKey(sessions, relaySessionKey, relaySessionKey, task); err != nil {
+		return err
+	}
+	if err := store.MarkSeatRefreshed(task.TaskID, e.name, relaySessionKey); err != nil {
+		return err
+	}
+	*message = e.prependFeatureContext(task, store.Path(), *message)
+	slog.Info("feature-start: lazy refreshed relay seat",
+		"project", e.name,
+		"task_id", task.TaskID,
+		"relay_session", relaySessionKey,
+		"source_session", sourceSessionKey,
+	)
+	return nil
+}
+
+func (e *Engine) prependFeatureContext(task *FeatureTask, boardPath, content string) string {
+	if task == nil {
+		return content
+	}
+	var b strings.Builder
+	b.WriteString("[FEATURE-CONTEXT]\n")
+	b.WriteString("This seat has just been lazily refreshed for the active Nexus feature.\n")
+	b.WriteString("Do not treat this context block alone as a task. Process the actual message after the separator.\n")
+	b.WriteString(fmt.Sprintf("Task ID: %s\n", task.TaskID))
+	b.WriteString(fmt.Sprintf("Title: %s\n", task.Title))
+	b.WriteString(fmt.Sprintf("Board: %s\n", boardPath))
+	b.WriteString(fmt.Sprintf("Seat: %s\n", e.name))
+	if task.NextAction != "" {
+		b.WriteString(fmt.Sprintf("Board next_action: %s\n", task.NextAction))
+	}
+	b.WriteString("[/FEATURE-CONTEXT]\n---\n")
+	b.WriteString(content)
+	return b.String()
 }
 
 func (e *Engine) launchFeatureCounselAudit(msg *Message, task *FeatureTask, boardPath string) {

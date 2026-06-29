@@ -2946,6 +2946,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	if refreshedSession, refreshed, err := e.applyLazyFeatureContextToMessage(msg, sessions, interactiveKey); err != nil {
+		slog.Warn("feature-start: lazy refresh failed", "project", e.name, "session", msg.SessionKey, "error", err)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Feature context refresh failed: %v", err))
+		return
+	} else if refreshed {
+		session = refreshedSession
+	}
 
 	// Prepend pending reactions to the message content.
 	if reactions := session.DrainReactions(); len(reactions) > 0 {
@@ -15619,6 +15626,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		return "", err
 	}
 	session := sessions.GetOrCreateActive(relaySessionKey)
+	if err := e.applyLazyFeatureContextToRelayMessage(sessions, relaySessionKey, sourceSessionKey, &message); err != nil {
+		return "", fmt.Errorf("feature context refresh: %w", err)
+	}
+	session = sessions.GetOrCreateActive(relaySessionKey)
 
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
