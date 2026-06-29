@@ -52,7 +52,13 @@ func parseFeatureStartArgs(args []string) (featureStartOptions, error) {
 }
 
 func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
-	if e == nil || e.name != featureChefSeat {
+	if e == nil {
+		return
+	}
+	if e.name != featureChefSeat {
+		if e.name == featureChefFlashSeat {
+			e.reply(p, msg.ReplyCtx, "❌ `/feature-start` is only authorized on chef-seat. Please use `/feature-start@Chef_Resonova_bot` instead.")
+		}
 		return
 	}
 	opts, err := parseFeatureStartArgs(args)
