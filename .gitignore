@@ -132,6 +132,15 @@ Desktop.ini
 .planning/
 
 # ============================================================================
+# Local git worktrees
+# ============================================================================
+# Convention: ad-hoc worktrees created with
+#   git worktree add .worktrees/<task-name> origin/<branch>
+# are local-only scratch directories used by multiple agents (qa, dev, release)
+# for parallel branch work. They must never be committed.
+.worktrees/
+
+# ============================================================================
 # Security
 # ============================================================================
 # Never commit secrets or credentials

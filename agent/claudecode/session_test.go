@@ -177,7 +177,7 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 		"session_id": "test-session",
 		"usage": map[string]any{
 			"input_tokens":                float64(130),
-			"output_tokens":               float64(648),       // real turn total
+			"output_tokens":               float64(648), // real turn total
 			"cache_creation_input_tokens": float64(2_000),
 			"cache_read_input_tokens":     float64(8_000_000), // summed, would inflate ctx
 		},
@@ -574,12 +574,176 @@ func TestWriteTempAppendPromptFile_UniquePerCall(t *testing.T) {
 	}
 }
 
+// TestWriteTempAppendPromptFile_ReadableByOtherUser guards the
+// run_as_user regression from issue #1429. os.CreateTemp defaults to
+// 0600 owned by the cc-connect process user; when the agent is
+// spawned as a different OS user (via run_as_user), a 0600 root-owned
+// file is unreadable and the agent exits with EACCES before reading
+// any prompt at all. The fix is to chmod 0o644 immediately after
+// write, matching ensureSharedSystemPromptFile (which writes 0o644
+// via writeFileAtomic).
+//
+// We assert the contract two ways: (1) the on-disk mode is 0o644 —
+// any reader path bit is set, no execute bits, no setuid/sticky; and
+// (2) a non-owner stat-open succeeds in O_RDONLY, which is the same
+// access path the spawned agent uses when it calls os.Open on the
+// file path passed via --append-system-prompt-file.
+func TestWriteTempAppendPromptFile_ReadableByOtherUser(t *testing.T) {
+	dir := t.TempDir()
+	path, err := writeTempAppendPromptFile(dir, "session X")
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	want := os.FileMode(0o644)
+	if info.Mode().Perm() != want {
+		t.Fatalf("per-spawn prompt file mode = %o, want %o — run_as_user target user would get EACCES (#1429)",
+			info.Mode().Perm(), want)
+	}
+
+	// Non-owner open simulates the spawned agent's read path. On root
+	// the kernel bypasses the mode bits, so this only fails for a
+	// truly 0o000 file. We still assert it to make the regression
+	// observable on systems where the test runs as a non-root user
+	// (CI matrix, dev laptops).
+	if _, err := os.OpenFile(path, os.O_RDONLY, 0); err != nil {
+		t.Fatalf("open O_RDONLY as a non-owner: %v — file is unreadable even for an unprivileged reader", err)
+	}
+}
+
 func makeFiller(n int) string {
 	b := make([]byte, n)
 	for i := range b {
 		b[i] = 'a' + byte(i%26)
 	}
 	return string(b)
+}
+
+// TestHandleUserEmitsToolResult is a regression test for the bug where
+// claudeSession.handleUser silently dropped tool_result content blocks
+// (only logging when is_error=true) instead of emitting EventToolResult.
+// Without this event, engine never sees tool output and the Feishu/Slack/
+// Discord progress card never renders tool results — only the final
+// assistant text reaches the user.
+//
+// Cases covered:
+//  - string content (plain text result)
+//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+//  - is_error=true (exit code 1, success=false)
+func TestHandleUserEmitsToolResult(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         map[string]any
+		wantResult  string
+		wantCode    int
+		wantSuccess bool
+	}{
+		{
+			name: "string content",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":          "tool_result",
+							"tool_use_id":   "toolu_abc",
+							"is_error":      false,
+							"content":       "command output here",
+						},
+					},
+				},
+			},
+			wantResult:  "command output here",
+			wantCode:    0,
+			wantSuccess: true,
+		},
+		{
+			name: "array content",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_def",
+							"is_error":    false,
+							"content": []any{
+								map[string]any{"type": "text", "text": "line one"},
+								map[string]any{"type": "text", "text": "line two"},
+							},
+						},
+					},
+				},
+			},
+			wantResult:  "line one\nline two",
+			wantCode:    0,
+			wantSuccess: true,
+		},
+		{
+			name: "error result",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_err",
+							"is_error":    true,
+							"content":     "boom",
+						},
+					},
+				},
+			},
+			wantResult:  "boom",
+			wantCode:    1,
+			wantSuccess: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cs := &claudeSession{
+				events: make(chan core.Event, 4),
+				ctx:    ctx,
+			}
+			cs.alive.Store(true)
+
+			cs.handleUser(tc.raw)
+
+			select {
+			case evt := <-cs.events:
+				if evt.Type != core.EventToolResult {
+					t.Fatalf("event type = %q, want %q", evt.Type, core.EventToolResult)
+				}
+				if evt.ToolResult != tc.wantResult {
+					t.Errorf("ToolResult = %q, want %q", evt.ToolResult, tc.wantResult)
+				}
+				if evt.ToolExitCode == nil || *evt.ToolExitCode != tc.wantCode {
+					got := -1
+					if evt.ToolExitCode != nil {
+						got = *evt.ToolExitCode
+					}
+					t.Errorf("ToolExitCode = %d, want %d", got, tc.wantCode)
+				}
+				if evt.ToolSuccess == nil || *evt.ToolSuccess != tc.wantSuccess {
+					got := false
+					if evt.ToolSuccess != nil {
+						got = *evt.ToolSuccess
+					}
+					t.Errorf("ToolSuccess = %v, want %v", got, tc.wantSuccess)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for EventToolResult — handleUser dropped the tool_result")
+			}
+		})
+	}
 }
 
 func helperCommand(ctx context.Context, mode string) *exec.Cmd {

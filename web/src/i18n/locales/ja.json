@@ -5,7 +5,7 @@
     "providers": "プロバイダー",
     "sessions": "セッション",
     "chat": "チャット",
-    "cron": "Cron",
+    "cron": "スケジュールジョブ",
     "bridge": "ブリッジ",
     "skills": "スキル",
     "system": "システム"

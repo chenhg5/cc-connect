@@ -10220,6 +10220,50 @@ func TestHandleMessageBusyRecalledCurrentStopsAndProcessesNewMessage(t *testing.
 	}
 }
 
+func TestStopCurrentMessageIfRecalledThrottlesRepeatedFallbackChecks(t *testing.T) {
+	p := &recallCheckingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		recalled:           false,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession:     newControllableSession("current"),
+		platform:         p,
+		replyCtx:         "reply-ctx-1",
+		currentMessageID: "msg-1",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	for range 3 {
+		if e.stopCurrentMessageIfRecalled(key) {
+			t.Fatal("stopCurrentMessageIfRecalled returned true for non-recalled message")
+		}
+	}
+	checked := p.checkedReplyCtxs()
+	if len(checked) != 1 || checked[0] != "reply-ctx-1" {
+		t.Fatalf("checked reply contexts = %v, want exactly one check for reply-ctx-1", checked)
+	}
+
+	state.mu.Lock()
+	state.replyCtx = "reply-ctx-2"
+	state.currentMessageID = "msg-2"
+	state.lastRecallProbeMessageID = ""
+	state.lastRecallProbeAt = time.Time{}
+	state.recallProbeInFlight = false
+	state.mu.Unlock()
+
+	if e.stopCurrentMessageIfRecalled(key) {
+		t.Fatal("stopCurrentMessageIfRecalled returned true for second non-recalled message")
+	}
+	checked = p.checkedReplyCtxs()
+	if len(checked) != 2 || checked[1] != "reply-ctx-2" {
+		t.Fatalf("checked reply contexts = %v, want second check for new message", checked)
+	}
+}
+
 func TestExecuteCardAction_NewCleansUpAndCreatesSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -12685,6 +12729,34 @@ func TestEstimateTokensWithPendingAssistant(t *testing.T) {
 	gotWithPending := estimateTokensWithPendingAssistant(entries, "Extra content here")
 	if gotWithPending <= gotWithoutPending {
 		t.Errorf("expected pending message to increase token count")
+	}
+}
+
+func TestTruncateHistoryEntry(t *testing.T) {
+	if got := truncateHistoryEntry("abcdef", 3); got != "abc..." {
+		t.Fatalf("truncateHistoryEntry ascii = %q, want %q", got, "abc...")
+	}
+	if got := truncateHistoryEntry("你好世界", 2); got != "你好..." {
+		t.Fatalf("truncateHistoryEntry unicode = %q, want %q", got, "你好...")
+	}
+	if got := truncateHistoryEntry("👨‍👩‍👧 中文", 2); got != "👨‍..." || !utf8.ValidString(got) {
+		t.Fatalf("truncateHistoryEntry emoji = %q, want valid UTF-8 %q", got, "👨‍...")
+	}
+	if got := truncateHistoryEntry("abcdef", 0); got != "abcdef" {
+		t.Fatalf("truncateHistoryEntry disabled = %q, want original", got)
+	}
+}
+
+func TestEngineHistoryEntryMaxLen(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	if got := e.historyEntryMaxLen(); got != defaultHistoryMaxLen {
+		t.Fatalf("default historyEntryMaxLen = %d, want %d", got, defaultHistoryMaxLen)
+	}
+
+	limit := 0
+	e.SetDisplayConfig(DisplayCfg{HistoryMaxLen: &limit})
+	if got := e.historyEntryMaxLen(); got != 0 {
+		t.Fatalf("configured historyEntryMaxLen = %d, want 0", got)
 	}
 }
 

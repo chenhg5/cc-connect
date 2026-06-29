@@ -146,6 +146,18 @@ func writeTempAppendPromptFile(ccDataDir, content string) (string, error) {
 		_ = os.Remove(f.Name())
 		return "", err
 	}
+	// os.CreateTemp defaults to mode 0600 owned by the cc-connect process
+	// user (often root when launched by systemd). When the agent is spawned
+	// under run_as_user, the target user is different and gets EACCES on
+	// 0600 root-owned files (issue #1429). The shared prompt file already
+	// uses 0o644 (see ensureSharedSystemPromptFile → writeFileAtomic);
+	// the per-spawn temp file is just a superset of the shared content
+	// and is equally non-secret, so we mirror that mode here.
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("claudecode: chmod per-spawn prompt file 0o644: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(f.Name())
 		return "", err
@@ -204,7 +216,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -217,7 +229,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
-	// cliArgsFlag these get bundled into a single passthrough string.
+	// cmdArgsFlag these get bundled into a single passthrough string.
 	// outerArgs are flags the wrapper itself understands (e.g. --model).
 	innerArgs := []string{
 		"--output-format", "stream-json",
@@ -326,16 +338,16 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	// Build final argument list.
-	// When cliArgsFlag is set (e.g. "-a"), inner args are bundled into a
+	// When cmdArgsFlag is set (e.g. "-a"), inner args are bundled into a
 	// single passthrough string via that flag, while outer args (--model etc.)
 	// are appended directly so the wrapper can also interpret them.
 	// Args containing spaces/newlines are quoted so the wrapper's command-line
 	// parser (e.g. splitCommandLine) keeps them as single tokens.
 	// Result: my-cli code -t foo -a "--verbose --append-system-prompt 'long text'" --model x
 	var allArgs []string
-	if cliArgsFlag != "" {
+	if cmdArgsFlag != "" {
 		allArgs = append(allArgs, cliExtraArgs...)
-		allArgs = append(allArgs, cliArgsFlag, shellJoinArgs(innerArgs))
+		allArgs = append(allArgs, cmdArgsFlag, shellJoinArgs(innerArgs))
 		allArgs = append(allArgs, outerArgs...)
 	} else {
 		allArgs = append(allArgs, cliExtraArgs...)
@@ -740,9 +752,39 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
+			var result string
+			switch c := item["content"].(type) {
+			case string:
+				result = c
+			case []any:
+				var parts []string
+				for _, elem := range c {
+					if m, ok := elem.(map[string]any); ok {
+						if t, _ := m["text"].(string); t != "" {
+							parts = append(parts, t)
+						}
+					}
+				}
+				result = strings.Join(parts, "\n")
+			}
 			if isError {
-				result, _ := item["content"].(string)
 				slog.Debug("claudeSession: tool error", "content", result)
+			}
+			success := !isError
+			code := 0
+			if isError {
+				code = 1
+			}
+			evt := core.Event{
+				Type:         core.EventToolResult,
+				ToolResult:   truncateStr(strings.TrimSpace(result), 500),
+				ToolExitCode: &code,
+				ToolSuccess:  &success,
+			}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 	}
@@ -1162,8 +1204,8 @@ func (cs *claudeSession) Close() error {
 	// descendants (e.g. MCP server bridges) a second chance to run cleanup
 	// handlers that respond to signals but not stdin EOF.
 	if err := signalProcessGroup(cs.cmd, syscall.SIGTERM); err != nil {
-			slog.Warn("claudeSession: signal SIGTERM", "error", err)
-		}
+		slog.Warn("claudeSession: signal SIGTERM", "error", err)
+	}
 
 	select {
 	case <-cs.done:

@@ -41,6 +41,7 @@ var iflowPendingToolTimeoutDefaultMode = 6 * time.Second
 // then tails the transcript JSONL to recover structured assistant/tool events.
 type iflowSession struct {
 	cmd            string
+	extraArgs      []string // extra args from cmd, prepended before iflow args
 	workDir        string
 	model          string
 	mode           string
@@ -92,11 +93,12 @@ type iflowToolResult struct {
 	Output string
 }
 
-func newIFlowSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string, toolTimeoutSec int) (*iflowSession, error) {
+func newIFlowSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, toolTimeoutSec int) (*iflowSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &iflowSession{
 		cmd:            cmd,
+		extraArgs:      extraArgs,
 		workDir:        workDir,
 		model:          model,
 		mode:           mode,
@@ -157,7 +159,7 @@ func (s *iflowSession) Send(prompt string, images []core.ImageAttachment, files 
 	}
 	turn.sessionDir = sessionDir
 
-	args := make([]string, 0, 16)
+	args := append([]string{}, s.extraArgs...)
 	if s.model != "" {
 		args = append(args, "-m", s.model)
 	}

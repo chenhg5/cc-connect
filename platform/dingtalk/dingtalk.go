@@ -200,9 +200,17 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			default:
 			}
 
-			if err := p.streamClient.Start(ctx); err != nil {
-				slog.Warn("dingtalk: stream disconnected, reconnecting", "error", err)
-			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("dingtalk: stream panic recovered, will reconnect",
+							"panic", r)
+					}
+				}()
+				if err := p.streamClient.Start(ctx); err != nil {
+					slog.Warn("dingtalk: stream disconnected, reconnecting", "error", err)
+				}
+			}()
 
 			// Brief pause before reconnecting to avoid tight loop on persistent failures.
 			select {

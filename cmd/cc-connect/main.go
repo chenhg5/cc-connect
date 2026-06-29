@@ -565,6 +565,7 @@ func main() {
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
 			mode, tm, tool, tmlen, toollen, _, _ := config.EffectiveDisplay(cfg, &proj)
+			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
 				Mode:             mode,
 				CardMode:         config.EffectiveCardMode(cfg, &proj),
@@ -572,6 +573,7 @@ func main() {
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
 				ToolMessages:     tool,
+				HistoryMaxLen:    &historyMaxLen,
 			})
 		}
 
@@ -1311,11 +1313,15 @@ func main() {
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
-	// After startup, check if we were restarted and send success notification
+	// After startup, check if we were restarted and queue the success
+	// notification. The engine dispatches it on the first OnPlatformReady
+	// for the target platform (or with a 10s safety timeout), so async
+	// platforms that need 2-3s to actually connect (e.g. Telegram) do not
+	// silently drop the notify. See issue #1383.
 	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
-		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
+		slog.Info("post-restart: queuing success notification", "platform", notify.Platform, "session", notify.SessionKey)
 		for _, e := range engines {
-			e.SendRestartNotification(notify.Platform, notify.SessionKey)
+			e.SetPendingRestartNotify(notify)
 		}
 	}
 
@@ -1690,6 +1696,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload display config (includes legacy quiet → display mapping)
 	mode, tm, tool, tmlen, toollen, showCtx, showFooter := config.EffectiveDisplay(cfg, proj)
+	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
 		Mode:             mode,
 		CardMode:         config.EffectiveCardMode(cfg, proj),
@@ -1697,6 +1704,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
 		ToolMessages:     tool,
+		HistoryMaxLen:    &historyMaxLen,
 	})
 	result.DisplayUpdated = true
 

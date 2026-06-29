@@ -1784,17 +1784,23 @@ func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 	}
 }
 
-func TestResolveMentions_CardFormat(t *testing.T) {
+// TestResolveMentions_MarkdownContent verifies that @name inside markdown
+// content (which would trigger MsgTypeInteractive) is still resolved to the
+// MsgTypeText at syntax (<at user_id="...">name</at>).
+func TestResolveMentions_MarkdownContent(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
 		members:   map[string]string{"张三": "ou_zhangsan"},
 		fetchedAt: time.Now(),
 	})
-	// Content with complex markdown triggers card format
+	// Content with complex markdown
 	input := "# 巡检报告\n\n@张三 请查看\n\n```\nstatus: ok\n```"
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
-	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
-		t.Fatalf("card format should use <at id=...>, got %q", result)
+	if !strings.Contains(result, `<at user_id="ou_zhangsan">张三</at>`) {
+		t.Fatalf("markdown content should resolve to text format <at user_id=...>, got %q", result)
+	}
+	if strings.Contains(result, "<at id=") {
+		t.Fatalf("card format <at id=...> must not be emitted (no mention event); got %q", result)
 	}
 }
 

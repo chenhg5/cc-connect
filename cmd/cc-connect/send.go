@@ -98,6 +98,12 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			req.Message = args[i]
+		case "--cwd", "--work-dir":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("%s requires a value", args[i])
+			}
+			i++
+			req.WorkDir = args[i]
 		case "--tts":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("%s requires a value", args[i])
@@ -366,6 +372,8 @@ Send a message, attachment, or synthesized voice message to an active cc-connect
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
+      --cwd <path>         Start a new session in this working directory
+      --work-dir <path>    Alias for --cwd
       --tts <text>         Synthesize text and send it as a voice/audio message
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)

@@ -38,7 +38,7 @@ cc-connect 完整功能使用指南。
 | `/list` | 列出当前项目的会话 |
 | `/switch <id>` | 切换到指定会话 |
 | `/current` | 查看当前会话 |
-| `/history [n]` | 查看最近 n 条消息 |
+| `/history [n]` | 查看最近 n 条消息；单条长度受 `[display].history_max_len` 控制，默认 1000 |
 | `/usage` | 查看账号/模型限额使用情况 |
 | `/provider [...]` | 管理 API Provider |
 | `/model [switch <alias>]` | 列出可用模型或按别名切换 |

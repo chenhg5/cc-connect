@@ -59,6 +59,62 @@
       }
     },
     {
+      "name": "zhipu-glm",
+      "display_name": "Zhipu GLM (z.ai)",
+      "invite_url": "https://z.ai/subscribe",
+      "description": "Zhipu GLM Coding Plan — flat-rate monthly subscription for GLM-4.7 / GLM-5.2 (1M context) via z.ai's Anthropic- and OpenAI-compatible endpoints. Works in Claude Code, Codex and OpenCode.",
+      "description_zh": "智谱 GLM Coding Plan（z.ai 国际站）— 包月订阅，提供 GLM-4.7 / GLM-5.2（1M 上下文），兼容 Anthropic 与 OpenAI 接口，可用于 Claude Code、Codex、OpenCode。订阅 key 按套餐配额计费，非按量。",
+      "features": ["GLM-5.2", "1M Context", "订阅制 (非按量)", "高性价比"],
+      "tier": 1,
+      "website": "https://z.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.z.ai/api/anthropic",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]", "glm-4.6", "glm-4.5-air"]
+        },
+        "codex": {
+          "base_url": "https://api.z.ai/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://api.z.ai/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"]
+        }
+      }
+    },
+    {
+      "name": "zhipu-glm-cn",
+      "display_name": "智谱 GLM (中国站)",
+      "invite_url": "https://bigmodel.cn/claude-code",
+      "description": "Zhipu GLM Coding Plan, China endpoint (open.bigmodel.cn) — lower latency for users in mainland China. GLM-4.7 / GLM-5.2 via Anthropic- and OpenAI-compatible APIs.",
+      "description_zh": "智谱 GLM Coding Plan 国内站（open.bigmodel.cn）— 大陆用户延迟更低。GLM-4.7 / GLM-5.2，兼容 Anthropic 与 OpenAI 接口，可用于 Claude Code、Codex、OpenCode。",
+      "features": ["GLM-5.2", "1M Context", "订阅制 (非按量)", "低延迟 (CN)"],
+      "tier": 1,
+      "website": "https://bigmodel.cn",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://open.bigmodel.cn/api/anthropic",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]", "glm-4.6", "glm-4.5-air"]
+        },
+        "codex": {
+          "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"]
+        }
+      }
+    },
+    {
       "name": "aigocode",
       "display_name": "AIGoCode",
       "invite_url": "https://aigocode.com/invite/CYY3C85C",

@@ -80,45 +80,45 @@ type copilotPermissionResult struct {
 	Rules []any  `json:"rules,omitempty"`
 }
 
-func newCopilotSession(ctx context.Context, workDir, cliBin, model, mode, resumeSessionID string, extraEnv []string, provider *copilotWireProviderConfig) (*copilotSession, error) {
+func newCopilotSession(ctx context.Context, workDir, cliBin string, extraArgs []string, model, mode, resumeSessionID string, extraEnv []string, provider *copilotWireProviderConfig) (*copilotSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
-	args := []string{"--headless", "--stdio", "--no-auto-update"}
+	args := append(append([]string{}, extraArgs...), "--headless", "--stdio", "--no-auto-update")
 
 	slog.Debug("copilotSession: starting", "bin", cliBin, "args", args, "dir", workDir)
 
-	cmd := exec.CommandContext(sessionCtx, cliBin, args...)
-	cmd.Dir = workDir
-	prepareCmdForKill(cmd)
+	child := exec.CommandContext(sessionCtx, cliBin, args...)
+	child.Dir = workDir
+	prepareCmdForKill(child)
 
 	env := os.Environ()
 	if len(extraEnv) > 0 {
 		env = core.MergeEnv(env, extraEnv)
 	}
-	cmd.Env = env
+	child.Env = env
 
-	stdin, err := cmd.StdinPipe()
+	stdin, err := child.StdinPipe()
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("copilotSession: stdin pipe: %w", err)
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("copilotSession: stdout pipe: %w", err)
 	}
 
 	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	child.Stderr = &stderrBuf
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("copilotSession: start: %w", err)
 	}
 
 	cs := &copilotSession{
-		cmd:                cmd,
+		cmd:                child,
 		rpc:                newRPCClient(stdin),
 		reader:             newLSPReader(stdout),
 		events:             make(chan core.Event, 64),
