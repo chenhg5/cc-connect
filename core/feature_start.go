@@ -56,8 +56,10 @@ func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
 		return
 	}
 	if e.name != featureChefSeat {
-		if e.name == featureChefFlashSeat {
-			e.reply(p, msg.ReplyCtx, "❌ `/feature-start` is only authorized on chef-seat. Please use `/feature-start@Chef_Resonova_bot` instead.")
+		if e.name == featureChefFlashSeat && strings.HasPrefix(msg.Content, "/feature") {
+			if msg.WasMentioned || !strings.Contains(msg.SessionKey, ":-") {
+				e.reply(p, msg.ReplyCtx, "❌ `/feature-start` is only authorized on chef-seat. Please use `/feature-start@Chef_Resonova_bot` instead.")
+			}
 		}
 		return
 	}

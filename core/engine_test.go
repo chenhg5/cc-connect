@@ -1315,6 +1315,52 @@ func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) 
 	}
 }
 
+type stubPreviewPlatform struct {
+	stubPlatformEngine
+	previews []string
+}
+
+func (p *stubPreviewPlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
+	p.previews = append(p.previews, content)
+	return "preview-msg-id", nil
+}
+
+func (p *stubPreviewPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	p.previews = append(p.previews, content)
+	return nil
+}
+
+func TestProcessInteractiveEvents_AvoidsDuplicateSeparatorsForThinkingEvents(t *testing.T) {
+	p := &stubPreviewPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: false, Mode: "quiet"})
+
+	sessionKey := "telegram:user-thinking-sep"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-thinking-sep")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-thinking-sep",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Hello"}
+	agentSession.events <- Event{Type: EventThinking, Content: "thinking 1"}
+	agentSession.events <- Event{Type: EventThinking, Content: "thinking 2"}
+	agentSession.events <- Event{Type: EventText, Content: "World"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-thinking-sep", time.Now(), nil, nil, state.replyCtx, false)
+	finalText := ""
+	if len(p.previews) > 0 {
+		finalText = p.previews[len(p.previews)-1]
+	}
+	if finalText != "Hello\n\nWorld" {
+		t.Fatalf("final preview = %q, want %q\nall previews = %#v", finalText, "Hello\n\nWorld", p.previews)
+	}
+}
+
 func TestProcessInteractiveEvents_AddsDoneReactionAfterNormalReply(t *testing.T) {
 	p := &stubDoneReactionPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

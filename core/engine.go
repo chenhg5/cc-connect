@@ -4969,29 +4969,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				break
 			}
-			// When thinking messages are hidden, behavior depends on display mode:
-			//   quiet/single: append separator to keep all text in one card
-			//   compact:      freeze+detach to split text into separate cards
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" || progressStyleForTarget(p, replyCtx) == "single" {
-					if sp.canPreview() && sp.appendSeparator("\n\n") {
-						textParts = append(textParts, "\n\n")
-					}
-				} else {
-					if sp.canPreview() {
-						sp.freeze()
-						sp.detachPreview()
+				lastPart := ""
+				if len(textParts) > 0 {
+					lastPart = textParts[len(textParts)-1]
+				}
+				if lastPart != "" && !strings.HasSuffix(lastPart, "\n") && !strings.HasSuffix(lastPart, "\n\n") {
+					if e.display.Mode == "quiet" || progressStyleForTarget(p, replyCtx) == "single" {
+						if sp.canPreview() && sp.appendSeparator("\n\n") {
+							textParts = append(textParts, "\n\n")
+						}
 					} else {
-						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
+						if sp.canPreview() {
+							sp.freeze()
+							sp.detachPreview()
+						} else {
+							segment := strings.Join(textParts[segmentStart:], "")
+							if segment != "" {
+								for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+									sendWorkspace(p, replyCtx, chunk)
+								}
 							}
 						}
+						segmentStart = len(textParts)
 					}
-					segmentStart = len(textParts)
+					silentHold = false
 				}
-				silentHold = false
 			}
 			if e.display.ThinkingMessages && event.Content != "" {
 				// --- StreamingCard path ---
