@@ -126,8 +126,8 @@ func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
 	}
 	refreshed = append(refreshed, featureChefSeat)
 
-	secondaryRefreshed, secondaryWarnings := chef.refreshSecondaryFeatureStartSeats(chefPlatform, msg, task, boardStore, seatNames)
-	refreshed = append(refreshed, secondaryRefreshed...)
+	peerChefRefreshed, peerChefWarnings := chef.refreshPeerChefFeatureStartSeats(chefPlatform, msg, task, boardStore, seatNames)
+	refreshed = append(refreshed, peerChefRefreshed...)
 	pending := pendingFeatureSeats(seatNames, refreshed)
 
 	packet := chef.buildFeatureStartPacket(task, boardStore.Path(), refreshed, pending)
@@ -140,8 +140,8 @@ func (e *Engine) cmdFeatureStart(p Platform, msg *Message, args []string) {
 	reply := fmt.Sprintf("✅ Feature started: %s\nTask: `%s`\nBoard: `%s`\nRefreshed: %s",
 		task.Title, task.TaskID, boardStore.Path(), strings.Join(refreshed, ", "))
 	reply += "\nLazy refresh pending: " + strings.Join(pending, ", ")
-	if len(secondaryWarnings) > 0 {
-		reply += "\nWarnings: " + strings.Join(secondaryWarnings, "; ")
+	if len(peerChefWarnings) > 0 {
+		reply += "\nWarnings: " + strings.Join(peerChefWarnings, "; ")
 	}
 	e.reply(p, msg.ReplyCtx, reply)
 }
@@ -203,7 +203,7 @@ func pendingFeatureSeats(seatNames []string, refreshedSeats []string) []string {
 	return pending
 }
 
-func (e *Engine) refreshSecondaryFeatureStartSeats(p Platform, msg *Message, task *FeatureTask, boardStore *FeatureBoardStore, seatNames []string) ([]string, []string) {
+func (e *Engine) refreshPeerChefFeatureStartSeats(p Platform, msg *Message, task *FeatureTask, boardStore *FeatureBoardStore, seatNames []string) ([]string, []string) {
 	known := map[string]bool{}
 	for _, name := range seatNames {
 		known[strings.TrimSpace(name)] = true
