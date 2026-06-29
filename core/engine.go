@@ -79,9 +79,10 @@ const (
 )
 
 const (
-	messageRecallCheckTimeout = 2 * time.Second
-	messageRecallPollInterval = 2 * time.Second
-	recalledStopLockWait      = 2 * time.Second
+	messageRecallCheckTimeout  = 2 * time.Second
+	messageRecallPollInterval  = 2 * time.Second
+	messageRecallProbeCooldown = time.Minute
+	recalledStopLockWait       = 2 * time.Second
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -494,25 +495,28 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession           AgentSession
-	platform               Platform
-	replyCtx               any
-	currentMessageID       string
-	workspaceDir           string
-	agent                  Agent
-	mu                     sync.Mutex
-	stopCh                 chan struct{}
-	stopped                bool
-	pending                *pendingPermission
-	pendingMessages        []queuedMessage // messages queued while session was busy
-	approveAll             bool            // when true, auto-approve all permission requests for this session
-	fromVoice              bool            // true if current turn originated from voice transcription
-	sideText               string
-	deleteMode             *deleteModeState
-	modelSwitch            *modelSwitchState
-	pendingProviderAdd     *pendingProviderAddState
-	lastAutoCompressAt     time.Time
-	lastAutoCompressTokens int
+	agentSession             AgentSession
+	platform                 Platform
+	replyCtx                 any
+	currentMessageID         string
+	lastRecallProbeMessageID string
+	lastRecallProbeAt        time.Time
+	recallProbeInFlight      bool
+	workspaceDir             string
+	agent                    Agent
+	mu                       sync.Mutex
+	stopCh                   chan struct{}
+	stopped                  bool
+	pending                  *pendingPermission
+	pendingMessages          []queuedMessage // messages queued while session was busy
+	approveAll               bool            // when true, auto-approve all permission requests for this session
+	fromVoice                bool            // true if current turn originated from voice transcription
+	sideText                 string
+	deleteMode               *deleteModeState
+	modelSwitch              *modelSwitchState
+	pendingProviderAdd       *pendingProviderAddState
+	lastAutoCompressAt       time.Time
+	lastAutoCompressTokens   int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -2594,15 +2598,48 @@ func (e *Engine) stopCurrentMessageIfRecalled(sessionKey string) bool {
 	platform := state.platform
 	replyCtx := state.replyCtx
 	messageID := state.currentMessageID
-	state.mu.Unlock()
 	if platform == nil || replyCtx == nil || messageID == "" {
+		state.mu.Unlock()
 		return false
 	}
-
 	detector, ok := platform.(MessageRecallDetector)
 	if !ok {
+		state.mu.Unlock()
 		return false
 	}
+	if state.recallProbeInFlight {
+		state.mu.Unlock()
+		slog.Debug("message recall fallback probe skipped; probe already in flight",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+		)
+		return false
+	}
+	now := time.Now()
+	if state.lastRecallProbeMessageID == messageID && now.Sub(state.lastRecallProbeAt) < messageRecallProbeCooldown {
+		nextProbeIn := messageRecallProbeCooldown - now.Sub(state.lastRecallProbeAt)
+		state.mu.Unlock()
+		slog.Debug("message recall fallback probe throttled",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+			"next_probe_in", nextProbeIn,
+		)
+		return false
+	}
+	state.recallProbeInFlight = true
+	state.lastRecallProbeMessageID = messageID
+	state.lastRecallProbeAt = now
+	state.mu.Unlock()
+
+	defer func() {
+		state.mu.Lock()
+		if state.currentMessageID == messageID {
+			state.recallProbeInFlight = false
+		}
+		state.mu.Unlock()
+	}()
 
 	ctx, cancel := context.WithTimeout(e.ctx, messageRecallCheckTimeout)
 	defer cancel()
@@ -2922,6 +2959,12 @@ sessionLocked:
 	// reset_on_idle_mins is not defeated by heartbeats or unsolicited agent
 	// output running between user messages (#1115).
 	session.TouchUserActivity()
+
+	// Ensure an interactiveState entry exists before launching the async
+	// processor so messages arriving during session startup can be queued
+	// instead of dropped (issue #565). This is still needed after idle auto-
+	// reset because cleanupInteractiveState may remove the early placeholder.
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
@@ -3587,6 +3630,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	// Update reply context for this turn
 	state.mu.Lock()
+	if state.currentMessageID != msg.MessageID {
+		state.lastRecallProbeMessageID = ""
+		state.lastRecallProbeAt = time.Time{}
+		state.recallProbeInFlight = false
+	}
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
@@ -3657,6 +3705,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
+	as := state.agentSession // capture under lock to avoid race with cleanup
 	state.mu.Unlock()
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
@@ -3664,7 +3713,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+		if as == nil {
+			sendDone <- fmt.Errorf("agent session became nil")
+			return
+		}
+		sendDone <- as.Send(promptContent, msg.Images, msg.Files)
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -5594,9 +5647,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
+				state.mu.Lock()
+				as := state.agentSession // capture under lock to avoid race with cleanup
+				state.mu.Unlock()
+
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+					if as == nil {
+						nextSend <- fmt.Errorf("agent session became nil")
+						return
+					}
+					nextSend <- as.Send(queuedPrompt, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
 
@@ -5905,19 +5966,26 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
-		if state.agentSession == nil || !state.agentSession.Alive() {
+		state.mu.Lock()
+		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
+		state.mu.Unlock()
+		if as == nil || !as.Alive() {
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
 
-		drainEvents(state.agentSession.Events())
+		drainEvents(as.Events())
 
 		session.AddHistory("user", queued.content)
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
+			if as == nil {
+				sendDone <- fmt.Errorf("agent session became nil")
+				return
+			}
+			sendDone <- as.Send(prompt, queued.images, queued.files)
 		}()
 
 		var stopTyping func()

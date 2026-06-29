@@ -143,6 +143,7 @@ type Platform struct {
 	dedup            *core.MessageDedup
 	botOpenID        string
 	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap       map[string]string // agent name -> open_id (for outbound @ resolution)
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
@@ -321,6 +322,22 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		}
 	}
 
+	// Parse mention_map for outbound bot-to-bot @ resolution.
+	// Maps agent-friendly names (e.g. "Collector-B") to Feishu open_ids,
+	// so that when an agent writes @Collector-B in its reply, cc-connect
+	// converts it to a native Feishu <at> tag that triggers a notification.
+	var mentionMap map[string]string
+	if mentionMapRaw, ok := opts["mention_map"]; ok {
+		if mm, ok := mentionMapRaw.(map[string]any); ok {
+			mentionMap = make(map[string]string, len(mm))
+			for name, id := range mm {
+				if idStr, ok := id.(string); ok && idStr != "" {
+					mentionMap[name] = idStr
+				}
+			}
+		}
+	}
+
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -390,6 +407,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
 		peerBots:                   peerBots,
+		mentionMap:                 mentionMap,
 		imageBatch:                 make(map[string]*imageBatchEntry),
 		imageBatchWindow:           imageBatchWindow,
 	}
@@ -1821,42 +1839,59 @@ func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string
 
 // resolveMentionsInContent replaces @name with Feishu at tags in raw content
 // (before JSON serialization). Reverse-matches against the chat member list,
-// longest name first. Uses the correct at syntax based on predicted message type.
+// longest name first. Always emits the MsgTypeText at syntax
+// (<at user_id="...">name</at>) because Feishu only fires mention events for
+// <at> inside MsgTypeText — not inside cards or post messages.
 func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
 	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
 		return content
 	}
+	// Build merged name -> open_id map.
+	// Layer 1: group member display names (existing behavior, lower priority).
+	// Layer 2: mentionMap entries (explicit config, higher priority).
+	merged := make(map[string]string)
+
 	members := p.getChatMembers(ctx, chatID)
-	if len(members) == 0 {
+	for name, openID := range members {
+		if openID != "" {
+			merged[name] = openID
+		}
+	}
+
+	p.mu.RLock()
+	for name, openID := range p.mentionMap {
+		if openID != "" {
+			merged[name] = openID
+		}
+	}
+	p.mu.RUnlock()
+
+	if len(merged) == 0 {
 		return content
 	}
+
 	// Sort names longest-first to avoid partial matches.
-	names := make([]string, 0, len(members))
-	for name := range members {
+	names := make([]string, 0, len(merged))
+	for name := range merged {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
 
-	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
 	result := content
 	for _, name := range names {
 		pattern := "@" + name
 		if !strings.Contains(result, pattern) {
 			continue
 		}
-		openID := members[name]
+		openID := merged[name]
 		if openID == "" {
-			slog.Debug(p.tag()+": skipping ambiguous mention", "name", name)
-			continue
+			continue // ambiguous member, skip
 		}
-		var atTag string
-		if useCardFormat {
-			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
-		} else {
-			escapedName := html.EscapeString(name)
-			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
-		}
-		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
+		// Always use the MsgTypeText at syntax so Feishu fires a mention
+		// event. The card variant (<at id=...></at>) renders the name but
+		// does NOT notify the target, which defeats bot-to-bot mentions.
+		escapedName := html.EscapeString(name)
+		atTag := fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
@@ -2630,16 +2665,22 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // SendWithStatusFooter implements core.StatusFooterSender: send a reply with
 // the body content followed by a small/dim status-footer block. Always uses
 // the interactive card path so the footer can render with text_size:
-// "notation". Falls back to plain Send when the footer is empty.
+// "notation". Falls back to plain Send when the footer is empty or the content
+// contains a resolved @mention (Feishu only fires mention events for <at> tags
+// inside MsgTypeText, not inside cards).
 func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
-	if strings.TrimSpace(footer) == "" {
-		return p.Send(ctx, rctx, content)
-	}
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+	if strings.TrimSpace(footer) == "" || strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`) {
+		if strings.TrimSpace(footer) != "" {
+			content += "\n\n" + footer
+		}
+		return p.Send(ctx, rctx, content)
+	}
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
 	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
@@ -2869,21 +2910,15 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
-// predictMsgType returns the message type that buildReplyContent will choose,
-// without actually building the content. Used to select the correct at syntax
-// before building.
-func predictMsgType(content string) string {
-	if !containsMarkdown(content) {
-		return larkim.MsgTypeText
-	}
-	if countMarkdownTables(content) <= maxCardTables {
-		return larkim.MsgTypeInteractive
-	}
-	return larkim.MsgTypePost
-}
-
 func buildReplyContent(content string) (msgType string, body string) {
-	if !containsMarkdown(content) {
+	// Feishu does not generate mention events for <at> tags in card/post
+	// messages sent by bots. Force MsgTypeText when a real mention is present
+	// (resolved to an <at user_id="..."> or <at id=...> tag) so Feishu
+	// recognizes it and notifies the target bot. Checking the resolved tag
+	// instead of a bare "@" avoids false positives on email addresses, URLs,
+	// and escaped characters.
+	hasMention := strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`)
+	if !containsMarkdown(content) || hasMention {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
@@ -6251,10 +6286,9 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 				continue
 			}
 			footerElements = append(footerElements, map[string]any{
-				"tag":        "markdown",
-				"content":    sanitizeCardMarkdownForCard(line),
-				"text_size":  "notation",
-
+				"tag":       "markdown",
+				"content":   sanitizeCardMarkdownForCard(line),
+				"text_size": "notation",
 			})
 		}
 	}
