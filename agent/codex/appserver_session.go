@@ -505,7 +505,6 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
 	return nil
@@ -607,7 +606,6 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -654,7 +652,6 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -722,7 +719,6 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -1106,7 +1102,6 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
-			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -1172,8 +1167,6 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		return
 	}
 
-	s.flushPendingAsThinking()
-
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
@@ -1214,9 +1207,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	case "agentMessage":
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) != "" {
-			s.stateMu.Lock()
-			s.pendingMsgs = append(s.pendingMsgs, text)
-			s.stateMu.Unlock()
+			s.emit(core.Event{Type: core.EventText, Content: text})
 		}
 
 	case "commandExecution":
@@ -1516,34 +1507,7 @@ func (s *appServerSession) completeTurn() {
 	}
 	s.currentTurn = ""
 	s.stateMu.Unlock()
-	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
-}
-
-func (s *appServerSession) flushPendingAsThinking() {
-	s.stateMu.Lock()
-	msgs := append([]string(nil), s.pendingMsgs...)
-	s.pendingMsgs = s.pendingMsgs[:0]
-	s.stateMu.Unlock()
-
-	for _, text := range msgs {
-		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
-		}
-	}
-}
-
-func (s *appServerSession) flushPendingAsText() {
-	s.stateMu.Lock()
-	msgs := append([]string(nil), s.pendingMsgs...)
-	s.pendingMsgs = s.pendingMsgs[:0]
-	s.stateMu.Unlock()
-
-	for _, text := range msgs {
-		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventText, Content: text})
-		}
-	}
 }
 
 func (s *appServerSession) emit(event core.Event) {
