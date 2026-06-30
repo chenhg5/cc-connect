@@ -15402,3 +15402,50 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
 	}
 }
+
+func TestHandleRelay_SessionLocking(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("relay-session")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("source", agent, []Platform{p}, "", LangEnglish)
+
+	sourceSessionKey := "test:chat:user"
+	fromProject := "caller-project"
+
+	// First, simulate another process locking the session.
+	relaySessionKey := relayConversationKey(fromProject, "test", "chat")
+	session := e.sessions.GetOrCreateActive(relaySessionKey)
+	if !session.TryLock() {
+		t.Fatal("failed to lock session manually")
+	}
+
+	// Calling HandleRelay now should block and time out because the session is locked.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := e.HandleRelay(ctx, fromProject, sourceSessionKey, "hello")
+	if err == nil {
+		t.Fatal("expected HandleRelay to fail with locked session, got nil error")
+	}
+	if !strings.Contains(err.Error(), "session is busy") {
+		t.Errorf("expected 'session is busy' error, got: %v", err)
+	}
+
+	// Now unlock the session.
+	session.Unlock()
+
+	// Calling HandleRelay again should succeed.
+	// Since we are running it, we need to push an EventResult so it returns successfully.
+	sess.events <- Event{Type: EventResult, Content: "result text"}
+
+	respCtx, respCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer respCancel()
+
+	resp, err := e.HandleRelay(respCtx, fromProject, sourceSessionKey, "hello")
+	if err != nil {
+		t.Fatalf("expected HandleRelay to succeed after unlock, got error: %v", err)
+	}
+	if resp != "result text" {
+		t.Errorf("expected response 'result text', got %q", resp)
+	}
+}

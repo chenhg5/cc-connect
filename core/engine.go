@@ -15651,6 +15651,23 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	}
 	session = sessions.GetOrCreateActive(relaySessionKey)
 
+	// Try to acquire the session lock. Since the caller may retry a timed-out
+	// relay request while the agent is still running, checking the lock prevents
+	// starting multiple concurrent agent processes in the same workspace.
+	for {
+		if session.TryLock() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("relay: session is busy: %w", ctx.Err())
+		case <-e.ctx.Done():
+			return "", e.ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	defer session.Unlock()
+
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
