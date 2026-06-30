@@ -527,16 +527,26 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		// handle their own user feedback via stdout synth events and the
 		// normal slash-command path returns immediately.
 		//
-		// Without an explicit EventResult here, two scenarios hang
-		// forever in processInteractiveEvents:
-		//   (a) trigger-compact: handler returns without await, so no
-		//       synthetic agent_end ever lands on stdout.
-		//   (b) cc-connect-compact: an extension that crashes, races a
-		//       kill, or simply omits the finally-synthesized agent_end
-		//       leaves the turn open.
+		// Two things happen here:
 		//
-		// JSON mode (json one-shot) is unaffected — process exit is the
-		// turn-end marker there, and compaction_end has no special meaning.
+		// 1. If pi reports an errorMessage, emit EventError. This covers
+		//    compaction paths that have no extension to surface the error
+		//    to the user (e.g. trigger-compact.ts only calls ctx.ui.notify,
+		//    which cc-connect drops in RPC mode). pi's errorMessage is
+		//    usually self-describing ("Compaction failed: Nothing to compact
+		//    (session too small)"), so we pass it through verbatim — no
+		//    additional prefix — to avoid "Error: compaction failed:
+		//    Compaction failed: ..." in the platform message.
+		//
+		// 2. Always emit EventResult. Without it, two scenarios hang
+		//    forever in processInteractiveEvents:
+		//      (a) trigger-compact: handler returns without await, so no
+		//          synthetic agent_end ever lands on stdout.
+		//      (b) cc-connect-compact: an extension that crashes, races a
+		//          kill, or simply omits the finally-synthesized agent_end
+		//          leaves the turn open.
+		//    JSON mode (json one-shot) is unaffected — process exit is the
+		//    turn-end marker there, and compaction_end has no special meaning.
 		//
 		// Duplicate EventResult (when both agent_end and compaction_end
 		// close the same turn) is safe: processInteractiveEvents only
@@ -544,6 +554,13 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		// text in the second pass, which is empty for out-of-band
 		// compactions. The only side effect is a redundant
 		// ws.BeginTurn/EndTurn pair, accepted as belt-and-suspenders.
+		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
 		if s.rpc {
 			sid := s.CurrentSessionID()
 			evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}

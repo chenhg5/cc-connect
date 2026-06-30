@@ -818,6 +818,114 @@ func TestHandleEvent_UnhandledType(t *testing.T) {
 	}
 }
 
+// ── handleEvent: compaction_* (regression for /cmp silent-hang bug) ──
+//
+// Prior to the fix, ctx.compact() was fire-and-forget: pi emits
+// compaction_start/compaction_end events on stdout but never sends agent_end.
+// Without an explicit handler, cc-connect's processInteractiveEvents hangs
+// forever waiting for a turn-end signal that never arrives. The fix in
+// handleEvent adds a compaction_end case that synthesizes EventResult so
+// the engine can finalize the turn. On errors it also surfaces an
+// EventError so the user sees the failure even when no extension does.
+
+func TestHandleEvent_CompactionStartNoEvent(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":   "compaction_start",
+		"reason": "manual",
+	})
+	// compaction_start is observable-only; no event is emitted.
+	if got := drainEvents(s); len(got) != 0 {
+		t.Fatalf("compaction_start must not emit any event, got %d: %#v", len(got), got)
+	}
+}
+
+func TestHandleEvent_CompactionEndEmitsResultInRPCMode(t *testing.T) {
+	// Regression: this is the exact scenario that caused /cmp to hang.
+	// Before the fix, this case fell through to "unrecognized event type"
+	// and processInteractiveEvents never saw EventResult.
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":    "compaction_end",
+		"aborted": false,
+	})
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("compaction_end in RPC mode must emit exactly 1 EventResult, got %d: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventResult {
+		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	}
+	if !evts[0].Done {
+		t.Errorf("expected Done=true, got false")
+	}
+}
+
+func TestHandleEvent_CompactionEndJSONModeNoEvent(t *testing.T) {
+	// JSON mode relies on process exit as the turn-end marker; the
+	// compaction_end handler is intentionally a no-op there.
+	s := newTestSession(false) // rpc=false
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":    "compaction_end",
+		"aborted": false,
+	})
+	if got := drainEvents(s); len(got) != 0 {
+		t.Fatalf("compaction_end in json mode must not emit EventResult, got %d: %#v", len(got), got)
+	}
+}
+
+func TestHandleEvent_CompactionEndWithErrorMessageEmitsError(t *testing.T) {
+	// Covers trigger-compact/auto-trigger paths that have no extension
+	// to surface pi's own compaction error to the user.
+	s := newTestSession(true)
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":         "compaction_end",
+		"aborted":      false,
+		"errorMessage": "Compaction failed: Nothing to compact (session too small)",
+	})
+	evts := drainEvents(s)
+	if len(evts) != 2 {
+		t.Fatalf("expected 2 events (EventError + EventResult), got %d: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventError {
+		t.Errorf("first event must be EventError, got %s", evts[0].Type)
+	}
+	if evts[0].Error == nil || evts[0].Error.Error() != "Compaction failed: Nothing to compact (session too small)" {
+		t.Errorf("EventError message not preserved verbatim: %v", evts[0].Error)
+	}
+	if evts[1].Type != core.EventResult || !evts[1].Done {
+		t.Errorf("second event must be EventResult{Done:true}, got %s done=%v", evts[1].Type, evts[1].Done)
+	}
+}
+
+func TestHandleEvent_CompactionEndEmptyErrorMessageDoesNotEmitError(t *testing.T) {
+	// pi sometimes sends {"errorMessage": ""} on success-shaped events;
+	// treat empty as "no error" so we don't spam EventError on every turn.
+	s := newTestSession(true)
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":         "compaction_end",
+		"aborted":      false,
+		"errorMessage": "",
+	})
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("empty errorMessage must not emit EventError; got %d events: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventResult {
+		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	}
+}
+
 // ── handleMessageUpdate: text_delta ──────────────────────────
 
 func TestHandleMessageUpdate_TextDelta(t *testing.T) {
