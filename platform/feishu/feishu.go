@@ -2911,6 +2911,7 @@ func detectMimeType(data []byte) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
+	content = core.NormalizeOutgoingContent(content)
 	// Feishu does not generate mention events for <at> tags in card/post
 	// messages sent by bots. Force MsgTypeText when a real mention is present
 	// (resolved to an <at user_id="..."> or <at id=...> tag) so Feishu
