@@ -186,8 +186,11 @@ const (
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
+	MsgPlanApprovalPrompt        MsgKey = "plan_approval_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
+	MsgApproveAllRevoked         MsgKey = "approve_all_revoked"
+	MsgApproveAllAlreadyOff      MsgKey = "approve_all_already_off"
 	MsgPermissionDenied          MsgKey = "permission_denied_msg"
 	MsgPermissionHint            MsgKey = "permission_hint"
 	MsgQuietOn                   MsgKey = "quiet_on"
@@ -842,6 +845,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⚠️ **権限リクエスト**\n\nエージェントが **%s** を使用しようとしています:\n\n```\n%s\n```\n\n**allow** / **deny** / **allow all**（このセッション中は全て自動許可）で返信してください。",
 		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente quiere usar **%s**:\n\n```\n%s\n```\n\nResponda **allow** / **deny** / **allow all** (omitir futuras solicitudes en esta sesión).",
 	},
+	MsgPlanApprovalPrompt: {
+		LangEnglish:            "📋 **Plan — your approval needed**\n\n%s\n\n———\nReply **allow** to proceed, or **deny** to revise. (A long plan may arrive as several messages.)",
+		LangChinese:            "📋 **计划 — 需要你确认**\n\n%s\n\n———\n回复 **允许** 开始执行，或 **拒绝** 让其修改。（计划较长时可能分成多条消息发出。）",
+		LangTraditionalChinese: "📋 **計畫 — 需要你確認**\n\n%s\n\n———\n回覆 **允許** 開始執行，或 **拒絕** 讓其修改。（計畫較長時可能分成多條訊息發出。）",
+		LangJapanese:           "📋 **プラン — 承認が必要です**\n\n%s\n\n———\n**allow** で実行、**deny** で修正を依頼してください。",
+		LangSpanish:            "📋 **Plan — se requiere tu aprobación**\n\n%s\n\n———\nResponde **allow** para continuar o **deny** para revisar. (Un plan largo puede llegar en varios mensajes.)",
+	},
 	MsgPermissionAllowed: {
 		LangEnglish:            "✅ Allowed, continuing...",
 		LangChinese:            "✅ 已允许，继续执行...",
@@ -855,6 +865,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 本次會話已開啟自動批准，後續權限請求將自動允許。",
 		LangJapanese:           "✅ このセッションの全ての権限を自動承認に設定しました。",
 		LangSpanish:            "✅ Todos los permisos se aprobarán automáticamente en esta sesión.",
+	},
+	MsgApproveAllRevoked: {
+		LangEnglish:            "🔒 Approve-all turned off. Permission and plan approvals will be asked again.",
+		LangChinese:            "🔒 已收回「全部允许」。后续权限与计划审批将重新征求你的确认。",
+		LangTraditionalChinese: "🔒 已收回「全部允許」。後續權限與計畫審批將重新徵求你的確認。",
+		LangJapanese:           "🔒 自動承認を解除しました。今後の権限・プラン承認は再度確認します。",
+		LangSpanish:            "🔒 Aprobación automática desactivada. Se volverá a pedir confirmación para permisos y planes.",
+	},
+	MsgApproveAllAlreadyOff: {
+		LangEnglish:            "ℹ️ Approve-all is not active for this session.",
+		LangChinese:            "ℹ️ 本次会话当前并未开启「全部允许」。",
+		LangTraditionalChinese: "ℹ️ 本次會話目前並未開啟「全部允許」。",
+		LangJapanese:           "ℹ️ このセッションでは自動承認は有効になっていません。",
+		LangSpanish:            "ℹ️ La aprobación automática no está activa en esta sesión.",
 	},
 	MsgPermissionDenied: {
 		LangEnglish:            "❌ Denied. Agent will stop this tool use.",

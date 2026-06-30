@@ -5167,12 +5167,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventPermissionRequest:
 			isAskQuestion := event.ToolName == "AskUserQuestion" && len(event.Questions) > 0
+			// ExitPlanMode is a plan-approval request, not a routine tool use:
+			// always surface it to the user even under approve-all, the same
+			// way AskUserQuestion is exempted.
+			isExitPlanMode := event.ToolName == "ExitPlanMode"
 
 			state.mu.Lock()
 			autoApprove := state.approveAll
 			state.mu.Unlock()
 
-			if autoApprove && !isAskQuestion {
+			if autoApprove && !isAskQuestion && !isExitPlanMode {
 				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
 				_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
 					Behavior:     "allow",
@@ -5219,6 +5223,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+			} else if isExitPlanMode {
+				// Render the plan as markdown (no code fence, no truncation) so its
+				// headers/lists/bold display properly. event.ToolInput is the plan
+				// text itself (see summarizeInput), not raw JSON.
+				prompt := fmt.Sprintf(e.i18n.T(MsgPlanApprovalPrompt), event.ToolInput)
+				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, event.ToolInput)
 			} else {
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
@@ -6017,6 +6027,7 @@ var builtinCommands = []struct {
 	{[]string{"usage", "quota"}, "usage"},
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
+	{[]string{"manual", "noyolo", "askme"}, "manual"},
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
@@ -6051,6 +6062,36 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+}
+
+// cmdManual revokes session-level approve-all ("allow all" / yolo) without
+// restarting or clearing the session. After this, permission and plan
+// approvals are asked again. Aliases: /noyolo, /askme.
+func (e *Engine) cmdManual(p Platform, msg *Message) {
+	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" {
+			e.interactiveMu.Lock()
+			state, ok = e.interactiveStates[found]
+			e.interactiveMu.Unlock()
+		}
+	}
+	if !ok || state == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgApproveAllAlreadyOff))
+		return
+	}
+	state.mu.Lock()
+	wasOn := state.approveAll
+	state.approveAll = false
+	state.mu.Unlock()
+	if wasOn {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgApproveAllRevoked))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgApproveAllAlreadyOff))
+	}
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -6225,6 +6266,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHistory(p, msg, args)
 	case "allow":
 		e.cmdAllow(p, msg, args)
+	case "manual":
+		e.cmdManual(p, msg)
 	case "model":
 		e.cmdModel(p, msg, args)
 	case "reasoning":
