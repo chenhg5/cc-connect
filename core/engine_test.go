@@ -12952,6 +12952,146 @@ func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
 	}
 }
 
+// namedResultAgent is a resultAgent whose Name() matches a registered agent
+// factory, so getOrCreateWorkspaceAgent can spawn workspace instances of it.
+type namedResultAgent struct {
+	resultAgent
+	customName string
+}
+
+func (a *namedResultAgent) Name() string { return a.customName }
+
+// stubThreadParentPlatform implements ReplyContextReconstructor and
+// ThreadParentResolver on top of stubPlatformEngine.
+type stubThreadParentPlatform struct {
+	stubPlatformEngine
+	parents         map[string]string
+	resolvedThreads []string
+}
+
+func (p *stubThreadParentPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	return "thread-rctx", nil
+}
+
+func (p *stubThreadParentPlatform) ResolveThreadParent(channelID string) (string, error) {
+	p.resolvedThreads = append(p.resolvedThreads, channelID)
+	if parent, ok := p.parents[channelID]; ok {
+		return parent, nil
+	}
+	return channelID, nil
+}
+
+// Regression for cron jobs whose stored session key carries a Discord thread
+// ID (thread_isolation rewrites guild session keys to "discord:<threadID>"):
+// workspace bindings are keyed by the parent channel, so ExecuteCronJob must
+// consult ThreadParentResolver instead of silently falling back to the
+// global agent.
+func TestExecuteCronJob_ResolvesThreadParentForWorkspaceBinding(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "guanqizhu")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentName := "cron-thread-parent-agent"
+	wsSession := newResultAgentSession("workspace done")
+	var factoryWorkDirs []string
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		if wd, _ := opts["work_dir"].(string); wd != "" {
+			factoryWorkDirs = append(factoryWorkDirs, wd)
+		}
+		return &namedResultAgent{resultAgent{session: wsSession}, agentName}, nil
+	})
+
+	globalSession := newResultAgentSession("global done")
+	globalAgent := &namedResultAgent{resultAgent{session: globalSession}, agentName}
+
+	platform := &stubThreadParentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+		parents:            map[string]string{"T-thread": "C-parent"},
+	}
+
+	// Session path must live in a temp dir: workspace session managers are
+	// created next to it, and "" would litter the package dir during tests.
+	e := NewEngine("test", globalAgent, []Platform{platform},
+		filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = NewCronScheduler(store)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.workspaceBindings.Bind("project:test", "discord:C-parent", "guanqizhu", wsDir)
+
+	job := &CronJob{
+		ID:         "job-thread",
+		SessionKey: "discord:T-thread",
+		Prompt:     "fix rejected ads",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+
+	if len(platform.resolvedThreads) == 0 || platform.resolvedThreads[0] != "T-thread" {
+		t.Fatalf("ResolveThreadParent calls = %v, want [T-thread]", platform.resolvedThreads)
+	}
+	wantDir := normalizeWorkspacePath(wsDir)
+	if len(factoryWorkDirs) != 1 || factoryWorkDirs[0] != wantDir {
+		t.Fatalf("workspace agent work_dirs = %v, want [%s]", factoryWorkDirs, wantDir)
+	}
+	if len(wsSession.sentPrompts) != 1 || !strings.Contains(wsSession.sentPrompts[0], "fix rejected ads") {
+		t.Fatalf("workspace agent prompts = %#v, want the cron prompt", wsSession.sentPrompts)
+	}
+	if len(globalSession.sentPrompts) != 0 {
+		t.Fatalf("global agent prompts = %#v, want none (job must run on workspace agent)", globalSession.sentPrompts)
+	}
+}
+
+// When the thread parent has no binding either, the job must still run —
+// on the global agent — rather than fail.
+func TestExecuteCronJob_NoBindingFallsBackToGlobalAgent(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+
+	globalSession := newResultAgentSession("global done")
+	globalAgent := &namedResultAgent{resultAgent{session: globalSession}, "cron-no-binding-agent"}
+
+	platform := &stubThreadParentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+
+	e := NewEngine("test", globalAgent, []Platform{platform},
+		filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = NewCronScheduler(store)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+
+	job := &CronJob{
+		ID:         "job-unbound",
+		SessionKey: "discord:T-orphan",
+		Prompt:     "daily report",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+
+	if len(globalSession.sentPrompts) != 1 || !strings.Contains(globalSession.sentPrompts[0], "daily report") {
+		t.Fatalf("global agent prompts = %#v, want the cron prompt", globalSession.sentPrompts)
+	}
+}
+
 func TestExecuteCronJob_ExpandsSlashSkillPrompt(t *testing.T) {
 	tests := []struct {
 		name          string

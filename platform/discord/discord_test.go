@@ -382,6 +382,41 @@ func TestResolveCronReplyTarget_ReusesExistingThreadKey(t *testing.T) {
 	}
 }
 
+func TestResolveThreadParentID(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			switch channelID {
+			case "thread-1":
+				return &discordgo.Channel{ID: "thread-1", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "channel-1"}, nil
+			case "channel-1":
+				return &discordgo.Channel{ID: "channel-1", Type: discordgo.ChannelTypeGuildText}, nil
+			default:
+				return nil, fmt.Errorf("unknown channel %q", channelID)
+			}
+		},
+	}
+
+	parent, err := resolveThreadParentID("thread-1", ops)
+	if err != nil {
+		t.Fatalf("resolveThreadParentID(thread) error = %v", err)
+	}
+	if parent != "channel-1" {
+		t.Fatalf("parent = %q, want channel-1", parent)
+	}
+
+	same, err := resolveThreadParentID("channel-1", ops)
+	if err != nil {
+		t.Fatalf("resolveThreadParentID(channel) error = %v", err)
+	}
+	if same != "channel-1" {
+		t.Fatalf("non-thread channel = %q, want channel-1 unchanged", same)
+	}
+
+	if _, err := resolveThreadParentID("missing", ops); err == nil {
+		t.Fatal("resolveThreadParentID(missing) error = nil, want lookup error")
+	}
+}
+
 func TestSendWithButtons_UsesFollowupComponents(t *testing.T) {
 	requests := make([]string, 0, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1485,9 +1485,35 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		channelID := extractChannelID(sessionKey)
 		if channelID != "" {
 			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
-			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
-				if err == nil {
+			if err == nil && workspace == "" {
+				// The stored key may carry a thread ID (e.g. Discord with
+				// thread_isolation rewrites session keys to "discord:<threadID>")
+				// while workspace bindings are keyed by the parent channel.
+				// Ask the platform for the parent and retry the lookup.
+				if resolver, ok := targetPlatform.(ThreadParentResolver); ok {
+					parent, perr := resolver.ResolveThreadParent(channelID)
+					switch {
+					case perr != nil:
+						slog.Warn("cron: thread parent lookup failed",
+							"job", job.ID, "channel", channelID, "error", perr)
+					case parent != "" && parent != channelID:
+						workspace, _, err = e.resolveWorkspace(targetPlatform, parent)
+					}
+				}
+			}
+			switch {
+			case err != nil:
+				slog.Warn("cron: workspace resolution failed, using global agent",
+					"job", job.ID, "session_key", sessionKey, "error", err)
+			case workspace == "":
+				slog.Warn("cron: no workspace binding for channel, using global agent",
+					"job", job.ID, "session_key", sessionKey, "channel", channelID)
+			default:
+				wsAgent, wsSessions, _, effectiveDir, wcErr := e.workspaceContext(workspace, sessionKey)
+				if wcErr != nil {
+					slog.Warn("cron: workspace agent unavailable, using global agent",
+						"job", job.ID, "workspace", workspace, "error", wcErr)
+				} else {
 					agent = wsAgent
 					sessions = wsSessions
 					workspaceDir = effectiveDir
