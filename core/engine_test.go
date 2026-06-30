@@ -10611,6 +10611,33 @@ func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
 	}
 }
 
+func TestCmdShell_BareCommand_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	// "/shell" with no arguments and no trailing space should show usage.
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/shell",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShell(p, msg, "/shell")
+
+	sent := p.getSent()
+	foundUsage := false
+	for _, s := range sent {
+		if strings.Contains(s, "Usage") {
+			foundUsage = true
+		}
+	}
+	if !foundUsage {
+		t.Fatalf("expected usage message for bare /shell, got %v", sent)
+	}
+}
+
 func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
