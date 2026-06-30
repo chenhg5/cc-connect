@@ -29,6 +29,29 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: strin
   { key: 'weibo', label: 'Weibo (微博)', abbr: 'WB', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
 ];
 
+// Permission mode options per agent type. The values must match the keys
+// emitted by each agent's `normalizeMode` / `PermissionModes` so that
+// "save" round-trips correctly. See:
+//   claudecode: agent/claudecode/claudecode.go:818  (PermissionModes)
+//   codex:      agent/codex/codex.go:129            (normalizeMode)
+const CLAUDECODE_MODE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'default', label: 'default' },
+  { value: 'acceptEdits', label: 'acceptEdits (edit)' },
+  { value: 'plan', label: 'plan' },
+  { value: 'bypassPermissions', label: 'bypassPermissions (yolo)' },
+  { value: 'dontAsk', label: 'dontAsk' },
+];
+const CODEX_MODE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'suggest', label: 'suggest (default)' },
+  { value: 'auto-edit', label: 'auto-edit' },
+  { value: 'full-auto', label: 'full-auto' },
+  { value: 'yolo', label: 'yolo (bypass)' },
+];
+const MODE_OPTIONS_BY_AGENT: Record<string, { value: string; label: string }[]> = {
+  claudecode: CLAUDECODE_MODE_OPTIONS,
+  codex: CODEX_MODE_OPTIONS,
+};
+
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
@@ -83,6 +106,13 @@ export default function ProjectDetail() {
   const navigate = useNavigate();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Permission mode options track the *effective* agent type: a freshly-picked
+  // type overrides the saved one so the dropdown matches what would be saved.
+  // Unknown agent types fall back to ClaudeCode (matches the previous hardcoded
+  // behavior) so this change is non-breaking for other agents.
+  const effectiveAgentType = selectedAgentType || project?.agent_type || '';
+  const modeOptions = MODE_OPTIONS_BY_AGENT[effectiveAgentType] || CLAUDECODE_MODE_OPTIONS;
 
   const handleDeleteProject = async () => {
     if (!name) return;
@@ -519,11 +549,12 @@ export default function ProjectDetail() {
                 onChange={(e) => setAgentMode(e.target.value)}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
-                <option value="default">default</option>
-                <option value="acceptEdits">acceptEdits (edit)</option>
-                <option value="plan">plan</option>
-                <option value="bypassPermissions">bypassPermissions (yolo)</option>
-                <option value="dontAsk">dontAsk</option>
+                {modeOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+                {agentMode && !modeOptions.some((o) => o.value === agentMode) && (
+                  <option value={agentMode}>{agentMode}</option>
+                )}
               </select>
             </div>
           </div>
