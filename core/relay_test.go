@@ -177,11 +177,10 @@ func TestRelayManager_DefaultVisibilityEchoesFullMessages(t *testing.T) {
 		t.Fatalf("source sent = %#v, want full relay request", sourceSent)
 	}
 	wantTargetFull := []string{
-		"[target-bot] ✅ received — implementing: please ask target",
 		"[target-bot] target says long answer",
 	}
-	if len(targetSent) != 2 || targetSent[0] != wantTargetFull[0] || targetSent[1] != wantTargetFull[1] {
-		t.Fatalf("target sent = %#v, want ack then full relay response", targetSent)
+	if len(targetSent) != 1 || targetSent[0] != wantTargetFull[0] {
+		t.Fatalf("target sent = %#v, want full relay response", targetSent)
 	}
 }
 
@@ -223,7 +222,15 @@ func TestRelayManager_InjectsHandbackIntoSourceSession(t *testing.T) {
 		t.Fatal("RelayManager.Send() did not return")
 	}
 
-	history := sourceEngine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
+	var history []HistoryEntry
+	for i := 0; i < 100; i++ {
+		history = sourceEngine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
+		if len(history) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	if len(history) != 1 {
 		t.Fatalf("source history len = %d, want 1", len(history))
 	}
@@ -247,11 +254,10 @@ func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
 		t.Fatalf("source sent = %#v, want summary relay request", sourceSent)
 	}
 	wantTargetSummary := []string{
-		"[target-bot] ✅ received — implementing: please ask target",
 		"[target-bot] relay response ready (23 chars)",
 	}
-	if len(targetSent) != 2 || targetSent[0] != wantTargetSummary[0] || targetSent[1] != wantTargetSummary[1] {
-		t.Fatalf("target sent = %#v, want ack then summary relay response", targetSent)
+	if len(targetSent) != 1 || targetSent[0] != wantTargetSummary[0] {
+		t.Fatalf("target sent = %#v, want summary relay response", targetSent)
 	}
 }
 

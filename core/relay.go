@@ -328,18 +328,6 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
 	}
 
-	// Auto-ack: immediately confirm receipt before work starts so Boss and
-	// the source engine know the relay was picked up.
-	if targetEngine != nil && visibility != RelayVisibilityNone {
-		ackSummary := req.Message
-		if runes := []rune(ackSummary); len(runes) > 80 {
-			ackSummary = string(runes[:80]) + "…"
-		}
-		ackSummary = strings.ReplaceAll(ackSummary, "\n", " ")
-		ack := fmt.Sprintf("[%s] ✅ received — implementing: %s", toName, ackSummary)
-		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, ack)
-	}
-
 	// Execute relay: inject message into target engine and collect response
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
