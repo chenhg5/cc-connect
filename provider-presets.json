@@ -3,6 +3,29 @@
   "updated_at": "2026-06-03",
   "providers": [
     {
+      "name": "novita",
+      "display_name": "Novita AI",
+      "invite_url": "https://novita.ai/settings/key-management",
+      "description": "Novita AI unified model API with OpenAI- and Anthropic-compatible endpoints. Access coding and agentic models including Kimi K2.7 Code, GLM 5.2, MiniMax M3, DeepSeek V4 Pro, and Qwen3 Coder.",
+      "description_zh": "Novita AI 统一模型 API，兼容 OpenAI 与 Anthropic 接口。支持 Kimi K2.7 Code、GLM 5.2、MiniMax M3、DeepSeek V4 Pro、Qwen3 Coder 等 Coding 与 Agentic 模型。",
+      "features": ["Kimi K2.7 Code", "GLM 5.2", "MiniMax M3", "OpenAI/Anthropic"],
+      "tier": 2,
+      "website": "https://novita.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.novita.ai/anthropic",
+          "model": "moonshotai/kimi-k2.7-code",
+          "models": ["moonshotai/kimi-k2.7-code", "zai-org/glm-5.2", "minimax/minimax-m3", "deepseek/deepseek-v4-pro", "qwen/qwen3-coder-next"]
+        },
+        "codex": {
+          "base_url": "https://api.novita.ai/openai/v1",
+          "model": "moonshotai/kimi-k2.7-code",
+          "models": ["moonshotai/kimi-k2.7-code", "zai-org/glm-5.2", "minimax/minimax-m3", "deepseek/deepseek-v4-pro", "qwen/qwen3-coder-next"],
+          "codex_config": { "wire_api": "chat" }
+        }
+      }
+    },
+    {
       "name": "minimax",
       "display_name": "MiniMax",
       "invite_url": "https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link",
