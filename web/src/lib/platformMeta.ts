@@ -2,10 +2,12 @@ export interface FieldDef {
   key: string;
   labelKey: string;
   required?: boolean;
-  type?: 'text' | 'password' | 'number' | 'boolean';
+  type?: 'text' | 'password' | 'number' | 'boolean' | 'select';
   placeholder?: string;
   hintKey?: string;
   group?: 'basic' | 'advanced';
+  options?: string[];
+  showWhen?: Record<string, string[]>;
 }
 
 export interface PlatformMeta {
@@ -101,6 +103,86 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'app_id', labelKey: 'fields.appId', required: true, placeholder: '1234567890' },
       { key: 'app_secret', labelKey: 'fields.appSecret', required: true, type: 'password' },
       { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+    ],
+  },
+  cloud_web: {
+    label: 'Cloud Web (Self-hosted IM)',
+    fields: [
+      {
+        key: 'transport',
+        labelKey: 'fields.transport',
+        required: true,
+        type: 'select',
+        options: ['websocket', 'long_poll', 'gateway'],
+      },
+      { key: 'token', labelKey: 'fields.accessToken', required: true, type: 'password' },
+      {
+        key: 'base_url',
+        labelKey: 'fields.apiBaseUrl',
+        placeholder: 'https://gateway.example.com',
+        showWhen: { transport: ['websocket', 'long_poll', 'gateway'] },
+        hintKey: 'fields.cloudWebBaseUrlHint',
+      },
+      {
+        key: 'ws_url',
+        labelKey: 'fields.wsUrl',
+        placeholder: 'wss://gateway.example.com/cloud-web/ws',
+        group: 'advanced',
+        showWhen: { transport: ['websocket'] },
+        hintKey: 'fields.cloudWebWsHint',
+      },
+      {
+        key: 'long_poll_timeout_ms',
+        labelKey: 'fields.longPollTimeout',
+        type: 'number',
+        placeholder: '30000',
+        group: 'advanced',
+        showWhen: { transport: ['long_poll'] },
+      },
+      {
+        key: 'events_path',
+        labelKey: 'fields.eventsPath',
+        placeholder: '/cloud-web/v1/events',
+        group: 'advanced',
+        showWhen: { transport: ['long_poll'] },
+      },
+      {
+        key: 'send_path',
+        labelKey: 'fields.sendPath',
+        placeholder: '/cloud-web/v1/send',
+        group: 'advanced',
+        showWhen: { transport: ['long_poll', 'gateway'] },
+      },
+      {
+        key: 'listen',
+        labelKey: 'fields.listen',
+        placeholder: ':8099',
+        showWhen: { transport: ['gateway'] },
+      },
+      {
+        key: 'webhook_path',
+        labelKey: 'fields.callbackPath',
+        placeholder: '/cloud-web/webhook',
+        group: 'advanced',
+        showWhen: { transport: ['gateway'] },
+      },
+      {
+        key: 'public_url',
+        labelKey: 'fields.publicUrl',
+        group: 'advanced',
+        showWhen: { transport: ['gateway'] },
+        hintKey: 'fields.publicUrlHint',
+      },
+      {
+        key: 'register_url',
+        labelKey: 'fields.registerUrl',
+        group: 'advanced',
+        showWhen: { transport: ['gateway'] },
+        hintKey: 'fields.registerUrlHint',
+      },
+      { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+      { key: 'share_session_in_channel', labelKey: 'fields.sharedGroupSession', type: 'boolean', group: 'advanced' },
+      { key: 'group_reply_all', labelKey: 'fields.groupReplyAll', type: 'boolean', group: 'advanced' },
     ],
   },
 };
