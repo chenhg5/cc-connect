@@ -15448,4 +15448,29 @@ func TestHandleRelay_SessionLocking(t *testing.T) {
 	if resp != "result text" {
 		t.Errorf("expected response 'result text', got %q", resp)
 	}
+
+	// Verify that different relay sessions do not block each other (no global lock).
+	// Lock the first relay session again.
+	if !session.TryLock() {
+		t.Fatal("failed to lock session manually for different-session test")
+	}
+	defer session.Unlock()
+
+	// Call HandleRelay for a different source session (different platform/chat).
+	// This should run in parallel without blocking.
+	differentSourceKey := "test:chat2:user"
+	differentSess := newControllableSession("relay-session-2")
+	agent.nextSession = differentSess
+	differentSess.events <- Event{Type: EventResult, Content: "different result"}
+
+	diffCtx, diffCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer diffCancel()
+
+	diffResp, err := e.HandleRelay(diffCtx, fromProject, differentSourceKey, "hello")
+	if err != nil {
+		t.Fatalf("expected HandleRelay on different session to succeed, got error: %v", err)
+	}
+	if diffResp != "different result" {
+		t.Errorf("expected response 'different result', got %q", diffResp)
+	}
 }
