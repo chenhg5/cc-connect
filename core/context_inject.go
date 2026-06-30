@@ -168,8 +168,8 @@ func formatGroupContext(entries []aggregatedEntry, n int) string {
 			label = "Jay"
 		}
 		c := e.Content
-		if runes := []rune(c); len(runes) > 500 {
-			c = string(runes[:500]) + "…"
+		if runes := []rune(c); len(runes) > 5000 {
+			c = string(runes[:5000]) + "…"
 		}
 		// strip newlines from content to keep each entry on one line
 		c = strings.ReplaceAll(c, "\n", " ")
