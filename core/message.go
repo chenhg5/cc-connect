@@ -267,4 +267,14 @@ type AgentSessionInfo struct {
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string
+	Cwd          string
+}
+
+// AgentWorkdirInfo summarizes agent sessions grouped by working directory.
+type AgentWorkdirInfo struct {
+	Cwd           string
+	SessionCount  int
+	MessageCount  int
+	ModifiedAt    time.Time
+	LatestSummary string
 }
