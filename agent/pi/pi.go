@@ -20,7 +20,7 @@ func init() {
 	core.RegisterAgent("pi", New)
 }
 
-// Agent drives the pi coding agent CLI (`pi --mode json --no-input`).
+// Agent drives the pi coding agent CLI.
 type Agent struct {
 	cmd          string   // path to pi binary
 	cliExtraArgs []string // extra args from cmd after the binary name
@@ -29,6 +29,7 @@ type Agent struct {
 	model        string
 	mode         string // "default" | "yolo"
 	thinking     string // reasoning effort: off, minimal, low, medium, high, xhigh
+	rpc          bool   // true = --mode rpc (persistent, extension_ui); false = --mode json (one-shot, default)
 	sessionEnv   []string
 	mu           sync.Mutex
 }
@@ -41,6 +42,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	thinking, _ := opts["thinking"].(string)
+	rpc, _ := opts["rpc"].(bool)
 
 	cmd, extraArgs := core.ParseCmdOpts(opts, "pi")
 
@@ -62,6 +65,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:      workDir,
 		model:        model,
 		mode:         mode,
+		thinking:     thinking,
+		rpc:          rpc,
 	}, nil
 }
 
@@ -77,6 +82,28 @@ func normalizeMode(raw string) string {
 func (a *Agent) Name() string           { return "pi" }
 func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Pi" }
+
+// WorkspaceAgentOptions implements core.WorkspaceAgentOptionSnapshotter.
+// It returns the user-configured options that must propagate to per-workspace
+// agents reconstructed by the engine in multi-workspace mode. work_dir is
+// intentionally omitted — the engine sets the target workspace. sessionEnv is
+// also omitted (runtime-only). model and mode are copied by the engine via
+// GetModel/GetMode, so we don't repeat them here.
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	opts := map[string]any{}
+	if a.cmd != "" && a.cmd != "pi" {
+		opts["cmd"] = a.cmd
+	}
+	if a.rpc {
+		opts["rpc"] = true
+	}
+	if a.thinking != "" {
+		opts["thinking"] = a.thinking
+	}
+	return opts
+}
 
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
@@ -114,8 +141,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	rpc := a.rpc
 	a.mu.Unlock()
-	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, sessionID, extraEnv)
+	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, rpc, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
