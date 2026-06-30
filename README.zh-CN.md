@@ -258,6 +258,91 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 </p>
 
 
+## 📋 准备工作
+
+> **请严格按照以下顺序安装** — cc-connect 是本地 AI 编程 Agent 的桥接工具，因此对应的 Agent CLI 必须先安装并完成登录认证，之后 cc-connect 才能正常启动。如果跳过前面的步骤直接启动 cc-connect，进程会直接退出并报错 `claudecode: claude CLI not found in PATH`（其他 Agent 报错类似），Web UI 在 `:9820` 也就无从访问。
+
+### 1️⃣ 安装 AI Agent CLI
+
+选择你要桥接的 Agent，至少装一个。
+
+```bash
+# Claude Code（最常用）
+brew install --cask claude-code            # macOS / Linux Homebrew
+# 或
+npm install -g @anthropic-ai/claude-code   # 任意平台通过 npm
+
+# OpenAI Codex
+npm install -g @openai/codex
+
+# Google Gemini CLI
+npm install -g @google/gemini-cli
+
+# iFlow CLI
+npm install -g @iflow-ai/iflow-cli
+
+# Qoder CLI
+curl -fsSL https://qoder.com/install | bash
+```
+
+**Cursor Agent** 和 **OpenCode** 请参考各自的官方安装文档：
+- Cursor Agent: <https://docs.cursor.com/agent>
+- OpenCode: <https://github.com/opencode-ai/opencode>
+
+确认可执行文件在 `PATH` 中：
+
+```bash
+claude --version       # 或 codex / gemini / opencode / qodercli / cursor-agent ...
+```
+
+### 2️⃣ 完成 Agent 登录认证
+
+每个 Agent 都有自己的登录流程 — 先在终端交互式跑一次，让它把凭据存到你的 home 目录：
+
+```bash
+claude login           # 会在浏览器里打开授权页面
+# 或
+codex login            # / gemini / opencode 等也类似，请参考各自文档
+```
+
+跳过这一步的话，cc-connect 仍能启动，但 Agent 会因为未认证拒绝所有请求。
+
+### 3️⃣ 安装 cc-connect
+
+```bash
+# npm（任意平台）
+npm install -g cc-connect
+
+# Homebrew（macOS / Linux）
+brew install cc-connect
+
+# 也可以从 https://github.com/chenhg5/cc-connect/releases 直接下载二进制
+```
+
+### 4️⃣ 启动 cc-connect 并打开 Web UI
+
+```bash
+cc-connect             # 启动服务；首次运行会自动生成 ~/.cc-connect/config.toml
+```
+
+首次启动时，cc-connect 会打印类似：
+
+```
+Web admin:  http://localhost:9820
+```
+
+在浏览器里打开该地址。如果 `9820` 已被占用，可以传 `--web-port 9821` 或在 `config.toml` 里设置 `web_port`。
+
+> **注意：** `cc-connect web` *只* 打开浏览器和配置界面，并**不会**启动服务本身。仍需要在另一个终端里跑 `cc-connect`。
+
+### 5️⃣ 在 Web UI 里配置平台 Bot Token
+
+在 Web UI 里新建一个项目，然后添加至少一个平台（飞书 / Telegram / Discord / Slack / 钉钉 / 企业微信 / QQ / LINE / 微信 ilink），把该平台开发者后台的 Bot Token 粘贴进去。保存后 cc-connect 会热加载。
+
+至此完成 — 给你的 Bot 发条消息，cc-connect 就会把它转给本地的 Agent。
+
+---
+
 ## 🚀 快速开始
 
 ### 🤖 通过 AI Agent 安装配置（推荐）
