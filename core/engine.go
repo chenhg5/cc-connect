@@ -3928,17 +3928,26 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
-		// After /new or /switch the active session changes, but the old agent
-		// process may still be alive. Reusing it would send messages to the
-		// wrong conversation context.
+		//
+		// Trust the live process as the source of truth. It represents the
+		// user's in-flight conversation — killing it loses context as collateral
+		// damage, which is the worst-case outcome. Disk state (session.AgentSessionID)
+		// is only a cold-start hint: useful when the engine is starting fresh, but
+		// it can be stale or corrupted by earlier bugs (see issue #1470), and the
+		// engine has no reliable way to tell stale from intentional.
+		//
+		// Recycle is now strictly bounded to the cold-start case: live is dead
+		// (currentID == "") but disk has an id we can resume from. All other
+		// cases reuse the existing live state, including:
+		//   - Stale disk + alive live (the original bug — disk might be wrong
+		//     from a prior botched turn, live is the real running session)
+		//   - /new done correctly — cleanupInteractiveState (called by /new)
+		//     removes the state from the map entirely, so we never reach this
+		//     branch; the next message hits the spawn path below.
+		//   - /switch / /fork — same cleanup path.
 		wantID := session.GetAgentSessionID()
 		currentID := state.agentSession.CurrentSessionID()
-		// Reuse only when the live process matches what the Session expects:
-		// - IDs match (same Claude session), or
-		// - the process has not reported an ID yet (startup; empty want is OK).
-		// If wantID is empty (/new, cleared session) but the process already has
-		// a concrete ID, reusing would keep --resume context — recycle (#238).
-		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		needRecycle := currentID == "" && wantID != ""
 		if !needRecycle {
 			return state
 		}
