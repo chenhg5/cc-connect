@@ -7122,6 +7122,45 @@ func TestSessionMismatch_KeepsLiveWhenDiskCleared(t *testing.T) {
 	}
 }
 
+// TestSessionMismatch_RecyclesColdStartWhenLiveHasNoId verifies the
+// remaining case where needRecycle fires: the live process is alive
+// (Alive() guard above) but hasn't reported a session id yet
+// (currentID == ""), while disk has a session to resume from. This is
+// a narrow race during agent startup — get_state returned before the
+// live id was reported. Recycle here lets the new process use the
+// disk's session, which would otherwise be ignored.
+func TestSessionMismatch_RecyclesColdStartWhenLiveHasNoId(t *testing.T) {
+	newSess := newControllableSession("disk-id") // matches disk so writeback is a no-op
+	agent := &controllableAgent{nextSession: newSess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	liveSess := newControllableSession("") // alive, but no id yet
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: liveSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	session := &Session{AgentSessionID: "disk-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	if state.agentSession == liveSess {
+		t.Fatal("expected live agent to be replaced when it has no session id but disk has one")
+	}
+	if state.agentSession != newSess {
+		t.Fatalf("expected new agent session from StartSession; got %p, want %p", state.agentSession, newSess)
+	}
+	select {
+	case <-liveSess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("id-less live agent was not closed during cold-start recycle")
+	}
+}
+
 // TestSessionMismatch_ReusesWhenIDsMatch verifies that getOrCreateInteractiveStateWith
 // returns the existing state when agent session IDs match (no unnecessary recycling).
 func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
