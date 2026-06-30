@@ -2009,3 +2009,111 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// CUJ-G7 · Custom prompt command keeps active session on disk-vs-live mismatch
+//
+// SPOTLIGHT: This is the user-perspective regression test for issue #1470.
+// The user reported that ANY prompt-typed custom command (their /cmp, but
+// also /skill, /timer reusing session, cron, heartbeat) silently landed in
+// the wrong session when disk state was stale or corrupted. The engine
+// killed the live agent process holding the user's in-flight conversation
+// and spawned a fresh one against disk, producing a "Nothing to compact
+// (session too small)" failure for commands that needed context.
+//
+// This test asserts that on a custom command prompt:
+//
+//   1. The live agent process is NOT recycled — exactly one agent session
+//      is spawned across the whole journey.
+//   2. The custom command's prompt reaches the SAME live session, not a
+//      newly spawned one.
+//   3. The Session the user is chatting in remains the one that handles
+//      the command (matters in multi-workspace mode, where executeCustomCommand
+//      previously looked up the wrong SessionManager key — see fix commit
+//      "fix(core): route custom commands and skills to user's chat session").
+//
+// The user perspective matters here because per-function unit tests passed
+// for years while every custom command prompt silently broke in production.
+// ===========================================================================
+
+func TestCUJ_G7_CustomCommandKeepsActiveSession(t *testing.T) {
+	env := newCUJEnv(t)
+	// Register a prompt-typed custom command so handleCommand routes through
+	// executeCustomCommand → processInteractiveMessageWith → getOrCreate-
+	// InteractiveStateWith (where the mismatch-recycle decision lives).
+	env.engine.commands.Add("do-something", "trigger a custom prompt", "compact me", "", "", "test")
+	key := "test:alice"
+
+	// 1. User starts a normal conversation — the live agent session is
+	// spawned, and the Session gets an agent_session_id set.
+	env.userSends("alice", "regular chat message")
+	env.waitFor("first reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	if len(env.agent.sessions) != 1 {
+		t.Fatalf("setup: expected exactly 1 live agent session after first chat, got %d",
+			len(env.agent.sessions))
+	}
+	liveSession := env.agent.sessions[0]
+	originalSession := env.activeSession(key)
+	if originalSession == nil {
+		t.Fatal("setup: expected an active Session after first chat")
+	}
+
+	// 2. Simulate disk-state corruption: change the Session's agent_session_id
+	// to something that does NOT match the live agent's reported id. This is
+	// what earlier bugs (and crashes between two partial writes) can do to
+	// the on-disk sessions.json.
+	originalSession.SetAgentSessionID("stale-corrupted-id", "cuj")
+
+	// 3. User triggers a custom prompt command.
+	env.plat.clearSent()
+	env.userSends("alice", "/do-something")
+	env.waitFor("custom command reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+
+	// 4. The live agent session must NOT have been recycled — exactly one
+	// agent session should exist across the whole journey. The OLD engine
+	// would have killed live and spawned a second one here, which is the
+	// bug #1470 ping-pong.
+	if len(env.agent.sessions) != 1 {
+		t.Fatalf("expected live agent to be preserved (still 1 spawned); got %d. "+
+			"This is issue #1470: a custom prompt command must not recycle the "+
+			"live process when disk and live disagree on the session id.",
+			len(env.agent.sessions))
+	}
+	if !liveSession.Alive() {
+		t.Fatal("expected the original live session to still be alive after the custom command")
+	}
+
+	// 5. The custom command's prompt must reach the LIVE session, not a new
+	// one. If the engine had recycled, the new session would receive the
+	// prompt and the live one would only have the original chat message.
+	prompts := liveSession.getSentPrompts()
+	sawChatPrompt := false
+	sawCommandPrompt := false
+	for _, p := range prompts {
+		if strings.Contains(p, "regular chat message") {
+			sawChatPrompt = true
+		}
+		if strings.Contains(p, "compact me") {
+			sawCommandPrompt = true
+		}
+	}
+	if !sawChatPrompt {
+		t.Errorf("live session did not receive the original chat prompt. Prompts: %v", prompts)
+	}
+	if !sawCommandPrompt {
+		t.Errorf("custom command prompt did not reach the live session. "+
+			"Prompts: %v — the engine either recycled live or routed the "+
+			"command to a different session.", prompts)
+	}
+
+	// 6. After the custom command, the user's active Session should still
+	// be the same one (the live-session id stayed put).
+	if env.activeSession(key).ID != originalSession.ID {
+		t.Errorf("active session changed unexpectedly after custom command: was %s, now %s",
+			originalSession.ID, env.activeSession(key).ID)
+	}
+}
+
