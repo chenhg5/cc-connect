@@ -526,3 +526,138 @@ func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
 		t.Fatalf("expected no global relay session, got %q", got)
 	}
 }
+
+type msgRecordingAgentSession struct {
+	stubAgentSession
+	receivedPrompts []string
+	events          chan Event
+}
+
+func (s *msgRecordingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.receivedPrompts = append(s.receivedPrompts, prompt)
+	go func() {
+		s.events <- Event{Type: EventResult, Content: "ok", Done: true}
+	}()
+	return nil
+}
+
+func (s *msgRecordingAgentSession) Events() <-chan Event {
+	return s.events
+}
+
+type msgRecordingAgent struct {
+	stubAgent
+	nextSession *msgRecordingAgentSession
+}
+
+func (a *msgRecordingAgent) StartSession(ctx context.Context, sessionID string) (AgentSession, error) {
+	return a.nextSession, nil
+}
+
+func TestRelayManager_ProactiveDeathNotifications(t *testing.T) {
+	// 1. Process Crash Case
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	sourceSession := &msgRecordingAgentSession{events: make(chan Event, 10)}
+	sourceEngine := NewEngine("source", &msgRecordingAgent{nextSession: sourceSession}, []Platform{sourcePlatform}, "", LangEnglish)
+
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{
+		"source": "source-bot",
+		"target": "target-bot",
+	})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:user-1",
+			Message:    "crash me",
+		})
+		done <- err
+	}()
+
+	targetSession.events <- Event{Type: EventError, Error: fmt.Errorf("process terminated unexpectedly")}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error from crashed target")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RelayManager.Send() did not return")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if len(sourceSession.receivedPrompts) != 1 {
+		t.Fatalf("expected 1 proactive notification injected, got %d", len(sourceSession.receivedPrompts))
+	}
+	wantMsg := "[CC-RELAY-HANDBACK]\nFrom: target-bot\n\ntarget-bot process has crashed. It will be restarted on next message, but context was lost."
+	if sourceSession.receivedPrompts[0] != wantMsg {
+		t.Errorf("got prompt %q, want %q", sourceSession.receivedPrompts[0], wantMsg)
+	}
+
+	// 2. Timeout Case
+	sourceSession2 := &msgRecordingAgentSession{events: make(chan Event, 10)}
+	sourceEngine2 := NewEngine("source", &msgRecordingAgent{nextSession: sourceSession2}, []Platform{sourcePlatform}, "", LangEnglish)
+
+	targetSession2 := newControllableSession("target-session2")
+	targetEngine2 := NewEngine("target", &controllableAgent{nextSession: targetSession2}, []Platform{targetPlatform}, "", LangEnglish)
+
+	rm2 := NewRelayManager("")
+	rm2.SetTimeout(10 * time.Millisecond) // short timeout
+	rm2.Bind("feishu", "chat-1", map[string]string{
+		"source": "source-bot",
+		"target": "target-bot",
+	})
+	rm2.RegisterEngine("source", sourceEngine2)
+	rm2.RegisterEngine("target", targetEngine2)
+
+	done2 := make(chan error, 1)
+	go func() {
+		_, err := rm2.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:user-1",
+			Message:    "timeout me",
+		})
+		done2 <- err
+	}()
+
+	select {
+	case err := <-done2:
+		if err == nil {
+			t.Fatal("expected timeout error")
+		}
+	case <-time.After(50 * time.Millisecond):
+		targetSession2.events <- Event{Type: EventThinking, Content: "unblock"}
+		targetSession2.events <- Event{Type: EventResult, Content: "unblock", Done: true}
+
+		select {
+		case err := <-done2:
+			if err == nil {
+				t.Fatal("expected timeout error")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Relay2 did not return even after unblocking")
+		}
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if len(sourceSession2.receivedPrompts) != 1 {
+		t.Fatalf("expected 1 proactive notification injected for timeout, got %d", len(sourceSession2.receivedPrompts))
+	}
+	wantMsgTimeout := "[CC-RELAY-HANDBACK]\nFrom: target-bot\n\ntarget-bot appears to be hung (session locked beyond timeout). You can decide to wait, retry, or escalate."
+	if sourceSession2.receivedPrompts[0] != wantMsgTimeout {
+		t.Errorf("got timeout prompt %q, want %q", sourceSession2.receivedPrompts[0], wantMsgTimeout)
+	}
+}

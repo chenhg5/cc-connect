@@ -346,7 +346,23 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 
 	response, err := targetEngine.HandleRelay(relayCtx, req.From, req.SessionKey, req.Message)
 	if err != nil {
+		var notification string
+		isTimeout := false
 		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out") || strings.Contains(err.Error(), "deadline exceeded") {
+			isTimeout = true
+			notification = fmt.Sprintf("%s appears to be hung (session locked beyond timeout). You can decide to wait, retry, or escalate.", toName)
+		} else {
+			notification = fmt.Sprintf("%s process has crashed. It will be restarted on next message, but context was lost.", toName)
+		}
+
+		if sourceEngine != nil && strings.TrimSpace(req.SessionKey) != "" {
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				_ = sourceEngine.InjectRelayHandback(context.Background(), platform, req.SessionKey, toName, notification)
+			}()
+		}
+
+		if isTimeout {
 			return nil, fmt.Errorf("relay execution timed out. The target bot %q might be busy, hung, or working slowly. You can query its daemon-internal status by running: cc-connect status --project %s", req.To, req.To)
 		}
 		return nil, fmt.Errorf("relay: %w", err)
