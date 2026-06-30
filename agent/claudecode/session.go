@@ -53,6 +53,12 @@ type claudeSession struct {
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
 
+	// hardRecoveryNeeded is set when Claude Code emits a structurally broken
+	// turn (for example max_tokens truncates a tool_use JSON payload). Once set,
+	// the engine should reset/fresh-start the session rather than keep feeding
+	// prompts to the poisoned stream.
+	hardRecoveryNeeded atomic.Bool
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -612,6 +618,70 @@ func resultSubtype(raw map[string]any) string {
 	return ""
 }
 
+func resultStopReason(raw map[string]any) string {
+	if s, ok := raw["stop_reason"].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func hasUnparsedToolInput(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			if k == "__unparsedToolInput" {
+				return true
+			}
+			if hasUnparsedToolInput(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range x {
+			if hasUnparsedToolInput(val) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isTruncatedToolInputError(text string) bool {
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "InputValidationError") &&
+		(strings.Contains(text, "could not be parsed as JSON") ||
+			strings.Contains(text, "truncated output") ||
+			strings.Contains(text, "__unparsedToolInput"))
+}
+
+func isNoVisibleOutputMetaPrompt(raw map[string]any, msg map[string]any) bool {
+	isMeta, _ := raw["isMeta"].(bool)
+	if !isMeta {
+		return false
+	}
+	content, _ := msg["content"].(string)
+	return strings.Contains(content, "Your previous response had no visible output") ||
+		strings.Contains(content, "Please continue and produce a user-visible response")
+}
+
+func (cs *claudeSession) emitUnhealthyResult(reason string) {
+	evt := core.Event{
+		Type:           core.EventResult,
+		Done:           true,
+		AgentUnhealthy: true,
+		SessionID:      cs.CurrentSessionID(),
+		Metadata: map[string]any{
+			"hard_recovery": reason,
+		},
+	}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
 func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
@@ -703,6 +773,10 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		switch contentType {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
+			if hasUnparsedToolInput(item["input"]) {
+				cs.hardRecoveryNeeded.Store(true)
+				slog.Warn("claudeSession: detected unparsed/truncated tool input", "tool", toolName)
+			}
 			if toolName == "AskUserQuestion" {
 				continue
 			}
@@ -740,6 +814,11 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 	if !ok {
 		return
 	}
+	if isNoVisibleOutputMetaPrompt(raw, msg) {
+		slog.Warn("claudeSession: detected no-visible-output meta prompt; marking session unhealthy")
+		cs.emitUnhealthyResult("no_visible_output_meta")
+		return
+	}
 	contentArr, ok := msg["content"].([]any)
 	if !ok {
 		return
@@ -769,6 +848,10 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			}
 			if isError {
 				slog.Debug("claudeSession: tool error", "content", result)
+				if isTruncatedToolInputError(result) {
+					cs.hardRecoveryNeeded.Store(true)
+					slog.Warn("claudeSession: detected truncated tool input validation error")
+				}
 			}
 			success := !isError
 			code := 0
@@ -836,15 +919,36 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.usageMu.Unlock()
 	}
 
+	stopReason := resultStopReason(raw)
+	metadata := map[string]any{}
+	if stopReason != "" {
+		metadata["stop_reason"] = stopReason
+	}
+	agentUnhealthy := false
+	if !isCompaction && cs.hardRecoveryNeeded.Load() {
+		agentUnhealthy = true
+		metadata["hard_recovery"] = "truncated_tool_call"
+	}
+	if !isCompaction && strings.TrimSpace(content) == "" && inputTokens == 0 && outputTokens == 0 {
+		agentUnhealthy = true
+		metadata["hard_recovery"] = "zero_token_empty_result"
+	}
+	if len(metadata) == 0 {
+		metadata = nil
+	}
+
 	evt := core.Event{
 		Type:                     core.EventResult,
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
+		StopReason:               stopReason,
+		AgentUnhealthy:           agentUnhealthy,
 		Done:                     !isCompaction,
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
+		Metadata:                 metadata,
 	}
 	select {
 	case cs.events <- evt:
@@ -941,6 +1045,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 // Files are saved to local temp files and referenced in the text prompt
 // so Claude Code can read them with its built-in tools.
 func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	cs.hardRecoveryNeeded.Store(false)
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}

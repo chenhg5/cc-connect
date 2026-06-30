@@ -85,6 +85,135 @@ const (
 	recalledStopLockWait       = 2 * time.Second
 )
 
+const maxAutoContinueAttempts = 5
+
+func isMaxTokensStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max_token", "max-tokens", "max token", "output_limit":
+		return true
+	default:
+		return false
+	}
+}
+
+func autoContinuePrompt(lang Language) string {
+	if lang == LangChinese || lang == LangTraditionalChinese || lang == LangJapanese {
+		return "上一条回复因为 max_tokens 被截断。请从中断处继续，不要重复已经输出的内容。如果任务尚未完成，继续执行；如果已经完成，只做简短收尾。避免输出长篇解释，优先继续执行必要步骤。"
+	}
+	return "Your previous response was truncated by max_tokens. Continue exactly from where it stopped without repeating already delivered content. If the task is not finished, keep executing; if it is finished, provide only a brief wrap-up. Avoid long explanations and focus on necessary next steps."
+}
+
+const (
+	recoveryHistoryEntries = 30
+	recoveryEntryMaxRunes  = 1000
+	recoveryTotalMaxRunes  = 16000
+)
+
+func (e *Engine) recoveryBaseDir() string {
+	if e.dataDir != "" {
+		return filepath.Join(e.dataDir, "recovery")
+	}
+	if e.sessions != nil && e.sessions.StorePath() != "" {
+		return filepath.Join(filepath.Dir(e.sessions.StorePath()), "recovery")
+	}
+	return ""
+}
+
+func (e *Engine) recoveryHandoffPath(sessionKey string) string {
+	base := e.recoveryBaseDir()
+	if base == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(e.name + "\\x00" + sessionKey))
+	return filepath.Join(base, fmt.Sprintf("%s-%s.md", e.name, hex.EncodeToString(h[:8])))
+}
+
+func (e *Engine) buildAgentRecoveryHandoff(sessionKey string, session *Session, event Event) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Recovery handoff\n\n")
+	fmt.Fprintf(&b, "A previous Claude Code agent session was reset because cc-connect detected a corrupted or unhealthy stream. Use this handoff to continue the user's task in the fresh session without replaying the broken transcript.\n\n")
+	fmt.Fprintf(&b, "## Reset reason\n\n")
+	fmt.Fprintf(&b, "- Project: %s\n", e.name)
+	fmt.Fprintf(&b, "- cc-connect session key: %s\n", sessionKey)
+	fmt.Fprintf(&b, "- Previous agent session: %s\n", session.GetAgentSessionID())
+	if event.StopReason != "" {
+		fmt.Fprintf(&b, "- stop_reason: %s\n", event.StopReason)
+	}
+	if event.Metadata != nil {
+		fmt.Fprintf(&b, "- metadata: %v\n", event.Metadata)
+	}
+	fmt.Fprintf(&b, "- tokens: input=%d output=%d cache_read=%d cache_creation=%d\n", event.InputTokens, event.OutputTokens, event.CacheReadInputTokens, event.CacheCreationInputTokens)
+	fmt.Fprintf(&b, "\n## How to continue\n\n")
+	fmt.Fprintf(&b, "1. Continue the user's task from the latest useful state.\n")
+	fmt.Fprintf(&b, "2. Inspect project files, progress notes, manifests, logs, and generated artifacts before repeating work.\n")
+	fmt.Fprintf(&b, "3. Do not assume the previous Claude Code chat context is still available.\n")
+	fmt.Fprintf(&b, "4. Avoid long inline Bash heredocs or huge tool inputs; write large code/data to files first.\n")
+	fmt.Fprintf(&b, "5. Keep the next user-visible reply concise and mention if you had to recover from a reset.\n")
+	fmt.Fprintf(&b, "\n## Recent cc-connect conversation history\n\n")
+	history := session.GetHistory(recoveryHistoryEntries)
+	if len(history) == 0 {
+		fmt.Fprintf(&b, "(No cc-connect history was available.)\n")
+	} else {
+		for _, h := range history {
+			role := h.Role
+			if role == "" {
+				role = "unknown"
+			}
+			fmt.Fprintf(&b, "### %s at %s\n\n%s\n\n", role, h.Timestamp.Format(time.RFC3339), truncateRunes(h.Content, recoveryEntryMaxRunes))
+		}
+	}
+	return truncateRunes(b.String(), recoveryTotalMaxRunes)
+}
+
+func (e *Engine) saveAgentRecoveryHandoff(sessionKey string, session *Session, event Event) {
+	if session == nil {
+		return
+	}
+	path := e.recoveryHandoffPath(sessionKey)
+	if path == "" {
+		slog.Warn("recovery handoff: no data dir/store path configured, skipping", "session", sessionKey)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		slog.Warn("recovery handoff: mkdir failed", "path", path, "error", err)
+		return
+	}
+	content := e.buildAgentRecoveryHandoff(sessionKey, session, event)
+	if err := AtomicWriteFile(path, []byte(content), 0o644); err != nil {
+		slog.Warn("recovery handoff: write failed", "path", path, "error", err)
+		return
+	}
+	slog.Info("recovery handoff saved", "session", sessionKey, "path", path)
+}
+
+func (e *Engine) consumeAgentRecoveryHandoff(sessionKey string) string {
+	path := e.recoveryHandoffPath(sessionKey)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("recovery handoff: read failed", "path", path, "error", err)
+		}
+		return ""
+	}
+	if err := os.Remove(path); err != nil {
+		slog.Warn("recovery handoff: remove after consume failed", "path", path, "error", err)
+		return ""
+	}
+	slog.Info("recovery handoff consumed", "session", sessionKey, "path", path)
+	return strings.TrimSpace(string(data))
+}
+
+func prependRecoveryHandoff(prompt, handoff string) string {
+	handoff = strings.TrimSpace(handoff)
+	if handoff == "" {
+		return prompt
+	}
+	return handoff + "\n\n---\n\n# Current user message\n\n" + prompt
+}
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -3614,6 +3743,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// on the turn completing without a process crash).
 	sessions.Save()
 
+	// If a previous agent session was reset as unhealthy, consume its handoff
+	// before getOrCreateInteractiveStateWith starts a fresh agent and stores the
+	// new agent_session_id on this Session.
+	recoveryHandoff := ""
+	if session.GetAgentSessionID() == "" {
+		recoveryHandoff = e.consumeAgentRecoveryHandoff(interactiveKey)
+	}
+
 	// Use the agent override when available (multi-workspace mode)
 	var agentOverride Agent
 	if agent != e.agent {
@@ -3699,6 +3836,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	promptContent = prependRecoveryHandoff(promptContent, recoveryHandoff)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -4418,6 +4556,26 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventResult:
+				if event.AgentUnhealthy {
+					slog.Warn("unsolicited agent session marked unhealthy; resetting",
+						"session", sessionKey,
+						"agent_session", session.GetAgentSessionID(),
+						"stop_reason", event.StopReason,
+						"metadata", event.Metadata,
+						"input_tokens", event.InputTokens,
+						"output_tokens", event.OutputTokens,
+					)
+					state.mu.Lock()
+					state.eventsNeedResync = true
+					state.mu.Unlock()
+					e.saveAgentRecoveryHandoff(sessionKey, session, event)
+					session.SetAgentSessionID("", e.agent.Name())
+					sessions.Save()
+					e.send(p, replyCtx, e.i18n.T(MsgAgentSessionResetAfterBadOutput))
+					go e.cleanupInteractiveState(sessionKey, state)
+					return
+				}
+
 				fullResponse := event.Content
 				if fullResponse == "" && len(textParts) > 0 {
 					fullResponse = strings.Join(textParts, "")
@@ -4542,6 +4700,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var partialText string
 	triggerAutoCompress := false
 	pendingSend := sendDone
+	autoContinueAttempts := 0
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -5260,6 +5419,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 				continue
 			}
+			if event.AgentUnhealthy {
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				slog.Warn("agent session marked unhealthy; resetting instead of reusing",
+					"session", session.ID,
+					"agent_session", session.GetAgentSessionID(),
+					"stop_reason", event.StopReason,
+					"metadata", event.Metadata,
+					"input_tokens", event.InputTokens,
+					"output_tokens", event.OutputTokens,
+				)
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				e.saveAgentRecoveryHandoff(sessionKey, session, event)
+				session.SetAgentSessionID("", e.agent.Name())
+				sessions.Save()
+				e.cleanupInteractiveState(sessionKey, state)
+				e.send(p, replyCtx, e.i18n.T(MsgAgentSessionResetAfterBadOutput))
+				return
+			}
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
@@ -5567,6 +5747,53 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			} else {
 				slog.Debug("tts: not enabled", "tts_nil", e.tts == nil, "enabled", e.tts != nil && e.tts.Enabled, "tts_obj_nil", e.tts == nil || e.tts.TTS == nil)
+			}
+
+			// Same-session auto-continue for plain max_tokens truncation. Hard
+			// tool-call corruption is handled above by resetting the session.
+			if isMaxTokensStopReason(event.StopReason) {
+				if autoContinueAttempts < maxAutoContinueAttempts {
+					autoContinueAttempts++
+					if autoContinueAttempts == 1 {
+						e.send(p, replyCtx, e.i18n.T(MsgAutoContinueStarted))
+					}
+					if pendingSend != nil {
+						if err := <-pendingSend; err != nil {
+							slog.Debug("async send error before auto-continue", "error", err)
+						}
+					}
+					nextSend := make(chan error, 1)
+					prompt := autoContinuePrompt(e.i18n.CurrentLang())
+					go func() {
+						nextSend <- state.agentSession.Send(prompt, nil, nil)
+					}()
+					pendingSend = nextSend
+
+					// Reset per-turn rendering/accounting state for the continuation.
+					msgID = ""
+					textParts = nil
+					segmentStart = 0
+					silentHold = false
+					toolCount = 0
+					toolSteps = nil
+					partialText = ""
+					lastRichCardUpdate = time.Time{}
+					lastRichCardLen = 0
+					cardMessageID = nil
+					cardToolCalls = nil
+					cardThinkingText = ""
+					cardAnswerText.Reset()
+					turnStart = time.Now()
+					waitStart = turnStart
+					firstEventLogged = false
+					sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
+					cp = newCompactProgressWriter(e.ctx, p, replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+					slog.Info("auto-continuing after max_tokens", "session", session.ID, "attempt", autoContinueAttempts)
+					continue
+				}
+				e.send(p, replyCtx, e.i18n.T(MsgAutoContinueLimit))
+			} else {
+				autoContinueAttempts = 0
 			}
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
