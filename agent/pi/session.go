@@ -512,6 +512,47 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			}
 		}
 
+	case "compaction_start":
+		// Pi fires this when ctx.compact() begins (slash command or
+		// turn_end threshold). The active extension typically notifies the
+		// user directly, so we don't surface a platform-visible event here
+		// — just stop logging it as "unrecognized event type" in DEBUG.
+		slog.Debug("piSession: compaction started")
+
+	case "compaction_end":
+		// Pi fires this when ctx.compact() finishes. ctx.compact() is
+		// fire-and-forget: it never sends agent_end, because compaction
+		// runs out-of-band with the agent loop. Extensions that drive
+		// ctx.compact() (e.g. cc-connect-compact.ts, trigger-compact.ts)
+		// handle their own user feedback via stdout synth events and the
+		// normal slash-command path returns immediately.
+		//
+		// Without an explicit EventResult here, two scenarios hang
+		// forever in processInteractiveEvents:
+		//   (a) trigger-compact: handler returns without await, so no
+		//       synthetic agent_end ever lands on stdout.
+		//   (b) cc-connect-compact: an extension that crashes, races a
+		//       kill, or simply omits the finally-synthesized agent_end
+		//       leaves the turn open.
+		//
+		// JSON mode (json one-shot) is unaffected — process exit is the
+		// turn-end marker there, and compaction_end has no special meaning.
+		//
+		// Duplicate EventResult (when both agent_end and compaction_end
+		// close the same turn) is safe: processInteractiveEvents only
+		// sends a message to the platform when fullResponse has accumulated
+		// text in the second pass, which is empty for out-of-band
+		// compactions. The only side effect is a redundant
+		// ws.BeginTurn/EndTurn pair, accepted as belt-and-suspenders.
+		if s.rpc {
+			sid := s.CurrentSessionID()
+			evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
+
 	case "extension_ui_request":
 		if s.rpc {
 			s.handleExtensionUIRequest(raw)
