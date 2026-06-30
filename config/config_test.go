@@ -1684,6 +1684,33 @@ func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesAgentSessionIdleTimeoutMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithAgentSessionIdleTimeoutFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].AgentSessionIdleTimeoutMins == nil {
+		t.Fatal("expected agent_session_idle_timeout_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].AgentSessionIdleTimeoutMins; got != 45 {
+		t.Fatalf("agent_session_idle_timeout_mins = %d, want 45", got)
+	}
+}
+
+func TestLoad_RejectsNegativeAgentSessionIdleTimeoutMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeAgentSessionIdleTimeoutFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative agent_session_idle_timeout_mins")
+	}
+	if !strings.Contains(err.Error(), "agent_session_idle_timeout_mins") {
+		t.Fatalf("error = %q, want agent_session_idle_timeout_mins validation", err.Error())
+	}
+}
+
 func TestLoad_ParsesRunAsUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("run_as_user is only supported on Linux/macOS")
@@ -2099,6 +2126,42 @@ const projectWithNegativeResetOnIdleFixture = `
 [[projects]]
 name = "beta"
 reset_on_idle_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithAgentSessionIdleTimeoutFixture = `
+[[projects]]
+name = "beta"
+agent_session_idle_timeout_mins = 45
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeAgentSessionIdleTimeoutFixture = `
+[[projects]]
+name = "beta"
+agent_session_idle_timeout_mins = -1
 
 [projects.agent]
 type = "codex"
