@@ -1,7 +1,6 @@
 package opencode
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -195,26 +194,19 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	defer s.wg.Done()
 	defer func() { _ = cmd.Wait() }()
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
+	err := core.ReadLineLoop(stdout, func(line []byte) error {
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("opencodeSession: non-JSON line", "line", line)
-			continue
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("opencodeSession: non-JSON line", "line", string(line))
+			return nil
 		}
 
 		s.handleEvent(raw)
-	}
+		return nil
+	})
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("opencodeSession: scanner error", "error", err)
+	if err != nil {
+		slog.Error("opencodeSession: readLoop error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
 		case s.events <- evt:

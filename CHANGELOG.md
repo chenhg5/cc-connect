@@ -96,6 +96,9 @@ file send/receive via OneBot, WeCom `SendFile` (WebSocket), Feishu audio/video m
 `/timer` and `/cancel` commands, and broad platform fixes across Telegram, Discord, DingTalk, Feishu,
 WeCom, WeiXin, Cursor, OpenCode, Pi, and Codex. See `changelogs/v1.3.3-beta.5.md` for the full list.
 
+### Fixed
+- **Agent bridge "bufio.Scanner: token too long"**: when an agent subprocess emitted a single newline-delimited line larger than the scanner buffer (e.g. a multi-MB MCP tool result), the bridge aborted the session with `bufio.ErrTooLong`. All line-oriented agent adapters (claudecode, codex app-server, cursor, gemini, kimi, opencode, pi, qoder) now read stdout via the shared `core.ReadLineLoop` helper, which uses `bufio.Reader.ReadBytes('\n')` with a 10MB cap. Lines over the cap are logged and dropped instead of killing the loop, so subsequent valid lines still reach the engine (#189).
+
 ### New Features
 - **Google Antigravity (`agy`)** agent as a first-class integration (#1123)
 - **GitHub Copilot** agent as a first-class integration (#865)

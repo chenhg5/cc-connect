@@ -1,7 +1,6 @@
 package pi
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -170,29 +169,19 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		}
 	}()
 
-	// Pi's JSON events are small (typically <1KB each). A 10MB Scanner buffer
-	// is more than sufficient — no need for the bufio.Reader approach used by
-	// adapters that may receive very large single-line responses.
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
+	err := core.ReadLineLoop(stdout, func(line []byte) error {
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("piSession: non-JSON line", "line", truncStr(line, 100))
-			continue
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("piSession: non-JSON line", "line", truncStr(string(line), 100))
+			return nil
 		}
 
 		s.handleEvent(raw)
-	}
+		return nil
+	})
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("piSession: scanner error", "error", err)
+	if err != nil {
+		slog.Error("piSession: readLoop error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
 		case s.events <- evt:

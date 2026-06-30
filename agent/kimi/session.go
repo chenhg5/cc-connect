@@ -1,7 +1,6 @@
 package kimi
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -226,36 +225,27 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 		stdout.Close()
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	var scanErr error
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		slog.Debug("kimiSession: raw", "line", truncate(line, 500))
+	scanErr := core.ReadLineLoop(stdout, func(line []byte) error {
+		slog.Debug("kimiSession: raw", "line", truncate(string(line), 500))
 
 		// Kimi prints a non-JSON line at the end: "To resume this session: kimi -r <id>"
-		if strings.HasPrefix(line, "To resume this session:") {
-			if id := extractResumeSessionID(line); id != "" {
+		if bytes.HasPrefix(line, []byte("To resume this session:")) {
+			if id := extractResumeSessionID(string(line)); id != "" {
 				ks.sessionID.Store(id)
 				slog.Debug("kimiSession: session id updated", "session_id", id)
 			}
-			continue
+			return nil
 		}
 
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("kimiSession: non-JSON line", "line", line)
-			continue
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("kimiSession: non-JSON line", "line", string(line))
+			return nil
 		}
 
 		ks.handleEvent(raw)
-	}
-	scanErr = scanner.Err()
+		return nil
+	})
 
 	// Wait for process exit before sending any terminal event so the engine
 	// never sees EventError after EventResult from the same turn.
@@ -275,7 +265,7 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	}
 
 	if scanErr != nil {
-		slog.Error("kimiSession: scanner error", "error", scanErr)
+		slog.Error("kimiSession: readLoop error", "error", scanErr)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)}
 		select {
 		case ks.events <- evt:
