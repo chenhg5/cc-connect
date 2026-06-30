@@ -6934,7 +6934,7 @@ func TestCleanupCAS_SkipsWhenStateReplaced(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	// Old goroutine calls cleanup with the OLD state pointer — should be skipped.
-	e.cleanupInteractiveState(key, oldState)
+	e.cleanupInteractiveStateIfCurrent(key, oldState)
 
 	e.interactiveMu.Lock()
 	current := e.interactiveStates[key]
@@ -6957,7 +6957,7 @@ func TestCleanupCAS_DeletesWhenStateMatches(t *testing.T) {
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
-	e.cleanupInteractiveState(key, state)
+	e.cleanupInteractiveStateIfCurrent(key, state)
 
 	e.interactiveMu.Lock()
 	current := e.interactiveStates[key]
@@ -7034,6 +7034,170 @@ func TestCleanupCAS_ConcurrentUnconditionalCloseOnce(t *testing.T) {
 		t.Fatal("expected state to be deleted after cleanup")
 	}
 	e.interactiveMu.Unlock()
+}
+
+func TestCleanupIfCurrent_NilExpectedDoesNotDeleteNewState(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	var expected *interactiveState
+	newState := &interactiveState{agentSession: newControllableSession("new")}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = newState
+	e.interactiveMu.Unlock()
+
+	e.cleanupInteractiveStateIfCurrent(key, expected)
+
+	e.interactiveMu.Lock()
+	got := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if got != newState {
+		t.Fatal("nil-expected cleanup deleted a newly created state")
+	}
+}
+
+func TestCmdNew_SwitchesActiveBeforeBlockingCleanup(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "test:ch:user1"
+
+	old := e.sessions.GetOrCreateActive(key)
+	oldID := old.ID
+	old.SetAgentSessionID("old-agent", agent.Name())
+
+	blocker := newBlockingCloseSession("old-agent")
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: blocker}
+	e.interactiveMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.cmdNew(p, &Message{SessionKey: key, Content: "/new", ReplyCtx: "ctx"}, nil)
+		close(done)
+	}()
+
+	<-blocker.closeStarted
+
+	active := e.sessions.GetOrCreateActive(key)
+	if active.ID == oldID {
+		t.Fatal("active session still points to old session while cleanup is blocked")
+	}
+	if got := old.GetAgentSessionID(); got != "" {
+		t.Fatalf("old session AgentSessionID = %q, want cleared", got)
+	}
+
+	close(blocker.releaseClose)
+	<-done
+}
+
+func TestIssue600_CmdNewConcurrentMessageUsesNewSessionAndKeepsReplacementState(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "test:ch:user1"
+
+	old := e.sessions.GetOrCreateActive(key)
+	oldID := old.ID
+	old.SetAgentSessionID("old-agent", agent.Name())
+
+	blocker := newBlockingCloseSession("old-agent")
+	oldState := &interactiveState{agentSession: blocker}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = oldState
+	e.interactiveMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.cmdNew(p, &Message{SessionKey: key, Content: "/new", ReplyCtx: "ctx"}, nil)
+		close(done)
+	}()
+
+	<-blocker.closeStarted
+
+	activeDuringCleanup := e.sessions.GetOrCreateActive(key)
+	if activeDuringCleanup.ID == oldID {
+		t.Fatal("concurrent message would use the old active session during /new cleanup")
+	}
+
+	replacement := &interactiveState{agentSession: newControllableSession("replacement")}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = replacement
+	e.interactiveMu.Unlock()
+
+	close(blocker.releaseClose)
+	<-done
+
+	e.interactiveMu.Lock()
+	got := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if got != replacement {
+		t.Fatal("/new stale cleanup deleted replacement interactive state")
+	}
+}
+
+// TestCmdNew_PreservesConcurrentState verifies that cmdNew passes the current
+// interactive state as `expected` to cleanupInteractiveState, so that a
+// concurrent message's state created during the blocking close is not deleted.
+func TestCmdNew_PreservesConcurrentState(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:ch:user1"
+
+	// Create an old interactive state (simulating an active session).
+	oldSession := newControllableSession("old")
+	oldState := &interactiveState{agentSession: oldSession}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = oldState
+	e.interactiveMu.Unlock()
+
+	// Call cmdNew — this captures `expected` = oldState, then calls
+	// cleanupInteractiveStateIfCurrent(key, oldState).
+	msg := &Message{SessionKey: key, Content: "/new", ReplyCtx: "ctx"}
+	e.cmdNew(p, msg, nil)
+
+	// After cmdNew, the old state should be cleaned up and no state should remain.
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if current != nil {
+		t.Fatal("expected old state to be deleted after /new")
+	}
+
+	// Verify old agent session was closed (save ref before cleanup nils it).
+	if oldSession.Alive() {
+		t.Error("expected old agent session to be closed after /new")
+	}
+}
+
+// TestCmdNew_ConcurrentStateSurvivesCleanup verifies the race scenario:
+// cmdNew captures expected=oldState, then during the blocking close a concurrent
+// message replaces the state. The second re-check in cleanupInteractiveState
+// should detect the replacement and skip the delete.
+func TestCmdNew_ConcurrentStateSurvivesCleanup(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+
+	oldState := &interactiveState{agentSession: newControllableSession("old")}
+	newState := &interactiveState{agentSession: newControllableSession("new")}
+
+	// Simulate: concurrent message already replaced the state before cleanup starts.
+	// The first re-check detects state != expected and returns early.
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = newState
+	e.interactiveMu.Unlock()
+
+	e.cleanupInteractiveStateIfCurrent(key, oldState)
+
+	e.interactiveMu.Lock()
+	survived := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+
+	if survived != newState {
+		t.Fatal("expected-based cleanup deleted the concurrent state — race not prevented")
+	}
 }
 
 // TestSessionMismatch_RecyclesStaleAgent verifies that getOrCreateInteractiveStateWith
@@ -7374,7 +7538,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 4: Old goroutine exits and calls cleanup with OLD state pointer.
 	// This simulates processInteractiveEvents channelClosed path.
-	e.cleanupInteractiveState(key, oldState)
+	e.cleanupInteractiveStateIfCurrent(key, oldState)
 
 	// Verify: new state must survive.
 	e.interactiveMu.Lock()

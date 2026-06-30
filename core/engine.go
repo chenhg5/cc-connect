@@ -818,7 +818,7 @@ func (e *Engine) reapIdleWorkspaces() {
 	e.interactiveMu.Unlock()
 
 	for _, target := range targets {
-		e.cleanupInteractiveState(target.key, target.state)
+		e.cleanupInteractiveStateIfCurrent(target.key, target.state)
 	}
 	for _, ws := range reaped {
 		slog.Info("workspace idle-reaped", "workspace", ws)
@@ -4103,10 +4103,18 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // IMPORTANT: The state is deleted from the map AFTER the agent session is closed
 // to avoid race conditions where concurrent requests see an empty map while the
 // agent session is still being shut down (which can take up to 130s for Stop hooks).
-func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
+func (e *Engine) cleanupInteractiveState(sessionKey string) {
+	e.cleanupInteractiveStateWithExpectation(sessionKey, false, nil)
+}
+
+func (e *Engine) cleanupInteractiveStateIfCurrent(sessionKey string, expected *interactiveState) {
+	e.cleanupInteractiveStateWithExpectation(sessionKey, true, expected)
+}
+
+func (e *Engine) cleanupInteractiveStateWithExpectation(sessionKey string, hasExpected bool, expected *interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
-	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
+	if hasExpected && state != expected {
 		// Another turn has already replaced the state — skip cleanup.
 		e.interactiveMu.Unlock()
 		return
@@ -4154,7 +4162,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	e.interactiveMu.Lock()
 	// Re-check that the state hasn't been replaced during the close
 	currentState, currentOk := e.interactiveStates[sessionKey]
-	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
+	if currentOk && hasExpected && currentState != expected {
 		// Another turn has replaced the state during our close — don't delete it.
 		e.interactiveMu.Unlock()
 		return
@@ -4646,7 +4654,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				e.notifyDroppedQueuedMessages(state, err)
 				if state.agentSession == nil || !state.agentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
+					e.cleanupInteractiveStateIfCurrent(sessionKey, state)
 				}
 				state.mu.Lock()
 				p := state.platform
@@ -4665,7 +4673,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			p := state.platform
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-			e.cleanupInteractiveState(sessionKey, state)
+			e.cleanupInteractiveStateIfCurrent(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
 			elapsed := time.Since(turnStart)
@@ -5807,7 +5815,7 @@ channelClosed:
 	state.eventsNeedResync = true
 	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	e.cleanupInteractiveState(sessionKey, state)
+	e.cleanupInteractiveStateIfCurrent(sessionKey, state)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -6582,21 +6590,26 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
+	e.interactiveMu.Lock()
+	expectedNew := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
 
 	// Clear old session's agent session ID so it cannot be resumed
 	old := sessions.GetOrCreateActive(msg.SessionKey)
 	old.SetAgentSessionID("", "")
 	old.ClearHistory()
-	sessions.Save()
 
 	name := ""
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
 	sessions.NewSession(msg.SessionKey, name)
+	sessions.Save()
+
+	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
+	e.cleanupInteractiveStateIfCurrent(interactiveKey, expectedNew)
+	slog.Info("cmdNew: cleanup done", "session_key", msg.SessionKey)
+
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
@@ -10013,7 +10026,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			return
 		case event, ok = <-events:
 			if !ok {
-				e.cleanupInteractiveState(sessionKey, state)
+				e.cleanupInteractiveStateIfCurrent(sessionKey, state)
 				if !auto {
 					if len(textParts) > 0 {
 						e.send(p, replyCtx, strings.Join(textParts, ""))
@@ -10028,7 +10041,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			if !auto {
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
 			}
-			e.cleanupInteractiveState(sessionKey, state)
+			e.cleanupInteractiveStateIfCurrent(sessionKey, state)
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("compress timed out"))
 			return
 		case <-e.ctx.Done():
@@ -12364,7 +12377,7 @@ func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveSt
 		state.mu.Unlock()
 	}
 	e.pushModelSwitchResultCard(sessionKey, resultCard)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey), state)
+	e.cleanupInteractiveStateIfCurrent(e.interactiveKeyForSessionKey(sessionKey), state)
 }
 
 func (e *Engine) pushModelSwitchResultCard(sessionKey string, card *Card) {
