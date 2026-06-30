@@ -14252,7 +14252,15 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	// Look up the SessionManager using the UNPREFIXED sessionKey (matches the
+	// user-message path at engine.go:2923 and cron/timer paths). The
+	// workspace-prefixed interactiveKey is only correct for the engine's
+	// interactiveStates map; the SessionManager keys active sessions by the
+	// raw session key. Using interactiveKey here would land /cmp in a
+	// different session from where the user has been chatting, defeating
+	// the purpose of "compact the conversation I'm in right now" (issue
+	// #1470 follow-up). See also executeSkill below.
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -14480,7 +14488,10 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	// See executeCustomCommand above — use the unprefixed session key for the
+	// SessionManager lookup so skill runs land in the same session as the
+	// user's regular chat messages on that channel.
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return

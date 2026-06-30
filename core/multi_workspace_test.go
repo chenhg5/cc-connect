@@ -779,3 +779,157 @@ func TestLookupEffectiveBinding_NoIsolationUnbindsMissing(t *testing.T) {
 		t.Errorf("expected missing workspace binding to be unbound without isolation, got %+v", got)
 	}
 }
+
+// TestExecuteCustomCommand_LandsInUserChatSession is the regression test for
+// the second half of issue #1470. Even after the engine stops killing live
+// agent processes on disk-mismatch, the custom command path was still
+// routing /cmp (and /skill, etc.) to a different session from the one the
+// user was actually chatting in.
+//
+// Background: in multi-workspace mode, commandContextWithWorkspace returns
+// an interactiveKey that is workspace-prefixed (workspace + ":" + sessionKey),
+// meant for the engine's interactiveStates map. The executeCustomCommand /
+// executeSkill helpers were passing that same workspace-prefixed string to
+// SessionManager.GetOrCreateActive, but the SessionManager keys active
+// sessions by the raw session key (matches the user-message path at
+// engine.go:2923). The result: in a workspace with overrides or legacy
+// pollution where both keys exist in active_session, /cmp locked one
+// session while regular messages locked the other — so /cmp would compact
+// a tiny "default" session instead of the user's real conversation.
+//
+// This test seeds both keys, calls executeCustomCommand, and asserts the
+// user's chat session (keyed by msg.SessionKey) is the one that gets
+// locked.
+func TestExecuteCustomCommand_LandsInUserChatSession(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "bound-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "C-routing"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "bound-channel", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: channelID,
+		SessionKey: channelKey + ":U-001",
+		UserID:     "U-001",
+		UserName:   "alice",
+		Content:    "/cmp",
+		MessageID:  "msg-cmp-1",
+	}
+
+	// Resolve workspace context so the workspace session manager is created.
+	_, sessions, interactiveKey, _, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("commandContextWithWorkspace: %v", err)
+	}
+	if sessions == e.sessions {
+		t.Fatal("expected workspace-specific session manager, got global")
+	}
+
+	// Seed the workspace session manager with two sessions:
+	//   - userSession: the one the user has been chatting in (keyed by msg.SessionKey)
+	//   - pollutedSession: a stale "default" session created by the OLD bug,
+	//     keyed by the workspace-prefixed interactiveKey.
+	userSession := sessions.NewSession(msg.SessionKey, "user-chat")
+	pollutedSession := sessions.NewSession(interactiveKey, "default")
+	if userSession.ID == pollutedSession.ID {
+		t.Fatal("test setup: expected two distinct sessions")
+	}
+
+	// Pre-seed the engine's interactiveStates map for the workspace-prefixed
+	// key with a stub agent session so processInteractiveMessageWith (which
+	// runs in a goroutine after executeCustomCommand returns) does NOT call
+	// StartSession — it just hangs waiting for events, keeping userSession
+	// locked long enough for the test to assert.
+	stubAgentSess := &stubAgentSession{}
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{
+		agentSession: stubAgentSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// Execute /cmp via the production helper.
+	cmd := &CustomCommand{
+		Name:   "cmp",
+		Prompt: "compact me",
+		Source: "config",
+	}
+	e.executeCustomCommand(p, msg, cmd, nil)
+
+	// Assert: userSession is the one that was locked.
+	if !userSession.Busy() {
+		t.Errorf("expected userSession (msg.SessionKey=%q) to be locked after /cmp; "+
+			"the engine routed the command to a different session. "+
+			"This is the second half of issue #1470.", msg.SessionKey)
+	}
+	if pollutedSession.Busy() {
+		t.Errorf("expected pollutedSession (interactiveKey=%q) to NOT be locked; "+
+			"executeCustomCommand used the workspace-prefixed interactiveKey for "+
+			"the SessionManager lookup, but the SessionManager is keyed by raw sessionKey.",
+			interactiveKey)
+	}
+}
+
+// TestExecuteSkill_LandsInUserChatSession mirrors the test above for the
+// skill execution path (which has the same bug pattern as custom commands).
+func TestExecuteSkill_LandsInUserChatSession(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "bound-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "C-skill"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "bound-channel", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: channelID,
+		SessionKey: channelKey + ":U-001",
+		UserID:     "U-001",
+		UserName:   "alice",
+		Content:    "/summarize",
+		MessageID:  "msg-skill-1",
+	}
+
+	_, sessions, interactiveKey, _, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("commandContextWithWorkspace: %v", err)
+	}
+
+	userSession := sessions.NewSession(msg.SessionKey, "user-chat")
+	pollutedSession := sessions.NewSession(interactiveKey, "default")
+	if userSession.ID == pollutedSession.ID {
+		t.Fatal("test setup: expected two distinct sessions")
+	}
+
+	stubAgentSess := &stubAgentSession{}
+	e.interactiveMu.Lock()
+	e.interactiveStates[interactiveKey] = &interactiveState{
+		agentSession: stubAgentSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	skill := &Skill{Name: "summarize", Source: "config"}
+	e.executeSkill(p, msg, skill, nil)
+
+	if !userSession.Busy() {
+		t.Errorf("expected userSession (msg.SessionKey=%q) to be locked after /summarize", msg.SessionKey)
+	}
+	if pollutedSession.Busy() {
+		t.Errorf("expected pollutedSession (interactiveKey=%q) to NOT be locked after /summarize", interactiveKey)
+	}
+}
