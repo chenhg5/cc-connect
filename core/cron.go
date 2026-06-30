@@ -32,7 +32,7 @@ type CronJob struct {
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
-	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
+	SessionMode string    `json:"session_mode,omitempty"` // "" = use global default; "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
@@ -71,14 +71,20 @@ func (j *CronJob) UsesNewSessionPerRun() bool {
 	return NormalizeCronSessionMode(j.SessionMode) == "new_per_run"
 }
 
-// NormalizeCronSessionMode maps CLI/API aliases to canonical values ("", "new_per_run").
+// NormalizeCronSessionMode maps CLI/API aliases to canonical values
+// ("", "reuse", "new_per_run"). The empty string means "unspecified" — the
+// scheduler falls back to the global default. "reuse" means the user
+// explicitly opted out of new-per-run, and is preserved separately so it can
+// override a global default of new_per_run on a per-job basis.
 // Returns the original string if unrecognized (caller should validate).
 func NormalizeCronSessionMode(s string) string {
 	s = strings.TrimSpace(s)
 	low := strings.ToLower(s)
 	switch low {
-	case "", "reuse":
+	case "":
 		return ""
+	case "reuse":
+		return "reuse"
 	case "new_per_run", "new-per-run":
 		return "new_per_run"
 	default:
@@ -97,7 +103,7 @@ func validateCronJob(j *CronJob) error {
 		return fmt.Errorf("session_key is required")
 	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
-	if mode != "" && mode != "new_per_run" {
+	if mode != "" && mode != "reuse" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
 	}
 	if j.Mode != "" {
