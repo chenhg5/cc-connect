@@ -25,6 +25,22 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// RelayGroupVisibilityTarget is an optional interface for platforms that
+// want to customise the session key used when echoing relay request /
+// response messages into the group chat for visibility.  Platforms that
+// understand the concept of a thread, topic, or sub-conversation can
+// return a thread-scoped session key so the visibility echoes land in
+// the same conversation that triggered the relay; platforms without
+// such a concept simply don't implement this interface and core falls
+// back to the legacy "<platform>:<chatID>:relay" target.
+//
+// Returning (key, true) → core uses key verbatim as the group session
+// key for visibility echoes.
+// Returning ("", false) → core falls back to the legacy default.
+type RelayGroupVisibilityTarget interface {
+	RelayGroupVisibilityKey(callerSessionKey string) (groupSessionKey string, ok bool)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {

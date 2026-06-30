@@ -63,6 +63,201 @@ func (p *relayVisibilityPlatform) ReconstructReplyCtx(sessionKey string) (any, e
 	return sessionKey, nil
 }
 
+func (p *relayVisibilityPlatform) getReconstructed() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.reconstructed))
+	copy(out, p.reconstructed)
+	return out
+}
+
+// runRelayVisibilityScenarioWith is like runRelayVisibilityScenario but
+// accepts a custom session key and returns the reconstructed session keys
+// captured by the source and target platforms, so contract tests can pin
+// exactly which group session key core computed.
+func runRelayVisibilityScenarioWith(t *testing.T, visibility string, sessionKey string) (
+	resp string, sourceSent []string, targetSent []string, sourceKeys []string, targetKeys []string,
+) {
+	t.Helper()
+
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{sourcePlatform}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{
+		"source": "source-bot",
+		"target": "target-bot",
+	})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+	if visibility != "" {
+		rm.SetVisibility(visibility)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: sessionKey,
+			Message:    "go",
+		})
+		done <- err
+	}()
+	targetSession.events <- Event{Type: EventResult, Content: "ok"}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send() did not return")
+	}
+
+	return "ok", sourcePlatform.getSent(), targetPlatform.getSent(), sourcePlatform.getReconstructed(), targetPlatform.getReconstructed()
+}
+
+// stubVisibilityTargetPlatform is a stubPlatformEngine that opts into
+// core.RelayGroupVisibilityTarget, so core/relay tests can pin the exact
+// contract: when the platform returns ok=true, core MUST use its key
+// verbatim; when ok=false (or the interface isn't implemented), core MUST
+// fall back to "<platform>:<chatID>:relay".
+type stubVisibilityTargetPlatform struct {
+	relayVisibilityPlatform
+	overrideKey string
+	overrideOK  bool
+	seenCaller  []string
+}
+
+func (p *stubVisibilityTargetPlatform) RelayGroupVisibilityKey(callerSessionKey string) (string, bool) {
+	p.mu.Lock()
+	p.seenCaller = append(p.seenCaller, callerSessionKey)
+	p.mu.Unlock()
+	return p.overrideKey, p.overrideOK
+}
+
+// TestRelayGroupVisibility_DelegatesToPlatformInterface — when the
+// platform implements RelayGroupVisibilityTarget AND returns ok=true,
+// core MUST use the platform-supplied key for BOTH the request echo
+// and the response echo.
+func TestRelayGroupVisibility_DelegatesToPlatformInterface(t *testing.T) {
+	src := &stubVisibilityTargetPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		overrideKey:             "feishu:chat-1:root:om_abc",
+		overrideOK:              true,
+	}
+	tgt := &stubVisibilityTargetPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		overrideKey:             "feishu:chat-1:root:om_abc",
+		overrideOK:              true,
+	}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{src}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{tgt}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:root:om_abc",
+			Message:    "go",
+		})
+		done <- err
+	}()
+	targetSession.events <- Event{Type: EventResult, Content: "ok"}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send() did not return")
+	}
+
+	const want = "feishu:chat-1:root:om_abc"
+	if got := src.getReconstructed(); len(got) != 1 || got[0] != want {
+		t.Fatalf("source reconstructed = %#v, want [%q]", got, want)
+	}
+	if got := tgt.getReconstructed(); len(got) != 1 || got[0] != want {
+		t.Fatalf("target reconstructed = %#v, want [%q]", got, want)
+	}
+}
+
+// TestRelayGroupVisibility_FallsBackWhenPlatformReturnsNotOK — even
+// when the platform implements the interface, ok=false MUST cause core
+// to use the legacy "<platform>:<chatID>:relay" key.
+func TestRelayGroupVisibility_FallsBackWhenPlatformReturnsNotOK(t *testing.T) {
+	src := &stubVisibilityTargetPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		overrideOK:              false, // returns ("", false)
+	}
+	tgt := &stubVisibilityTargetPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		overrideOK:              false,
+	}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{src}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{tgt}, "", LangEnglish)
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:root:om_xyz", // even thread-shaped
+			Message:    "go",
+		})
+		done <- err
+	}()
+	targetSession.events <- Event{Type: EventResult, Content: "ok"}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send() did not return")
+	}
+
+	const want = "feishu:chat-1:relay"
+	if got := src.getReconstructed(); len(got) != 1 || got[0] != want {
+		t.Fatalf("source reconstructed = %#v, want [%q] (must fall back)", got, want)
+	}
+	if got := tgt.getReconstructed(); len(got) != 1 || got[0] != want {
+		t.Fatalf("target reconstructed = %#v, want [%q] (must fall back)", got, want)
+	}
+}
+
+// TestRelayGroupVisibility_FallsBackWhenPlatformDoesNotImplement — a
+// platform that does NOT implement RelayGroupVisibilityTarget (the
+// vanilla relayVisibilityPlatform) MUST get the legacy ":relay" key.
+// This pins the default for the 13 non-feishu platforms in production.
+func TestRelayGroupVisibility_FallsBackWhenPlatformDoesNotImplement(t *testing.T) {
+	_, _, _, sourceKeys, targetKeys :=
+		runRelayVisibilityScenarioWith(t, "", "feishu:chat-1:root:om_does_not_matter")
+
+	const want = "feishu:chat-1:relay"
+	if len(sourceKeys) != 1 || sourceKeys[0] != want {
+		t.Fatalf("source reconstructed = %#v, want [%q]", sourceKeys, want)
+	}
+	if len(targetKeys) != 1 || targetKeys[0] != want {
+		t.Fatalf("target reconstructed = %#v, want [%q]", targetKeys, want)
+	}
+}
+
 func runRelayVisibilityScenario(t *testing.T, visibility string) (resp string, sourceSent []string, targetSent []string) {
 	t.Helper()
 
