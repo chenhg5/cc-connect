@@ -18,6 +18,11 @@
 - **claudecode**: fix per-spawn system-prompt temp file EACCES under `run_as_user` (#1429). The per-spawn temp file written by `writeTempAppendPromptFile` (the 1% edge-case path used when the prompt has session-specific platform formatting or user `append_system_prompt`) inherited `os.CreateTemp`'s 0600 mode and was owned by the cc-connect process user (often root under systemd). When the agent was spawned under a different `run_as_user`, it could not read the file and exited before any prompt was loaded. The file is now `chmod 0o644` immediately after write, matching the shared `ensureSharedSystemPromptFile` path. Prompt content is non-secret (a superset of the already-shared base prompt), so 0644 is consistent with the shared file. Does not affect the shared-file path (already 0644 since #1376) or the daemon-mode path resolution (#1419).
 - **core**: queue post-restart notification and dispatch on platform ready (#1383). Previously `/restart` sent the success notification immediately after engine startup, racing the platform's async connect window (Telegram: ~2.6s). On a not-yet-ready platform the send was silently dropped at debug log level. The notify is now queued on the engine and dispatched when the target platform reaches `OnPlatformReady`, with bounded retry (3 attempts, 0/500/1500 ms backoff) on transient send failure. Failed sends log at warn level. A 10s safety timeout drops the notify with a warning if the target platform never reaches ready, so startup is never blocked indefinitely. Also covers Discord / Weixin / Matrix (other AsyncRecoverablePlatform implementations) for free.
 
+## Unreleased
+
+### Fixed
+- **DingTalk message list title**: derive the `markdown.title` field on outgoing DingTalk messages from the message content (markdown stripped, first non-empty line, truncated to 20 runes) instead of the hardcoded `"reply"`. The DingTalk chat list now shows the actual reply preview instead of "reply" on every entry. Empty / pure-format / pure-emoji messages still fall back to "reply" so the title is never blank (#1269).
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5
