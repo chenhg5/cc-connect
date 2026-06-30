@@ -51,7 +51,7 @@ func TestDownloadSlackFile_HTMLDetection(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := &Platform{botToken: "xoxb-test-token"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test-token"}
 	_, err := p.downloadSlackFile(ts.URL)
 	if err == nil {
 		t.Fatal("expected error for HTML response, got nil")
@@ -70,7 +70,7 @@ func TestDownloadSlackFile_MissingAuth(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := &Platform{botToken: "xoxb-test-token"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test-token"}
 	_, err := p.downloadSlackFile(ts.URL)
 	if err == nil {
 		t.Fatal("expected error for 401 response, got nil")
@@ -91,7 +91,7 @@ func TestDownloadSlackFile_Success(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := &Platform{botToken: "xoxb-test-token"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test-token"}
 	data, err := p.downloadSlackFile(ts.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -102,7 +102,7 @@ func TestDownloadSlackFile_Success(t *testing.T) {
 }
 
 func TestDownloadSlackFile_EmptyURL(t *testing.T) {
-	p := &Platform{botToken: "xoxb-test-token"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test-token"}
 	_, err := p.downloadSlackFile("")
 	if err == nil {
 		t.Fatal("expected error for empty URL, got nil")
@@ -127,7 +127,7 @@ func TestProcessSlackFileShares_GenericFile(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := &Platform{botToken: "xoxb-test"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test"}
 	images, audio, docs := p.processSlackFileShares([]slackevents.File{
 		{
 			ID:                 "Fpdf",
@@ -162,7 +162,7 @@ func TestProcessSlackFileShares_ImageVsDoc(t *testing.T) {
 	}))
 	defer txtSrv.Close()
 
-	p := &Platform{botToken: "xoxb-test"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test"}
 	images, audio, docs := p.processSlackFileShares([]slackevents.File{
 		{ID: "1", Name: "x.png", Mimetype: "image/png", URLPrivateDownload: imgSrv.URL},
 		{ID: "2", Name: "n.txt", Mimetype: "text/plain", URLPrivateDownload: txtSrv.URL},
@@ -188,7 +188,7 @@ func TestProcessSlackFileShares_EmptyMimeBecomesOctetStream(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := &Platform{botToken: "xoxb-test"}
+	p := &Platform{allowFrom: "*", botToken: "xoxb-test"}
 	_, _, docs := p.processSlackFileShares([]slackevents.File{
 		{ID: "z", Name: "blob.bin", Mimetype: "", URLPrivateDownload: ts.URL},
 	})

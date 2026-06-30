@@ -159,7 +159,7 @@ func TestPlatformImplementsInterfaces(t *testing.T) {
 // ============================================================================
 
 func TestReconstructReplyCtx_Valid(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	rctx, err := p.ReconstructReplyCtx("wps-xiezuo:comp123:chat456")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -177,7 +177,7 @@ func TestReconstructReplyCtx_Valid(t *testing.T) {
 }
 
 func TestReconstructReplyCtx_P2PWithSenderKeepsActualChatID(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	rctx, err := p.ReconstructReplyCtx("wps-xiezuo:comp123:chat456:user789")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -198,7 +198,7 @@ func TestReconstructReplyCtx_P2PWithSenderKeepsActualChatID(t *testing.T) {
 }
 
 func TestReconstructReplyCtx_InvalidPrefix(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	_, err := p.ReconstructReplyCtx("feishu:comp:chat")
 	if err == nil {
 		t.Fatal("expected error for invalid prefix")
@@ -206,7 +206,7 @@ func TestReconstructReplyCtx_InvalidPrefix(t *testing.T) {
 }
 
 func TestReconstructReplyCtx_TooFewParts(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	_, err := p.ReconstructReplyCtx("wps-xiezuo:onlyone")
 	if err == nil {
 		t.Fatal("expected error for too few parts")
@@ -361,7 +361,7 @@ func TestDecryptEventData_RoundTrip(t *testing.T) {
 		AccessKey:     accessKey,
 	}
 
-	p := &Platform{appSecret: appSecret, appID: accessKey}
+	p := &Platform{allowFrom: "*", appSecret: appSecret, appID: accessKey}
 
 	if !p.verifyEventSignature(event) {
 		t.Fatal("signature verification failed")
@@ -425,7 +425,7 @@ func TestVerifyEventSignature_Valid(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	sig = strings.TrimRight(sig, "=")
 
-	p := &Platform{appSecret: appSecret, appID: accessKey}
+	p := &Platform{allowFrom: "*", appSecret: appSecret, appID: accessKey}
 	event := wpsEventFrame{
 		Topic:         topic,
 		Nonce:         nonce,
@@ -441,7 +441,7 @@ func TestVerifyEventSignature_Valid(t *testing.T) {
 }
 
 func TestVerifyEventSignature_Invalid(t *testing.T) {
-	p := &Platform{appSecret: "secret", appID: "id"}
+	p := &Platform{allowFrom: "*", appSecret: "secret", appID: "id"}
 	event := wpsEventFrame{
 		Topic:         "t",
 		Nonce:         "n",
@@ -461,13 +461,13 @@ func TestVerifyEventSignature_Invalid(t *testing.T) {
 // ============================================================================
 
 func TestHandleRawMessage_ACK(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	raw := []byte(`{"type":"ack","nonce":"abc","code":200}`)
 	p.handleRawMessage(context.Background(), raw)
 }
 
 func TestHandleRawMessage_GoAway(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	raw := []byte(`{"type":"goaway","reason":"server_shutdown","message":"bye"}`)
 	p.handleRawMessage(context.Background(), raw)
 	if p.stopped {
@@ -476,7 +476,7 @@ func TestHandleRawMessage_GoAway(t *testing.T) {
 }
 
 func TestHandleRawMessage_GoAwayReplaced(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	raw := []byte(`{"type":"goaway","reason":"connection_replaced","message":"bye"}`)
 	p.handleRawMessage(context.Background(), raw)
 	if !p.stopped {
@@ -485,7 +485,7 @@ func TestHandleRawMessage_GoAwayReplaced(t *testing.T) {
 }
 
 func TestHandleRawMessage_InvalidJSON(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	raw := []byte(`not json at all`)
 	p.handleRawMessage(context.Background(), raw)
 }
@@ -495,7 +495,7 @@ func TestHandleRawMessage_InvalidJSON(t *testing.T) {
 // ============================================================================
 
 func TestSignWSHeader(t *testing.T) {
-	p := &Platform{appID: "test-app", appSecret: "test-secret"}
+	p := &Platform{allowFrom: "*", appID: "test-app", appSecret: "test-secret"}
 	header, err := p.signWSHeader()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -519,10 +519,11 @@ func TestSignWSHeader(t *testing.T) {
 func TestHandleChatMessage_P2P(t *testing.T) {
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "*",
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
-		dedup: core.MessageDedup{},
+		dedup:     core.MessageDedup{},
 	}
 
 	msgData := wpsMessageData{
@@ -564,10 +565,11 @@ func TestHandleChatMessage_P2P(t *testing.T) {
 func TestHandleChatMessage_Group(t *testing.T) {
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "*",
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
-		dedup: core.MessageDedup{},
+		dedup:     core.MessageDedup{},
 	}
 
 	msgData := wpsMessageData{
@@ -599,10 +601,11 @@ func TestHandleChatMessage_Group(t *testing.T) {
 func TestHandleChatMessage_Duplicate(t *testing.T) {
 	ch := make(chan *core.Message, 2)
 	p := &Platform{
+		allowFrom: "*",
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
-		dedup: core.MessageDedup{},
+		dedup:     core.MessageDedup{},
 	}
 
 	msgData := wpsMessageData{
@@ -638,6 +641,7 @@ func TestHandleChatMessage_Duplicate(t *testing.T) {
 func TestHandleChatMessage_EmptyContent(t *testing.T) {
 	called := 0
 	p := &Platform{
+		allowFrom: "*",
 		handler: func(_ core.Platform, msg *core.Message) {
 			called++
 		},
@@ -672,6 +676,7 @@ func TestHandleChatMessage_EmptyContent(t *testing.T) {
 func TestHandleChatMessageRecall(t *testing.T) {
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "*",
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
@@ -711,7 +716,7 @@ func TestHandleChatMessageRecall(t *testing.T) {
 // ============================================================================
 
 func TestStop_Idempotent(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	if err := p.Stop(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -730,12 +735,13 @@ func TestHandleEvent_FullChain_ChatMessage(t *testing.T) {
 
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "*",
 		appID:     appID,
 		appSecret: appSecret,
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
-		dedup: core.MessageDedup{},
+		dedup:     core.MessageDedup{},
 	}
 
 	payload := map[string]any{
@@ -770,11 +776,13 @@ func TestHandleEvent_FullChain_Recall(t *testing.T) {
 
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "*",
 		appID:     appID,
 		appSecret: appSecret,
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
+		dedup:     core.MessageDedup{},
 	}
 
 	payload := map[string]any{
@@ -800,6 +808,7 @@ func TestHandleEvent_FullChain_Recall(t *testing.T) {
 func TestHandleEvent_BadSignature(t *testing.T) {
 	called := false
 	p := &Platform{
+		allowFrom: "*",
 		appID:     "bad",
 		appSecret: "sig",
 		handler: func(_ core.Platform, msg *core.Message) {
@@ -833,6 +842,7 @@ func TestHandleEvent_DoesNotLogDecryptedPayload(t *testing.T) {
 	appID := "AK_LOG"
 	appSecret := "log-secret"
 	p := &Platform{
+		allowFrom: "*",
 		appID:     appID,
 		appSecret: appSecret,
 		handler:   func(_ core.Platform, msg *core.Message) {},
@@ -861,9 +871,9 @@ func TestHandleEvent_DoesNotLogDecryptedPayload(t *testing.T) {
 func TestHandleChatMessage_AllowFrom(t *testing.T) {
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "allowed_user",
 		appID:     "id",
 		appSecret: "secret",
-		allowFrom: "allowed_user",
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
@@ -1512,12 +1522,13 @@ func TestWebSocketIntegration_ReceiveEvent(t *testing.T) {
 
 	ch := make(chan *core.Message, 1)
 	p := &Platform{
+		allowFrom: "*",
 		appID:     appID,
 		appSecret: appSecret,
 		handler: func(_ core.Platform, msg *core.Message) {
 			ch <- msg
 		},
-		dedup: core.MessageDedup{},
+		dedup:     core.MessageDedup{},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -197,7 +197,7 @@ func TestBuildFeishuFileMessageContent(t *testing.T) {
 }
 
 func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -261,7 +261,7 @@ func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 }
 
 func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -315,7 +315,7 @@ func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
 }
 
 func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -356,7 +356,7 @@ func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *test
 }
 
 func TestInteractivePlatform_CardActionFormSubmitPassesSelectedIDs(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -401,7 +401,7 @@ func TestInteractivePlatform_CardActionFormSubmitPassesSelectedIDs(t *testing.T)
 }
 
 func TestInteractivePlatform_CardActionFormSubmitUsesActionNameFallback(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -445,7 +445,7 @@ func TestInteractivePlatform_CardActionFormSubmitUsesActionNameFallback(t *testi
 }
 
 func TestInteractivePlatform_CardActionFormCancelUsesActionNameFallback(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestInteractivePlatform_CardActionFormCancelUsesActionNameFallback(t *testi
 }
 
 func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*", "thread_isolation": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -525,7 +525,7 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 }
 
 func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -651,6 +651,7 @@ func TestNewFeishu_InvalidCustomDomain(t *testing.T) {
 func TestLark_SessionKeyPrefix(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
+		"allow_from": "*", "allow_chat": "*",
 	})
 	if err != nil {
 		t.Fatalf("newPlatform(lark) error = %v", err)
@@ -706,6 +707,7 @@ func TestLark_SessionKeyPrefix(t *testing.T) {
 func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true,
+		"allow_from": "*", "allow_chat": "*",
 	})
 	if err != nil {
 		t.Fatalf("newPlatform(lark) error = %v", err)
@@ -768,6 +770,7 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
 		"group_reply_all": true, "thread_isolation": true,
+		"allow_from": "*", "allow_chat": "*",
 	})
 	if err != nil {
 		t.Fatalf("newPlatform(lark) error = %v", err)
@@ -1673,7 +1676,7 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 		chatType  string
 		wantPass  bool
 	}{
-		{"empty allow_chat permits all groups", "", "oc_abc", "group", true},
+		{"empty allow_chat denies all groups (fail-closed)", "", "oc_abc", "group", false},
 		{"wildcard permits all groups", "*", "oc_abc", "group", true},
 		{"matching chat_id passes", "oc_abc", "oc_abc", "group", true},
 		{"non-matching chat_id blocked", "oc_abc", "oc_xyz", "group", false},
@@ -1687,6 +1690,7 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
 				"app_id": "cli_xxx", "app_secret": "secret",
 				"enable_feishu_card": true,
+				"allow_from":        "*",
 				"group_reply_all":    true,
 				"allow_chat":         tt.allowChat,
 			})
@@ -1879,7 +1883,7 @@ func (m *mockRefreshPlatform) RefreshCard(ctx context.Context, sessionKey string
 }
 
 func TestCardAction_NavFast_ReturnsCard(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1914,7 +1918,7 @@ func TestCardAction_NavFast_ReturnsCard(t *testing.T) {
 }
 
 func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1965,7 +1969,7 @@ func TestCardAction_NavSlow_ReturnsToastThenRefreshes(t *testing.T) {
 }
 
 func TestCardAction_NavSlow_NilCard_NoRefresh(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "allow_from": "*", "allow_chat": "*"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
