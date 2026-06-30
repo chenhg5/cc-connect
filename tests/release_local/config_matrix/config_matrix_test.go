@@ -128,6 +128,8 @@ disabled_platforms = ["feishu", "telegram"]
 interval_ms = 250
 min_delta_chars = 12
 max_chars = 777
+stop_behavior = "freeze"
+
 
 [[projects]]
 name = "release"
@@ -169,6 +171,9 @@ app_secret = "secret"
 	}
 	if cfg.StreamPreview.MaxChars == nil || *cfg.StreamPreview.MaxChars != 777 {
 		t.Fatalf("stream_preview.max_chars = %#v, want 777", cfg.StreamPreview.MaxChars)
+	}
+	if cfg.StreamPreview.StopBehavior == nil || *cfg.StreamPreview.StopBehavior != "freeze" {
+		t.Fatalf("stream_preview.stop_behavior = %#v, want \"freeze\"", cfg.StreamPreview.StopBehavior)
 	}
 
 	proj := &cfg.Projects[0]
