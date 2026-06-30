@@ -11316,7 +11316,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 			// wraps naturally.
 			var optionsText strings.Builder
 			for i, opt := range q.Options {
-				optionsText.WriteString(fmt.Sprintf("%d. **%s**", i+1, opt.Label))
+				fmt.Fprintf(&optionsText, "%d. **%s**", i+1, opt.Label)
 				if opt.Description != "" {
 					optionsText.WriteString(" — " + opt.Description)
 				}
