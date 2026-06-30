@@ -586,12 +586,13 @@ func main() {
 			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
 			for i, h := range cfg.Hooks {
 				coreHooks[i] = core.HookConfig{
-					Event:   h.Event,
-					Type:    h.Type,
-					Command: h.Command,
-					URL:     h.URL,
-					Timeout: h.Timeout,
-					Async:   h.Async,
+					Event:           h.Event,
+					Type:            h.Type,
+					Command:         h.Command,
+					URL:             h.URL,
+					Timeout:         h.Timeout,
+					Async:           h.Async,
+					ConsumeResponse: h.ConsumeResponse,
 				}
 			}
 			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, shellProfile))

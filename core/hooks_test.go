@@ -20,11 +20,11 @@ func boolPtr(v bool) *bool { return &v }
 func TestNewHookManager_ValidatesConfig(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "message.received", Type: "command", Command: "echo ok"},
-		{Event: "", Type: "command", Command: "echo bad"},         // missing event
-		{Event: "error", Type: "http", URL: ""},                   // missing url
-		{Event: "error", Type: "http", URL: "ftp://bad"},          // bad url scheme
-		{Event: "error", Type: "unknown", Command: "echo"},        // bad type
-		{Event: "error", Type: "command", Command: ""},            // missing command
+		{Event: "", Type: "command", Command: "echo bad"},  // missing event
+		{Event: "error", Type: "http", URL: ""},            // missing url
+		{Event: "error", Type: "http", URL: "ftp://bad"},   // bad url scheme
+		{Event: "error", Type: "unknown", Command: "echo"}, // bad type
+		{Event: "error", Type: "command", Command: ""},     // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
 	hm := NewHookManager("test", hooks, "sh", "-c", "")
@@ -530,5 +530,182 @@ func TestEmit_TimestampAutoFilled(t *testing.T) {
 
 	if receivedTime.Before(before) {
 		t.Errorf("expected auto-filled timestamp >= %v, got %v", before, receivedTime)
+	}
+}
+
+func TestEmitConsumable_HTTPHookHandledResponse(t *testing.T) {
+	var received atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"handled":true,"reason":"workbench"}`))
+	}))
+	defer srv.Close()
+
+	hm := NewHookManager("proj", []HookConfig{
+		{Event: "message.received", Type: "http", URL: srv.URL, Async: boolPtr(true), ConsumeResponse: true},
+	}, "sh", "-c", "")
+
+	decision := hm.EmitConsumable(HookEvent{Event: HookEventMessageReceived, Content: "hello"})
+
+	if !decision.Handled {
+		t.Fatalf("expected handled decision")
+	}
+	if decision.Reason != "workbench" {
+		t.Fatalf("reason = %q, want workbench", decision.Reason)
+	}
+	if received.Load() != 1 {
+		t.Fatalf("expected one request, got %d", received.Load())
+	}
+}
+
+func TestEmit_HTTPHookWithConsumeResponseDoesNotReadResponse(t *testing.T) {
+	headersSent := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(headersSent)
+		time.Sleep(time.Second)
+		_, _ = w.Write([]byte(`{"handled":true}`))
+	}))
+	defer srv.Close()
+
+	hm := NewHookManager("proj", []HookConfig{
+		{Event: "message.received", Type: "http", URL: srv.URL, Async: boolPtr(false), ConsumeResponse: true},
+	}, "sh", "-c", "")
+
+	start := time.Now()
+	hm.Emit(HookEvent{Event: HookEventMessageReceived})
+	elapsed := time.Since(start)
+
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Emit blocked for %v; default Emit must not read hook responses", elapsed)
+	}
+	select {
+	case <-headersSent:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("server did not receive hook request")
+	}
+}
+
+func TestEmitConsumable_HTTPHookUnhandledResponses(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "handled false",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"handled":false}`))
+			},
+		},
+		{
+			name: "empty body",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			},
+		},
+		{
+			name: "invalid json",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`not-json`))
+			},
+		},
+		{
+			name: "http error",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+		},
+		{
+			name: "http non-2xx",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotModified)
+				_, _ = w.Write([]byte(`{"handled":true}`))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(tt.handler)
+			defer srv.Close()
+
+			hm := NewHookManager("proj", []HookConfig{
+				{Event: "message.received", Type: "http", URL: srv.URL, Async: boolPtr(false), ConsumeResponse: true},
+			}, "sh", "-c", "")
+
+			if decision := hm.EmitConsumable(HookEvent{Event: HookEventMessageReceived}); decision.Handled {
+				t.Fatalf("expected unhandled decision, got %#v", decision)
+			}
+		})
+	}
+}
+
+func TestEmitConsumable_HTTPHookFailureFallsBackToUnhandled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+	}))
+	url := srv.URL
+	srv.Close()
+
+	hm := NewHookManager("proj", []HookConfig{
+		{Event: "message.received", Type: "http", URL: url, Async: boolPtr(false), Timeout: 1, ConsumeResponse: true},
+	}, "sh", "-c", "")
+
+	if decision := hm.EmitConsumable(HookEvent{Event: HookEventMessageReceived}); decision.Handled {
+		t.Fatalf("expected unhandled decision on hook failure, got %#v", decision)
+	}
+}
+
+func TestEmitConsumable_HTTPHookTimeoutFallsBackToUnhandled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	hm := NewHookManager("proj", []HookConfig{
+		{Event: "message.received", Type: "http", URL: srv.URL, Async: boolPtr(false), Timeout: 1, ConsumeResponse: true},
+	}, "sh", "-c", "")
+
+	if decision := hm.EmitConsumable(HookEvent{Event: HookEventMessageReceived}); decision.Handled {
+		t.Fatalf("expected unhandled decision on hook timeout, got %#v", decision)
+	}
+}
+
+func TestEmitConsumable_MultipleHooksFiresAllAndHandlesIfAnyHandled(t *testing.T) {
+	var first, second, third atomic.Int32
+	firstSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		first.Add(1)
+		_, _ = w.Write([]byte(`{"handled":false}`))
+	}))
+	defer firstSrv.Close()
+	secondSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		second.Add(1)
+		_, _ = w.Write([]byte(`{"handled":true,"reason":"second"}`))
+	}))
+	defer secondSrv.Close()
+	thirdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		third.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer thirdSrv.Close()
+
+	hm := NewHookManager("proj", []HookConfig{
+		{Event: "message.received", Type: "http", URL: firstSrv.URL, Async: boolPtr(false), ConsumeResponse: true},
+		{Event: "message.received", Type: "http", URL: secondSrv.URL, Async: boolPtr(false), ConsumeResponse: true},
+		{Event: "message.received", Type: "http", URL: thirdSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", "")
+
+	decision := hm.EmitConsumable(HookEvent{Event: HookEventMessageReceived})
+
+	if !decision.Handled || decision.Reason != "second" {
+		t.Fatalf("decision = %#v, want handled by second hook", decision)
+	}
+	if first.Load() != 1 || second.Load() != 1 || third.Load() != 1 {
+		t.Fatalf("hook counts = first:%d second:%d third:%d, want all 1", first.Load(), second.Load(), third.Load())
 	}
 }
