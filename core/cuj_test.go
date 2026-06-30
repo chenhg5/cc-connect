@@ -1074,16 +1074,18 @@ func TestCUJ_I5_AskUserQuestionCardButtonsResolveToLabel(t *testing.T) {
 		}
 	}
 
-	// Buttons must be split across rows of at most 3 with equal columns,
-	// and labeled with the option INDEX (not the label string).
+	// Buttons must be split across rows with equal columns. With 4 options
+	// the layout is a single row (typical prompts render in one row for a
+	// clean horizontal choice bar; only option sets >5 split into multiple
+	// rows of up to 5 buttons each).
 	var rows []CardActions
 	for _, elem := range card.Elements {
 		if a, ok := elem.(CardActions); ok {
 			rows = append(rows, a)
 		}
 	}
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 button rows for 4 options, got %d", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 button row for 4 options (≤5 in single row), got %d", len(rows))
 	}
 	for i, row := range rows {
 		if row.Layout != CardActionLayoutEqualColumns {

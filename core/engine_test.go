@@ -6362,6 +6362,31 @@ func TestResolveAskQuestionAnswer_FreeText(t *testing.T) {
 	}
 }
 
+func TestAskqButtonsPerRowFor(t *testing.T) {
+	// Typical prompts (≤5 options) render all buttons in a single row.
+	// Larger option sets (>5) cap at 5 per row with a trailing partial row.
+	cases := []struct {
+		n, want int
+	}{
+		{0, 0},   // no buttons, no row
+		{1, 1},   // 1 button, 1 row
+		{2, 2},   // 2 buttons, 1 row
+		{3, 3},   // 3 buttons, 1 row
+		{4, 4},   // 4 buttons, 1 row (improved from old 3+1 split)
+		{5, 5},   // 5 buttons, 1 row (single row max)
+		{6, 5},   // 6 buttons → 5+1 (2 rows)
+		{7, 5},   // 7 buttons → 5+2 (2 rows)
+		{10, 5},  // 10 buttons → 5+5 (2 rows)
+		{11, 5},  // 11 buttons → 5+5+1 (3 rows)
+		{100, 5}, // pathological: many rows of 5
+	}
+	for _, c := range cases {
+		if got := askqButtonsPerRowFor(c.n); got != c.want {
+			t.Errorf("askqButtonsPerRowFor(%d) = %d, want %d", c.n, got, c.want)
+		}
+	}
+}
+
 func TestResolveAskQuestionAnswer_MultiSelect(t *testing.T) {
 	e := newTestEngine()
 	q := testQuestions()[0]
@@ -6471,19 +6496,26 @@ func TestSendAskQuestionPrompt_CardPlatform_ManyOptions_SplitsButtonRows(t *test
 		t.Fatal("expected CardActions rows for option buttons")
 	}
 	for i, row := range rows {
-		if len(row.Buttons) > 3 {
-			t.Errorf("row %d has %d buttons, want at most 3", i, len(row.Buttons))
+		if len(row.Buttons) > 5 {
+			t.Errorf("row %d has %d buttons, want at most 5", i, len(row.Buttons))
 		}
 		if row.Layout != CardActionLayoutEqualColumns {
 			t.Errorf("row %d layout = %q, want %q", i, row.Layout, CardActionLayoutEqualColumns)
 		}
 	}
 
-	// 7 options should split into rows of 3 + 3 + 1.
-	if len(rows) != 3 {
-		t.Errorf("expected 3 button rows for 7 options, got %d", len(rows))
+	// 7 options should split into rows of 5 + 2 (askqButtonsPerRowFor caps
+	// at 5 per row; >5 options get a trailing partial row).
+	if len(rows) != 2 {
+		t.Errorf("expected 2 button rows for 7 options (5+2), got %d", len(rows))
 	}
-	if got := len(rows[0].Buttons) + len(rows[1].Buttons) + len(rows[2].Buttons); got != 7 {
+	if len(rows[0].Buttons) != 5 {
+		t.Errorf("row 0 buttons = %d, want 5", len(rows[0].Buttons))
+	}
+	if len(rows[1].Buttons) != 2 {
+		t.Errorf("row 1 buttons = %d, want 2", len(rows[1].Buttons))
+	}
+	if got := len(rows[0].Buttons) + len(rows[1].Buttons); got != 7 {
 		t.Errorf("total buttons = %d, want 7", got)
 	}
 
