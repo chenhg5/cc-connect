@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -4355,6 +4355,167 @@ func TestCmdProvider_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "switch") {
 		t.Fatalf("provider text = %q, want switch hint", p.sent[0])
+	}
+}
+
+// TestCmdProvider_UsesInlineButtonsOnButtonOnlyPlatform mirrors the
+// /model behavior on platforms that do not support cards but do support
+// inline buttons. cmdProvider must emit one button per provider whose
+// Data starts with "cmd:/provider switch " so the platform callback
+// path can dispatch to the same switch handler as the text command.
+func TestCmdProvider_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "openai", BaseURL: "https://api.openai.com", Model: "gpt-4.1"},
+			{Name: "azure", BaseURL: "https://azure.example", Model: "gpt-4.1-mini"},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdProvider(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.buttonRows) == 0 {
+		t.Fatal("expected /provider to send inline buttons on button-only platform")
+	}
+	// Flatten all button rows so we can assert on the full set without
+	// caring about the exact 3-per-row layout.
+	var all []ButtonOption
+	for _, row := range p.buttonRows {
+		all = append(all, row...)
+	}
+	wantData := []string{
+		"cmd:/provider switch openai",
+		"cmd:/provider switch azure",
+		"cmd:/provider clear",
+	}
+	for _, want := range wantData {
+		found := false
+		for _, b := range all {
+			if b.Data == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("button with Data=%q not found in %d buttons across %d rows", want, len(all), len(p.buttonRows))
+		}
+	}
+}
+
+// TestCmdProvider_ButtonsMarkActiveProvider verifies the active provider
+// button carries the ▶ marker in its label, mirroring the text-body
+// marker convention used by /model and the legacy text path.
+func TestCmdProvider_ButtonsMarkActiveProvider(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "openai"},
+			{Name: "azure"},
+		},
+		active: "azure",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdProvider(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	var all []ButtonOption
+	for _, row := range p.buttonRows {
+		all = append(all, row...)
+	}
+	var active, inactive *ButtonOption
+	for i := range all {
+		switch all[i].Data {
+		case "cmd:/provider switch azure":
+			active = &all[i]
+		case "cmd:/provider switch openai":
+			inactive = &all[i]
+		}
+	}
+	if active == nil {
+		t.Fatalf("active azure button missing; got %+v", all)
+	}
+	if inactive == nil {
+		t.Fatalf("inactive openai button missing; got %+v", all)
+	}
+	if !strings.HasPrefix(active.Text, "▶") {
+		t.Errorf("active button label = %q, want ▶ prefix", active.Text)
+	}
+	if strings.HasPrefix(inactive.Text, "▶") {
+		t.Errorf("inactive button label = %q, must NOT carry ▶ prefix", inactive.Text)
+	}
+}
+
+// TestCmdProvider_NoClearButtonWhenNoActiveProvider guards the empty-
+// active edge: when no provider is currently active, there is nothing
+// to clear, so the Clear button must not appear. This avoids the user
+// landing on a button that does nothing useful on first boot.
+func TestCmdProvider_NoClearButtonWhenNoActiveProvider(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "openai"},
+			{Name: "azure"},
+		},
+		// active == "" — no provider currently selected
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdProvider(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	var all []ButtonOption
+	for _, row := range p.buttonRows {
+		all = append(all, row...)
+	}
+	for _, b := range all {
+		if b.Data == "cmd:/provider clear" {
+			t.Errorf("Clear button must NOT be shown when no provider is active; got button %+v", b)
+		}
+	}
+	// Sanity: the provider switch buttons must still be there.
+	if len(all) < 2 {
+		t.Errorf("expected ≥2 provider buttons, got %d: %+v", len(all), all)
+	}
+}
+
+// TestCmdProvider_ButtonsCapRowAtThree verifies the 3-per-row layout
+// matches /model: with 5 providers we should see 2 rows of 3 + a final
+// row carrying the remainder plus the Clear button (since one provider
+// is active).
+func TestCmdProvider_ButtonsCapRowAtThree(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "p1"}, {Name: "p2"}, {Name: "p3"}, {Name: "p4"}, {Name: "p5"},
+		},
+		active: "p3",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdProvider(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	// Expected layout: [p1, p2, ▶ p3] [p4, p5] [Clear]
+	// The Clear button lives on its own row so it is visually distinct
+	// from the destructive-free switch list — see the cmdProvider code
+	// where Clear is appended after the provider-button loop completes.
+	wantRows := [][]string{
+		{"p1", "p2", "▶ p3"},
+		{"p4", "p5"},
+		{"Clear"},
+	}
+	if len(p.buttonRows) != len(wantRows) {
+		t.Fatalf("got %d button rows, want %d: %+v", len(p.buttonRows), len(wantRows), p.buttonRows)
+	}
+	for i, want := range wantRows {
+		if len(p.buttonRows[i]) != len(want) {
+			t.Fatalf("row %d has %d buttons, want %d: %+v", i, len(p.buttonRows[i]), len(want), p.buttonRows[i])
+		}
+		for j, wantText := range want {
+			if p.buttonRows[i][j].Text != wantText {
+				t.Errorf("row %d button %d Text = %q, want %q", i, j, p.buttonRows[i][j].Text, wantText)
+			}
+		}
 	}
 }
 
@@ -15016,8 +15177,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15045,7 +15206,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
