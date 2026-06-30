@@ -15377,3 +15377,80 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
 	}
 }
+
+// --- Regression: streaming-card silent reply must not leak the NO_REPLY marker ---
+
+// recordingStreamCard captures the content passed to Finalize so tests can
+// assert what was rendered into the card.
+type recordingStreamCard struct {
+	mu      sync.Mutex
+	final   bool
+	content string
+}
+
+func (c *recordingStreamCard) Update(_ context.Context, _ string) error { return nil }
+func (c *recordingStreamCard) Finalize(_ context.Context, content string) error {
+	c.mu.Lock()
+	c.final = true
+	c.content = content
+	c.mu.Unlock()
+	return nil
+}
+func (c *recordingStreamCard) Failed() bool { return false }
+func (c *recordingStreamCard) finalized() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.final
+}
+func (c *recordingStreamCard) finalContent() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.content
+}
+
+// recordingStreamCardPlatform is a StreamingCardPlatform whose card records the
+// finalized content for assertions.
+type recordingStreamCardPlatform struct {
+	stubPlatformEngine
+	card *recordingStreamCard
+}
+
+func (p *recordingStreamCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	return p.card, nil
+}
+
+// TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed is a
+// regression test for the bug where a silent (bare NO_REPLY) turn on a
+// StreamingCardPlatform rendered the literal "NO_REPLY" marker into the card:
+// the streamCard finalize branch ran before — and shadowed — the isSilent
+// suppression branch, so buildCardContent received the raw NO_REPLY response.
+// The card must finalize WITHOUT the marker on a silent turn.
+func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "slack:user-streamcard-bare-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-bare-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-bare-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-bare-noreply", time.Now(), nil, nil, state.replyCtx)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized on a silent turn")
+	}
+	if strings.Contains(card.finalContent(), "NO_REPLY") {
+		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
