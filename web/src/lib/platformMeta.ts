@@ -85,6 +85,13 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'share_session_in_channel', labelKey: 'fields.sharedGroupSession', type: 'boolean', group: 'advanced' },
     ],
   },
+  yuanbao: {
+    label: 'Yuanbao (腾讯元宝)',
+    fields: [
+      { key: 'bot_token', labelKey: 'fields.botToken', required: true, type: 'password', placeholder: 'app_key:app_secret' },
+      { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+    ],
+  },
   line: {
     label: 'LINE',
     fields: [

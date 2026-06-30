@@ -1386,6 +1386,22 @@ app_secret = "your-feishu-app-secret"
 # proxy_username = ""
 # proxy_password = ""
 
+# -----------------------------------------------------------------------------
+# Tencent Yuanbao (yuanbao.tencent.com bot platform)
+# 腾讯元宝机器人：WebSocket 长连接平台，通过 bot_token 自动换取 sign-token
+# Setup helper: `cc-connect yuanbao setup --project <name> --token app_key:app_secret`
+# -----------------------------------------------------------------------------
+#
+# [[projects.platforms]]
+# type = "yuanbao"
+#
+# [projects.platforms.options]
+# bot_token  = "your-app-key:your-app-secret"
+# api_domain = "https://bot.yuanbao.tencent.com"                          # optional / 可选
+# ws_url     = "wss://bot-wss.yuanbao.tencent.com/wss/connection"         # optional / 可选
+# route_env  = "prod"                                                    # optional X-Route-Env / 可选路由头
+# allow_from = "*"                                                       # or "open_id_1,open_id_2"
+
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
