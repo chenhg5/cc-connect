@@ -417,6 +417,7 @@ type Engine struct {
 
 	// Multi-workspace mode
 	multiWorkspace               bool
+	workspacePattern             string
 	baseDir                      string
 	skipGit                      bool
 	workspaceInitAllowLocalPaths bool
@@ -780,6 +781,11 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
+}
+
+// SetWorkspacePattern sets the template pattern for thread-scoped workspaces.
+func (e *Engine) SetWorkspacePattern(pattern string) {
+	e.workspacePattern = pattern
 }
 
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
@@ -3900,6 +3906,42 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	if ws.agent != nil {
 		return ws.agent, ws.sessions, nil
+	}
+
+	// Dynamic git worktree creation if e.workspacePattern is set and workspace does not exist
+	if e.workspacePattern != "" {
+		if _, err := os.Stat(workspace); os.IsNotExist(err) {
+			var baseRepo string
+			if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+				baseRepo = wd.GetWorkDir()
+			}
+			if baseRepo != "" {
+				threadID := extractThreadIDFromPath(e.workspacePattern, workspace)
+				if threadID != "" {
+					branchName := "task-" + threadID
+					// Verify if branch exists
+					checkCmd := exec.Command("git", "-C", baseRepo, "show-ref", "--verify", "refs/heads/"+branchName)
+					branchExists := checkCmd.Run() == nil
+
+					var gitArgs []string
+					if branchExists {
+						// Use existing branch
+						gitArgs = []string{"-C", baseRepo, "worktree", "add", workspace, branchName}
+					} else {
+						// Create and checkout new branch from main
+						gitArgs = []string{"-C", baseRepo, "worktree", "add", "-b", branchName, workspace, "main"}
+					}
+
+					slog.Info("executing git worktree creation hook", "workspace", workspace, "args", gitArgs)
+					cmd := exec.Command("git", gitArgs...)
+					if output, err := cmd.CombinedOutput(); err != nil {
+						slog.Error("failed to create git worktree", "path", workspace, "error", err, "output", string(output))
+						return nil, nil, fmt.Errorf("git worktree creation failed: %w (output: %s)", err, string(output))
+					}
+					slog.Info("git worktree created successfully", "path", workspace)
+				}
+			}
+		}
 	}
 
 	// Create a new agent instance with this workspace's work_dir
@@ -16286,10 +16328,56 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 	return agent, sessions, interactiveKey, err
 }
 
+func extractThreadID(channelID string) string {
+	parts := strings.Split(channelID, ":")
+	if len(parts) > 1 {
+		return parts[1]
+	}
+	return ""
+}
+
+func extractThreadIDFromSessionKey(sessionKey string) string {
+	parts := strings.Split(sessionKey, ":")
+	if len(parts) >= 4 && parts[0] == "telegram" {
+		return parts[2]
+	}
+	return ""
+}
+
+func extractThreadIDFromPath(pattern, path string) string {
+	idx := strings.Index(pattern, "${THREAD_ID}")
+	if idx == -1 {
+		return ""
+	}
+	prefix := pattern[:idx]
+	suffix := pattern[idx+len("${THREAD_ID}"):]
+
+	val := path
+	if strings.HasPrefix(val, prefix) {
+		val = strings.TrimPrefix(val, prefix)
+	}
+	if suffix != "" && strings.HasSuffix(val, suffix) {
+		val = strings.TrimSuffix(val, suffix)
+	}
+	return val
+}
+
 // commandContextWithWorkspace is like commandContext but additionally returns
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
+	if e.workspacePattern != "" {
+		channelID := effectiveChannelID(msg)
+		threadID := extractThreadID(channelID)
+		if threadID != "" {
+			workspace := strings.ReplaceAll(e.workspacePattern, "${THREAD_ID}", threadID)
+			agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, msg.SessionKey)
+			if err != nil {
+				return nil, nil, "", "", err
+			}
+			return agent, sessions, interactiveKey, effectiveDir, nil
+		}
+	}
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
@@ -16318,6 +16406,15 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions
+		}
+	}
+	if e.workspacePattern != "" {
+		threadID := extractThreadIDFromSessionKey(sessionKey)
+		if threadID != "" {
+			workspace := strings.ReplaceAll(e.workspacePattern, "${THREAD_ID}", threadID)
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
+				return wsAgent, wsSessions
+			}
 		}
 	}
 	if !e.multiWorkspace || e.workspaceBindings == nil {

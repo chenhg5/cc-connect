@@ -526,18 +526,26 @@ func main() {
 		}
 
 		// Wire multi-workspace mode
-		if proj.Mode == "multi-workspace" {
+		if proj.Mode == "multi-workspace" || proj.WorkspacePattern != "" {
 			baseDir := proj.BaseDir
+			if baseDir == "" && proj.WorkspacePattern != "" {
+				baseDir = filepath.Dir(proj.WorkspacePattern)
+			}
 			if strings.HasPrefix(baseDir, "~/") {
 				home, _ := os.UserHomeDir()
 				baseDir = filepath.Join(home, baseDir[2:])
 			}
-			if err := os.MkdirAll(baseDir, 0o755); err != nil {
-				slog.Error("failed to create base_dir", "path", baseDir, "err", err)
-				continue
+			if baseDir != "" {
+				if err := os.MkdirAll(baseDir, 0o755); err != nil {
+					slog.Error("failed to create base_dir", "path", baseDir, "err", err)
+					continue
+				}
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.WorkspacePattern != "" {
+				engine.SetWorkspacePattern(proj.WorkspacePattern)
+			}
 			if proj.WorkspaceInitAllowLocalPaths != nil {
 				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
 			}
