@@ -1561,6 +1561,69 @@ func TestForwardSelect_EmptyTitleUsesDefault(t *testing.T) {
 	}
 }
 
+// TestForwardSelect_ObjectOptionsExtractsLabelAndDescription verifies that
+// extension_select options sent as objects (with both label and description)
+// are forwarded to the engine as UserQuestionOption{Label, Description},
+// not silently dropped. Regression guard for the bug where the cc-connect
+// TUI showed option descriptions but the Feishu card rendered label-only
+// because forwardSelect only handled string-form options.
+func TestForwardSelect_ObjectOptionsExtractsLabelAndDescription(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+
+	s.forwardSelect("sel-3", map[string]any{
+		"title": "Pick a database",
+		"options": []any{
+			map[string]any{
+				"label":       "PostgreSQL",
+				"description": "Recommended for production",
+			},
+			map[string]any{
+				"label":       "SQLite",
+				"description": "Lightweight file-based",
+			},
+			map[string]any{
+				"label":       "MySQL",
+				"description": "Popular open-source",
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	evt := evts[0]
+	if evt.ToolName != "extension_select" {
+		t.Fatalf("ToolName = %q, want extension_select", evt.ToolName)
+	}
+	if len(evt.Questions) != 1 {
+		t.Fatalf("expected 1 question, got %d", len(evt.Questions))
+	}
+	q := evt.Questions[0]
+	if q.Question != "Pick a database" {
+		t.Errorf("Question = %q, want %q", q.Question, "Pick a database")
+	}
+
+	want := []core.UserQuestionOption{
+		{Label: "PostgreSQL", Description: "Recommended for production"},
+		{Label: "SQLite", Description: "Lightweight file-based"},
+		{Label: "MySQL", Description: "Popular open-source"},
+	}
+	if len(q.Options) != len(want) {
+		t.Fatalf("expected %d options, got %d", len(want), len(q.Options))
+	}
+	for i, opt := range q.Options {
+		if opt.Label != want[i].Label {
+			t.Errorf("option[%d].Label = %q, want %q", i, opt.Label, want[i].Label)
+		}
+		if opt.Description != want[i].Description {
+			t.Errorf("option[%d].Description = %q, want %q",
+				i, opt.Description, want[i].Description)
+		}
+	}
+}
+
 // TestForwardConfirm_RoutesAsRegularPermission verifies that extension_confirm
 // is forwarded as a regular permission request (no Questions field) so the
 // engine renders an Allow/Deny card rather than a Yes/No question card. This

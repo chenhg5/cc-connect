@@ -613,21 +613,51 @@ func (s *piSession) forwardSelect(id string, raw map[string]any) {
 	title, _ := raw["title"].(string)
 	options, _ := raw["options"].([]any)
 
-	var opts []string
+	// Pi Agent sends options in either of two shapes:
+	//   - []string                         ("Red", "Green", "Blue")
+	//   - []map[string]any                 ([{label:"Red", description:"..."}])
+	// The object form carries an optional description which cc-connect's
+	// AskUserQuestion card layout renders as a full-width markdown line
+	// under each option (the long-description fix in core/engine.go). If we
+	// only accepted strings here, any object option would be silently dropped
+	// — the user's TUI sees the description, but cc-connect never forwards
+	// it to the engine, so the Feishu card renders label-only. Accept both
+	// shapes for forward compatibility.
+	userOpts := make([]core.UserQuestionOption, 0, len(options))
 	for _, opt := range options {
-		if o, ok := opt.(string); ok {
-			opts = append(opts, o)
+		switch v := opt.(type) {
+		case string:
+			// String form: the string IS the label.
+			userOpts = append(userOpts, core.UserQuestionOption{Label: v})
+		case map[string]any:
+			// Object form: extract label + optional description. Label
+			// carries the option's value verbatim so resolveAskQuestionAnswer
+			// → result.Message maps back to the same string the extension
+			// passed in.
+			label, _ := v["label"].(string)
+			if label == "" {
+				label, _ = v["text"].(string)
+			}
+			if label == "" {
+				label, _ = v["name"].(string)
+			}
+			desc, _ := v["description"].(string)
+			if desc == "" {
+				desc, _ = v["preview"].(string)
+			}
+			if label == "" {
+				slog.Warn("piSession: option missing label in extension_select",
+					"id", id)
+				continue
+			}
+			userOpts = append(userOpts, core.UserQuestionOption{
+				Label:       label,
+				Description: desc,
+			})
+		default:
+			slog.Warn("piSession: unsupported option type in extension_select",
+				"id", id, "type", fmt.Sprintf("%T", opt))
 		}
-	}
-
-	// Convert raw string options to UserQuestionOption so cc-connect renders
-	// them as a rich button card (AskUserQuestion flow) instead of a plain
-	// permission prompt. Label carries the option's value verbatim so that
-	// resolveAskQuestionAnswer → result.Message maps back to the same string
-	// the extension passed in.
-	userOpts := make([]core.UserQuestionOption, 0, len(opts))
-	for _, o := range opts {
-		userOpts = append(userOpts, core.UserQuestionOption{Label: o})
 	}
 
 	requestID := fmt.Sprintf("pi_ext_%s", id)
@@ -643,14 +673,21 @@ func (s *piSession) forwardSelect(id string, raw map[string]any) {
 		questionText = "Select an option"
 	}
 
+	// ToolInput carries a short label-only summary for the engine's tool-use
+	// stream; the rich per-option content (with descriptions) lives in the
+	// Questions field below, which cc-connect's card layout renders.
+	labelSummary := make([]string, 0, len(userOpts))
+	for _, o := range userOpts {
+		labelSummary = append(labelSummary, o.Label)
+	}
 	evt := core.Event{
 		Type:     core.EventPermissionRequest,
 		RequestID: requestID,
 		ToolName: "extension_select",
-		ToolInput: fmt.Sprintf("%s [%s]", title, strings.Join(opts, ", ")),
+		ToolInput: fmt.Sprintf("%s [%s]", title, strings.Join(labelSummary, ", ")),
 		ToolInputRaw: map[string]any{
 			"title":   title,
-			"options": opts,
+			"options": labelSummary,
 			"method":  "select",
 		},
 		Questions: []core.UserQuestion{{
