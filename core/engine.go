@@ -3936,9 +3936,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// it can be stale or corrupted by earlier bugs (see issue #1470), and the
 		// engine has no reliable way to tell stale from intentional.
 		//
-		// Recycle is now strictly bounded to the cold-start case: live is dead
-		// (currentID == "") but disk has an id we can resume from. All other
-		// cases reuse the existing live state, including:
+		// Recycle is now strictly bounded to the cold-start race window: the
+		// live process is alive (we are inside the Alive() guard above) but
+		// hasn't reported a session id yet (currentID == ""), while disk has
+		// a session we can resume from. All other cases reuse the existing
+		// live state, including:
 		//   - Stale disk + alive live (the original bug — disk might be wrong
 		//     from a prior botched turn, live is the real running session)
 		//   - /new done correctly — cleanupInteractiveState (called by /new)
