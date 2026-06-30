@@ -3423,6 +3423,18 @@ func (e *Engine) resolveAskQuestionAnswer(q UserQuestion, input string) string {
 	return input
 }
 
+// askqButtonsPerRowFor returns the per-row button cap for AskUserQuestion
+// prompts on card platforms. Typical prompts (≤5 options) render all
+// buttons in a single row so the user sees a clean horizontal choice bar.
+// Larger option sets (>5 is rare in practice) get max-5-per-row with a
+// trailing partial row, mirroring the Telegram / InlineButtonSender path.
+func askqButtonsPerRowFor(n int) int {
+	if n <= 5 {
+		return n
+	}
+	return 5
+}
+
 // buildAskQuestionResponse constructs the updatedInput for AskUserQuestion control_response.
 func buildAskQuestionResponse(originalInput map[string]any, questions []UserQuestion, collected map[int]string) map[string]any {
 	result := make(map[string]any)
@@ -11297,16 +11309,59 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 			cb.Note(e.i18n.T(MsgAskQuestionNoteMulti))
 		} else {
 			cb.Markdown(body)
+			// Render options as a full-width numbered list. Putting the
+			// description in a CardListItem column squeezes long descriptions
+			// into a narrow 5/12-weighted column (issue: 1-line options wrap
+			// to 10-20+ lines). A markdown list spans the full card width and
+			// wraps naturally.
+			var optionsText strings.Builder
 			for i, opt := range q.Options {
-				desc := opt.Label
+				fmt.Fprintf(&optionsText, "%d. **%s**", i+1, opt.Label)
 				if opt.Description != "" {
-					desc += " — " + opt.Description
+					optionsText.WriteString(" — " + opt.Description)
 				}
-				answerData := fmt.Sprintf("askq:%d:%d", qIdx, i+1)
-				cb.ListItemBtnExtra(desc, opt.Label, "default", answerData, map[string]string{
-					"askq_label":    opt.Label,
-					"askq_question": q.Question,
+				optionsText.WriteString("\n")
+			}
+			cb.Markdown(strings.TrimRight(optionsText.String(), "\n"))
+
+			// Render choice buttons below the list with equal column widths.
+			// Button text = option index (1-based). Labels are already shown
+			// in the markdown list above; on Feishu mobile the button width
+			// only fits ~2-3 chars so a single digit is more reliable than
+			// the label itself (which can be 20+ chars).
+			//
+			// Layout: typical prompts (≤5 options) render all buttons in a
+			// single row so the user sees a clean horizontal choice bar.
+			// Larger option sets (>5 is rare in practice for AskUserQuestion)
+			// get max-5-per-row with a trailing partial row.
+			//
+			// The index is purely a CC-Connect UI choice — the callback
+			// resolves back to q.Options[i].Label before forwarding to the
+			// agent, so the agent never sees the index.
+			//
+			// IMPORTANT: `row = nil` (not `row[:0]`) after each emitted row.
+			// The previous CardActions row stores the same underlying array;
+			// resetting length would let the next append overwrite button
+			// labels/values for prior rows (corrupted click targets).
+			askqPerRow := askqButtonsPerRowFor(len(q.Options))
+			var row []CardButton
+			for i, opt := range q.Options {
+				row = append(row, CardButton{
+					Text:  strconv.Itoa(i + 1),
+					Type:  "default",
+					Value: fmt.Sprintf("askq:%d:%d", qIdx, i+1),
+					Extra: map[string]string{
+						"askq_label":    opt.Label,
+						"askq_question": q.Question,
+					},
 				})
+				if len(row) == askqPerRow {
+					cb.ButtonsEqual(row...)
+					row = nil
+				}
+			}
+			if len(row) > 0 {
+				cb.ButtonsEqual(row...)
 			}
 			cb.Note(e.i18n.T(MsgAskQuestionNote))
 		}
