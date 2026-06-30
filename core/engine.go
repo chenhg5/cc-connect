@@ -5239,6 +5239,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			<-pending.Resolved
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
+			// The stream preview was frozen+detached when this permission
+			// request was emitted, so any subsequent EventText in this turn
+			// would otherwise be buffered until EventResult and sent as a
+			// single bulk message (regression fixed by
+			// fix/stream-preview-after-permission). unfreeze() restores the
+			// preview so the post-resolution output opens a fresh streaming
+			// card and continues to update incrementally.
+			sp.unfreeze()
+
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
 				idleTimer.Reset(e.eventIdleTimeout)

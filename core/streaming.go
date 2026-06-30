@@ -320,6 +320,50 @@ func (sp *streamPreview) freeze() {
 	sp.degraded = true
 }
 
+// unfreeze reverses a prior freeze()+detachPreview() so the preview resumes
+// streaming. After unfreeze, the next appendText() will create a NEW preview
+// message (the prior handle was detached), giving the post-interruption
+// output its own card instead of being buffered until end of turn.
+//
+// Required pairing: callers must invoke unfreeze() only after a matching
+// freeze()+detachPreview() (or an equivalent sequence that left previewMsgID
+// nil and degraded true). It is intended to be called once the user-visible
+// interruption (permission prompt, AskUserQuestion) has been resolved and
+// the agent is producing new output in the same turn.
+//
+// Why a new card: the old preview message is committed by freeze() as a
+// permanent in-place update of the pre-interruption text. Keeping a handle
+// to it would overwrite that committed message with the post-interruption
+// content. Detach+re-attach on the next appendText is what the surrounding
+// code (engine EventPermissionRequest handler) does today, and unfreeze()
+// simply restores the streamPreview's degraded state so that flow can run
+// again on the same turn.
+func (sp *streamPreview) unfreeze() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+
+	// Allow appendText() to bypass the interval/MinDeltaChars throttle on
+	// the first chunk after the interruption: lastSentAt is the only gate
+	// the throttle checks, and zeroing it makes that gate fall through.
+	sp.lastSentAt = time.Time{}
+
+	// Start a fresh accumulation window so the new card is a clean slate.
+	// Without this, the dedupe in flushLocked (text == sp.lastSentText)
+	// would suppress the first send of the new card, and the new card
+	// would appear empty until enough chars accumulated to force a flush.
+	sp.fullText = ""
+	sp.lastSentText = ""
+	sp.lastSentViaUpdate = false
+	sp.pendingStatus = ""
+
+	// previewMsgID stays nil (set by the matching detachPreview()). The
+	// next flushLocked() will see nil and call SendPreviewStart, opening
+	// a fresh card.
+	sp.degraded = false
+}
+
 // discard removes the preview message when possible and disables further
 // preview updates. Call this when the caller intends to send a separate
 // non-preview message (for example after tool use or on terminal errors).
