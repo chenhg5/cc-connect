@@ -3467,6 +3467,18 @@ func (e *Engine) resolveAskQuestionAnswer(q UserQuestion, input string) string {
 	return input
 }
 
+// askqButtonsPerRowFor returns the per-row button cap for AskUserQuestion
+// prompts on card platforms. Typical prompts (≤5 options) render all
+// buttons in a single row so the user sees a clean horizontal choice bar.
+// Larger option sets (>5 is rare in practice) get max-5-per-row with a
+// trailing partial row, mirroring the Telegram / InlineButtonSender path.
+func askqButtonsPerRowFor(n int) int {
+	if n <= 5 {
+		return n
+	}
+	return 5
+}
+
 // buildAskQuestionResponse constructs the updatedInput for AskUserQuestion control_response.
 func buildAskQuestionResponse(originalInput map[string]any, questions []UserQuestion, collected map[int]string) map[string]any {
 	result := make(map[string]any)
@@ -11510,11 +11522,16 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 			}
 			cb.Markdown(strings.TrimRight(optionsText.String(), "\n"))
 
-			// Render choice buttons below the list, max 3 per row with equal
-			// column widths. Button text = option index (1-based). Labels are
-			// already shown in the markdown list above; on Feishu mobile the
-			// button width only fits ~2-3 chars so a single digit is more
-			// reliable than the label itself (which can be 20+ chars).
+			// Render choice buttons below the list with equal column widths.
+			// Button text = option index (1-based). Labels are already shown
+			// in the markdown list above; on Feishu mobile the button width
+			// only fits ~2-3 chars so a single digit is more reliable than
+			// the label itself (which can be 20+ chars).
+			//
+			// Layout: typical prompts (≤5 options) render all buttons in a
+			// single row so the user sees a clean horizontal choice bar.
+			// Larger option sets (>5 is rare in practice for AskUserQuestion)
+			// get max-5-per-row with a trailing partial row.
 			//
 			// The index is purely a CC-Connect UI choice — the callback
 			// resolves back to q.Options[i].Label before forwarding to the
@@ -11524,7 +11541,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 			// The previous CardActions row stores the same underlying array;
 			// resetting length would let the next append overwrite button
 			// labels/values for prior rows (corrupted click targets).
-			const askqButtonsPerRow = 3
+			askqPerRow := askqButtonsPerRowFor(len(q.Options))
 			var row []CardButton
 			for i, opt := range q.Options {
 				row = append(row, CardButton{
@@ -11536,7 +11553,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 						"askq_question": q.Question,
 					},
 				})
-				if len(row) == askqButtonsPerRow {
+				if len(row) == askqPerRow {
 					cb.ButtonsEqual(row...)
 					row = nil
 				}
