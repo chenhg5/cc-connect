@@ -889,6 +889,42 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 	}
 }
 
+// TestExtractPostPlainText_HrTag is a regression test for issue #508
+// (related #470/#472). Lark posts use the `hr` element to mark a
+// horizontal rule boundary between sections of a quoted post; the
+// extractor must surface it as a standalone `---` so the agent
+// understands the section break instead of silently dropping it.
+func TestExtractPostPlainText_HrTag(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "hr_alone",
+			content: `{"content":[[{"tag":"hr"}]]}`,
+			want:    "---",
+		},
+		{
+			name:    "hr_after_text",
+			content: `{"content":[[{"tag":"text","text":"before"},{"tag":"hr"},{"tag":"text","text":"after"}]]}`,
+			want:    "before\n---\nafter",
+		},
+		{
+			name:    "hr_between_paragraphs",
+			content: `{"content":[[{"tag":"text","text":"first"}],[{"tag":"hr"}],[{"tag":"text","text":"second"}]]}`,
+			want:    "first\n---\nsecond",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractPostPlainText(tc.content); got != tc.want {
+				t.Errorf("extractPostPlainText(%q) = %q, want %q", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 func TestStripMentions(t *testing.T) {
