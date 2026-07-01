@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -73,15 +74,17 @@ type pingData struct {
 }
 
 type messageData struct {
-	Role      string `json:"role"`
-	Type      string `json:"type"`
-	Content   string `json:"content"`
-	SessionID string `json:"session_id"`
-	ChatID    string `json:"chat_id"`
-	MessageID string `json:"message_id"`
-	Timestamp int64  `json:"timestamp"`
-	DeviceUUID string `json:"device_uuid"`
-	DeviceName string `json:"device_name"`
+	Role       string   `json:"role"`
+	Type       string   `json:"type"`
+	Content    string   `json:"content"`
+	SessionID  string   `json:"session_id"`
+	ChatID     string   `json:"chat_id"`
+	MessageID  string   `json:"message_id"`
+	Timestamp  int64    `json:"timestamp"`
+	DeviceUUID string   `json:"device_uuid"`
+	DeviceName string   `json:"device_name"`
+	MediaURLs  []string `json:"media_urls,omitempty"`
+	MediaURL   string   `json:"media_url,omitempty"`
 }
 
 type typingData struct {
@@ -202,6 +205,77 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 		return fmt.Errorf("wps-agentspace: invalid reply context type")
 	}
 	return p.sendText(rc.ChatID, content, rc)
+}
+
+// SendFile implements core.FileSender. The WPS Agentspace WebSocket protocol
+// has no native binary file frame, so we persist the file to a shared
+// directory and reply with a path the user can open locally.
+func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAttachment) error {
+	rc, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("wps-agentspace: SendFile: invalid reply context type %T", replyCtx)
+	}
+
+	path, err := p.saveAttachment(file.FileName, file.Data)
+	if err != nil {
+		return fmt.Errorf("wps-agentspace: SendFile: %w", err)
+	}
+
+	notice := fmt.Sprintf("📎 文件已保存到本地：\n%s", path)
+	return p.sendText(rc.ChatID, notice, rc)
+}
+
+// SendImage implements core.ImageSender. Same disk-persist fallback as SendFile.
+func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAttachment) error {
+	rc, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("wps-agentspace: SendImage: invalid reply context type %T", replyCtx)
+	}
+
+	name := img.FileName
+	if name == "" {
+		ext := ".png"
+		if strings.HasPrefix(img.MimeType, "image/jpeg") {
+			ext = ".jpg"
+		} else if strings.HasPrefix(img.MimeType, "image/gif") {
+			ext = ".gif"
+		} else if strings.HasPrefix(img.MimeType, "image/webp") {
+			ext = ".webp"
+		}
+		name = "image_" + time.Now().Format("20060102_150405") + ext
+	}
+
+	path, err := p.saveAttachment(name, img.Data)
+	if err != nil {
+		return fmt.Errorf("wps-agentspace: SendImage: %w", err)
+	}
+
+	notice := fmt.Sprintf("🖼 图片已保存到本地：\n%s", path)
+	return p.sendText(rc.ChatID, notice, rc)
+}
+
+// saveAttachment writes data to ~/.cc-connect/attachments/<name> and returns
+// the absolute path. The filename is sanitized to a basename to prevent path
+// traversal.
+func (p *Platform) saveAttachment(name string, data []byte) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".cc-connect", "attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir: %w", err)
+	}
+
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == "/" {
+		name = fmt.Sprintf("file_%d", time.Now().UnixMilli())
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", fmt.Errorf("write: %w", err)
+	}
+	return path, nil
 }
 
 // Stop gracefully shuts down the platform.
@@ -464,11 +538,30 @@ func (p *Platform) handleUserMessage(data messageData) error {
 	}
 
 	content := strings.TrimSpace(data.Content)
+
+	// Collect media URLs (file attachments from user)
+	var mediaURLs []string
+	if len(data.MediaURLs) > 0 {
+		mediaURLs = data.MediaURLs
+	} else if data.MediaURL != "" {
+		mediaURLs = []string{data.MediaURL}
+	}
+
+	// If only media without text, use first URL as content
+	if content == "" && len(mediaURLs) > 0 {
+		content = mediaURLs[0]
+	}
+
 	if content == "" {
 		return nil
 	}
 
-	slog.Info("wps-agentspace: received message", "chat_id", chatID, "content", truncate(content, 100))
+	// Append media URLs to content so Claude can access files
+	if len(mediaURLs) > 0 {
+		content = content + "\n\n[附件]\n" + strings.Join(mediaURLs, "\n")
+	}
+
+	slog.Info("wps-agentspace: received message", "chat_id", chatID, "content", truncate(content, 100), "media_count", len(mediaURLs))
 
 	// Send typing indicator
 	p.sendTyping(chatID)
