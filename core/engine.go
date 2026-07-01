@@ -3975,6 +3975,16 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 						// Use existing branch
 						gitArgs = []string{"-C", baseRepo, "worktree", "add", workspace, branchName}
 					} else {
+						// Pre-flight sync: Pull origin main into baseRepo before branching off main.
+						// This runs instantly since the origin is a local Git directory path.
+						slog.Info("pre-flight sync: pulling origin main in base repo", "base_repo", baseRepo)
+						pullCmd := exec.Command("git", "-C", baseRepo, "pull", "origin", "main")
+						if output, err := pullCmd.CombinedOutput(); err != nil {
+							slog.Warn("pre-flight sync: failed to pull origin main", "base_repo", baseRepo, "error", err, "output", string(output))
+						} else {
+							slog.Info("pre-flight sync: base repo main successfully pulled")
+						}
+
 						// Create and checkout new branch from main
 						gitArgs = []string{"-C", baseRepo, "worktree", "add", "-b", branchName, workspace, "main"}
 					}
