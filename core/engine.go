@@ -9349,7 +9349,29 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.cleanupInteractiveState(interactiveKey)
+
+	// If the active session supports live model switching (e.g. ACP), apply
+	// it immediately. On success keep the current session running with no
+	// cleanup/restart; otherwise fall back to the CLI-agent model of
+	// cleaning up so the next message restarts with the new model.
+	liveSwitched := false
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		state.mu.Lock()
+		sess := state.agentSession
+		state.mu.Unlock()
+		if sess != nil && sess.Alive() {
+			if lm, ok := sess.(LiveModelSwitcher); ok {
+				liveSwitched = lm.SetLiveModel(target)
+			}
+		}
+	}
+
+	if !liveSwitched {
+		e.cleanupInteractiveState(interactiveKey)
+	}
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context

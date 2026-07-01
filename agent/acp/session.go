@@ -44,13 +44,27 @@ type acpSession struct {
 	toolInputMu   sync.Mutex
 	toolInputByID map[string]string // toolCallId -> summarized tool input
 
-	// modesMu guards availableModes and currentMode. Both fields are
-	// populated on handshake (session/new or session/load response) and
-	// updated whenever SetLiveMode succeeds or the server announces a
-	// mode change via session/update.
+	// modesMu guards availableModes, currentMode and modeConfigID. Populated
+	// on handshake (session/new or session/load) and updated whenever
+	// SetLiveMode succeeds or the server announces a mode change.
+	// modeConfigID is non-empty when the mode selector came from the
+	// configOptions mechanism (switch via session/set_config_option);
+	// empty means the `modes` block is used (switch via session/set_mode).
 	modesMu        sync.RWMutex
 	availableModes []acpModeInfo
 	currentMode    string
+	modeConfigID   string
+
+	// modelsMu guards availableModels, currentModel and modelConfigID.
+	// Populated on handshake and updated when SetLiveModel succeeds or the
+	// server announces a model change. modelConfigID is non-empty when the
+	// model selector came from configOptions (switch via
+	// session/set_config_option); empty means the `models` block is used
+	// (switch via session/set_model).
+	modelsMu        sync.RWMutex
+	availableModels []acpModelInfo
+	currentModel    string
+	modelConfigID   string
 
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
@@ -71,7 +85,7 @@ type acpSessionConfig struct {
 	workDir         string
 	resumeSessionID string
 	authMethod      string
-	initialMode     string           // if non-empty, applied via session/set_mode after session/new
+	initialMode     string           // if non-empty, applied via SetLiveMode after session/new
 	callbacks       sessionCallbacks // may be nil
 }
 
@@ -216,12 +230,16 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			slog.Warn("acp: session/load failed, starting new session", "error", err)
 		} else {
 			var lr struct {
-				SessionID string         `json:"sessionId"`
-				Modes     *acpModesBlock `json:"modes"`
+				SessionID     string            `json:"sessionId"`
+				Modes         *acpModesBlock    `json:"modes"`
+				Models        *acpModelsBlock   `json:"models"`
+				ConfigOptions []acpConfigOption `json:"configOptions"`
 			}
 			if json.Unmarshal(loadRes, &lr) == nil && lr.SessionID != "" {
 				s.setACPSessionID(lr.SessionID)
 				s.absorbModes(lr.Modes)
+				s.absorbModels(lr.Models)
+				s.absorbConfigOptions(lr.ConfigOptions)
 				return nil
 			}
 		}
@@ -236,8 +254,10 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: session/new: %w", err)
 	}
 	var sn struct {
-		SessionID string         `json:"sessionId"`
-		Modes     *acpModesBlock `json:"modes"`
+		SessionID     string            `json:"sessionId"`
+		Modes         *acpModesBlock    `json:"modes"`
+		Models        *acpModelsBlock   `json:"models"`
+		ConfigOptions []acpConfigOption `json:"configOptions"`
 	}
 	if err := json.Unmarshal(newRes, &sn); err != nil {
 		return fmt.Errorf("acp: parse session/new: %w", err)
@@ -247,6 +267,8 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	}
 	s.setACPSessionID(sn.SessionID)
 	s.absorbModes(sn.Modes)
+	s.absorbModels(sn.Models)
+	s.absorbConfigOptions(sn.ConfigOptions)
 	return nil
 }
 
@@ -269,6 +291,201 @@ func (s *acpSession) absorbModes(block *acpModesBlock) {
 	}
 }
 
+// absorbModels caches the ACP `models` block and reports it to the
+// parent agent. It is the model-selector counterpart of absorbModes,
+// called on handshake (session/new or session/load) and on
+// current_model_update notifications.
+func (s *acpSession) absorbModels(block *acpModelsBlock) {
+	if block == nil || len(block.AvailableModels) == 0 {
+		return
+	}
+	s.modelsMu.Lock()
+	s.availableModels = append(s.availableModels[:0], block.AvailableModels...)
+	if block.CurrentModelID != "" {
+		s.currentModel = block.CurrentModelID
+	}
+	s.modelsMu.Unlock()
+	if s.callbacks != nil {
+		s.callbacks.reportModels(*block)
+	}
+	slog.Debug("acp: absorbed models", "count", len(block.AvailableModels), "current", block.CurrentModelID)
+}
+
+// absorbConfigOptions handles the newer `configOptions` mechanism (an
+// alternative to the top-level `models`/`modes` blocks). It normalises the
+// model and mode selectors it finds into the same availableModels /
+// availableModes caches, and records the originating configId so live
+// switching routes through session/set_config_option.
+func (s *acpSession) absorbConfigOptions(options []acpConfigOption) {
+	for i := range options {
+		opt := options[i]
+		switch opt.Category {
+		case "model":
+			models := flattenModelOptions(opt)
+			if len(models) == 0 {
+				continue
+			}
+			s.modelsMu.Lock()
+			s.availableModels = models
+			if opt.CurrentValue != "" {
+				s.currentModel = opt.CurrentValue
+			}
+			s.modelConfigID = opt.ID
+			s.modelsMu.Unlock()
+			if s.callbacks != nil {
+				s.callbacks.reportModels(acpModelsBlock{CurrentModelID: opt.CurrentValue, AvailableModels: models})
+			}
+			slog.Debug("acp: absorbed model configOption", "configId", opt.ID, "count", len(models), "current", opt.CurrentValue)
+		case "mode":
+			modes := flattenModeOptions(opt)
+			if len(modes) == 0 {
+				continue
+			}
+			s.modesMu.Lock()
+			s.availableModes = modes
+			if opt.CurrentValue != "" {
+				s.currentMode = opt.CurrentValue
+			}
+			s.modeConfigID = opt.ID
+			s.modesMu.Unlock()
+			if s.callbacks != nil {
+				s.callbacks.reportModes(acpModesBlock{CurrentModeID: opt.CurrentValue, AvailableModes: modes})
+			}
+			slog.Debug("acp: absorbed mode configOption", "configId", opt.ID, "count", len(modes), "current", opt.CurrentValue)
+		}
+	}
+}
+
+// flattenModelOptions converts a configOption's option list (flat or
+// grouped) into acpModelInfo entries.
+func flattenModelOptions(opt acpConfigOption) []acpModelInfo {
+	var out []acpModelInfo
+	for _, o := range opt.Options {
+		if o.Group != "" {
+			for _, g := range o.Options {
+				out = append(out, acpModelInfo{ModelID: g.Value, Name: g.Name, Description: g.Description})
+			}
+		} else if o.Value != "" {
+			out = append(out, acpModelInfo{ModelID: o.Value, Name: o.Name, Description: o.Description})
+		}
+	}
+	return out
+}
+
+// flattenModeOptions converts a configOption's option list (flat or
+// grouped) into acpModeInfo entries.
+func flattenModeOptions(opt acpConfigOption) []acpModeInfo {
+	var out []acpModeInfo
+	for _, o := range opt.Options {
+		if o.Group != "" {
+			for _, g := range o.Options {
+				out = append(out, acpModeInfo{ID: g.Value, Name: g.Name, Description: g.Description})
+			}
+		} else if o.Value != "" {
+			out = append(out, acpModeInfo{ID: o.Value, Name: o.Name, Description: o.Description})
+		}
+	}
+	return out
+}
+
+// SetLiveModel implements core.LiveModelSwitcher. It applies a model
+// change to the running session and re-publishes the new state so
+// Agent.GetModel stays in sync. Returns true on success, false if the
+// model is unknown / the call errors / the session is closed.
+//
+// The switch routes through session/set_config_option when the model
+// selector came from the configOptions mechanism (modelConfigID set), or
+// session/set_model when it came from the `models` block.
+func (s *acpSession) SetLiveModel(model string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return false
+	}
+	modelID := s.matchAvailableModel(model)
+	if modelID == "" {
+		slog.Debug("acp: SetLiveModel rejected unknown model", "model", model, "session_id", sid)
+		return false
+	}
+
+	s.modelsMu.RLock()
+	configID := s.modelConfigID
+	s.modelsMu.RUnlock()
+
+	if configID != "" {
+		if !s.setConfigOption(sid, configID, modelID) {
+			return false
+		}
+	} else {
+		if _, err := s.tr.call(s.ctx, "session/set_model", map[string]any{
+			"sessionId": sid,
+			"modelId":   modelID,
+		}); err != nil {
+			slog.Warn("acp: session/set_model failed", "model", modelID, "session_id", sid, "error", err)
+			return false
+		}
+	}
+
+	// Both RPCs return without the full updated state, so optimistically
+	// update the local cache and re-publish to keep Agent.GetModel in sync.
+	s.modelsMu.Lock()
+	s.currentModel = modelID
+	available := append([]acpModelInfo(nil), s.availableModels...)
+	s.modelsMu.Unlock()
+	if s.callbacks != nil {
+		s.callbacks.reportModels(acpModelsBlock{
+			CurrentModelID:  modelID,
+			AvailableModels: available,
+		})
+	}
+	slog.Info("acp: live model applied", "model", modelID, "session_id", sid)
+	return true
+}
+
+// setConfigOption sends a session/set_config_option RPC. Returns true on
+// success. Any full configOptions payload in the response is absorbed to
+// keep caches fresh.
+func (s *acpSession) setConfigOption(sid, configID, value string) bool {
+	res, err := s.tr.call(s.ctx, "session/set_config_option", map[string]any{
+		"sessionId": sid,
+		"configId":  configID,
+		"value":     value,
+	})
+	if err != nil {
+		slog.Warn("acp: session/set_config_option failed", "configId", configID, "value", value, "session_id", sid, "error", err)
+		return false
+	}
+	var resp struct {
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if json.Unmarshal(res, &resp) == nil && len(resp.ConfigOptions) > 0 {
+		s.absorbConfigOptions(resp.ConfigOptions)
+	}
+	return true
+}
+
+// matchAvailableModel resolves a user-typed model string to a known ACP
+// modelId from the cached availableModels list. Matching is case-
+// insensitive on both modelId and display name to accommodate IM input.
+// Returns "" if nothing matches or if models are unknown.
+func (s *acpSession) matchAvailableModel(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	lower := strings.ToLower(input)
+	s.modelsMu.RLock()
+	defer s.modelsMu.RUnlock()
+	for _, m := range s.availableModels {
+		if strings.ToLower(m.ModelID) == lower || strings.ToLower(m.Name) == lower {
+			return m.ModelID
+		}
+	}
+	return ""
+}
+
 func (s *acpSession) setACPSessionID(id string) {
 	s.acpSessMu.Lock()
 	s.acpSessID = id
@@ -289,9 +506,12 @@ func (s *acpSession) CurrentMode() string {
 	return s.currentMode
 }
 
-// SetLiveMode applies a permission mode change to the running session
-// via `session/set_mode`. Returns true on success, false if the mode
-// is unknown / the call errors / the session is closed.
+// SetLiveMode applies a permission mode change to the running session.
+// The switch routes through session/set_config_option when the mode
+// selector came from the configOptions mechanism (modeConfigID set), or
+// session/set_mode when it came from the `modes` block. Returns true on
+// success, false if the mode is unknown / the call errors / the session
+// is closed.
 //
 // This is the implementation of core.LiveModeSwitcher for ACP
 // sessions; the engine invokes it when the user runs `/mode <x>`,
@@ -316,16 +536,27 @@ func (s *acpSession) SetLiveMode(mode string) bool {
 		)
 		return false
 	}
-	if _, err := s.tr.call(s.ctx, "session/set_mode", map[string]any{
-		"sessionId": sid,
-		"modeId":    modeID,
-	}); err != nil {
-		slog.Warn("acp: session/set_mode failed",
-			"mode", modeID,
-			"session_id", sid,
-			"error", err,
-		)
-		return false
+
+	s.modesMu.RLock()
+	configID := s.modeConfigID
+	s.modesMu.RUnlock()
+
+	if configID != "" {
+		if !s.setConfigOption(sid, configID, modeID) {
+			return false
+		}
+	} else {
+		if _, err := s.tr.call(s.ctx, "session/set_mode", map[string]any{
+			"sessionId": sid,
+			"modeId":    modeID,
+		}); err != nil {
+			slog.Warn("acp: session/set_mode failed",
+				"mode", modeID,
+				"session_id", sid,
+				"error", err,
+			)
+			return false
+		}
 	}
 	s.modesMu.Lock()
 	s.currentMode = modeID
@@ -372,6 +603,8 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	}
 	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
+	s.maybeAbsorbCurrentModelUpdate(params)
+	s.maybeAbsorbConfigOptionUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
@@ -394,7 +627,7 @@ func (s *acpSession) maybeAbsorbCurrentModeUpdate(params json.RawMessage) {
 		return
 	}
 	var head struct {
-		Kind     string `json:"sessionUpdate"`
+		Kind          string `json:"sessionUpdate"`
 		CurrentModeID string `json:"currentModeId"`
 	}
 	if json.Unmarshal(wrap.Update, &head) != nil {
@@ -413,6 +646,64 @@ func (s *acpSession) maybeAbsorbCurrentModeUpdate(params json.RawMessage) {
 			AvailableModes: available,
 		})
 	}
+}
+
+// maybeAbsorbCurrentModelUpdate watches session/update notifications for
+// `current_model_update` (server-driven model switch, e.g. when the
+// agent changes model during execution or the user switches via another
+// client). Mirrors maybeAbsorbCurrentModeUpdate.
+func (s *acpSession) maybeAbsorbCurrentModelUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var head struct {
+		Kind           string `json:"sessionUpdate"`
+		CurrentModelID string `json:"currentModelId"`
+	}
+	if json.Unmarshal(wrap.Update, &head) != nil {
+		return
+	}
+	if head.Kind != "current_model_update" || head.CurrentModelID == "" {
+		return
+	}
+	s.modelsMu.Lock()
+	s.currentModel = head.CurrentModelID
+	available := append([]acpModelInfo(nil), s.availableModels...)
+	s.modelsMu.Unlock()
+	if s.callbacks != nil {
+		s.callbacks.reportModels(acpModelsBlock{
+			CurrentModelID:  head.CurrentModelID,
+			AvailableModels: available,
+		})
+	}
+}
+
+// maybeAbsorbConfigOptionUpdate watches session/update notifications for
+// `config_option_update` (the configOptions-mechanism counterpart of
+// current_model_update / current_mode_update). It re-absorbs the full
+// configOptions payload so model/mode caches stay in sync when the agent
+// changes a selector during execution.
+func (s *acpSession) maybeAbsorbConfigOptionUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var head struct {
+		Kind          string            `json:"sessionUpdate"`
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if json.Unmarshal(wrap.Update, &head) != nil {
+		return
+	}
+	if head.Kind != "config_option_update" || len(head.ConfigOptions) == 0 {
+		return
+	}
+	s.absorbConfigOptions(head.ConfigOptions)
 }
 
 // cacheToolCallInput extracts and caches rawInput from tool_call and tool_call_update

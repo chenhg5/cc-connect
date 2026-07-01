@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -30,8 +31,9 @@ type Agent struct {
 	displayName  string // optional, for doctor (default "ACP")
 
 	// mode is the pending permission mode to apply to new sessions.
-	// When set, StartSession applies it via session/set_mode right after
-	// session/new. Empty means "use whatever the agent selects by default".
+	// When set, StartSession applies it via the session's SetLiveMode
+	// right after session/new. Empty means "use whatever the agent selects
+	// by default".
 	mode string
 
 	// listUnsupported caches a negative result after we probe the agent
@@ -45,9 +47,24 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
+
+	// modelsCache holds the latest `models` block observed via session/new
+	// or session/load. availableModels feeds the `/model` picker;
+	// currentModel reflects the active model. pendingModel holds a
+	// user-selected model to apply to future sessions (mirrors `mode`).
+	modelsMu        sync.RWMutex
+	availableModels []acpModelInfo
+	currentModel    string
+	pendingModel    string
+
+	// sessionConfigProbed marks whether probeSessionConfig has run once.
+	// A single probe fills both the modes and models caches, serving
+	// /mode and /model, so an agent advertising neither won't trigger a
+	// fresh process spawn on every command.
+	sessionConfigProbed atomic.Bool
 
 	mu sync.RWMutex
 }
@@ -58,6 +75,7 @@ type Agent struct {
 // would never see availableModes / capability advertisements.
 type sessionCallbacks interface {
 	reportModes(block acpModesBlock)
+	reportModels(block acpModelsBlock)
 	reportListSupported(supported bool)
 }
 
@@ -95,15 +113,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = strings.TrimSpace(mode)
 
 	return &Agent{
-		workDir:     workDir,
+		workDir:      workDir,
 		cmd:          cmdStr,
 		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
+		args:         args,
+		staticEnv:    staticEnv,
+		extraEnv:     extra,
+		authMethod:   authMethod,
+		displayName:  displayName,
+		mode:         mode,
 	}, nil
 }
 
@@ -310,14 +328,24 @@ func (a *Agent) GetMode() string {
 }
 
 // PermissionModes returns the modes this ACP agent offers. The list is
-// populated from the latest `modes.availableModes` observed on
-// session/new or session/load; before the first successful handshake
-// it returns an empty slice, and the engine will hide the mode picker.
+// populated from the modes observed on session/new or session/load —
+// either the `modes` block or a configOptions mode selector. If nothing
+// has been observed yet (no session started), it triggers a one-time
+// probe so `/mode` can list options without requiring the user to start a
+// session first — this mirrors AvailableModels for `/model`.
 //
 // ACP doesn't send per-mode Desc/NameZh, so Description (if the server
 // sent one) maps to Desc for both locales. IM-side translators are
 // free to map well-known ids to localised strings later.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
+	a.modesMu.RLock()
+	empty := len(a.modesCache) == 0
+	a.modesMu.RUnlock()
+
+	if empty {
+		a.ensureSessionConfigProbed()
+	}
+
 	a.modesMu.RLock()
 	defer a.modesMu.RUnlock()
 	out := make([]core.PermissionModeInfo, len(a.modesCache))
@@ -368,5 +396,183 @@ func (a *Agent) reportListSupported(supported bool) {
 		a.listUnsupported.Store(true)
 	} else {
 		a.listUnsupported.Store(false)
+	}
+}
+
+func (a *Agent) reportModels(block acpModelsBlock) {
+	a.modelsMu.Lock()
+	a.availableModels = append(a.availableModels[:0], block.AvailableModels...)
+	if block.CurrentModelID != "" {
+		a.currentModel = block.CurrentModelID
+	}
+	a.modelsMu.Unlock()
+}
+
+// -- ModelSwitcher implementation --
+//
+// Models come from either the `models` block or a configOptions entry with
+// category "model" (both are normalised into the same cache during the
+// handshake / probe).
+
+// SetModel records the user-selected model as the preference for future
+// sessions. For a running session the engine separately calls the
+// session's SetLiveModel to switch live.
+func (a *Agent) SetModel(model string) {
+	a.modelsMu.Lock()
+	a.pendingModel = model
+	// Optimistically update currentModel so GetModel / rendering reflect
+	// the user's intent immediately.
+	if model != "" {
+		a.currentModel = model
+	}
+	a.modelsMu.Unlock()
+	slog.Info("acp: model changed", "model", model)
+}
+
+// GetModel returns the current model. The most recent SetModel
+// (pendingModel, the user's intent) wins; otherwise it falls back to the
+// currentModel the server reported during the handshake. This mirrors
+// GetMode's precedence logic.
+func (a *Agent) GetModel() string {
+	a.modelsMu.RLock()
+	defer a.modelsMu.RUnlock()
+	if a.pendingModel != "" {
+		return a.pendingModel
+	}
+	return a.currentModel
+}
+
+// AvailableModels returns the models this ACP agent advertised, whether
+// via the `models` block or a configOptions model selector. When the
+// cache is empty (no session started yet), it triggers a one-time probe
+// to fetch them.
+//
+// Note: the ctx argument only satisfies the core.ModelSwitcher
+// interface; the probe uses its own timeout (see probeSessionConfig) and
+// is therefore not bounded by the caller's short ctx (cmdModel's 10s).
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	_ = ctx
+	a.modelsMu.RLock()
+	empty := len(a.availableModels) == 0
+	a.modelsMu.RUnlock()
+
+	if empty {
+		a.ensureSessionConfigProbed()
+	}
+
+	a.modelsMu.RLock()
+	defer a.modelsMu.RUnlock()
+	if len(a.availableModels) == 0 {
+		return nil
+	}
+	out := make([]core.ModelOption, 0, len(a.availableModels))
+	for _, m := range a.availableModels {
+		out = append(out, core.ModelOption{Name: m.ModelID, Desc: m.Description})
+	}
+	return out
+}
+
+// ensureSessionConfigProbed triggers a one-time probe (initialize +
+// session/new) when no session has advertised the session config yet.
+// A single probe fills both the modes and models caches, so /mode and
+// /model both benefit. Subsequent calls are cheap no-ops once probed.
+func (a *Agent) ensureSessionConfigProbed() {
+	if a.sessionConfigProbed.Load() {
+		return
+	}
+	// Nothing to spawn without a command (e.g. a zero-value Agent used in
+	// unit tests). Skip the probe rather than attempting a doomed exec.
+	a.mu.RLock()
+	cmd := a.cmd
+	a.mu.RUnlock()
+	if cmd == "" {
+		return
+	}
+	a.probeSessionConfig()
+}
+
+// probeSessionConfig spawns a short-lived ACP process, runs
+// initialize + session/new to obtain the mode and model selectors (from
+// the `modes`/`models` blocks or configOptions), then shuts it down.
+// Used to answer /model and /mode when no session is
+// active.
+//
+// The probe uses sessionConfigProbeTimeout rather than inheriting the
+// caller's possibly-short ctx (cmdModel/cmdMode only pass 10s). Some
+// agents (e.g. kiro CLI) initialize multiple MCP servers on startup and
+// can take longer than 10s, which would otherwise surface as
+// "probe initialize/session/new: context deadline exceeded". The child
+// process is reaped by teardown, so at worst the probe ends itself when
+// the timeout fires.
+func (a *Agent) probeSessionConfig() {
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absWorkDir, _ := filepath.Abs(workDir)
+	if absWorkDir == "" {
+		absWorkDir = workDir
+	}
+
+	probeCtx, cancel := context.WithTimeout(context.Background(), sessionConfigProbeTimeout)
+	defer cancel()
+
+	tr, _, teardown, err := a.probeSpawn(probeCtx, absWorkDir)
+	if err != nil {
+		slog.Warn("acp: probeSessionConfig spawn failed", "error", err)
+		return
+	}
+	defer teardown()
+
+	if _, err := probeInitialize(probeCtx, tr); err != nil {
+		slog.Warn("acp: probeSessionConfig initialize failed", "error", err)
+		return
+	}
+
+	newRes, err := tr.call(probeCtx, "session/new", map[string]any{
+		"cwd":        absWorkDir,
+		"mcpServers": []any{},
+	})
+	if err != nil {
+		slog.Warn("acp: probeSessionConfig session/new failed", "error", err)
+		return
+	}
+	// session/new completed, so mark as probed to avoid respawning.
+	a.sessionConfigProbed.Store(true)
+	var sn struct {
+		SessionID     string            `json:"sessionId"`
+		Modes         *acpModesBlock    `json:"modes"`
+		Models        *acpModelsBlock   `json:"models"`
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if json.Unmarshal(newRes, &sn) != nil {
+		return
+	}
+	// Mechanism A: top-level models/modes blocks.
+	if sn.Models != nil && len(sn.Models.AvailableModels) > 0 {
+		a.reportModels(*sn.Models)
+		slog.Info("acp: probeSessionConfig fetched models", "count", len(sn.Models.AvailableModels))
+	}
+	if sn.Modes != nil && len(sn.Modes.AvailableModes) > 0 {
+		a.reportModes(*sn.Modes)
+		slog.Info("acp: probeSessionConfig fetched modes", "count", len(sn.Modes.AvailableModes))
+	}
+	// Mechanism B: configOptions (model/mode selectors). The probe only
+	// needs to populate the agent-level caches so /model and /mode can
+	// list options; the configId used for live switching is recorded by
+	// the real session's absorbConfigOptions.
+	for i := range sn.ConfigOptions {
+		opt := sn.ConfigOptions[i]
+		switch opt.Category {
+		case "model":
+			if models := flattenModelOptions(opt); len(models) > 0 {
+				a.reportModels(acpModelsBlock{CurrentModelID: opt.CurrentValue, AvailableModels: models})
+				slog.Info("acp: probeSessionConfig fetched model configOption", "count", len(models))
+			}
+		case "mode":
+			if modes := flattenModeOptions(opt); len(modes) > 0 {
+				a.reportModes(acpModesBlock{CurrentModeID: opt.CurrentValue, AvailableModes: modes})
+				slog.Info("acp: probeSessionConfig fetched mode configOption", "count", len(modes))
+			}
+		}
 	}
 }
