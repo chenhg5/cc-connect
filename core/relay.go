@@ -456,16 +456,35 @@ func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, cont
 }
 
 func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
-	// Format: "platform:chatID:userID"
-	// Relay session format: "relay:sourceProject:chatID"
-	parts := strings.SplitN(sessionKey, ":", 3)
+	parts := strings.Split(sessionKey, ":")
 	if len(parts) < 2 {
 		return "", "", fmt.Errorf("invalid session key format: %q", sessionKey)
 	}
-	if parts[0] == "relay" && len(parts) == 3 {
-		// For relay sessions, chatID is the third part: "relay:sourceProject:chatID"
-		return parts[0], parts[2], nil
+
+	if parts[0] == "relay" {
+		// Relay session format:
+		// "relay:sourceProject:platformName:chatID" or "relay:sourceProject:platformName:chatID:threadID"
+		if len(parts) >= 4 {
+			return parts[0], strings.Join(parts[2:], ":"), nil
+		}
+		if len(parts) == 3 {
+			return parts[0], parts[2], nil
+		}
+		return "", "", fmt.Errorf("invalid relay session key format: %q", sessionKey)
 	}
+
+	// Normal session format:
+	// For "platform:chatID:threadID:userID" (4 parts):
+	if len(parts) == 4 && parts[0] == "telegram" {
+		return parts[0], parts[1] + ":" + parts[2], nil
+	}
+
+	// For "platform:t:chatID:threadID:userID" (5 parts, type tag present):
+	if len(parts) == 5 && len(parts[1]) == 1 {
+		return parts[0], parts[2] + ":" + parts[3], nil
+	}
+
+	// Default fallback: return platform name and parts[1] (base chat ID)
 	return parts[0], parts[1], nil
 }
 

@@ -667,3 +667,58 @@ func TestRelayManager_ProactiveDeathNotifications(t *testing.T) {
 		t.Errorf("got timeout prompt %q, want %q", sourceSession2.receivedPrompts[0], wantMsgTimeout)
 	}
 }
+
+func TestParseSessionKeyParts_TopicThreadSupport(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionKey   string
+		wantPlatform string
+		wantChatID   string
+		wantErr      bool
+	}{
+		{
+			name:         "Standard 3-part key (no topic)",
+			sessionKey:   "telegram:-1003917051393:7664413698",
+			wantPlatform: "telegram",
+			wantChatID:   "-1003917051393",
+			wantErr:      false,
+		},
+		{
+			name:         "4-part key with topic thread",
+			sessionKey:   "telegram:-1003917051393:553:7664413698",
+			wantPlatform: "telegram",
+			wantChatID:   "-1003917051393:553",
+			wantErr:      false,
+		},
+		{
+			name:         "Relay session key (no topic)",
+			sessionKey:   "relay:chef-seat:telegram:-1003917051393",
+			wantPlatform: "relay",
+			wantChatID:   "telegram:-1003917051393",
+			wantErr:      false,
+		},
+		{
+			name:         "Relay session key with topic",
+			sessionKey:   "relay:chef-seat:telegram:-1003917051393:553",
+			wantPlatform: "relay",
+			wantChatID:   "telegram:-1003917051393:553",
+			wantErr:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plat, chatID, err := parseSessionKeyParts(tt.sessionKey)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseSessionKeyParts() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if plat != tt.wantPlatform {
+				t.Errorf("platform = %q, want %q", plat, tt.wantPlatform)
+			}
+			if chatID != tt.wantChatID {
+				t.Errorf("chatID = %q, want %q", chatID, tt.wantChatID)
+			}
+		})
+	}
+}
+
