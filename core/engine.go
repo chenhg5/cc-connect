@@ -1517,7 +1517,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewBackgroundSession(runSessionKey, "cron-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
@@ -1718,7 +1718,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := sessions.NewSideSession(runSessionKey, "timer-"+job.ID)
+		session := sessions.NewBackgroundSession(runSessionKey, "timer-"+job.ID)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
@@ -6608,10 +6608,25 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 // filter_external_sessions config. When disabled (default), all sessions are
 // returned. When enabled, only sessions tracked by cc-connect are shown.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
+	sessions = filterHiddenSessions(sessions, sm.BackgroundAgentSessionIDs())
 	if !e.filterExternalSessions {
 		return sessions
 	}
 	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+}
+
+func filterHiddenSessions(sessions []AgentSessionInfo, hidden map[string]struct{}) []AgentSessionInfo {
+	if len(hidden) == 0 {
+		return sessions
+	}
+	filtered := make([]AgentSessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		if _, ok := hidden[s.ID]; ok {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered
 }
 
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
