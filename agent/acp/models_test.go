@@ -370,6 +370,53 @@ func TestSession_bothMechanisms_configOptionsWins(t *testing.T) {
 	assert(t, s2)
 }
 
+// Mixed mechanisms: an agent provides a model selector via configOptions
+// but a mode selector only via the legacy `modes` block. The two selectors
+// must resolve independently — model from configOptions (modelConfigID set),
+// mode from the block (modeConfigID empty). Order-independent.
+func TestSession_mixedMechanisms_modelCfgModeBlock(t *testing.T) {
+	assert := func(t *testing.T, s *acpSession) {
+		t.Helper()
+		s.modelsMu.RLock()
+		if s.modelConfigID != "model" || s.currentModel != "cfg-model" ||
+			len(s.availableModels) != 1 || s.availableModels[0].ModelID != "cfg-model" {
+			s.modelsMu.RUnlock()
+			t.Fatalf("model: configID=%q current=%q avail=%+v — want configOptions",
+				s.modelConfigID, s.currentModel, s.availableModels)
+		}
+		s.modelsMu.RUnlock()
+
+		s.modesMu.RLock()
+		defer s.modesMu.RUnlock()
+		if s.modeConfigID != "" || s.currentMode != "block-mode" ||
+			len(s.availableModes) != 1 || s.availableModes[0].ID != "block-mode" {
+			t.Fatalf("mode: configID=%q current=%q avail=%+v — want legacy block",
+				s.modeConfigID, s.currentMode, s.availableModes)
+		}
+	}
+	modeBlock := &acpModesBlock{
+		CurrentModeID:  "block-mode",
+		AvailableModes: []acpModeInfo{{ID: "block-mode", Name: "Block Mode"}},
+	}
+	// configOptions carries only a model selector (no mode category).
+	cfg := []acpConfigOption{{
+		ID: "model", Category: "model", CurrentValue: "cfg-model",
+		Options: []acpConfigSelectOptions{{Value: "cfg-model"}},
+	}}
+
+	// configOptions first, then the mode block (handshake order).
+	s1 := &acpSession{}
+	s1.absorbConfigOptions(cfg)
+	s1.absorbModes(modeBlock)
+	assert(t, s1)
+
+	// Reversed order must yield the same result.
+	s2 := &acpSession{}
+	s2.absorbModes(modeBlock)
+	s2.absorbConfigOptions(cfg)
+	assert(t, s2)
+}
+
 // --- concurrency safety (run with -race) ---------------------------
 
 func TestAgent_ConcurrentModelAccess(t *testing.T) {

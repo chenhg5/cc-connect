@@ -544,7 +544,8 @@ func (a *Agent) probeSessionConfig() {
 		Models        *acpModelsBlock   `json:"models"`
 		ConfigOptions []acpConfigOption `json:"configOptions"`
 	}
-	if json.Unmarshal(newRes, &sn) != nil {
+	if err := json.Unmarshal(newRes, &sn); err != nil {
+		slog.Warn("acp: probeSessionConfig parse session/new failed", "error", err)
 		return
 	}
 	// configOptions (newer mechanism) takes precedence. Absorb it first and
