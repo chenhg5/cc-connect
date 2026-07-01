@@ -23,6 +23,14 @@ func init() {
 	core.RegisterPlatform("qq", New)
 }
 
+// defaultHTTPFallbackThreshold is the message size (in bytes) above which Send()
+// routes through the OneBot HTTP API instead of the WebSocket. The OneBot WS
+// implementation round-trips every reply through the same readLoop that
+// delivers events, so a long reply can race or stall and trip the 15s WS
+// timeout (see #1474). HTTP send has a dedicated 120s timeout and avoids
+// queueing on the WS readLoop.
+const defaultHTTPFallbackThreshold = 512
+
 // Platform connects to a OneBot v11 implementation (NapCat, LLOneBot, etc.)
 // via forward WebSocket. It receives message events and sends messages back
 // through the same WS connection.
@@ -40,7 +48,8 @@ type Platform struct {
 	selfID                int64
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
-	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	httpURL               string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	sendViaHTTP           string   // "auto" (default) | "always" | "never"
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -57,12 +66,26 @@ func New(opts map[string]any) (core.Platform, error) {
 	httpURL, _ := opts["http_url"].(string)
 	httpURL = strings.TrimRight(httpURL, "/")
 
+	sendViaHTTP, _ := opts["send_via_http"].(string)
+	switch sendViaHTTP {
+	case "", "auto", "always", "never":
+		// valid
+	default:
+		slog.Warn("qq: invalid send_via_http value, falling back to auto",
+			"got", sendViaHTTP, "valid", []string{"auto", "always", "never"})
+		sendViaHTTP = "auto"
+	}
+	if sendViaHTTP == "" {
+		sendViaHTTP = "auto"
+	}
+
 	return &Platform{
 		wsURL:                 wsURL,
 		token:                 token,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
-		httpURL:            httpURL,
+		httpURL:               httpURL,
+		sendViaHTTP:           sendViaHTTP,
 	}, nil
 }
 
@@ -443,6 +466,13 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 }
 
 // Send sends a message to the conversation identified by replyCtx.
+//
+// Long messages route through the OneBot HTTP API instead of WebSocket. The
+// OneBot WS implementation round-trips every reply through the same readLoop
+// that delivers inbound events, so a long reply can race or stall and trip
+// the 15s WS timeout (#1474). HTTP send has a dedicated 120s timeout and
+// avoids queueing on the WS readLoop. Threshold + mode controlled by
+// `send_via_http` config (default "auto" → switch at 512 bytes).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
 	rctx, ok := replyCtx.(*replyContext)
 	if !ok {
@@ -453,15 +483,40 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 		"message": content,
 	}
 
+	useHTTP := p.shouldUseHTTP(content)
+	call := p.callAPI
+	if useHTTP {
+		call = p.callHTTPAPI
+	}
+
 	if rctx.messageType == "group" {
 		params["group_id"] = rctx.groupID
-		_, err := p.callAPI("send_group_msg", params)
+		_, err := call("send_group_msg", params)
 		return err
 	}
 
 	params["user_id"] = rctx.userID
-	_, err := p.callAPI("send_private_msg", params)
+	_, err := call("send_private_msg", params)
 	return err
+}
+
+// shouldUseHTTP returns true when Send() should dispatch through the OneBot
+// HTTP API for this message. Honors the `send_via_http` config:
+//   - "always" → true (skip WS entirely for sends)
+//   - "never"  → false (always use WS, even for long messages)
+//   - "auto"   → true when len(content) > 512 bytes AND http_url is configured
+//
+// "auto" falls back to WS when http_url is empty — there is no HTTP path to
+// use. SendFile() and SendImage() are unaffected (separate code paths).
+func (p *Platform) shouldUseHTTP(content string) bool {
+	switch p.sendViaHTTP {
+	case "always":
+		return p.httpURL != ""
+	case "never":
+		return false
+	default: // "auto" or unset
+		return p.httpURL != "" && len(content) > defaultHTTPFallbackThreshold
+	}
 }
 
 // SendImage sends an image to the conversation.
