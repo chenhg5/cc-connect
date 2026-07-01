@@ -8,7 +8,11 @@
 ## Unreleased
 
 ### Added
+- **QQ: `group_reply_all` config option** to match Feishu / Discord / Telegram semantics (#1475). New `group_reply_all` boolean (default `false`): when `false`, the bot only responds to group messages that @-mention it (via `[CQ:at,qq=<self_id>]` or the JSON `{"type":"at","data":{"qq":"<id>"}}` segment); when `true`, the bot responds to every group message (legacy behavior). Private messages are unaffected.
 - **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
+
+### ⚠️ Breaking Changes
+- **QQ group default behavior changed** (#1475): the default value of `group_reply_all` is `false`, so QQ group messages that do not @-mention the bot are no longer delivered to the agent. Existing QQ group deployments that relied on "respond to every message" must set `group_reply_all = true` in the `[projects.platforms.options]` block to keep the legacy behavior. Aligns QQ with Feishu / Discord / Telegram (which already default to `@`-only).
 
 ### Fixed
 - **Feishu recall fallback probes**: throttle repeated active-message recall checks so long-running turns do not continuously call platform message APIs.

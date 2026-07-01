@@ -1572,6 +1572,15 @@ app_secret = "your-feishu-app-secret"
 #                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
+# group_reply_all = false          # If true, respond to ALL group messages without @mention
+#                                  # ⚠️ BREAKING CHANGE in v1.5.0 (#1475): default changed from true to false
+#                                  # to match Feishu / Discord / Telegram semantics. Existing QQ group
+#                                  # deployments that relied on "respond to every message" must set
+#                                  # this to true to keep the legacy behavior.
+#                                  # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
+#                                  # ⚠️ v1.5.0 破坏性变更（#1475）：默认值由 true 改为 false，与
+#                                  # 飞书/Discord/Telegram 行为一致。依赖"响应所有消息"行为的旧版
+#                                  # QQ 群部署必须显式设为 true 才能保留原行为。
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 
 # QQ Bot (Official / 官方 QQ 机器人) (uncomment to enable / 取消注释以启用)
