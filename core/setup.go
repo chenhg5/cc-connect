@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -201,6 +202,12 @@ func (m *ManagementServer) handleSetupFeishuSave(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusBadRequest, "project, app_id, app_secret required")
 		return
 	}
+	workDir, err := validateProjectWorkDir(req.WorkDir)
+	if err != nil {
+		mgmtError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.WorkDir = workDir
 	if m.setupFeishuSave == nil {
 		mgmtError(w, http.StatusServiceUnavailable, "feishu setup save not configured")
 		return
@@ -439,6 +446,12 @@ func (m *ManagementServer) handleSetupWeixinSave(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusBadRequest, "project and token required")
 		return
 	}
+	workDir, err := validateProjectWorkDir(req.WorkDir)
+	if err != nil {
+		mgmtError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.WorkDir = workDir
 	if m.setupWeixinSave == nil {
 		mgmtError(w, http.StatusServiceUnavailable, "weixin setup save not configured")
 		return
@@ -476,6 +489,12 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 		mgmtError(w, http.StatusBadRequest, "type is required")
 		return
 	}
+	workDir, err := validateProjectWorkDir(req.WorkDir)
+	if err != nil {
+		mgmtError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.WorkDir = workDir
 	if m.addPlatformToProject == nil {
 		mgmtError(w, http.StatusServiceUnavailable, "config persistence not available")
 		return
@@ -488,4 +507,23 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 		"message":          fmt.Sprintf("platform %q added to project %q", req.Type, projectName),
 		"restart_required": true,
 	})
+}
+
+func validateProjectWorkDir(workDir string) (string, error) {
+	trimmed := strings.TrimSpace(workDir)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	info, err := os.Stat(trimmed)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("work_dir does not exist: %s", trimmed)
+		}
+		return "", fmt.Errorf("work_dir is not accessible: %s: %w", trimmed, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("work_dir is not a directory: %s", trimmed)
+	}
+	return trimmed, nil
 }
