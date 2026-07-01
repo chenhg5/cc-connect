@@ -426,7 +426,7 @@ func (a *Agent) SetModel(model string) {
 		a.currentModel = model
 	}
 	a.modelsMu.Unlock()
-	slog.Info("acp: model changed", "model", model)
+	slog.Debug("acp: model changed", "model", model)
 }
 
 // GetModel returns the current model. The most recent SetModel
@@ -547,32 +547,35 @@ func (a *Agent) probeSessionConfig() {
 	if json.Unmarshal(newRes, &sn) != nil {
 		return
 	}
-	// Mechanism A: top-level models/modes blocks.
-	if sn.Models != nil && len(sn.Models.AvailableModels) > 0 {
-		a.reportModels(*sn.Models)
-		slog.Info("acp: probeSessionConfig fetched models", "count", len(sn.Models.AvailableModels))
-	}
-	if sn.Modes != nil && len(sn.Modes.AvailableModes) > 0 {
-		a.reportModes(*sn.Modes)
-		slog.Info("acp: probeSessionConfig fetched modes", "count", len(sn.Modes.AvailableModes))
-	}
-	// Mechanism B: configOptions (model/mode selectors). The probe only
-	// needs to populate the agent-level caches so /model and /mode can
-	// list options; the configId used for live switching is recorded by
-	// the real session's absorbConfigOptions.
+	// configOptions (newer mechanism) takes precedence. Absorb it first and
+	// track which selector categories it provided; the legacy models/modes
+	// blocks then only fill categories configOptions did not supply. This
+	// mirrors the session's absorb precedence and is order-independent.
+	hasCfgModel, hasCfgMode := false, false
 	for i := range sn.ConfigOptions {
 		opt := sn.ConfigOptions[i]
 		switch opt.Category {
 		case "model":
 			if models := flattenModelOptions(opt); len(models) > 0 {
 				a.reportModels(acpModelsBlock{CurrentModelID: opt.CurrentValue, AvailableModels: models})
+				hasCfgModel = true
 				slog.Info("acp: probeSessionConfig fetched model configOption", "count", len(models))
 			}
 		case "mode":
 			if modes := flattenModeOptions(opt); len(modes) > 0 {
 				a.reportModes(acpModesBlock{CurrentModeID: opt.CurrentValue, AvailableModes: modes})
+				hasCfgMode = true
 				slog.Info("acp: probeSessionConfig fetched mode configOption", "count", len(modes))
 			}
 		}
+	}
+	// Legacy models/modes blocks fill only what configOptions did not provide.
+	if !hasCfgModel && sn.Models != nil && len(sn.Models.AvailableModels) > 0 {
+		a.reportModels(*sn.Models)
+		slog.Info("acp: probeSessionConfig fetched models", "count", len(sn.Models.AvailableModels))
+	}
+	if !hasCfgMode && sn.Modes != nil && len(sn.Modes.AvailableModes) > 0 {
+		a.reportModes(*sn.Modes)
+		slog.Info("acp: probeSessionConfig fetched modes", "count", len(sn.Modes.AvailableModes))
 	}
 }

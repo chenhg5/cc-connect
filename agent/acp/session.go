@@ -237,9 +237,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			}
 			if json.Unmarshal(loadRes, &lr) == nil && lr.SessionID != "" {
 				s.setACPSessionID(lr.SessionID)
+				s.absorbConfigOptions(lr.ConfigOptions)
 				s.absorbModes(lr.Modes)
 				s.absorbModels(lr.Models)
-				s.absorbConfigOptions(lr.ConfigOptions)
 				return nil
 			}
 		}
@@ -266,9 +266,12 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: session/new: empty sessionId")
 	}
 	s.setACPSessionID(sn.SessionID)
+	// configOptions (newer mechanism) first so it claims the model/mode
+	// selectors; the legacy blocks then only fill selectors configOptions
+	// did not provide (absorbModes/absorbModels skip when the configId is set).
+	s.absorbConfigOptions(sn.ConfigOptions)
 	s.absorbModes(sn.Modes)
 	s.absorbModels(sn.Models)
-	s.absorbConfigOptions(sn.ConfigOptions)
 	return nil
 }
 
@@ -281,6 +284,13 @@ func (s *acpSession) absorbModes(block *acpModesBlock) {
 		return
 	}
 	s.modesMu.Lock()
+	// configOptions (the newer mechanism) takes precedence: if a mode
+	// selector was already absorbed from configOptions, don't let the
+	// legacy `modes` block overwrite it. Order-independent by design.
+	if s.modeConfigID != "" {
+		s.modesMu.Unlock()
+		return
+	}
 	s.availableModes = append(s.availableModes[:0], block.AvailableModes...)
 	if block.CurrentModeID != "" {
 		s.currentMode = block.CurrentModeID
@@ -300,6 +310,13 @@ func (s *acpSession) absorbModels(block *acpModelsBlock) {
 		return
 	}
 	s.modelsMu.Lock()
+	// configOptions (the newer mechanism) takes precedence: if a model
+	// selector was already absorbed from configOptions, don't let the
+	// legacy `models` block overwrite it. Order-independent by design.
+	if s.modelConfigID != "" {
+		s.modelsMu.Unlock()
+		return
+	}
 	s.availableModels = append(s.availableModels[:0], block.AvailableModels...)
 	if block.CurrentModelID != "" {
 		s.currentModel = block.CurrentModelID

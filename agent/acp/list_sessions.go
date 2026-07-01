@@ -27,11 +27,17 @@ var listSessionsProbeTimeout = 15 * time.Second
 // (see probeSessionConfig). It is deliberately independent from the
 // caller's ctx (cmdModel/cmdMode only pass 10s) because a cold start —
 // spawning the agent, initializing MCP servers, returning a possibly
-// large model list — can exceed 10s. The slowest tested agent (hermes,
-// 108 models) probes in ~11.4s steady-state; 15s sits right at the
-// load-jittered peak and times out intermittently, so 20s is used to
-// leave ~1.75x headroom while still bounding how long /model can block.
-var sessionConfigProbeTimeout = 20 * time.Second
+// large model list — can exceed 10s.
+//
+// This is an upper bound, not a fixed wait: fast agents return in well
+// under a second (mimo ~0.8s, codebuddy ~3s, kiro ~5s) and are unaffected.
+// It only matters for slow agents. The slowest tested (hermes, 108 models
+// fetched from a dynamic backend) has a highly variable probe: ~11-13s
+// typical but observed above 20s under load. 20s timed out intermittently
+// (probe returned an empty list -> /model showed "not supported"), so 30s
+// is used to reliably cover the worst case while leaving fast agents
+// unaffected.
+var sessionConfigProbeTimeout = 30 * time.Second
 
 // acpModeInfo mirrors the ACP `modes.availableModes[]` shape sent by
 // servers like `devin acp`, Cursor Agent, Copilot CLI, etc.

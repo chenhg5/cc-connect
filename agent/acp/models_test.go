@@ -328,6 +328,48 @@ func TestFlattenModelOptions_flatAndGrouped(t *testing.T) {
 	}
 }
 
+// When an agent advertises BOTH the legacy models/modes blocks AND
+// configOptions selectors, the newer configOptions must win — regardless
+// of the absorb order — and the state must stay consistent (the switch
+// path via modelConfigID/modeConfigID must match the reported list).
+func TestSession_bothMechanisms_configOptionsWins(t *testing.T) {
+	assert := func(t *testing.T, s *acpSession) {
+		t.Helper()
+		s.modelsMu.RLock()
+		defer s.modelsMu.RUnlock()
+		if s.modelConfigID != "model" {
+			t.Fatalf("modelConfigID = %q, want model (configOptions wins)", s.modelConfigID)
+		}
+		if s.currentModel != "new-a" {
+			t.Fatalf("currentModel = %q, want new-a (consistent with configOptions)", s.currentModel)
+		}
+		if len(s.availableModels) != 2 || s.availableModels[0].ModelID != "new-a" {
+			t.Fatalf("availableModels = %+v, want the configOptions list", s.availableModels)
+		}
+	}
+	block := &acpModelsBlock{
+		CurrentModelID:  "old-a",
+		AvailableModels: []acpModelInfo{{ModelID: "old-a"}, {ModelID: "old-b"}},
+	}
+	cfg := []acpConfigOption{{
+		ID: "model", Category: "model", CurrentValue: "new-a",
+		Options: []acpConfigSelectOptions{{Value: "new-a"}, {Value: "new-b"}},
+	}}
+
+	// configOptions first, then the block (handshake order).
+	s1 := &acpSession{}
+	s1.absorbConfigOptions(cfg)
+	s1.absorbModels(block)
+	assert(t, s1)
+
+	// Reversed order must yield the same result — precedence is not
+	// order-dependent (the block is skipped once modelConfigID is set).
+	s2 := &acpSession{}
+	s2.absorbModels(block)
+	s2.absorbConfigOptions(cfg)
+	assert(t, s2)
+}
+
 // --- concurrency safety (run with -race) ---------------------------
 
 func TestAgent_ConcurrentModelAccess(t *testing.T) {
