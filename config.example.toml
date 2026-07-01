@@ -2035,3 +2035,33 @@ app_secret = "your-feishu-app-secret"
 # [[projects.agent.providers]]
 # name = "google"
 # api_key = "your-gemini-api-key"    # GEMINI_API_KEY
+
+# =============================================================================
+# Project 10: WPS Agentspace / 项目 10：WPS 数字员工 (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# WPS数字员工平台接入，无需创建WPS应用，通过数字员工WebSocket连接
+# WPS Agentspace platform integration, connects via Digital Employee WebSocket
+#
+# 获取方式 / How to get credentials:
+#   app_id: WPS协作 -> 数字员工 -> 设置 -> App ID
+#   wps_sid: 浏览器登录 https://agentspace.wps.cn -> F12 -> Application -> Cookies -> wps_sid
+#
+# [[projects]]
+# name = "wps-agentspace"
+#
+# [projects.agent]
+# type = "claudecode"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "bypassPermissions"
+#
+# [[projects.platforms]]
+# type = "wps-agentspace"
+#
+# [projects.platforms.options]
+# app_id = "your-wps-app-id"           # WPS数字员工 App ID
+# wps_sid = "your-wps-sid"             # WPS登录凭证 (Cookie中的wps_sid)
+# device_name = "cc-connect"           # 设备名称（可选）
+# device_uuid = ""                     # 设备UUID（可选，留空自动生成）
+

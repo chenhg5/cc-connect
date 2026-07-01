@@ -18,6 +18,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/slack-go/slack v0.16.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.50.0
 	maunium.net/go/mautrix v0.27.0
 	modernc.org/sqlite v1.49.1
 	rsc.io/qr v0.2.0
@@ -61,7 +62,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
 	go.mau.fi/util v0.9.8 // indirect
-	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
