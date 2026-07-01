@@ -310,6 +310,7 @@ type DisplayCfg struct {
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5039,7 +5040,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			if event.Content != "" && !isEllipsisOnly(event.Content) {
+			content := event.Content
+			if e.display.HideAgentFooter {
+				content = stripAgentFooterLines(content)
+			}
+			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
 				// end-of-stream when the text resolves to bare NO_REPLY (Lark
@@ -5047,19 +5052,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// paths share this single transition; couldBeSilentPrefix is
 				// monotonically decreasing as segments grow, so the transition
 				// is held → released at most once per segment.
-				peekSegment := strings.Join(textParts[segmentStart:], "") + event.Content
+				peekSegment := strings.Join(textParts[segmentStart:], "") + content
 				prevHold := silentHold
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
 
 				handledByStreamCard := false
 				if streamCard != nil && !streamCard.Failed() {
-					textParts = append(textParts, event.Content) // always accumulate for history
+					textParts = append(textParts, content) // always accumulate for history
 					if !silentHold {
 						if releasedNow {
 							cardAnswerText.WriteString(peekSegment)
 						} else {
-							cardAnswerText.WriteString(event.Content)
+							cardAnswerText.WriteString(content)
 						}
 						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					}
@@ -5083,8 +5088,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							sp.setStatus(CardStatusWorking)
 						}
 					}
-					textParts = append(textParts, event.Content)
-					partialText += event.Content
+					textParts = append(textParts, content)
+					partialText += content
 					if hasRichCard {
 						if !silentHold {
 							// Lazy creation: if we held during the first text events and
@@ -5145,7 +5150,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							if releasedNow {
 								sp.appendText(peekSegment) // flush all held chunks at once
 							} else {
-								sp.appendText(event.Content)
+								sp.appendText(content)
 							}
 						}
 					}
@@ -5286,6 +5291,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
+			if e.display.HideAgentFooter {
+				fullResponse = stripAgentFooterLines(fullResponse)
+			}
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
@@ -16524,6 +16532,31 @@ func contextIndicatorText(inputTokens int) string {
 // Used to strip such markers from delivered text — the ctx indicator is now
 // rendered exclusively in the reply footer.
 var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
+
+// agentFooterLineRe matches standalone agent-emitted status footer lines such as:
+// *claude-opus-4-8[1m] · out 788 · in 442 cw 0 cr 395.1k · ctx 40%*
+// The line must contain all three metrics so ordinary prose is left untouched.
+var agentFooterLineRe = regexp.MustCompile(`^[ \t]*\*?[A-Za-z0-9][^\n]*\s+·\s+out\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bin\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bctx\s+[0-9]+(?:\.[0-9]+)?%[^\n]*\*?[ \t]*$`)
+
+func stripAgentFooterLines(text string) string {
+	if text == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	removed := false
+	for _, line := range lines {
+		if agentFooterLineRe.MatchString(line) {
+			removed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !removed {
+		return text
+	}
+	return strings.TrimRight(strings.Join(kept, "\n"), "\n ")
+}
 
 // silentReplyRe matches a bare NO_REPLY marker (case-insensitive, optional surrounding whitespace).
 // When the agent emits exactly this as its full response, the platform send is suppressed
