@@ -99,6 +99,9 @@ type Config struct {
 	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
 	Speech             SpeechConfig            `toml:"speech"`
 	TTS                TTSConfig               `toml:"tts"`
+	Image              ImageConfig             `toml:"image"`
+	Video              VideoConfig             `toml:"video"`
+	Music              MusicConfig             `toml:"music"`
 	Display            DisplayConfig           `toml:"display"`
 	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
 	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
@@ -316,6 +319,85 @@ type TTSConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"mimo"`
+}
+
+// MediaCommandConfig configures a local command that returns generated media.
+// The command is executed directly without a shell. Args may contain
+// {{prompt}}, {{output}}, {{format}}, and for music {{lyrics}}/{{instrumental}}.
+type MediaCommandConfig struct {
+	Command     string   `toml:"command"`
+	Args        []string `toml:"args"`
+	WorkDir     string   `toml:"work_dir"`
+	Env         []string `toml:"env"`
+	Format      string   `toml:"format"`
+	TimeoutSecs int      `toml:"timeout_secs"`
+}
+
+// ImageConfig configures direct text-to-image generation for cc-connect send.
+type ImageConfig struct {
+	Enabled      bool   `toml:"enabled"`
+	Provider     string `toml:"provider"`       // "openai" | "minimax" | "command" | "openclaw"
+	MaxPromptLen int    `toml:"max_prompt_len"` // max rune count before rejecting generation; 0 = no limit
+	OpenAI       struct {
+		APIKey         string `toml:"api_key"`
+		BaseURL        string `toml:"base_url"`        // default https://api.openai.com/v1; may point to an OpenAI-compatible /v1 endpoint
+		Model          string `toml:"model"`           // default "gpt-image-1"
+		Size           string `toml:"size"`            // e.g. "1024x1024"; provider/model default when empty
+		Quality        string `toml:"quality"`         // e.g. "auto", "high", "medium", "low", "standard", "hd"
+		ResponseFormat string `toml:"response_format"` // "b64_json" or "url" for DALL-E-compatible providers; empty for GPT image models
+		OutputFormat   string `toml:"output_format"`   // "png", "jpeg", or "webp" for GPT image models
+		Background     string `toml:"background"`      // "transparent", "opaque", or "auto" for supported GPT image models
+		Style          string `toml:"style"`           // "vivid" or "natural" for DALL-E 3
+	} `toml:"openai"`
+	MiniMax struct {
+		APIKey          string `toml:"api_key"`
+		BaseURL         string `toml:"base_url"`
+		Model           string `toml:"model"`
+		ConfigFile      string `toml:"config_file"`      // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
+		ResponseFormat  string `toml:"response_format"`  // "base64" (default) or "url"
+		AspectRatio     string `toml:"aspect_ratio"`     // e.g. "1:1", "16:9"; provider default when empty
+		Width           int    `toml:"width"`            // optional custom width; set together with height
+		Height          int    `toml:"height"`           // optional custom height; set together with width
+		PromptOptimizer bool   `toml:"prompt_optimizer"` // provider prompt optimizer
+	} `toml:"minimax"`
+	Command MediaCommandConfig `toml:"command"`
+}
+
+// VideoConfig configures direct text-to-video generation for cc-connect send.
+type VideoConfig struct {
+	Enabled      bool   `toml:"enabled"`
+	Provider     string `toml:"provider"`       // "minimax" | "command" | "openclaw"
+	MaxPromptLen int    `toml:"max_prompt_len"` // max rune count before rejecting generation; 0 = no limit
+	MiniMax      struct {
+		APIKey           string `toml:"api_key"`
+		BaseURL          string `toml:"base_url"`
+		Model            string `toml:"model"`
+		ConfigFile       string `toml:"config_file"`        // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
+		Duration         int    `toml:"duration"`           // seconds; provider default when 0
+		Resolution       string `toml:"resolution"`         // e.g. "1080P"; provider default when empty
+		PollIntervalSecs int    `toml:"poll_interval_secs"` // default 10
+		TimeoutSecs      int    `toml:"timeout_secs"`       // default 600
+	} `toml:"minimax"`
+	Command MediaCommandConfig `toml:"command"`
+}
+
+// MusicConfig configures direct text-to-music generation for cc-connect send.
+type MusicConfig struct {
+	Enabled      bool   `toml:"enabled"`
+	Provider     string `toml:"provider"`       // "minimax" | "command"
+	MaxPromptLen int    `toml:"max_prompt_len"` // max rune count before rejecting generation; 0 = no limit
+	MiniMax      struct {
+		APIKey          string `toml:"api_key"`
+		BaseURL         string `toml:"base_url"`
+		Model           string `toml:"model"`
+		ConfigFile      string `toml:"config_file"` // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
+		SampleRate      int    `toml:"sample_rate"` // default 44100
+		Bitrate         int    `toml:"bitrate"`     // default 256000
+		Format          string `toml:"format"`      // default "mp3"
+		LyricsOptimizer bool   `toml:"lyrics_optimizer"`
+		Instrumental    bool   `toml:"instrumental"`
+	} `toml:"minimax"`
+	Command MediaCommandConfig `toml:"command"`
 }
 
 // TTSAgentConfig overrides global [tts] synthesis parameters for one project.

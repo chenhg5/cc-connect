@@ -71,7 +71,7 @@ Your normal text responses are automatically delivered to the user — just repl
 
 ## Available tools
 
-### Send generated images, files, or voice messages back to the user
+### Send generated images, files, media, or voice messages back to the user
 When you generate a local image or file that should be sent to the user, use:
 
   cc-connect send --image /absolute/path/to/image.png
@@ -88,7 +88,15 @@ When sending an audio (mp3/wav/m4a/ogg/opus) or video (mp4/mov/webm) clip that s
 
 These render as native media on platforms that support it (e.g. Feishu voice bubbles, Telegram voice messages). cc-connect transparently transcodes audio to the platform's preferred codec (e.g. opus for Feishu). On platforms without dedicated audio/video support cc-connect automatically falls back to the file-attachment path so delivery is preserved. Do NOT downgrade the user's request to --file when they explicitly asked for audio or video.
 
-When the user explicitly asks you to synthesize speech from text, use:
+When the user asks you to generate an image, video, or music and cc-connect has a matching provider configured, generate and send it directly with:
+
+  cc-connect send --generate-image "image prompt"
+  cc-connect send --generate-video "video prompt"
+  cc-connect send --generate-music "music prompt" --music-instrumental
+
+Use --music-lyrics for explicit lyrics, or --music-lyrics-optimizer to let the provider create lyrics from the prompt.
+
+When the user explicitly asks you to send a voice/audio reply, synthesize and send it with:
 
   cc-connect send --tts "text to speak"
 

@@ -796,6 +796,35 @@ func TestEngineSendToSessionWithAttachments_DisabledByConfig(t *testing.T) {
 	}
 }
 
+func TestEngineSendGeneratedMedia_DisabledByConfigSkipsProviders(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAttachmentSendEnabled(false)
+	image := &recordingImageGenerator{}
+	video := &recordingVideoGenerator{}
+	music := &recordingMusicGenerator{}
+	e.SetImageGenerationConfig(&ImageGenerationCfg{Enabled: true, Provider: "minimax", Generator: image})
+	e.SetVideoGenerationConfig(&VideoGenerationCfg{Enabled: true, Provider: "minimax", Generator: video})
+	e.SetMusicGenerationConfig(&MusicGenerationCfg{Enabled: true, Provider: "minimax", Generator: music})
+	e.interactiveStates["session-1"] = &interactiveState{
+		platform: p,
+		replyCtx: "ctx-1",
+	}
+
+	if err := e.SendGeneratedImageToSession("session-1", "watercolor fox"); !errors.Is(err, ErrAttachmentSendDisabled) {
+		t.Fatalf("image err = %v, want ErrAttachmentSendDisabled", err)
+	}
+	if err := e.SendGeneratedVideoToSession("session-1", "cinematic sunset"); !errors.Is(err, ErrAttachmentSendDisabled) {
+		t.Fatalf("video err = %v, want ErrAttachmentSendDisabled", err)
+	}
+	if err := e.SendGeneratedMusicToSession("session-1", "ambient synthwave", "", false, false); !errors.Is(err, ErrAttachmentSendDisabled) {
+		t.Fatalf("music err = %v, want ErrAttachmentSendDisabled", err)
+	}
+	if image.calls != 0 || video.calls != 0 || music.calls != 0 {
+		t.Fatalf("provider calls = image:%d video:%d music:%d, want all 0", image.calls, video.calls, music.calls)
+	}
+}
+
 func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1100,10 +1129,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -2267,6 +2296,12 @@ func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "cc-connect send --tts") {
 		t.Fatalf("prompt missing tts send instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "cc-connect send --generate-video") {
+		t.Fatalf("prompt missing generated video instructions: %q", prompt)
+	}
+	if !strings.Contains(prompt, "cc-connect send --generate-music") {
+		t.Fatalf("prompt missing generated music instructions: %q", prompt)
 	}
 	if !strings.Contains(prompt, "NO_REPLY") {
 		t.Fatalf("prompt missing silent reply guidance for voice tool: %q", prompt)
@@ -7546,6 +7581,9 @@ func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "cc-connect send --image") {
 		t.Fatalf("expected refreshed attachment instructions, got %q", string(content))
+	}
+	if !strings.Contains(string(content), "cc-connect send --generate-video") {
+		t.Fatalf("expected refreshed generated media instructions, got %q", string(content))
 	}
 }
 
@@ -15016,8 +15054,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15045,7 +15083,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {

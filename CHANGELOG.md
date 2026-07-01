@@ -9,6 +9,12 @@
 
 ### Added
 - **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
+- **Generated media send-back**: `cc-connect send` can generate image, video, and
+  music through configured providers (`--generate-image`, `--generate-video`,
+  `--generate-music`) and send the result back through the existing
+  attachment/media delivery path. Image generation supports OpenAI-compatible
+  and MiniMax providers; command/OpenClaw adapters can bridge provider-specific
+  image, video, and music CLIs.
 
 ### Fixed
 - **Feishu recall fallback probes**: throttle repeated active-message recall checks so long-running turns do not continuously call platform message APIs.

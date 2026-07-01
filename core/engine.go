@@ -336,6 +336,9 @@ type Engine struct {
 	i18n                  *I18n
 	speech                SpeechCfg
 	tts                   *TTSCfg
+	image                 *ImageGenerationCfg
+	video                 *VideoGenerationCfg
+	music                 *MusicGenerationCfg
 	display               DisplayCfg
 	injectSender          bool
 	attachmentSendEnabled bool
@@ -844,6 +847,21 @@ func (e *Engine) SetSpeechConfig(cfg SpeechCfg) {
 // SetTTSConfig configures the text-to-speech subsystem.
 func (e *Engine) SetTTSConfig(cfg *TTSCfg) {
 	e.tts = cfg
+}
+
+// SetImageGenerationConfig configures direct image generation for the send API.
+func (e *Engine) SetImageGenerationConfig(cfg *ImageGenerationCfg) {
+	e.image = cfg
+}
+
+// SetVideoGenerationConfig configures direct video generation for the send API.
+func (e *Engine) SetVideoGenerationConfig(cfg *VideoGenerationCfg) {
+	e.video = cfg
+}
+
+// SetMusicGenerationConfig configures direct music generation for the send API.
+func (e *Engine) SetMusicGenerationConfig(cfg *MusicGenerationCfg) {
+	e.music = cfg
 }
 
 // SetTTSSaveFunc registers a callback that persists TTS mode changes.
@@ -11001,6 +11019,129 @@ func (e *Engine) SendTTSToSession(sessionKey, text string) error {
 	return e.synthesizeAndSendTTS(p, replyCtx, text)
 }
 
+// SendGeneratedImageToSession generates an image with the configured provider
+// and sends it as a native image attachment to an active session.
+func (e *Engine) SendGeneratedImageToSession(sessionKey, prompt string) error {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return fmt.Errorf("image prompt is required")
+	}
+	if e.image == nil || !e.image.Enabled {
+		return fmt.Errorf("image generation is not configured")
+	}
+	if e.image.Generator == nil {
+		return fmt.Errorf("image generation provider is not configured")
+	}
+	if e.image.MaxPromptLen > 0 && utf8.RuneCountInString(prompt) > e.image.MaxPromptLen {
+		return fmt.Errorf("image prompt exceeds max_prompt_len (%d > %d)", utf8.RuneCountInString(prompt), e.image.MaxPromptLen)
+	}
+	if !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+	if _, _, _, err := e.resolveOutboundSessionTarget(sessionKey, true); err != nil {
+		return err
+	}
+	slog.Info("image: starting generation", "provider", e.image.Provider, "prompt_len", len(prompt))
+	data, format, err := e.image.Generator.GenerateImage(e.ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("generate image: %w", err)
+	}
+	image := ImageAttachment{
+		MimeType: generatedMediaMime("image", format),
+		Data:     data,
+		FileName: generatedMediaFileName("image", format),
+	}
+	if err := e.SendToSessionWithAttachments(sessionKey, "", []ImageAttachment{image}, nil, nil, false); err != nil {
+		return fmt.Errorf("send image: %w", err)
+	}
+	slog.Info("image: generated file sent", "provider", e.image.Provider, "format", format, "size", len(data))
+	return nil
+}
+
+// SendGeneratedVideoToSession generates a video with the configured provider
+// and sends it as a file attachment to an active session.
+func (e *Engine) SendGeneratedVideoToSession(sessionKey, prompt string) error {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return fmt.Errorf("video prompt is required")
+	}
+	if e.video == nil || !e.video.Enabled {
+		return fmt.Errorf("video generation is not configured")
+	}
+	if e.video.Generator == nil {
+		return fmt.Errorf("video generation provider is not configured")
+	}
+	if e.video.MaxPromptLen > 0 && utf8.RuneCountInString(prompt) > e.video.MaxPromptLen {
+		return fmt.Errorf("video prompt exceeds max_prompt_len (%d > %d)", utf8.RuneCountInString(prompt), e.video.MaxPromptLen)
+	}
+	if !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+	if _, _, _, err := e.resolveOutboundSessionTarget(sessionKey, true); err != nil {
+		return err
+	}
+	slog.Info("video: starting generation", "provider", e.video.Provider, "prompt_len", len(prompt))
+	data, format, err := e.video.Generator.GenerateVideo(e.ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("generate video: %w", err)
+	}
+	file := FileAttachment{
+		MimeType: generatedMediaMime("video", format),
+		Data:     data,
+		FileName: generatedMediaFileName("video", format),
+	}
+	if err := e.SendVideosToSession(sessionKey, []FileAttachment{file}); err != nil {
+		return fmt.Errorf("send video: %w", err)
+	}
+	slog.Info("video: generated file sent", "provider", e.video.Provider, "format", format, "size", len(data))
+	return nil
+}
+
+// SendGeneratedMusicToSession generates music with the configured provider
+// and sends it as an audio attachment to an active session.
+func (e *Engine) SendGeneratedMusicToSession(sessionKey, prompt, lyrics string, instrumental bool, lyricsOptimizer bool) error {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return fmt.Errorf("music prompt is required")
+	}
+	if e.music == nil || !e.music.Enabled {
+		return fmt.Errorf("music generation is not configured")
+	}
+	if e.music.Generator == nil {
+		return fmt.Errorf("music generation provider is not configured")
+	}
+	if e.music.MaxPromptLen > 0 && utf8.RuneCountInString(prompt) > e.music.MaxPromptLen {
+		return fmt.Errorf("music prompt exceeds max_prompt_len (%d > %d)", utf8.RuneCountInString(prompt), e.music.MaxPromptLen)
+	}
+	if !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+	if _, _, _, err := e.resolveOutboundSessionTarget(sessionKey, true); err != nil {
+		return err
+	}
+
+	opts := MusicGenerationOpts{
+		Lyrics:          lyrics,
+		Instrumental:    instrumental || e.music.Instrumental,
+		LyricsOptimizer: lyricsOptimizer || e.music.LyricsOptimizer,
+	}
+	slog.Info("music: starting generation", "provider", e.music.Provider, "prompt_len", len(prompt), "instrumental", opts.Instrumental, "lyrics_optimizer", opts.LyricsOptimizer)
+	data, format, err := e.music.Generator.GenerateMusic(e.ctx, prompt, opts)
+	if err != nil {
+		return fmt.Errorf("generate music: %w", err)
+	}
+	file := FileAttachment{
+		MimeType: generatedMediaMime("music", format),
+		Data:     data,
+		FileName: generatedMediaFileName("music", format),
+	}
+	if err := e.SendAudiosToSession(sessionKey, []FileAttachment{file}); err != nil {
+		return fmt.Errorf("send music: %w", err)
+	}
+	slog.Info("music: generated file sent", "provider", e.music.Provider, "format", format, "size", len(data))
+	return nil
+}
+
 // SendAudiosToSession routes outbound audio attachments to the
 // platform's AudioSender (native voice bubble + transcoding) when
 // supported, falling back to FileSender otherwise. Used by
@@ -11113,7 +11254,6 @@ func audioFormatHint(a FileAttachment) string {
 func videoFormatHint(v FileAttachment) string {
 	return audioFormatHint(v)
 }
-
 func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments bool) (*interactiveState, Platform, any, error) {
 	e.interactiveMu.Lock()
 
