@@ -94,7 +94,7 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	if ks.model != "" {
 		args = append(args, "--model", ks.model)
 	}
-	if ks.workDir != "" {
+	if ks.workDir != "" && ks.flagSupport.WorkDir {
 		args = append(args, "--work-dir", ks.workDir)
 	}
 
