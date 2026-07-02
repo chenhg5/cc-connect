@@ -69,34 +69,43 @@ func (t *stubTypingTicker) C() <-chan time.Time {
 func (t *stubTypingTicker) Stop() {}
 
 type stubTelegramBot struct {
-	mu                   sync.Mutex
-	sendMessageCalls     int
-	sendPhotoCalls       int
-	sendDocumentCalls    int
-	sendVoiceCalls       int
-	sendAudioCalls       int
-	sendChatActionCalls  int
-	editMessageTextCalls int
-	deleteMessageCalls   int
-	answerCallbackCalls  int
-	setMyCommandsCalls   int
-	getFileCalls         int
-	setReactionCalls     int
+	mu                    sync.Mutex
+	sendMessageCalls      int
+	sendPhotoCalls        int
+	sendDocumentCalls     int
+	sendVoiceCalls        int
+	sendAudioCalls        int
+	sendChatActionCalls   int
+	editMessageTextCalls  int
+	deleteMessageCalls    int
+	answerCallbackCalls   int
+	setMyCommandsCalls    int
+	createForumTopicCalls int
+	editForumTopicCalls   int
+	getFileCalls          int
+	setReactionCalls      int
 
-	sendErr    error
-	getFileErr error
-	file       *models.File
+	sendErr             error
+	createForumTopicErr error
+	getFileErr          error
+	file                *models.File
+	createForumTopic    *models.ForumTopic
+	sendMessageParams   []*tgbot.SendMessageParams
+	createTopicParams   []*tgbot.CreateForumTopicParams
+	editTopicParams     []*tgbot.EditForumTopicParams
 }
 
 func newStubTelegramBot() *stubTelegramBot {
 	return &stubTelegramBot{
-		file: &models.File{FilePath: "files/test.dat"},
+		file:             &models.File{FilePath: "files/test.dat"},
+		createForumTopic: &models.ForumTopic{MessageThreadID: 824, Name: "task-new"},
 	}
 }
 
-func (b *stubTelegramBot) SendMessage(_ context.Context, _ *tgbot.SendMessageParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendMessage(_ context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendMessageCalls++
+	b.sendMessageParams = append(b.sendMessageParams, params)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
@@ -188,6 +197,26 @@ func (b *stubTelegramBot) SetMyCommands(_ context.Context, _ *tgbot.SetMyCommand
 	if b.sendErr != nil {
 		return false, b.sendErr
 	}
+	return true, nil
+}
+
+func (b *stubTelegramBot) CreateForumTopic(_ context.Context, params *tgbot.CreateForumTopicParams) (*models.ForumTopic, error) {
+	b.mu.Lock()
+	b.createForumTopicCalls++
+	b.createTopicParams = append(b.createTopicParams, params)
+	topic := b.createForumTopic
+	b.mu.Unlock()
+	if b.createForumTopicErr != nil {
+		return nil, b.createForumTopicErr
+	}
+	return topic, nil
+}
+
+func (b *stubTelegramBot) EditForumTopic(_ context.Context, params *tgbot.EditForumTopicParams) (bool, error) {
+	b.mu.Lock()
+	b.editForumTopicCalls++
+	b.editTopicParams = append(b.editTopicParams, params)
+	b.mu.Unlock()
 	return true, nil
 }
 
@@ -851,6 +880,119 @@ func TestIsDirectedAtBot(t *testing.T) {
 	}
 }
 
+func TestGeneralTopicIntakeCreatesTopicAndDispatchesSyntheticThreadMessage(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{
+		token:              "token",
+		allowFrom:          "*",
+		httpClient:         &http.Client{},
+		bot:                stubBot,
+		selfUser:           &models.User{ID: 42, Username: "mybot"},
+		generalTopicIntake: true,
+		topicIntakeSeen:    make(map[string]struct{}),
+	}
+
+	var got *core.Message
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		got = msg
+	}
+
+	p.handleMessage(context.Background(), &models.Message{
+		ID:   77,
+		Date: int(time.Now().Unix()),
+		Chat: models.Chat{
+			ID:    -100123,
+			Type:  models.ChatTypeSupergroup,
+			Title: "Nexus",
+		},
+		From: &models.User{ID: 9001, Username: "Jay"},
+		Text: "@mybot build the thing",
+		Entities: []models.MessageEntity{
+			{Type: models.MessageEntityTypeMention, Offset: 0, Length: 6},
+		},
+	})
+
+	if got == nil {
+		t.Fatal("expected synthetic thread message to be dispatched")
+	}
+	if got.SessionKey != "telegram:-100123:824:9001" {
+		t.Fatalf("SessionKey = %q, want telegram:-100123:824:9001", got.SessionKey)
+	}
+	if got.ChannelKey != "-100123:824" {
+		t.Fatalf("ChannelKey = %q, want -100123:824", got.ChannelKey)
+	}
+	if got.Content != "build the thing" {
+		t.Fatalf("Content = %q, want stripped task text", got.Content)
+	}
+	if !got.WasMentioned {
+		t.Fatal("expected WasMentioned to carry through from General mention")
+	}
+	rc, ok := got.ReplyCtx.(replyContext)
+	if !ok {
+		t.Fatalf("ReplyCtx type = %T, want replyContext", got.ReplyCtx)
+	}
+	if rc.threadID != 824 || rc.messageID != 99 {
+		t.Fatalf("ReplyCtx = %+v, want threadID 824 and messageID 99", rc)
+	}
+
+	if stubBot.createForumTopicCalls != 1 {
+		t.Fatalf("CreateForumTopic calls = %d, want 1", stubBot.createForumTopicCalls)
+	}
+	if len(stubBot.createTopicParams) != 1 || stubBot.createTopicParams[0].Name != "task-new" {
+		t.Fatalf("CreateForumTopic params = %+v, want task-new", stubBot.createTopicParams)
+	}
+	if stubBot.editForumTopicCalls != 1 {
+		t.Fatalf("EditForumTopic calls = %d, want 1", stubBot.editForumTopicCalls)
+	}
+	if gotName := stubBot.editTopicParams[0].Name; gotName != "task-824-build-the-thing" {
+		t.Fatalf("EditForumTopic name = %q, want task-824-build-the-thing", gotName)
+	}
+	if stubBot.SendMessageCallCount() != 2 {
+		t.Fatalf("SendMessage calls = %d, want 2 (topic bootstrap + General confirmation)", stubBot.SendMessageCallCount())
+	}
+	if len(stubBot.sendMessageParams) < 1 || stubBot.sendMessageParams[0].MessageThreadID != 824 {
+		t.Fatalf("bootstrap MessageThreadID = %+v, want 824", stubBot.sendMessageParams)
+	}
+}
+
+func TestGeneralTopicIntakeDeduplicatesByGeneralMessageID(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{
+		token:              "token",
+		allowFrom:          "*",
+		httpClient:         &http.Client{},
+		bot:                stubBot,
+		selfUser:           &models.User{ID: 42, Username: "mybot"},
+		generalTopicIntake: true,
+		topicIntakeSeen:    make(map[string]struct{}),
+	}
+
+	dispatches := 0
+	p.handler = func(core.Platform, *core.Message) {
+		dispatches++
+	}
+	msg := &models.Message{
+		ID:   77,
+		Date: int(time.Now().Unix()),
+		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup},
+		From: &models.User{ID: 9001},
+		Text: "@mybot build the thing",
+		Entities: []models.MessageEntity{
+			{Type: models.MessageEntityTypeMention, Offset: 0, Length: 6},
+		},
+	}
+
+	p.handleMessage(context.Background(), msg)
+	p.handleMessage(context.Background(), msg)
+
+	if stubBot.createForumTopicCalls != 1 {
+		t.Fatalf("CreateForumTopic calls = %d, want 1", stubBot.createForumTopicCalls)
+	}
+	if dispatches != 1 {
+		t.Fatalf("dispatches = %d, want 1", dispatches)
+	}
+}
+
 func TestHandleMessageWithForumTopic(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	p := &Platform{
@@ -938,7 +1080,6 @@ func TestHandleMessageSupergroupNonForumTopicUsesThreadID(t *testing.T) {
 		t.Fatal("message not handled")
 	}
 }
-
 
 func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 	handled := make(chan *core.Message, 1)
@@ -1081,4 +1222,3 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 		t.Fatalf("ProgressStyle() = %q, want compact", got)
 	}
 }
-

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -47,6 +48,8 @@ type telegramBot interface {
 	DeleteMessage(ctx context.Context, params *tgbot.DeleteMessageParams) (bool, error)
 	AnswerCallbackQuery(ctx context.Context, params *tgbot.AnswerCallbackQueryParams) (bool, error)
 	SetMyCommands(ctx context.Context, params *tgbot.SetMyCommandsParams) (bool, error)
+	CreateForumTopic(ctx context.Context, params *tgbot.CreateForumTopicParams) (*models.ForumTopic, error)
+	EditForumTopic(ctx context.Context, params *tgbot.EditForumTopicParams) (bool, error)
 	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
 	FileDownloadLink(f *models.File) string
 	SetMessageReaction(ctx context.Context, params *tgbot.SetMessageReactionParams) (bool, error)
@@ -110,6 +113,7 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	enableReactions       bool
+	generalTopicIntake    bool
 	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
 
@@ -126,6 +130,8 @@ type Platform struct {
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+	topicIntakeMu       sync.Mutex
+	topicIntakeSeen     map[string]struct{}
 }
 
 const (
@@ -163,6 +169,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
+	generalTopicIntake, _ := opts["general_topic_intake"].(bool)
 
 	// Default to "compact" so streaming edits work out of the box. Telegram has
 	// no rich card UI, so "card" is normalized to "compact". Users can opt out
@@ -190,8 +197,10 @@ func New(opts map[string]any) (core.Platform, error) {
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		enableReactions:       enableReactions,
+		generalTopicIntake:    generalTopicIntake,
 		progressStyle:         progressStyle,
 		httpClient:            httpClient,
+		topicIntakeSeen:       make(map[string]struct{}),
 	}, nil
 }
 
@@ -537,7 +546,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		mentioned := botName != "" && strings.Contains(msg.Caption, "@"+botName)
 		caption := stripBotMention(msg.Caption, botName)
 		p.dispatchMessage(&core.Message{
-			SessionKey:   sessionKey, Platform: "telegram",
+			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:      caption,
 			MessageID:    strconv.Itoa(msg.ID),
@@ -612,7 +621,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		mentioned := botName != "" && strings.Contains(msg.Caption, "@"+botName)
 		caption := stripBotMention(msg.Caption, botName)
 		p.dispatchMessage(&core.Message{
-			SessionKey:   sessionKey, Platform: "telegram",
+			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:      caption,
 			MessageID:    strconv.Itoa(msg.ID),
@@ -649,9 +658,12 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	mentioned := botName != "" && strings.Contains(msg.Text, "@"+botName)
 	text := stripBotMention(msg.Text, botName)
+	if p.handleGeneralTopicIntake(ctx, msg, text, mentioned, isGroup, threadID, userID, userName, chatName) {
+		return
+	}
 	slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
 	p.dispatchMessage(&core.Message{
-		SessionKey:   sessionKey, Platform: "telegram",
+		SessionKey: sessionKey, Platform: "telegram",
 		UserID: userID, UserName: userName, ChatName: chatName,
 		Content:      text,
 		MessageID:    strconv.Itoa(msg.ID),
@@ -691,6 +703,133 @@ func (p *Platform) messageHandler() core.MessageHandler {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.handler
+}
+
+func (p *Platform) handleGeneralTopicIntake(ctx context.Context, msg *models.Message, text string, mentioned, isGroup bool, threadID int, userID, userName, chatName string) bool {
+	if !p.generalTopicIntake || !isGroup || threadID != 0 || !mentioned || isCommand(msg) || strings.TrimSpace(text) == "" {
+		return false
+	}
+
+	key := fmt.Sprintf("%d:%d", msg.Chat.ID, msg.ID)
+	p.topicIntakeMu.Lock()
+	if p.topicIntakeSeen == nil {
+		p.topicIntakeSeen = make(map[string]struct{})
+	}
+	if _, ok := p.topicIntakeSeen[key]; ok {
+		p.topicIntakeMu.Unlock()
+		return true
+	}
+	p.topicIntakeSeen[key] = struct{}{}
+	p.topicIntakeMu.Unlock()
+
+	bot, err := p.connectedBot("create forum topic")
+	if err != nil {
+		slog.Error("telegram: general topic intake unavailable", "error", err)
+		return true
+	}
+	topic, err := bot.CreateForumTopic(ctx, &tgbot.CreateForumTopicParams{
+		ChatID: msg.Chat.ID,
+		Name:   "task-new",
+	})
+	if err != nil {
+		slog.Error("telegram: create forum topic failed", "chat", msg.Chat.ID, "msg_id", msg.ID, "error", err)
+		_ = p.Reply(ctx, replyContext{chatID: msg.Chat.ID, messageID: msg.ID}, fmt.Sprintf("Failed to create task topic: %v", err))
+		return true
+	}
+	if topic == nil || topic.MessageThreadID == 0 {
+		slog.Error("telegram: create forum topic returned no thread id", "chat", msg.Chat.ID, "msg_id", msg.ID)
+		_ = p.Reply(ctx, replyContext{chatID: msg.Chat.ID, messageID: msg.ID}, "Failed to create task topic: Telegram returned no thread ID.")
+		return true
+	}
+
+	newThreadID := topic.MessageThreadID
+	topicName := "task-" + strconv.Itoa(newThreadID)
+	if slug := topicTitleSlug(text); slug != "" {
+		topicName += "-" + slug
+	}
+	if topicName != topic.Name {
+		if _, err := bot.EditForumTopic(ctx, &tgbot.EditForumTopicParams{
+			ChatID:          msg.Chat.ID,
+			MessageThreadID: newThreadID,
+			Name:            topicName,
+		}); err != nil {
+			slog.Warn("telegram: edit forum topic failed", "chat", msg.Chat.ID, "thread_id", newThreadID, "topic", topicName, "error", err)
+		}
+	}
+
+	intakeText := "Task intake from General:\n\n" + strings.TrimSpace(text)
+	sent, err := p.sendTopicIntakeMessage(ctx, bot, msg.Chat.ID, newThreadID, intakeText)
+	if err != nil {
+		slog.Error("telegram: send topic intake message failed", "chat", msg.Chat.ID, "thread_id", newThreadID, "error", err)
+		_ = p.Reply(ctx, replyContext{chatID: msg.Chat.ID, messageID: msg.ID}, fmt.Sprintf("Created topic %s, but failed to post task: %v", topicName, err))
+		return true
+	}
+
+	_ = p.Reply(ctx, replyContext{chatID: msg.Chat.ID, messageID: msg.ID}, fmt.Sprintf("Created topic `%s` and moved the task there.", topicName))
+
+	p.dispatchMessage(&core.Message{
+		SessionKey:   p.buildSessionKey(msg.Chat.ID, newThreadID, msg.From.ID),
+		Platform:     "telegram",
+		UserID:       userID,
+		UserName:     userName,
+		ChatName:     chatName,
+		Content:      text,
+		MessageID:    strconv.Itoa(msg.ID),
+		ChannelKey:   buildChannelKey(msg.Chat.ID, newThreadID),
+		ReplyCtx:     replyContext{chatID: msg.Chat.ID, threadID: newThreadID, messageID: sent.ID},
+		WasMentioned: true,
+	}, msg)
+	return true
+}
+
+func (p *Platform) sendTopicIntakeMessage(ctx context.Context, bot telegramBot, chatID int64, threadID int, content string) (*models.Message, error) {
+	html := core.MarkdownToSimpleHTML(content)
+	params := &tgbot.SendMessageParams{
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+		Text:            html,
+		ParseMode:       models.ParseModeHTML,
+	}
+	sent, err := bot.SendMessage(ctx, params)
+	if err == nil {
+		return sent, nil
+	}
+	if strings.Contains(err.Error(), "can't parse") {
+		params.Text = content
+		params.ParseMode = ""
+		return bot.SendMessage(ctx, params)
+	}
+	return nil, err
+}
+
+func topicTitleSlug(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	runeCount := 0
+	for _, r := range []rune(text) {
+		if runeCount >= 32 {
+			break
+		}
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(unicode.ToLower(r))
+			lastDash = false
+			runeCount++
+		case unicode.IsSpace(r) || r == '-' || r == '_' || r == ':' || r == '：':
+			if !lastDash && b.Len() > 0 {
+				b.WriteRune('-')
+				lastDash = true
+			}
+			runeCount++
+		default:
+			runeCount++
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // reactToMessage sets an emoji reaction on a Telegram message.
