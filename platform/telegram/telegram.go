@@ -802,6 +802,82 @@ func (p *Platform) sendTopicIntakeMessage(ctx context.Context, bot telegramBot, 
 	return nil, err
 }
 
+func (p *Platform) CreateTaskTopic(ctx context.Context, dashboardSessionKey, title, content string) (*core.TaskTopic, error) {
+	rctx, err := p.ReconstructReplyCtx(dashboardSessionKey)
+	if err != nil {
+		return nil, err
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("telegram: unexpected dashboard reply context %T", rctx)
+	}
+	if rc.chatID == 0 {
+		return nil, fmt.Errorf("telegram: dashboard session key has no chat ID")
+	}
+	bot, err := p.connectedBot("create dispatch topic")
+	if err != nil {
+		return nil, err
+	}
+	topicTitle := strings.TrimSpace(title)
+	if topicTitle == "" {
+		topicTitle = "task-new"
+	}
+	topic, err := bot.CreateForumTopic(ctx, &tgbot.CreateForumTopicParams{
+		ChatID: rc.chatID,
+		Name:   topicTitle,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if topic == nil || topic.MessageThreadID == 0 {
+		return nil, fmt.Errorf("telegram: create forum topic returned no thread ID")
+	}
+	newThreadID := topic.MessageThreadID
+	topicName := "task-" + strconv.Itoa(newThreadID)
+	if slug := topicTitleSlug(content); slug != "" {
+		topicName += "-" + slug
+	}
+	if topicName != topic.Name {
+		if _, err := bot.EditForumTopic(ctx, &tgbot.EditForumTopicParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: newThreadID,
+			Name:            topicName,
+		}); err != nil {
+			slog.Warn("telegram: edit dispatch topic failed", "chat", rc.chatID, "thread_id", newThreadID, "topic", topicName, "error", err)
+		}
+	}
+	sent, err := p.sendTopicIntakeMessage(ctx, bot, rc.chatID, newThreadID, content)
+	if err != nil {
+		return nil, err
+	}
+	userID := telegramUserIDFromSessionKey(dashboardSessionKey)
+	messageID := 0
+	if sent != nil {
+		messageID = sent.ID
+	}
+	return &core.TaskTopic{
+		SessionKey: p.buildSessionKey(rc.chatID, newThreadID, userID),
+		ReplyCtx:   replyContext{chatID: rc.chatID, threadID: newThreadID, messageID: messageID},
+		ThreadID:   strconv.Itoa(newThreadID),
+		Name:       topicName,
+	}, nil
+}
+
+func telegramUserIDFromSessionKey(sessionKey string) int64 {
+	parts := strings.Split(sessionKey, ":")
+	if len(parts) >= 4 {
+		if id, err := strconv.ParseInt(parts[len(parts)-1], 10, 64); err == nil {
+			return id
+		}
+	}
+	if len(parts) == 3 {
+		if id, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
+			return id
+		}
+	}
+	return 0
+}
+
 func topicTitleSlug(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {

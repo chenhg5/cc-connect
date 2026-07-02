@@ -527,6 +527,31 @@ func main() {
 		} else {
 			engine.SetConfigPath(configPath)
 		}
+		if enabled, _ := proj.Agent.Options["dispatch_enabled"].(bool); enabled {
+			dispatchSessionKey, _ := proj.Agent.Options["dispatch_session_key"].(string)
+			sourceProject, _ := proj.Agent.Options["dispatch_source_project"].(string)
+			pollSecs := 60
+			switch v := proj.Agent.Options["dispatch_poll_secs"].(type) {
+			case int:
+				if v > 0 {
+					pollSecs = v
+				}
+			case int64:
+				if v > 0 {
+					pollSecs = int(v)
+				}
+			case float64:
+				if v > 0 {
+					pollSecs = int(v)
+				}
+			}
+			engine.SetDispatchConfig(core.DispatchConfig{
+				Enabled:             true,
+				SourceProject:       sourceProject,
+				DashboardSessionKey: dispatchSessionKey,
+				PollInterval:        time.Duration(pollSecs) * time.Second,
+			})
+		}
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" || proj.WorkspacePattern != "" {

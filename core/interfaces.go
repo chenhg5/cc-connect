@@ -338,6 +338,20 @@ type InlineButtonSender interface {
 	SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
 }
 
+// TaskTopic describes a platform-created task conversation target.
+type TaskTopic struct {
+	SessionKey string
+	ReplyCtx   any
+	ThreadID   string
+	Name       string
+}
+
+// TaskTopicCreator is an optional Platform extension for creating a visible
+// task topic from an internal dispatch flow.
+type TaskTopicCreator interface {
+	CreateTaskTopic(ctx context.Context, dashboardSessionKey, title, content string) (*TaskTopic, error)
+}
+
 // CardSender is an optional interface for platforms that support sending
 // structured rich cards (e.g. Feishu Interactive Card). Platforms that do not
 // implement this interface will receive a plain-text fallback via Card.RenderText().

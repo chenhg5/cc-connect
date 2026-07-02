@@ -473,6 +473,10 @@ type Engine struct {
 
 	handoffFile       string // path to inject into cold-start sessions; empty = disabled
 	onMentionContextN int    // N seat messages to prepend on @-mention; 0 = disabled
+
+	dispatchConfig         DispatchConfig
+	dispatchStore          *dispatchStore
+	dispatchWatcherStarted bool
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -1208,7 +1212,6 @@ var privilegedCommands = map[string]bool{
 	"prune":   true,
 }
 
-
 // isAdmin checks whether the given user ID is authorized for privileged commands.
 // Unlike AllowList, empty adminFrom means deny-all (fail-closed).
 func (e *Engine) isAdmin(userID string) bool {
@@ -1357,6 +1360,10 @@ func (e *Engine) SetProjectStateStore(store *ProjectStateStore) {
 
 func (e *Engine) SetDataDir(dir string) {
 	e.dataDir = dir
+}
+
+func (e *Engine) SetDispatchConfig(cfg DispatchConfig) {
+	e.configureDispatch(cfg)
 }
 
 // SetConfigPath stores the config file path used at startup so it can be
@@ -5623,6 +5630,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
+			if handledDispatch, dispatchReplacement := e.maybeHandleDispatchBlock(p, sessionKey, baseResponse); handledDispatch {
+				baseResponse = dispatchReplacement
+				cleanResponse = dispatchReplacement
+				fullResponse = dispatchReplacement
+			}
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 
@@ -6376,7 +6388,6 @@ var builtinCommands = []struct {
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
 }
-
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	text := strings.TrimSpace(strings.Join(args, " "))
@@ -17407,4 +17418,3 @@ func (e *Engine) cmdPrune(p Platform, msg *Message, args []string) {
 
 	e.reply(p, msg.ReplyCtx, response.String())
 }
-
