@@ -637,6 +637,14 @@ type WorkspaceAgentOptionSnapshotter interface {
 	WorkspaceAgentOptions() map[string]any
 }
 
+// WorkspaceConfigEnvProvider is an optional interface for agents that carry
+// static [projects.agent.options.env] values. getOrCreateWorkspaceAgent uses
+// this when WorkspaceAgentOptions omits opts["env"] so per-workspace instances
+// still receive persona and provider env (e.g. CC_PERSONAS_DIR, CC_PROJECT).
+type WorkspaceConfigEnvProvider interface {
+	ConfigEnvMap() map[string]string
+}
+
 // LiveModeSwitcher is an optional interface for running agent sessions that can
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {

@@ -262,6 +262,22 @@ func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 	if opts2["cmd"] != "/custom/copilot" {
 		t.Fatalf("cmd = %v, want /custom/copilot", opts2["cmd"])
 	}
+
+	a3 := &Agent{
+		mode:      "bypassPermissions",
+		configEnv: []string{"CC_PROJECT=chef-seat", "CC_PERSONAS_DIR=F:\\nexus\\data\\personas"},
+	}
+	opts3 := a3.WorkspaceAgentOptions()
+	env, ok := opts3["env"].(map[string]string)
+	if !ok {
+		t.Fatalf("env = %T %v, want map[string]string", opts3["env"], opts3["env"])
+	}
+	if env["CC_PROJECT"] != "chef-seat" {
+		t.Errorf("CC_PROJECT = %q, want chef-seat", env["CC_PROJECT"])
+	}
+	if env["CC_PERSONAS_DIR"] != `F:\nexus\data\personas` {
+		t.Errorf("CC_PERSONAS_DIR = %q", env["CC_PERSONAS_DIR"])
+	}
 }
 
 // ---------------------------------------------------------------------------

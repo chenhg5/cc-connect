@@ -624,6 +624,84 @@ func TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs(t *testing.T) {
 	}
 }
 
+// configEnvTestAgent simulates copilot before the env snapshot fix: it reports
+// config env via ConfigEnvMap but omits env from WorkspaceAgentOptions.
+type configEnvTestAgent struct {
+	*namedTestAgent
+	configEnv map[string]string
+}
+
+func (a *configEnvTestAgent) WorkspaceAgentOptions() map[string]any {
+	return map[string]any{"mode": "bypassPermissions"}
+}
+
+func (a *configEnvTestAgent) ConfigEnvMap() map[string]string {
+	if len(a.configEnv) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(a.configEnv))
+	for k, v := range a.configEnv {
+		out[k] = v
+	}
+	return out
+}
+
+// TestMultiWorkspaceAgent_PropagatesConfigEnv is a regression guard for L-0072:
+// per-workspace agents must inherit CC_PERSONAS_DIR/CC_PROJECT from the parent
+// project agent when WorkspaceAgentOptions omits opts["env"].
+func TestMultiWorkspaceAgent_PropagatesConfigEnv(t *testing.T) {
+	baseDir := t.TempDir()
+	workspaceDir := filepath.Join(baseDir, "task-999")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentName := "config-env-propagation-test-agent"
+	var capturedOpts []map[string]any
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		snapshot := make(map[string]any, len(opts))
+		for k, v := range opts {
+			snapshot[k] = v
+		}
+		capturedOpts = append(capturedOpts, snapshot)
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	parent := &configEnvTestAgent{
+		namedTestAgent: &namedTestAgent{name: agentName},
+		configEnv: map[string]string{
+			"CC_PERSONAS_DIR": `F:\nexus\data\personas`,
+			"CC_PROJECT":      "chef-seat",
+		},
+	}
+	e := NewEngine("test", parent, nil, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	_, _, err := e.getOrCreateWorkspaceAgent(workspaceDir)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent: %v", err)
+	}
+
+	if len(capturedOpts) != 1 {
+		t.Fatalf("expected exactly 1 CreateAgent call, got %d", len(capturedOpts))
+	}
+	opts := capturedOpts[0]
+
+	env, ok := opts["env"].(map[string]string)
+	if !ok {
+		t.Fatalf("env not propagated to workspace opts; got %T %v", opts["env"], opts["env"])
+	}
+	if env["CC_PERSONAS_DIR"] != `F:\nexus\data\personas` {
+		t.Errorf("CC_PERSONAS_DIR = %q, want personas dir", env["CC_PERSONAS_DIR"])
+	}
+	if env["CC_PROJECT"] != "chef-seat" {
+		t.Errorf("CC_PROJECT = %q, want chef-seat", env["CC_PROJECT"])
+	}
+	if gotDir, _ := opts["work_dir"].(string); gotDir != workspaceDir {
+		t.Errorf("work_dir propagated = %q, want %q", gotDir, workspaceDir)
+	}
+}
+
 // TestCommandContextWithWorkspace_BoundChannel exercises the helper that
 // executeSkill / executeCustomCommand use to route slash commands to the
 // per-channel workspace agent. The previous implementation always handed

@@ -354,6 +354,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	opts := map[string]any{
 		"mode": a.mode,
 	}
+	if env := core.ConfigEnvSliceToMap(a.configEnv); len(env) > 0 {
+		opts["env"] = env
+	}
 	if a.model != "" {
 		opts["model"] = a.model
 	}
@@ -361,6 +364,13 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		opts["cmd"] = a.cmd
 	}
 	return opts
+}
+
+// ConfigEnvMap implements core.WorkspaceConfigEnvProvider.
+func (a *Agent) ConfigEnvMap() map[string]string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return core.ConfigEnvSliceToMap(a.configEnv)
 }
 
 func (a *Agent) Stop() error { return nil }

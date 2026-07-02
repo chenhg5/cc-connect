@@ -78,3 +78,17 @@ func ParseConfigEnv(opts map[string]any) []string {
 		return nil
 	}
 }
+
+// ConfigEnvSliceToMap converts KEY=VALUE env slices (from ParseConfigEnv) into a
+// map suitable for opts["env"] when propagating to per-workspace agents.
+func ConfigEnvSliceToMap(env []string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		m[k] = v
+	}
+	return m
+}
