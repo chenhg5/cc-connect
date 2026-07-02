@@ -6553,6 +6553,11 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "cancel":
 		e.cmdCancel(p, msg)
 	case "prune":
+		if disabledCmds["prune"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "prune", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/prune"))
+			return true
+		}
 		e.cmdPrune(p, msg, args)
 	case "help":
 		e.cmdHelp(p, msg)
@@ -6569,28 +6574,88 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "doctor":
 		e.cmdDoctor(p, msg)
 	case "upgrade":
+		if disabledCmds["upgrade"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "upgrade", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/upgrade"))
+			return true
+		}
 		e.cmdUpgrade(p, msg, args)
 	case "restart":
+		if disabledCmds["restart"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "restart", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/restart"))
+			return true
+		}
 		e.cmdRestart(p, msg)
 	case "alias":
+		if disabledCmds["alias"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "alias", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/alias"))
+			return true
+		}
 		e.cmdAlias(p, msg, args)
 	case "delete":
+		if disabledCmds["delete"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "delete", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/delete"))
+			return true
+		}
 		e.cmdDelete(p, msg, args)
 	case "bind":
+		if disabledCmds["bind"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "bind", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/bind"))
+			return true
+		}
 		e.cmdBind(p, msg, args)
 	case "search":
+		if disabledCmds["search"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "search", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/search"))
+			return true
+		}
 		e.cmdSearch(p, msg, args)
 	case "shell":
+		if disabledCmds["shell"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "shell", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/shell"))
+			return true
+		}
 		e.cmdShell(p, msg, raw)
 	case "diff":
+		if disabledCmds["diff"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "diff", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/diff"))
+			return true
+		}
 		e.cmdDiff(p, msg, raw)
 	case "show":
+		if disabledCmds["show"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "show", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/show"))
+			return true
+		}
 		e.cmdShow(p, msg, args)
 	case "dir":
+		if disabledCmds["dir"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "dir", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/dir"))
+			return true
+		}
 		e.cmdDir(p, msg, args)
 	case "tts":
+		if disabledCmds["tts"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "tts", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/tts"))
+			return true
+		}
 		e.cmdTTS(p, msg, args)
 	case "workspace":
+		if disabledCmds["workspace"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "workspace", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/workspace"))
+			return true
+		}
 		if !e.multiWorkspace {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWsNotEnabled))
 			return true
@@ -6598,13 +6663,34 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.handleWorkspaceCommand(p, msg, args)
 		return true
 	case "whoami":
+		if disabledCmds["whoami"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "whoami", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/whoami"))
+			return true
+		}
 		e.cmdWhoami(p, msg)
 	case "web":
+		if disabledCmds["web"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "web", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/web"))
+			return true
+		}
 		e.cmdWeb(p, msg, args)
 	case "ps":
+		if disabledCmds["ps"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "ps", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/ps"))
+			return true
+		}
 		e.cmdPs(p, msg, args)
 	case "feature-start":
+		if disabledCmds["feature-start"] {
+			slog.Info("audit: command_blocked", "user_id", msg.UserID, "platform", msg.Platform, "project", e.name, "command", "feature-start", "reason", "disabled")
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/feature-start"))
+			return true
+		}
 		e.cmdFeatureStart(p, msg, args)
+
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
