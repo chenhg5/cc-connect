@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -12,7 +13,7 @@ import (
 
 func TestNew_ParsesRunAsUserAndRunAsEnv(t *testing.T) {
 	opts := map[string]any{
-		"work_dir":    "/tmp/claudecode-test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "partseeker-coder",
 		"run_as_env":  []any{"PGSSLROOTCERT", "PGSSLMODE"},
 	}
@@ -37,7 +38,7 @@ func TestNew_RunAsUserSkipsClaudeLookPath(t *testing.T) {
 	// skipped because the target user's PATH is what matters. Verify that
 	// New() doesn't fail even when claude isn't on this test process's PATH.
 	opts := map[string]any{
-		"work_dir":    "/tmp/claudecode-test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "target-that-definitely-exists",
 	}
 	// Note: this test relies on New() NOT calling exec.LookPath("claude")
@@ -634,7 +635,7 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 		routerAPIKey:     "secret",
 	}
 	opts := parent.WorkspaceAgentOptions()
-	opts["work_dir"] = "/tmp/claudecode-test"
+	opts["work_dir"] = t.TempDir()
 	opts["run_as_user"] = "skip-lookpath"
 
 	a, err := New(opts)
@@ -873,4 +874,17 @@ func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 // regression can ship.
 func TestAgent_ImplementsSessionIDValidator(t *testing.T) {
 	var _ core.SessionIDValidator = (*Agent)(nil)
+}
+
+func TestNew_WorkDirDoesNotExist(t *testing.T) {
+	opts := map[string]any{
+		"work_dir": "/tmp/cc-connect-nonexistent-dir-that-should-not-exist",
+	}
+	_, err := New(opts)
+	if err == nil {
+		t.Fatal("expected error for non-existent work_dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected 'does not exist' in error, got: %v", err)
+	}
 }

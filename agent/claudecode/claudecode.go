@@ -129,6 +129,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("claudecode: work_dir %q does not exist", workDir)
+	}
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "claude")
 	cmdArgsFlag, _ := opts["cmd_args_flag"].(string)
 	if cmdArgsFlag == "" {
