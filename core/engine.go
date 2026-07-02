@@ -4065,6 +4065,16 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			}
 		}
 	}
+	// Copy static config env when the workspace snapshot omits it. Without
+	// this, per-workspace agents lose CC_PERSONAS_DIR/CC_PROJECT and persona
+	// injection becomes nondeterministic across worktree creation.
+	if _, ok := opts["env"]; !ok {
+		if ma, ok := e.agent.(WorkspaceConfigEnvProvider); ok {
+			if env := ma.ConfigEnvMap(); len(env) > 0 {
+				opts["env"] = env
+			}
+		}
+	}
 
 	agent, err := CreateAgent(e.agent.Name(), opts)
 	if err != nil {
@@ -4595,6 +4605,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					ws.EndTurn()
 				}
 			}
+			if globalStatusBoard != nil {
+				globalStatusBoard.OnTurnEnd(e.name)
+			}
 		}
 	}()
 
@@ -4625,6 +4638,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				return
 			}
 
+			session.TouchOutput()
+
 			// Go's select is non-deterministic when multiple cases are
 			// ready, so even after ctx is cancelled we may still read one
 			// last event from the channel. If ownership has been handed
@@ -4651,6 +4666,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.BeginTurn()
 					}
+				}
+				if globalStatusBoard != nil {
+					globalStatusBoard.OnTurnStart(e.name, "")
 				}
 				slog.Info("unsolicited events detected, relaying to platform",
 					"session", sessionKey)
@@ -4801,6 +4819,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 
+	if globalStatusBoard != nil {
+		globalStatusBoard.OnTurnStart(e.name, "")
+		defer globalStatusBoard.OnTurnEnd(e.name)
+	}
+
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
@@ -4907,6 +4930,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !ok {
 				goto channelClosed
 			}
+			session.TouchOutput()
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
@@ -15812,6 +15836,23 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 	}
 
 	relaySessionKey := relayConversationKey(fromProject, platformName, chatID)
+
+	// Thread-scoped workspace pattern (Forum Mode) must be resolved before static
+	// bindings — resolveWorkspace only knows about DB bindings and conventions.
+	if e.workspacePattern != "" {
+		if threadID := extractThreadIDFromSessionKey(sourceSessionKey); threadID != "" {
+			workspace := strings.ReplaceAll(e.workspacePattern, "{{THREAD_ID}}", threadID)
+			agent, sessions, err := e.getOrCreateWorkspaceAgent(workspace)
+			if err != nil {
+				return nil, nil, "", fmt.Errorf("get relay workspace agent: %w", err)
+			}
+			if ws := e.workspacePool.Get(workspace); ws != nil {
+				ws.Touch()
+			}
+			return agent, sessions, relaySessionKey, nil
+		}
+	}
+
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions, relaySessionKey, nil
 	}
@@ -15843,6 +15884,13 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 // the complete response is collected (or the relay context times out).
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
 	slog.Info("relay: HandleRelay started", "target", e.name, "from", fromProject, "message_len", len(message))
+	if globalStatusBoard != nil {
+		summary := message
+		if runes := []rune(summary); len(runes) > 80 {
+			summary = string(runes[:80]) + "…"
+		}
+		globalStatusBoard.OnRelayDispatched(fromProject, e.name, summary)
+	}
 	agent, sessions, relaySessionKey, err := e.relayContextForSourceSessionKey(fromProject, sourceSessionKey)
 	if err != nil {
 		return "", err

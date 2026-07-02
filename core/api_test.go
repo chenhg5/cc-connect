@@ -627,3 +627,76 @@ func TestHandleProjectStatus(t *testing.T) {
 		t.Errorf("got status %v, want hung", res["status"])
 	}
 }
+
+// TestHandleProjectStatus_StaleOutputTriggersHung proves the LastOutputAt
+// signal (L-0085/L-0097) independently marks a session "hung" even when
+// UpdatedAt alone would still say "working" — this is the exact gap that
+// let the L-0081 hang go undetected for the old UpdatedAt-only check.
+func TestHandleProjectStatus_StaleOutputTriggersHung(t *testing.T) {
+	engine := NewEngine("test-stale", &stubAgent{}, []Platform{&stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test-stale"}}}, "", LangEnglish)
+	engine.interactiveStates["session-1"] = &interactiveState{
+		platform: &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test-stale"}},
+		replyCtx: "reply-ctx",
+	}
+	engine.interactiveStates["session-1"].agentSession = &livenessStubAgentSession{alive: true}
+
+	api := &APIServer{engines: map[string]*Engine{"test-stale": engine}}
+	req := httptest.NewRequest(http.MethodGet, "/project/status?project=test-stale", nil)
+
+	session := engine.sessions.GetOrCreateActive("session-1")
+	session.TryLock()
+	// UpdatedAt is recent — the old, coarse signal alone would say "working".
+	session.UpdatedAt = time.Now()
+	// But LastOutputAt is stale beyond defaultHungAfter (90s) — the new,
+	// finer signal must independently mark this hung regardless.
+	session.LastOutputAt = time.Now().Add(-100 * time.Second)
+
+	rec := httptest.NewRecorder()
+	api.handleProjectStatus(rec, req)
+
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if res["status"] != "hung" {
+		t.Errorf("got status %v, want hung (stale LastOutputAt must trigger hung even with recent UpdatedAt)", res["status"])
+	}
+	lastOutputMsAgo, ok := res["last_output_ms_ago"].(float64)
+	if !ok {
+		t.Fatal("expected last_output_ms_ago in response")
+	}
+	if lastOutputMsAgo < 99000 {
+		t.Errorf("got last_output_ms_ago %v, want >= ~100000", lastOutputMsAgo)
+	}
+}
+
+// TestHandleProjectStatus_RecentOutputIsWorkingNotHung is the inverse
+// case: fresh LastOutputAt within the threshold must NOT be misreported
+// as hung, even though UpdatedAt (turn-boundary only) hasn't moved yet.
+func TestHandleProjectStatus_RecentOutputIsWorkingNotHung(t *testing.T) {
+	engine := NewEngine("test-fresh", &stubAgent{}, []Platform{&stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test-fresh"}}}, "", LangEnglish)
+	engine.interactiveStates["session-1"] = &interactiveState{
+		platform: &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test-fresh"}},
+		replyCtx: "reply-ctx",
+	}
+	engine.interactiveStates["session-1"].agentSession = &livenessStubAgentSession{alive: true}
+
+	api := &APIServer{engines: map[string]*Engine{"test-fresh": engine}}
+	req := httptest.NewRequest(http.MethodGet, "/project/status?project=test-fresh", nil)
+
+	session := engine.sessions.GetOrCreateActive("session-1")
+	session.TryLock()
+	session.UpdatedAt = time.Now()
+	session.TouchOutput() // fresh event, well within the stale-output threshold
+
+	rec := httptest.NewRecorder()
+	api.handleProjectStatus(rec, req)
+
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if res["status"] != "working" {
+		t.Errorf("got status %v, want working", res["status"])
+	}
+}

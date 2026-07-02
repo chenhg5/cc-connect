@@ -1364,6 +1364,14 @@ func main() {
 				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
 			}
 		}
+		if cfg.Relay.HungAfterSecs != nil {
+			secs := *cfg.Relay.HungAfterSecs
+			if secs <= 0 {
+				relayMgr.SetHungAfter(0)
+			} else {
+				relayMgr.SetHungAfter(time.Duration(secs) * time.Second)
+			}
+		}
 		relayMgr.SetVisibility(cfg.Relay.Visibility)
 		// Per-source loop guard. Both knobs are optional in config; the manager
 		// keeps its defaults when either is nil. Pass-through honors explicit 0.
@@ -1385,6 +1393,21 @@ func main() {
 		}
 
 		apiSrv.SetRelayManager(relayMgr)
+
+		// Status board: ships disabled by default (cfg.StatusBoard.Enabled).
+		// NewStatusBoard returns a safe no-op instance either way, so this
+		// is always safe to install and reference from engine hook points.
+		statusBoard := core.NewStatusBoard(cfg.StatusBoard.Enabled, cfg.StatusBoard.BotToken, cfg.StatusBoard.ChatID, cfg.DataDir)
+		core.SetStatusBoard(statusBoard)
+		if cfg.StatusBoard.Enabled {
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for range ticker.C {
+					apiSrv.PollStatusBoard(statusBoard)
+				}
+			}()
+		}
 
 		// Create shared DirHistory for all engines
 		dirHistory := core.NewDirHistory(cfg.DataDir)

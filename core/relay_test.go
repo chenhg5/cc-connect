@@ -244,6 +244,83 @@ func TestRelayManager_InjectsHandbackIntoSourceSession(t *testing.T) {
 	}
 }
 
+// TestRelayManager_DeliverySurvivesCallerContextCancellation is the
+// regression test for L-0103/L-0104: a real relay response that HandleRelay
+// already produced must still be delivered (handback injection + group
+// visibility) even if the caller's ctx is cancelled by something unrelated
+// (e.g. a new message preempting the target session's event reader) before
+// Send() reaches the delivery steps. Before the fix, InjectRelayHandback's
+// own `select { case <-ctx.Done(): return ctx.Err() }` guard (engine.go
+// ~16277) made this fail deterministically whenever ctx was already
+// cancelled by the time delivery ran.
+func TestRelayManager_DeliverySurvivesCallerContextCancellation(t *testing.T) {
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{sourcePlatform}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{
+		"source": "source-bot",
+		"target": "target-bot",
+	})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	sessionKey := "feishu:chat-1:user-1"
+
+	// Buffered channel (cap 8, see newControllableSession) — safe to
+	// pre-populate before Send() starts reading from it.
+	targetSession.events <- Event{Type: EventResult, Content: "target says the PR link", Done: true}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(ctx, RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: sessionKey,
+			Message:    "please ask target",
+		})
+		done <- err
+	}()
+
+	// Give HandleRelay's initial `select { case <-sendDone: ...; case
+	// <-ctx.Done(): ... }` gate (engine.go ~15997) time to resolve via
+	// sendDone (the mock Send() returns instantly) before we cancel — this
+	// avoids racing that early gate, which is not what this test targets.
+	// Once past it, EventResult handling never checks ctx, so exactly when
+	// cancellation lands after this point doesn't affect determinism.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RelayManager.Send() error = %v, want nil (already-produced response must still deliver despite cancelled ctx)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RelayManager.Send() did not return")
+	}
+
+	var history []HistoryEntry
+	for i := 0; i < 100; i++ {
+		history = sourceEngine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
+		if len(history) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(history) != 1 {
+		t.Fatalf("source history len = %d, want 1 (handback injection must not be silently dropped by a cancelled caller ctx)", len(history))
+	}
+	if !strings.Contains(history[0].Content, "[CC-RELAY-HANDBACK]") ||
+		!strings.Contains(history[0].Content, "target says the PR link") {
+		t.Fatalf("source history missing handback content: %q", history[0].Content)
+	}
+}
+
 func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
 	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, RelayVisibilitySummary)
 
@@ -530,6 +607,48 @@ func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
 	}
 	if got := e.sessions.ActiveSessionID("relay:source:mock:C404"); got != "" {
 		t.Fatalf("expected no global relay session, got %q", got)
+	}
+}
+
+func TestHandleRelay_WorkspacePatternRoutesByThreadID(t *testing.T) {
+	baseDir := t.TempDir()
+	pattern := filepath.Join(baseDir, "task-{{THREAD_ID}}")
+	threadID := "855"
+	workspace := strings.ReplaceAll(pattern, "{{THREAD_ID}}", threadID)
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	globalAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}
+	e := NewEngine("test", globalAgent, nil, "", LangEnglish)
+	e.SetWorkspacePattern(pattern)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	workspaceAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("workspace")}
+	ws := e.workspacePool.GetOrCreate(workspace)
+	ws.agent = workspaceAgent
+	ws.sessions = NewSessionManager("")
+
+	sourceSessionKey := "telegram:-1003917051393:" + threadID + ":7664413698"
+	resp, err := e.HandleRelay(context.Background(), "dev-pro", sourceSessionKey, "handback")
+	if err != nil {
+		t.Fatalf("HandleRelay() error = %v", err)
+	}
+	if resp != "workspace" {
+		t.Fatalf("HandleRelay() response = %q, want %q", resp, "workspace")
+	}
+	if got := workspaceAgent.EnvValue("CC_SESSION_KEY"); got != sourceSessionKey {
+		t.Fatalf("workspace CC_SESSION_KEY = %q, want %q", got, sourceSessionKey)
+	}
+	if got := globalAgent.EnvValue("CC_SESSION_KEY"); got != "" {
+		t.Fatalf("global agent should not receive relay env, got %q", got)
+	}
+	relayKey := relayConversationKey("dev-pro", "telegram", "-1003917051393:"+threadID)
+	if got := ws.sessions.ActiveSessionID(relayKey); got == "" {
+		t.Fatal("expected relay session in thread-scoped workspace session manager")
+	}
+	if b := e.workspaceBindings.Lookup("project:test", workspaceChannelKey("telegram", "-1003917051393:"+threadID)); b != nil {
+		t.Fatalf("workspace pattern relay should not require static binding, got %v", b)
 	}
 }
 

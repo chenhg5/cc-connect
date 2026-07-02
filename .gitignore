@@ -82,6 +82,10 @@ temp/
 *.pid
 *.log
 
+# Multi-workspace test fixtures created by core tests at run time
+# (e.g. TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir)
+core/test_ws_*.json
+
 # ============================================================================
 # IDE & Editor
 # ============================================================================

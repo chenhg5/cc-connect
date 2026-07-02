@@ -15,6 +15,13 @@ import (
 
 const relayTimeout = 60 * time.Second
 
+// defaultHungAfter is how long a busy session can go without producing a
+// single agent event (LastOutputAt) before /status reports it as "hung".
+// This is a separate, much tighter signal than relayTimeout: relayTimeout
+// caps how long the relay CLI blocks waiting for a turn to complete;
+// defaultHungAfter detects a stalled turn long before that cap is hit.
+const defaultHungAfter = 90 * time.Second
+
 // Default safety limits to prevent runaway relay loops (e.g. when an agent
 // misinterprets a normal reply as a relay command, or when two agents
 // volley a "relay" instruction back and forth).
@@ -43,6 +50,7 @@ type RelayManager struct {
 	bindings   map[string]*RelayBinding // chatID → binding
 	storePath  string                   // empty = no persistence
 	timeout    time.Duration
+	hungAfter  time.Duration
 	visibility string
 
 	// Per-source rate limit: tracks recent Send() times keyed by
@@ -60,6 +68,7 @@ func NewRelayManager(dataDir string) *RelayManager {
 		engines:     make(map[string]*Engine),
 		bindings:    make(map[string]*RelayBinding),
 		timeout:     relayTimeout,
+		hungAfter:   defaultHungAfter,
 		visibility:  RelayVisibilityFull,
 		burstWindow: defaultRelayBurstWindow,
 		burstMax:    defaultRelayBurstMax,
@@ -132,6 +141,25 @@ func (rm *RelayManager) SetTimeout(d time.Duration) {
 		d = 0
 	}
 	rm.timeout = d
+}
+
+// SetHungAfter overrides the stale-output threshold used by /status to
+// classify a busy session as "hung". Set to 0 to disable this signal and
+// fall back to the coarser relayTimeout-based check only.
+func (rm *RelayManager) SetHungAfter(d time.Duration) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	rm.hungAfter = d
+}
+
+// GetHungAfter returns the current stale-output threshold.
+func (rm *RelayManager) GetHungAfter() time.Duration {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.hungAfter
 }
 
 // SetVisibility controls whether relay request/response visibility messages are
@@ -364,8 +392,19 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		return nil, fmt.Errorf("relay: %w", err)
 	}
 
+	// Delivery uses its own short-lived context, deliberately detached from
+	// ctx/relayCtx. By this point HandleRelay has already produced a real
+	// response (even a "partial" one via relayPartialResponseOrError) — if
+	// ctx was cancelled by something unrelated (e.g. a new message arriving
+	// for the target session and preempting its event reader), that must
+	// not also take down delivery of a result we already have in hand.
+	// Mirrors the context.Background() pattern already used in the error
+	// branch above (line ~385) for the crash/hung notification path.
+	deliveryCtx, deliveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer deliveryCancel()
+
 	if sourceEngine != nil {
-		if err := sourceEngine.InjectRelayHandback(ctx, platform, req.SessionKey, toName, response); err != nil {
+		if err := sourceEngine.InjectRelayHandback(deliveryCtx, platform, req.SessionKey, toName, response); err != nil {
 			slog.Warn("relay: source handback injection failed",
 				"from", req.From,
 				"to", req.To,
@@ -387,7 +426,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 			}
 		}
 		slog.Info("relay: posting response visibility", "to", toName, "response_len", len(response))
-		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
+		rm.sendToGroup(deliveryCtx, targetEngine, platform, groupSessionKey, label)
 	}
 
 	return &RelayResponse{Response: response}, nil

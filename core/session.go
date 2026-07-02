@@ -48,6 +48,14 @@ type Session struct {
 	// processes an actual incoming user message. It is used by reset_on_idle_mins
 	// so that automated activity cannot prevent idle session rotation.
 	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
+	// LastOutputAt records the last time an agent process event (partial
+	// token, tool call, result, etc.) was received for this session.
+	// Unlike UpdatedAt (only bumped when a turn ends), this is touched on
+	// every event received mid-turn, so it can distinguish "still
+	// producing output" from "gone silent" while a turn is in flight —
+	// UpdatedAt alone can't tell the two apart since it doesn't move
+	// until the busy session unlocks.
+	LastOutputAt time.Time `json:"last_output_at,omitempty"`
 	// PendingReactions holds emoji reactions from the admin user that will be
 	// prepended to the next real message as context.
 	PendingReactions []PendingReaction `json:"pending_reactions,omitempty"`
@@ -175,6 +183,23 @@ func (s *Session) GetUpdatedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.UpdatedAt
+}
+
+// TouchOutput records that the agent process just produced an event.
+// Call this once per event drained from AgentSession.Events(), not just
+// at turn end, so status checks can detect a mid-turn hang.
+func (s *Session) TouchOutput() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastOutputAt = time.Now()
+}
+
+// GetLastOutputAt returns when the last agent event was received for
+// this session. Returns zero time if no event has been processed yet.
+func (s *Session) GetLastOutputAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastOutputAt
 }
 
 // AddReaction appends a pending emoji reaction. Capped at 3; oldest is

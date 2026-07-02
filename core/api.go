@@ -833,22 +833,20 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 	apiJSON(w, http.StatusOK, binding)
 }
 
-func (s *APIServer) handleProjectStatus(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// projectStatus is the result of classifying one project's engine state.
+// Shared by the HTTP /status handler and the StatusBoard poller so the
+// two never drift apart.
+type projectStatus struct {
+	Status            string
+	ProcessAlive      bool
+	ActiveSessions    int
+	HasLastOutput     bool
+	LastOutputMsAgo   int64
+}
 
-	project := r.URL.Query().Get("project")
-	if project == "" {
-		http.Error(w, "project query parameter required", http.StatusBadRequest)
-		return
-	}
-
-	e, ok := s.engines[project]
-	if !ok {
-		http.Error(w, fmt.Sprintf("project %q not found", project), http.StatusNotFound)
-		return
-	}
-
+// computeProjectStatus classifies a single engine's current state.
+// Caller must hold at least s.mu.RLock().
+func (s *APIServer) computeProjectStatus(e *Engine) projectStatus {
 	isBusy := false
 	processAlive := false
 	activeSessionsCount := 0
@@ -880,28 +878,120 @@ func (s *APIServer) handleProjectStatus(w http.ResponseWriter, r *http.Request) 
 	statusStr := "idle"
 	if isBusy {
 		timeoutLimit := 60 * time.Second
+		staleOutputLimit := defaultHungAfter
 		if s.relay != nil {
 			s.relay.mu.RLock()
 			if s.relay.timeout > 0 {
 				timeoutLimit = s.relay.timeout
 			}
+			staleOutputLimit = s.relay.hungAfter
 			s.relay.mu.RUnlock()
 		}
 
 		if !processAlive {
 			statusStr = "crashed"
-		} else if busySession != nil && time.Since(busySession.UpdatedAt) > timeoutLimit {
-			statusStr = "hung"
 		} else {
-			statusStr = "working"
+			// overTimeout is the original, coarse signal: no completed turn
+			// (UpdatedAt only moves on turn end) within the relay timeout.
+			// stale is the finer signal added alongside last_output_ms_ago:
+			// no single agent event (partial token, tool call, etc.) within
+			// staleOutputLimit, which is far tighter than timeoutLimit and
+			// catches a genuinely stuck turn long before it would count as
+			// "over timeout". Either signal independently marks "hung" —
+			// stale is expected to fire first for a real hang; overTimeout
+			// remains as a fallback for harness types where LastOutputAt
+			// never gets touched.
+			overTimeout := busySession != nil && time.Since(busySession.UpdatedAt) > timeoutLimit
+			stale := false
+			if busySession != nil && staleOutputLimit > 0 {
+				lastOutput := busySession.GetLastOutputAt()
+				stale = !lastOutput.IsZero() && time.Since(lastOutput) > staleOutputLimit
+			}
+			if overTimeout || stale {
+				statusStr = "hung"
+			} else {
+				statusStr = "working"
+			}
 		}
 	}
 
+	ps := projectStatus{
+		Status:         statusStr,
+		ProcessAlive:   processAlive,
+		ActiveSessions: activeSessionsCount,
+	}
+	if busySession != nil {
+		lastOutput := busySession.GetLastOutputAt()
+		if !lastOutput.IsZero() {
+			ps.HasLastOutput = true
+			ps.LastOutputMsAgo = time.Since(lastOutput).Milliseconds()
+		}
+	}
+	return ps
+}
+
+func (s *APIServer) handleProjectStatus(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		http.Error(w, "project query parameter required", http.StatusBadRequest)
+		return
+	}
+
+	e, ok := s.engines[project]
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", project), http.StatusNotFound)
+		return
+	}
+
+	ps := s.computeProjectStatus(e)
 	res := map[string]any{
 		"project":         project,
-		"status":          statusStr,
-		"process_alive":   processAlive,
-		"active_sessions": activeSessionsCount,
+		"status":          ps.Status,
+		"process_alive":   ps.ProcessAlive,
+		"active_sessions": ps.ActiveSessions,
+	}
+	if ps.HasLastOutput {
+		res["last_output_ms_ago"] = ps.LastOutputMsAgo
 	}
 	apiJSON(w, http.StatusOK, res)
+}
+
+// PollStatusBoard classifies every registered project and feeds any
+// "hung" state to sb. This is the one board state that requires polling
+// rather than a discrete event — it's a threshold crossed over elapsed
+// time, not a single moment like a turn starting or a relay dispatching.
+// Called on a fixed interval by main(); cheap when sb is disabled or
+// nothing is hung, since OnHungDetected/OnTurnEnd no-op on unchanged state.
+func (s *APIServer) PollStatusBoard(sb *StatusBoard) {
+	if sb == nil || !sb.enabled {
+		return
+	}
+	s.mu.RLock()
+	projects := make(map[string]*Engine, len(s.engines))
+	for name, e := range s.engines {
+		projects[name] = e
+	}
+	s.mu.RUnlock()
+
+	for name, e := range projects {
+		s.mu.RLock()
+		ps := s.computeProjectStatus(e)
+		s.mu.RUnlock()
+		if ps.Status == "hung" {
+			ago := "unknown"
+			if ps.HasLastOutput {
+				ago = (time.Duration(ps.LastOutputMsAgo) * time.Millisecond).Round(time.Second).String()
+			}
+			sb.OnHungDetected(name, ago)
+		} else if ps.Status == "idle" || ps.Status == "working" {
+			// Only demote a previously-hung seat back to idle/working here;
+			// the normal working/idle transitions are driven directly by
+			// OnTurnStart/OnTurnEnd at the point the turn actually starts
+			// or ends, not by this poller.
+			sb.recoverIfWasHung(name, ps.Status)
+		}
+	}
 }

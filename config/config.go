@@ -128,6 +128,11 @@ type Config struct {
 	// for sourcing shell profiles so that user-defined functions and aliases are
 	// available. Example: "source ~/.zshrc"
 	ShellProfile string `toml:"shell_profile,omitempty"`
+	// StatusBoard configures an optional standing Telegram message showing
+	// live per-seat status, refreshed on real state transitions rather than
+	// a timer. It is NOT a seat: it posts with its own dedicated bot token
+	// and never touches the [[projects]] engine machinery.
+	StatusBoard StatusBoardConfig `toml:"status_board,omitempty"`
 	// MaxAttachmentSizeMB is the per-file size limit, in MiB, for attachments
 	// sent through `cc-connect send --file/--image/--audio/--video` and the
 	// /send API. 0 (the default) means use core.DefaultMaxAttachmentSize
@@ -263,12 +268,22 @@ type RelayBindingConfig struct {
 // RelayConfig controls bot-to-bot relay behavior.
 type RelayConfig struct {
 	TimeoutSecs     *int                 `toml:"timeout_secs"`                // max seconds to wait for relay response; 0 = disabled; default 60
+	HungAfterSecs   *int                 `toml:"hung_after_secs,omitempty"`   // seconds of no agent output while busy before /status reports "hung"; default 90
 	Visibility      string               `toml:"visibility,omitempty"`        // "full" (default), "summary", or "none" for group visibility echoes
 	BurstWindowSecs *int                 `toml:"burst_window_secs,omitempty"` // rolling window for the per-source loop guard; default 60
 	BurstMax        *int                 `toml:"burst_max,omitempty"`         // max relays per source per window; 0 = disabled; default 10
 	Bindings        []RelayBindingConfig `toml:"bindings,omitempty"`          // static bindings
 }
 
+
+// StatusBoardConfig configures the optional standing status-board message.
+// Ships disabled by default; the bot token must be registered separately
+// via @BotFather (privacy mode disabled) before enabling.
+type StatusBoardConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	BotToken string `toml:"bot_token"`
+	ChatID   string `toml:"chat_id"`
+}
 
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
@@ -1014,6 +1029,9 @@ func (c *Config) validateInternal(permissive bool) error {
 	case "", "on", "off":
 	default:
 		return fmt.Errorf("config: attachment_send must be \"on\" or \"off\"")
+	}
+	if c.Relay.HungAfterSecs != nil && *c.Relay.HungAfterSecs < 0 {
+		return fmt.Errorf("config: relay.hung_after_secs must be >= 0")
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
