@@ -3069,7 +3069,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if e.onMentionContextN > 0 && e.dataDir != "" && msg.WasMentioned {
 		sessionsDir := filepath.Join(e.dataDir, "sessions")
 		chatID := extractSessionChatID(msg.SessionKey)
-		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN, chatID); len(entries) > 0 {
+		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN, chatID, e.ProjectName()); len(entries) > 0 {
 			if groupCtx := formatGroupContext(entries, e.onMentionContextN); groupCtx != "" {
 				if msg.Content != "" {
 					msg.Content = groupCtx + "\n---\n" + msg.Content

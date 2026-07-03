@@ -34,7 +34,7 @@ func formatPendingReactions(reactions []PendingReaction) string {
 // aggregatedEntry is one history turn collected across all seat sessions.
 type aggregatedEntry struct {
 	Project   string
-	Role      string    // "user" or "assistant"
+	Role      string // "user" or "assistant"
 	Content   string
 	Timestamp time.Time
 }
@@ -66,11 +66,12 @@ func extractSessionChatID(sessionKey string) string {
 }
 
 // aggregateSeatMessages reads session JSON files under sessionsDir and returns
-// the most recent n history entries across all seats that belong to chatID,
+// the most recent n history entries for targetProject that belong to chatID,
 // sorted oldest-first. Pass chatID="" to disable the filter (not recommended
 // in user-facing paths — use only when callers can guarantee privacy).
+// Pass targetProject="" to include all projects.
 // If sessionsDir is empty or unreadable it returns nil gracefully.
-func aggregateSeatMessages(sessionsDir string, n int, chatID string) []aggregatedEntry {
+func aggregateSeatMessages(sessionsDir string, n int, chatID string, targetProject string) []aggregatedEntry {
 	if n <= 0 || sessionsDir == "" {
 		return nil
 	}
@@ -88,6 +89,9 @@ func aggregateSeatMessages(sessionsDir string, n int, chatID string) []aggregate
 		project := strings.TrimSuffix(base, ".json")
 		if idx := strings.LastIndex(project, "_"); idx > 0 {
 			project = project[:idx]
+		}
+		if targetProject != "" && project != targetProject {
+			continue
 		}
 
 		data, err := os.ReadFile(f)
