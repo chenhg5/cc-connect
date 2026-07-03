@@ -460,3 +460,52 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 		t.Fatalf("final message = %q, want transformed final preview", got)
 	}
 }
+
+func TestStreamPreview_FreezeAndRecreate(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	// 1. Initial preview
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("First Segment")
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify first segment started streaming
+	msgs := mp.getMessages()
+	if len(msgs) == 0 || !strings.HasPrefix(msgs[0], "start:First Segment") {
+		t.Fatalf("expected First Segment to start streaming, got messages: %v", msgs)
+	}
+
+	// 2. Freeze and detach (e.g. on a tool call)
+	sp.freeze()
+	sp.detachPreview()
+
+	// 3. Recreate stream preview for the next segment (just like we did in engine.go)
+	sp = newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	if !sp.canPreview() {
+		t.Fatal("recreated stream preview should be able to preview")
+	}
+
+	// 4. Append text to the new segment
+	sp.appendText("Second Segment")
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify second segment started streaming as a new message (start:Second Segment)
+	msgs = mp.getMessages()
+	foundStartSecond := false
+	for _, m := range msgs {
+		if m == "start:Second Segment" {
+			foundStartSecond = true
+			break
+		}
+	}
+	if !foundStartSecond {
+		t.Fatalf("expected a new start preview for Second Segment, got messages: %v", msgs)
+	}
+}
+

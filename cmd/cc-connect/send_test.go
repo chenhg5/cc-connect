@@ -348,3 +348,21 @@ func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("decoded files = %#v", decoded.Files)
 	}
 }
+
+func TestParseSendArgs_ChatIDAndThreadID(t *testing.T) {
+	req, _, err := parseSendArgs([]string{"--chat-id", "-1003917051393", "--thread-id", "12345", "--message", "hello"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if req.SessionKey != "telegram:-1003917051393:12345:0" {
+		t.Errorf("unexpected SessionKey: %q", req.SessionKey)
+	}
+
+	req, _, err = parseSendArgs([]string{"--chat-id", "98765", "--platform", "slack", "hello"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if req.SessionKey != "slack:98765" {
+		t.Errorf("unexpected SessionKey: %q", req.SessionKey)
+	}
+}

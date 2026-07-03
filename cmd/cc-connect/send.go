@@ -77,6 +77,9 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	var audioPaths []string
 	var videoPaths []string
 	var positional []string
+	var chatID string
+	var threadID string
+	var platform string = "telegram"
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -92,6 +95,24 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			req.SessionKey = args[i]
+		case "--chat-id":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--chat-id requires a value")
+			}
+			i++
+			chatID = args[i]
+		case "--thread-id", "--topic-id":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("%s requires a value", args[i])
+			}
+			i++
+			threadID = args[i]
+		case "--platform":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--platform requires a value")
+			}
+			i++
+			platform = args[i]
 		case "--message", "-m":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--message requires a value")
@@ -171,6 +192,13 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	}
 	if req.Project == "" {
 		req.Project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
+	}
+	if req.SessionKey == "" && chatID != "" {
+		if threadID != "" {
+			req.SessionKey = fmt.Sprintf("%s:%s:%s:0", platform, chatID, threadID)
+		} else {
+			req.SessionKey = fmt.Sprintf("%s:%s", platform, chatID)
+		}
 	}
 	if req.SessionKey == "" {
 		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
@@ -384,6 +412,10 @@ Options:
       --at-all             @ everyone (DingTalk)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
+      --chat-id <id>       Target chat/group ID (alternative to --session)
+      --thread-id <id>     Target thread/topic ID (used with --chat-id)
+      --topic-id <id>      Alias for --thread-id
+      --platform <name>    Target platform (default: telegram, used with --chat-id)
       --data-dir <path>    Data directory (default: ~/.cc-connect)
   -h, --help               Show this help
 

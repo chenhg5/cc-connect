@@ -380,7 +380,7 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 	if dashboardSessionKey == "" {
 		return "", fmt.Errorf("dispatch dashboard session key is not configured")
 	}
-	platformName, _, err := parseSessionKeyParts(dashboardSessionKey)
+	platformName, chatID, err := parseSessionKeyParts(dashboardSessionKey)
 	if err != nil {
 		return "", fmt.Errorf("invalid dispatch dashboard session key: %w", err)
 	}
@@ -389,6 +389,7 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 	sessionKey := dashboardSessionKey
 	var replyCtx any
 	var topicID, topicName string
+	var channelKey string
 
 	if target.UsesWorkspacePattern() {
 		creator, ok := p.(TaskTopicCreator)
@@ -397,15 +398,51 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 		}
 		topic, err := creator.CreateTaskTopic(e.ctx, dashboardSessionKey, "task-new", "Task intake from [DISPATCH]:\n\n"+dispatchMessage)
 		if err != nil {
-			return "", fmt.Errorf("create task topic: %w", err)
+			slog.Warn("failed to create task topic, falling back to virtual topic on General channel", "project", e.name, "letter", req.Letter, "error", err)
+
+			// Fallback: Use virtual topic on General channel
+			parts := strings.Split(dashboardSessionKey, ":")
+			if len(parts) < 2 || parts[0] != "telegram" {
+				return "", fmt.Errorf("create task topic failed: %w (and dashboard session key is invalid)", err)
+			}
+			rawChatID := parts[1]
+			userID := parts[len(parts)-1]
+
+			var letterNum string
+			for _, r := range req.Letter {
+				if r >= '0' && r <= '9' {
+					letterNum += string(r)
+				}
+			}
+			if letterNum == "" {
+				letterNum = "9999"
+			}
+
+			// Virtual sessionKey
+			sessionKey = fmt.Sprintf("telegram:%s:%s:%s", rawChatID, letterNum, userID)
+			channelKey = rawChatID + ":" + letterNum
+
+			if rc, ok := p.(ReplyContextReconstructor); ok {
+				if reconstructed, rErr := rc.ReconstructReplyCtx(dashboardSessionKey); rErr == nil {
+					replyCtx = reconstructed
+				}
+			}
+			if replyCtx == nil {
+				replyCtx = dashboardSessionKey
+			}
+			topicName = "task-" + letterNum
+		} else {
+			if topic == nil || strings.TrimSpace(topic.SessionKey) == "" {
+				return "", fmt.Errorf("create task topic returned no session key")
+			}
+			sessionKey = topic.SessionKey
+			replyCtx = topic.ReplyCtx
+			topicID = topic.ThreadID
+			topicName = topic.Name
+			channelKey = chatID + ":" + topicID
 		}
-		if topic == nil || strings.TrimSpace(topic.SessionKey) == "" {
-			return "", fmt.Errorf("create task topic returned no session key")
-		}
-		sessionKey = topic.SessionKey
-		replyCtx = topic.ReplyCtx
-		topicID = topic.ThreadID
-		topicName = topic.Name
+	} else {
+		channelKey = chatID
 	}
 
 	if replyCtx == nil {
@@ -420,7 +457,7 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 		replyCtx = sessionKey
 	}
 
-	target.dispatchSyntheticMessage(platformName, sessionKey, replyCtx, dispatchMessage)
+	target.dispatchSyntheticMessage(platformName, sessionKey, channelKey, replyCtx, dispatchMessage)
 
 	exp := DispatchExpectation{
 		Letter:              req.Letter,
@@ -453,7 +490,7 @@ func buildDispatchMessage(req dispatchRequest) string {
 	return fmt.Sprintf("Dispatch letter %s.\n\nThread: %s\nPath: %s\n\nRead the QUERY, execute the requested work, then write %s.result.md and append the RESULT row to INDEX.md.", req.Letter, req.Thread, req.Path, req.Letter)
 }
 
-func (e *Engine) dispatchSyntheticMessage(platformName, sessionKey string, replyCtx any, content string) {
+func (e *Engine) dispatchSyntheticMessage(platformName, sessionKey, channelKey string, replyCtx any, content string) {
 	var platform Platform
 	for _, p := range e.platforms {
 		if p.Name() == platformName {
@@ -468,6 +505,7 @@ func (e *Engine) dispatchSyntheticMessage(platformName, sessionKey string, reply
 	msg := &Message{
 		Platform:          platformName,
 		SessionKey:        sessionKey,
+		ChannelKey:        channelKey,
 		Content:           content,
 		UserID:            "cc-connect-dispatch",
 		UserName:          "cc-connect dispatch",

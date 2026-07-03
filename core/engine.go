@@ -5131,6 +5131,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 						segmentStart = len(textParts)
+						sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
 					}
 					silentHold = false
 				}
@@ -5161,6 +5162,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
+				sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
@@ -5221,6 +5223,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 						segmentStart = len(textParts)
+						sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
 					}
 					silentHold = false
 				}
@@ -5272,6 +5275,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
+				sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
 				toolInput := event.ToolInput
 				var formattedInput string
 				if toolInput == "" {
@@ -5505,6 +5509,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if previewActive {
 				sp.detachPreview() // keep frozen preview visible as permanent message
 			}
+			sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
 
 			slog.Info("permission request",
 				"request_id", event.RequestID,
