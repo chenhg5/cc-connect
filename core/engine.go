@@ -396,6 +396,7 @@ type Engine struct {
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
+	idleExit              time.Duration
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -536,6 +537,12 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+
+	// Idle-exit tracking (idle_exit_mins): count of in-flight turns
+	// (foreground or unsolicited) and the time of the last turn boundary.
+	// Maintained by beginTurn/endTurn; read by reapIdleInteractiveSessions.
+	activeTurns    int
+	lastActivityAt time.Time
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -3654,6 +3661,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		defer ws.EndTurn()
 	}
 
+	state.beginTurn()
+	defer state.endTurn()
+
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
 	// Defer restores only when SetLiveMode succeeds for the override.
 	if msg.ModeOverride != "" {
@@ -4323,6 +4333,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	var turnActive bool // true after first event, cleared on EventResult
 	defer func() {
 		if turnActive {
+			state.endTurn()
 			if workspaceDir != "" && e.workspacePool != nil {
 				if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 					ws.EndTurn()
@@ -4380,6 +4391,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			// Mark workspace active on first event.
 			if !turnActive {
 				turnActive = true
+				state.beginTurn()
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.BeginTurn()
@@ -4443,6 +4455,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				textParts = nil
 				toolsUsed = nil
 				turnActive = false
+				state.endTurn()
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.EndTurn()

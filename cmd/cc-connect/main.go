@@ -722,6 +722,11 @@ func main() {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
+		if proj.IdleExitMins != nil && *proj.IdleExitMins > 0 {
+			engine.SetIdleExit(time.Duration(*proj.IdleExitMins) * time.Minute)
+			slog.Info("project: idle_exit_mins enabled, idle agent subprocesses will be closed and resumed on demand",
+				"project", proj.Name, "minutes", *proj.IdleExitMins)
+		}
 
 		// Wire sender injection
 		if proj.InjectSender != nil {

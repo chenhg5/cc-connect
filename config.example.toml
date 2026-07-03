@@ -172,6 +172,25 @@ level = "info" # debug, info, warn, error
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
 # =============================================================================
+# Idle exit: reclaim memory from idle agent processes
+# 空闲退出：回收空闲 agent 进程的内存
+# =============================================================================
+#
+# Close the agent subprocess (and its MCP children) after the session has been
+# inactive for N minutes, releasing its memory. The conversation is preserved:
+# the next message transparently resumes it via the saved agent session ID, at
+# the cost of a few seconds of cold start. Sessions with a running turn, a
+# pending permission request, or queued messages are never closed.
+# 会话空闲 N 分钟后关闭 agent 子进程（连同 MCP 子进程）、释放内存。对话不会丢失：
+# 下一条消息会用已保存的 agent session ID 透明恢复，代价是几秒冷启动。
+# 正在执行任务、等待权限确认、或有排队消息的会话不会被关闭。
+#
+# Default: 0 (disabled).
+# 默认值为 0（禁用）。
+# [[projects]]
+# idle_exit_mins = 30   # 0 or unset disables / 0 或不设置表示禁用
+
+# =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
 # =============================================================================

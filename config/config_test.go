@@ -3371,3 +3371,66 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestLoad_ParsesIdleExitMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithIdleExitFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].IdleExitMins == nil {
+		t.Fatal("expected idle_exit_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].IdleExitMins; got != 30 {
+		t.Fatalf("idle_exit_mins = %d, want 30", got)
+	}
+}
+
+func TestLoad_RejectsNegativeIdleExitMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeIdleExitFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative idle_exit_mins")
+	}
+	if !strings.Contains(err.Error(), "idle_exit_mins") {
+		t.Fatalf("error = %q, want idle_exit_mins validation", err.Error())
+	}
+}
+
+const projectWithIdleExitFixture = `
+[[projects]]
+name = "beta"
+idle_exit_mins = 30
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeIdleExitFixture = `
+[[projects]]
+name = "beta"
+idle_exit_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`

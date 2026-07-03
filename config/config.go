@@ -485,6 +485,11 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// IdleExitMins terminates the agent subprocess after the session has been
+	// inactive for the specified number of minutes, releasing its memory. The
+	// conversation is preserved: the next message transparently resumes it via
+	// the saved agent session ID. 0 or nil disables the behavior.
+	IdleExitMins *int `toml:"idle_exit_mins,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
@@ -1039,6 +1044,9 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if proj.IdleExitMins != nil && *proj.IdleExitMins < 0 {
+			return fmt.Errorf("config: %s.idle_exit_mins must be >= 0", prefix)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err
