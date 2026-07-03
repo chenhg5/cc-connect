@@ -108,6 +108,11 @@ func newCopilotSession(ctx context.Context, workDir, cliBin string, extraArgs []
 		env = core.MergeEnv(env, extraEnv)
 	}
 	child.Env = env
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "COPILOT_MODEL=") || strings.HasPrefix(kv, "COPILOT_PROVIDER_") {
+			slog.Warn("copilotSession: DEBUG child env carries COPILOT_* var", "kv", kv)
+		}
+	}
 
 	stdin, err := child.StdinPipe()
 	if err != nil {

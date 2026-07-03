@@ -1,8 +1,12 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
+
+	tgbot "github.com/go-telegram/bot"
 )
 
 func TestStatusBoard_DisabledIsSafeNoOp(t *testing.T) {
@@ -53,6 +57,37 @@ func TestStatusBoard_TransitionDedup(t *testing.T) {
 	sb.OnTurnEnd("dev-pro")
 	if sb.seats["dev-pro"].State != "idle" {
 		t.Fatalf("expected state to update to idle, got %q", sb.seats["dev-pro"].State)
+	}
+}
+
+func TestStatusBoard_RenderEnabledDoesNotSelfDeadlock(t *testing.T) {
+	botClient, err := tgbot.New("123456:fake", tgbot.WithSkipGetMe())
+	if err != nil {
+		t.Fatalf("create bot client: %v", err)
+	}
+	sb := &StatusBoard{
+		enabled:     true,
+		bot:         botClient,
+		chatID:      1,
+		minInterval: 0,
+		seats:       make(map[string]*seatStatus),
+	}
+	sb.seats["dev-pro"] = &seatStatus{State: "working", Detail: "task A"}
+	sb.messageID = 1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		sb.render(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("render blocked; likely self-deadlocked on status board mutex")
 	}
 }
 

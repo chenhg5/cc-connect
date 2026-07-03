@@ -128,6 +128,22 @@ func aggregateSeatMessages(sessionsDir string, n int, chatID string) []aggregate
 				if entry.Timestamp.IsZero() || entry.Content == "" {
 					continue
 				}
+				// A stored history entry that is itself a prior group-context
+				// injection (starts with the exact prefix formatGroupContext
+				// writes) must not be re-aggregated: each seat's own history
+				// verbatim-stores whatever was injected into it, so without
+				// this guard every subsequent @-mention re-includes the last
+				// N messages *including* their nested prior injections,
+				// which themselves contain even older ones — compounding
+				// without bound over a day of cross-seat activity until the
+				// injected block balloons to tens of thousands of characters
+				// before a single real word is added. Observed 2026-07-03:
+				// a plain "hi" expanded into an 11KB+ deeply-nested block,
+				// making seats appear hung when they were just chewing
+				// through an enormous accidental prompt.
+				if strings.HasPrefix(entry.Content, "[Group context (") {
+					continue
+				}
 				// deduplicate by project+timestamp+role
 				key := fmt.Sprintf("%s|%s|%d", project, entry.Role, entry.Timestamp.UnixNano())
 				if _, dup := seen[key]; dup {

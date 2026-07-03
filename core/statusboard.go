@@ -191,7 +191,7 @@ func (sb *StatusBoard) render(ctx context.Context) {
 		sb.mu.Unlock()
 		return // coalesce bursts; the next transition after the window will catch up
 	}
-	text := sb.renderText()
+	text := sb.renderTextLocked()
 	if text == sb.lastText {
 		sb.mu.Unlock()
 		return
@@ -253,20 +253,25 @@ func (sb *StatusBoard) post(ctx context.Context, chatID int64, text string) {
 
 var statusEmoji = map[string]string{
 	"working":  "\U0001F7E2", // green circle
-	"idle":     "⚪",     // white circle
+	"idle":     "⚪",          // white circle
 	"assigned": "\U0001F535", // blue circle
-	"hung":     "⚠️", // warning
+	"hung":     "⚠️",         // warning
 }
 
 func (sb *StatusBoard) renderText() string {
 	sb.mu.Lock()
+	text := sb.renderTextLocked()
+	sb.mu.Unlock()
+	return text
+}
+
+func (sb *StatusBoard) renderTextLocked() string {
 	names := make([]string, 0, len(sb.seats))
 	snapshot := make(map[string]*seatStatus, len(sb.seats))
 	for name, st := range sb.seats {
 		names = append(names, name)
 		snapshot[name] = st
 	}
-	sb.mu.Unlock()
 
 	sort.Strings(names)
 	var b strings.Builder

@@ -481,8 +481,30 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	cs.alive.Store(true)
 
 	go cs.readLoop(stdout, &stderrBuf)
+	go cs.debugMonitorEventsChannel()
 
 	return cs, nil
+}
+
+// debugMonitorEventsChannel is a temporary diagnostic (L-0143 follow-up):
+// logs cs.events channel occupancy every 2s so a stalled downstream
+// consumer (channel backpressure blocking readLoop, which blocks stdout
+// reads, which blocks the child's stdout write) is visible in the log
+// instead of just looking like a silent hang. Remove once root-caused.
+func (cs *claudeSession) debugMonitorEventsChannel() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-cs.done:
+			return
+		case <-ticker.C:
+			n := len(cs.events)
+			if n > 0 {
+				slog.Warn("claudeSession: DEBUG events channel occupancy", "len", n, "cap", cap(cs.events))
+			}
+		}
+	}
 }
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
@@ -638,12 +660,22 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 		cs.activeModel.Store(model)
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
+		prev, _ := cs.sessionID.Load().(string)
 		cs.sessionID.Store(sid)
-		evt := core.Event{Type: core.EventText, SessionID: sid}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-			return
+		// Only notify the engine the first time a session_id is learned.
+		// Every "thinking_tokens" progress ping also carries the same
+		// session_id, so without this guard handleSystem re-emits an
+		// EventText for each one — dozens per turn — flooding the
+		// 64-slot cs.events buffer, blocking readLoop's stdout reads,
+		// and backing up all the way to the child process's stdout
+		// write (observed as a near-zero-CPU "hang"). See L-0143/L-0144.
+		if prev == "" {
+			evt := core.Event{Type: core.EventText, SessionID: sid}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
+			}
 		}
 	}
 }
