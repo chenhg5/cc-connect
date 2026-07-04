@@ -2725,14 +2725,21 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		)
 	}
 
-	e.hooks.Emit(HookEvent{
+	if decision := e.hooks.EmitConsumable(HookEvent{
 		Event:      HookEventMessageReceived,
 		SessionKey: msg.SessionKey,
 		Platform:   msg.Platform,
 		UserID:     msg.UserID,
 		UserName:   msg.UserName,
 		Content:    msg.Content,
-	})
+	}); decision.Handled {
+		slog.Info("message handled by hook",
+			"platform", msg.Platform, "msg_id", msg.MessageID,
+			"session", msg.SessionKey, "user", msg.UserName,
+			"reason", decision.Reason,
+		)
+		return
+	}
 
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {

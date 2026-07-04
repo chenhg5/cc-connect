@@ -410,6 +410,18 @@ level = "info" # debug, info, warn, error
 # async = true                    # default true; set false to block until done
 # timeout = 10                    # seconds; default 10s for command, 5s for http
 #
+# A message.received HTTP hook can consume a message when it returns
+# {"handled": true}. This skips the default Agent for that message.
+# message.received HTTP 钩子可以返回 {"handled": true} 来消费消息，
+# 消费后该消息不会再进入默认 Agent。
+#
+# [[hooks]]
+# event = "message.received"
+# type = "http"
+# url = "http://127.0.0.1:8090/inbound"
+# consume_response = true          # default false; only applies to HTTP hooks
+# timeout = 5
+#
 # [[hooks]]
 # event = "error"
 # type = "http"
