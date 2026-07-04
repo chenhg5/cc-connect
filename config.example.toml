@@ -1570,6 +1570,20 @@ app_secret = "your-feishu-app-secret"
 # http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
 #                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
 #                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
+# send_via_http = "auto"           # optional: how Send() dispatches text replies (default "auto")
+#                                  #   "auto"  → WS for short messages (<=512 bytes), HTTP for longer ones.
+#                                  #            Long replies via WS can hit the 15s OneBot WS timeout (#1474).
+#                                  #            HTTP has a 120s timeout and avoids WS readLoop queueing.
+#                                  #            Falls back to WS if http_url is not configured.
+#                                  #   "always" → always use HTTP (requires http_url); falls back to WS if absent.
+#                                  #   "never"  → always use WebSocket, even for long messages.
+#                                  # 可选：Send() 的派发方式（默认 "auto"）
+#                                  #   "auto"  → 短消息（<=512 字节）走 WebSocket，长消息走 HTTP。
+#                                  #            长回复走 WS 可能命中 OneBot 15 秒 WS 超时（#1474）。
+#                                  #            HTTP 有 120 秒超时，并避免阻塞 WS readLoop。
+#                                  #            未配置 http_url 时退回 WS。
+#                                  #   "always" → 始终走 HTTP（需要 http_url）；缺失时退回 WS。
+#                                  #   "never"  → 始终走 WebSocket，即使长消息。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
