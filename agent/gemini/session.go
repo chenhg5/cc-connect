@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -231,28 +230,21 @@ func (gs *geminiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.
 		stdout.Close()
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		slog.Debug("geminiSession: raw", "line", truncate(line, 500))
+	err := core.ReadLineLoop(stdout, func(line []byte) error {
+		slog.Debug("geminiSession: raw", "line", truncate(string(line), 500))
 
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("geminiSession: non-JSON line", "line", line)
-			continue
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("geminiSession: non-JSON line", "line", string(line))
+			return nil
 		}
 
 		gs.handleEvent(raw)
-	}
+		return nil
+	})
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("geminiSession: scanner error", "error", err)
+	if err != nil {
+		slog.Error("geminiSession: readLoop error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
 		case gs.events <- evt:

@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -970,24 +969,17 @@ func (s *appServerSession) Close() error {
 
 func (s *appServerSession) readLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanBuf := make([]byte, 0, 64*1024)
-	const maxLineSize = 10 * 1024 * 1024 // 10MB
-	scanner.Buffer(scanBuf, maxLineSize)
-
-	for scanner.Scan() {
+	err := core.ReadLineLoop(r, func(data []byte) error {
 		select {
 		case <-s.ctx.Done():
-			return
+			return io.EOF
 		default:
 		}
-
-		data := scanner.Bytes()
 
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(data, &probe); err != nil {
 			slog.Debug("codex app-server: invalid JSON", "error", err)
-			continue
+			return nil
 		}
 
 		_, hasID := probe["id"]
@@ -999,7 +991,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			var resp rpcResponseEnvelope
 			if err := json.Unmarshal(data, &resp); err != nil {
 				slog.Debug("codex app-server: bad response envelope", "error", err)
-				continue
+				return nil
 			}
 			s.handleResponse(resp)
 
@@ -1012,21 +1004,17 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			var notif rpcNotificationEnvelope
 			if err := json.Unmarshal(data, &notif); err != nil {
 				slog.Debug("codex app-server: bad notification envelope", "error", err)
-				continue
+				return nil
 			}
 			s.handleNotification(notif.Method, notif.Params)
 		}
-	}
+		return nil
+	})
 
-	err := scanner.Err()
 	if err != nil {
 		if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
 			slog.Warn("codex app-server read failed", "error", err)
-			if errors.Is(err, bufio.ErrTooLong) {
-				s.emitError(fmt.Errorf("codex app-server line exceeds max size (%d bytes): %w", maxLineSize, err))
-			} else {
-				s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
-			}
+			s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
 		}
 		s.alive.Store(false)
 		s.rejectPending(err)
@@ -1041,17 +1029,15 @@ func (s *appServerSession) readLoop(r io.Reader) {
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	err := core.ReadLineLoopWithLimit(r, 1024*1024, func(data []byte) error {
+		line := strings.TrimSpace(string(data))
 		if line == "" {
-			continue
+			return nil
 		}
 		slog.Debug("codex app-server stderr", "line", line)
-	}
-	if err := scanner.Err(); err != nil && s.ctx.Err() == nil {
+		return nil
+	})
+	if err != nil && s.ctx.Err() == nil {
 		slog.Debug("codex app-server stderr read failed", "error", err)
 	}
 }

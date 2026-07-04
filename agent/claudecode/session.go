@@ -1,7 +1,6 @@
 package claudecode
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -468,13 +467,12 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
 	defer cs.finishReadLoop(waitErrCh, stderrBuf)
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		cs.handleReadLoopLine(scanner.Text())
-	}
+	err := core.ReadLineLoop(stdout, func(line []byte) error {
+		cs.handleReadLoopLine(string(line))
+		return nil
+	})
 
-	cs.handleReadLoopScanErr(scanner.Err(), waitDone)
+	cs.handleReadLoopScanErr(err, waitDone)
 }
 
 func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, <-chan struct{}) {
@@ -547,7 +545,7 @@ func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct
 	default:
 	}
 
-	slog.Error("claudeSession: scanner error", "error", err)
+	slog.Error("claudeSession: readLoop error", "error", err)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 	select {
 	case cs.events <- evt:

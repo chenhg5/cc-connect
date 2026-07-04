@@ -1,7 +1,6 @@
 package cursor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -39,8 +38,8 @@ type cursorSession struct {
 
 	// Permission handling: each Send() creates a new process whose stdin is used
 	// to respond to interaction_query permission requests.
-	stdinMu  sync.Mutex
-	stdin    io.WriteCloser // current process stdin; nil when no process is running
+	stdinMu sync.Mutex
+	stdin   io.WriteCloser // current process stdin; nil when no process is running
 
 	pendingMu sync.Mutex
 	pending   *pendingInteractionQuery // most recent unresolved interaction_query/request
@@ -178,28 +177,21 @@ func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 		}
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		slog.Debug("cursorSession: raw", "line", truncateStr(line, 500))
+	err := core.ReadLineLoop(stdout, func(line []byte) error {
+		slog.Debug("cursorSession: raw", "line", truncateStr(string(line), 500))
 
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("cursorSession: non-JSON line", "line", line)
-			continue
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("cursorSession: non-JSON line", "line", string(line))
+			return nil
 		}
 
 		cs.handleEvent(raw)
-	}
+		return nil
+	})
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("cursorSession: scanner error", "error", err)
+	if err != nil {
+		slog.Error("cursorSession: readLoop error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
 		case cs.events <- evt:

@@ -1,7 +1,6 @@
 package qoder
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -143,29 +142,20 @@ func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 	var gotResult bool
 	var nonJSONLines []string
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
+	scanErr := core.ReadLineLoop(stdout, func(line []byte) error {
 		var raw streamEvent
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("qoderSession: non-JSON line", "line", truncStr(line, 100))
-			nonJSONLines = append(nonJSONLines, line)
-			continue
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("qoderSession: non-JSON line", "line", truncStr(string(line), 100))
+			nonJSONLines = append(nonJSONLines, string(line))
+			return nil
 		}
 
 		if raw.Type == "result" {
 			gotResult = true
 		}
 		qs.handleEvent(&raw)
-	}
-
-	scanErr := scanner.Err()
+		return nil
+	})
 	if scanErr != nil {
 		slog.Error("qoderSession: scanner error", "error", scanErr)
 	}
