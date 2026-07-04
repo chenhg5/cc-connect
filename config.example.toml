@@ -1210,6 +1210,41 @@ app_secret = "your-feishu-app-secret"
 #                         #  a fresh session, replies in the same thread continue it).
 #                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
 
+# Google Chat (uncomment to enable / 取消注释以启用)
+# Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
+# events to a topic. No public IP is needed and there is NO Workspace Events
+# subscription expiry or per-restart resource leak (the subscription is fixed).
+# 注册的 Google Chat 应用通过 Cloud Pub/Sub 连接发布事件，无需公网 IP，且订阅固定（无过期/泄漏）。
+#
+# - receive: cc-connect pulls the Chat app's Pub/Sub subscription with a native
+#   streaming pull (no gws binary). 接收：原生流式拉取 Chat 应用的 Pub/Sub 订阅（无需 gws）。
+# - send: replies post via the Chat REST API as the app's service account
+#   (chat.bot), so replies appear as the bot. 发送：以服务账号（chat.bot）作为机器人回复。
+# Both directions use the same service-account key. 收发使用同一个服务账号密钥。
+#
+# Setup / 配置:
+# 1. Enable Chat API + Pub/Sub API. / 启用 Chat API 与 Pub/Sub API。
+# 2. Create a Pub/Sub topic; grant Publisher to
+#    chat-api-push@system.gserviceaccount.com; create a pull subscription.
+#    创建 Pub/Sub 主题并授予 chat-api-push@system Publisher，创建拉取订阅。
+# 3. Create a service account + JSON key (chat.bot). Grant it
+#    roles/pubsub.subscriber on the subscription so it can pull events.
+#    创建服务账号及 JSON 密钥，并在订阅上授予 roles/pubsub.subscriber 以拉取事件。
+# 4. Configure a Chat app (Chat API > Configuration): set status LIVE,
+#    Connection settings = Cloud Pub/Sub (your topic), Visibility = yourself.
+#    Do NOT check "Build as a Google Workspace add-on".
+#    配置 Chat 应用：状态 LIVE，连接方式选 Cloud Pub/Sub（你的主题），可见性=自己；不要勾选 add-on。
+# 5. DM the app (or @mention it in a space). / 私聊该应用（或在空间中 @ 它）。
+
+# [[projects.platforms]]
+# type = "googlechat"
+#
+# [projects.platforms.options]
+# subscription = "projects/PROJECT/subscriptions/NAME"  # Pub/Sub subscription the Chat app publishes to (required) / Chat 应用发布到的 Pub/Sub 订阅（必填）
+# credentials_file = "/path/to/service-account.json"    # SA key, used to pull events AND reply (chat.bot) (required) / 服务账号密钥，用于拉取事件与回复（必填）
+# allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123456789" / 允许的发送者 ID
+# session_scope = "space"                           # "space" (default) | "thread" | "user" / 会话粒度
+
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
 # 2. Under "Bot", create a bot and copy the token / 创建 Bot 并复制 token

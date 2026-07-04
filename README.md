@@ -389,6 +389,7 @@ cc-connect update --pre     # Include pre-releases
 | WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
+| Google Chat | [docs/googlechat.md](docs/googlechat.md) | Cloud Pub/Sub | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
