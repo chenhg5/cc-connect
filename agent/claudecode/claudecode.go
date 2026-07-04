@@ -1344,6 +1344,12 @@ func summarizeInput(tool string, input any) string {
 	}
 
 	switch tool {
+	case "ExitPlanMode":
+		// Show the plan markdown itself (real newlines), not the raw JSON
+		// input (which also carries allowedPrompts noise and escaped newlines).
+		if plan, ok := m["plan"].(string); ok {
+			return plan
+		}
 	case "Read", "Edit", "Write":
 		if fp, ok := m["file_path"].(string); ok {
 			return fp
