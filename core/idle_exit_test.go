@@ -244,3 +244,118 @@ func TestIdleExit_SetIdleExitIgnoresNonPositive(t *testing.T) {
 		t.Fatal("SetIdleExit with negative duration must leave idle exit disabled")
 	}
 }
+
+func TestIdleExit_SkipsPendingPermission(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingSendSession("perm-1")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	e.idleExit = 30 * time.Millisecond
+
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: sessionKey,
+			UserID:     "user1",
+			Content:    "needs approval",
+			ReplyCtx:   "ctx",
+		}, session, e.agent, e.sessions, sessionKey, "", sessionKey)
+		close(done)
+	}()
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach blocking wait")
+	}
+
+	sess.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-1",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/x",
+		ToolInputRaw: map[string]any{"path": "/tmp/x"},
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var sawPending bool
+	for time.Now().Before(deadline) {
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[sessionKey]
+		e.interactiveMu.Unlock()
+		if state != nil {
+			state.mu.Lock()
+			sawPending = state.pending != nil
+			state.mu.Unlock()
+			if sawPending {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawPending {
+		t.Fatal("expected pending permission while turn is waiting")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	e.reapIdleInteractiveSessions()
+
+	if !sess.Alive() {
+		t.Fatal("idle reaper closed a session waiting for permission approval")
+	}
+	if !interactiveStateExists(e, sessionKey) {
+		t.Fatal("idle reaper removed interactive state while waiting for permission")
+	}
+
+	if !e.handlePendingPermission(p, &Message{
+		SessionKey: sessionKey,
+		UserID:     "user1",
+		Content:    "allow",
+		ReplyCtx:   "ctx",
+	}, "allow", "") {
+		t.Fatal("expected pending permission to be handled")
+	}
+	close(sess.unblock)
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn did not complete after unblock")
+	}
+}
+
+func TestIdleExit_SkipsQueuedMessages(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newBlockingSendSession("queued-1")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	e.idleExit = 30 * time.Millisecond
+
+	sessionKey := "test:user1"
+	runTurn(t, e, p, sess, sessionKey, "hello")
+
+	// A queued message means user input is waiting to be processed; the
+	// reaper must not close the session out from under it.
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		t.Fatal("expected interactive state after turn")
+	}
+	state.mu.Lock()
+	state.pendingMessages = append(state.pendingMessages, queuedMessage{})
+	state.mu.Unlock()
+
+	time.Sleep(60 * time.Millisecond)
+	e.reapIdleInteractiveSessions()
+
+	if !sess.Alive() {
+		t.Fatal("idle reaper closed a session with queued messages")
+	}
+	if !interactiveStateExists(e, sessionKey) {
+		t.Fatal("idle reaper removed interactive state with queued messages")
+	}
+}
