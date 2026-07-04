@@ -460,3 +460,156 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 		t.Fatalf("final message = %q, want transformed final preview", got)
 	}
 }
+
+// TestStreamPreview_StopBehaviorFreeze_KeepsAndDetaches verifies the freeze
+// branch used by the engine when [stream_preview] stop_behavior = "freeze":
+// freeze() must push the final accumulated text to the platform and
+// detachPreview() must clear previewMsgID so a subsequent streamPreview
+// can send a fresh preview without colliding with the frozen one (#1295).
+func TestStreamPreview_StopBehaviorFreeze_KeepsAndDetaches(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+		StopBehavior:  StopBehaviorFreeze,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("partial answer so far")
+	time.Sleep(80 * time.Millisecond)
+
+	// Simulate the engine.go /stop branch: freeze then detach.
+	sp.freeze()
+	sp.detachPreview()
+
+	mp.mu.Lock()
+	deletedCount := len(mp.deleted)
+	msgs := append([]string(nil), mp.messages...)
+	mp.mu.Unlock()
+
+	if deletedCount != 0 {
+		t.Fatalf("freeze must NOT delete preview; got %d delete calls", deletedCount)
+	}
+	last := ""
+	if len(msgs) > 0 {
+		last = msgs[len(msgs)-1]
+	}
+	if !strings.HasPrefix(last, "update:") {
+		t.Fatalf("final message = %q, want an update: prefix from freeze()", last)
+	}
+	if !strings.Contains(last, "partial answer so far") {
+		t.Fatalf("final message = %q, want to contain accumulated text", last)
+	}
+	if sp.previewMsgID != nil {
+		t.Fatalf("detachPreview should clear previewMsgID; got %#v", sp.previewMsgID)
+	}
+
+	// A second streamPreview in the next turn must be able to start a fresh
+	// preview without conflicting with the frozen one. detachPreview already
+	// cleared the handle so the prior preview is invisible to the lifecycle.
+	sp2 := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp2.appendText("next turn first chunk")
+	time.Sleep(80 * time.Millisecond)
+
+	mp.mu.Lock()
+	startMsgs := []string{}
+	for _, m := range mp.messages {
+		if strings.HasPrefix(m, "start:") {
+			startMsgs = append(startMsgs, m)
+		}
+	}
+	mp.mu.Unlock()
+	if len(startMsgs) != 2 {
+		t.Fatalf("next-turn start count = %d, want2 (frozen + fresh); msgs=%v", len(startMsgs), startMsgs)
+	}
+}
+
+// TestStreamPreview_StopBehaviorDiscard_DefaultUnchanged verifies that the
+// default StopBehavior ("") resolves to discard, matching the prior
+// behavior where /stop removes the preview message entirely.
+func TestStreamPreview_StopBehaviorDiscard_DefaultUnchanged(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+		// StopBehavior left empty on purpose: defaults to discard.
+	}
+	if cfg.StopBehavior != "" {
+		t.Fatalf("test fixture broken: StopBehavior = %q, want empty", cfg.StopBehavior)
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(80 * time.Millisecond)
+
+	// Simulate the engine.go /stop branch when StopBehavior is not "freeze":
+	// discard() should run, deleting the preview message.
+	if sp.cfg.StopBehavior == StopBehaviorFreeze {
+		t.Fatal("test premise broken: empty StopBehavior must not equal freeze")
+	}
+	sp.discard()
+
+	mp.mu.Lock()
+	deletedCount := len(mp.deleted)
+	mp.mu.Unlock()
+	if deletedCount != 1 {
+		t.Fatalf("default /stop should delete preview; got %d delete calls", deletedCount)
+	}
+}
+
+// TestStreamPreview_StopBehaviorDiscard_ExplicitString verifies that setting
+// StopBehavior = "discard" behaves identically to leaving it empty (both
+// call discard, neither freezes).
+func TestStreamPreview_StopBehaviorDiscard_ExplicitString(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+		StopBehavior:  StopBehaviorDiscard,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(80 * time.Millisecond)
+
+	if sp.cfg.StopBehavior == StopBehaviorFreeze {
+		t.Fatal("explicit discard must not be classified as freeze")
+	}
+	sp.discard()
+
+	mp.mu.Lock()
+	deletedCount := len(mp.deleted)
+	mp.mu.Unlock()
+	if deletedCount != 1 {
+		t.Fatalf("explicit discard should delete preview; got %d delete calls", deletedCount)
+	}
+}
+
+// TestStopBehaviorIsValid guards against typos in TOML config: any value
+// outside {"", "discard", "freeze"} should be rejected by the validator.
+func TestStopBehaviorIsValid(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"", true},
+		{StopBehaviorDiscard, true},
+		{StopBehaviorFreeze, true},
+		{"DISCARD", false},
+		{"Freeze", false},
+		{"drop", false},
+		{"keep", false},
+		{"true", false},
+	}
+	for _, c := range cases {
+		if got := StopBehaviorIsValid(c.value); got != c.want {
+			t.Errorf("StopBehaviorIsValid(%q) = %v, want %v", c.value, got, c.want)
+		}
+	}
+}

@@ -4629,7 +4629,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		select {
 		case <-stopCh:
-			sp.discard()
+			// /stop interrupts the agent turn. The streaming preview lifecycle
+			// can either drop or freeze the preview, controlled by
+			// [stream_preview] stop_behavior (default: discard). Freezing
+			// keeps the partial text on screen and detaches the handle so
+			// the next turn's SendPreviewStart does not collide with it
+			// (#1295).
+			if e.streamPreview.StopBehavior == StopBehaviorFreeze {
+				sp.freeze()
+				sp.detachPreview()
+			} else {
+				sp.discard()
+			}
 			return
 		case event, ok = <-events:
 			if !ok {
