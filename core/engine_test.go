@@ -7500,24 +7500,32 @@ func TestSessionMismatch_KeepsLiveWhenDiskIsStale(t *testing.T) {
 	}
 }
 
-// TestSessionMismatch_KeepsLiveWhenDiskCleared verifies that when disk
-// session.AgentSessionID is empty but a live agent session is alive
-// (e.g. /new whose cleanupInteractiveState failed to run), the engine
-// reuses the live state instead of recycling.
+// TestSessionMismatch_RecyclesWhenDiskClearedButLiveSurvives verifies that
+// when disk session.AgentSessionID is empty (e.g. cmdNew cleared it via
+// /new) but a live agent session is still alive in the map, the engine
+// RECYCLES the orphan — closing the live session and spawning a fresh
+// one on StartSession. This is the regression target for the p2p /new
+// bug reported against cc-connect: a private Feishu chat whose pi
+// subprocess was still alive 18+ hours after the prior turn, where
+// /new cleared the disk Session.AgentSessionID but the prior live
+// state survived cleanupInteractiveState somehow (race / idle reaper
+// mismatch / future bug). After d94d472e (issue #1470), the engine
+// reused the orphan and the next user message hit 286k tokens of old
+// context. The fix is the XOR "disagreement on existence" predicate.
 //
-// Trade-off vs the previous TestSessionClearedAfterNew_RecyclesAliveAgent
-// behavior (issue #238): we now accept that a botched /new keeps old
-// context. The rationale is that cleanupInteractiveState is the proper
-// path for /new — it removes the state from the map and kills live.
-// The mismatch path is only hit when that cleanup didn't run, and in
-// that case killing live loses user context, which is the worse failure.
-func TestSessionMismatch_KeepsLiveWhenDiskCleared(t *testing.T) {
-	agent := &controllableAgent{}
+// Note: cleanupInteractiveState is the proper path for /new under
+// normal conditions — it removes the map entry and closes live in one
+// step. We only get to this code when that cleanup didn't run, and
+// leaving the orphan live would send the next user message to the old
+// context. See issue #238 for the original concern this test defends.
+func TestSessionMismatch_RecyclesWhenDiskClearedButLiveSurvives(t *testing.T) {
+	newSess := newControllableSession("fresh-id") // matches controllableAgent.nextSession
+	agent := &controllableAgent{nextSession: newSess}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	key := "test:user1"
-	liveSess := newControllableSession("live-id")
+	liveSess := newControllableSession("stale-live-id") // orphan from a botched /new
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = &interactiveState{
 		agentSession: liveSess,
@@ -7526,12 +7534,20 @@ func TestSessionMismatch_KeepsLiveWhenDiskCleared(t *testing.T) {
 	}
 	e.interactiveMu.Unlock()
 
-	session := &Session{AgentSessionID: ""} // cleared (e.g. by /new that didn't kill live)
+	session := &Session{AgentSessionID: ""} // /new cleared disk but didn't kill live
 
 	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 
-	if state.agentSession != liveSess {
-		t.Fatalf("expected live agent to be kept even when disk is empty; got %p, want %p", state.agentSession, liveSess)
+	if state.agentSession == liveSess {
+		t.Fatalf("expected orphan live agent to be RECYCLED, but it was kept; this re-introduces the p2p /new regression")
+	}
+	if state.agentSession != newSess {
+		t.Fatalf("expected fresh agent session from StartSession; got %p, want %p", state.agentSession, newSess)
+	}
+	select {
+	case <-liveSess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("orphan live agent session was not closed during recycle")
 	}
 }
 

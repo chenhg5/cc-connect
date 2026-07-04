@@ -3929,27 +3929,31 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
 		//
-		// Trust the live process as the source of truth. It represents the
-		// user's in-flight conversation — killing it loses context as collateral
-		// damage, which is the worst-case outcome. Disk state (session.AgentSessionID)
-		// is only a cold-start hint: useful when the engine is starting fresh, but
-		// it can be stale or corrupted by earlier bugs (see issue #1470), and the
-		// engine has no reliable way to tell stale from intentional.
+		// Trust the live process as the source of truth — UNLESS disk and
+		// live disagree about whether a session exists. Disagreement on
+		// existence means one of the two states is stale, and recycling is
+		// the only way to converge. The two disagreement cases are:
 		//
-		// Recycle is now strictly bounded to the cold-start race window: the
-		// live process is alive (we are inside the Alive() guard above) but
-		// hasn't reported a session id yet (currentID == ""), while disk has
-		// a session we can resume from. All other cases reuse the existing
-		// live state, including:
-		//   - Stale disk + alive live (the original bug — disk might be wrong
-		//     from a prior botched turn, live is the real running session)
-		//   - /new done correctly — cleanupInteractiveState (called by /new)
-		//     removes the state from the map entirely, so we never reach this
-		//     branch; the next message hits the spawn path below.
-		//   - /switch / /fork — same cleanup path.
+		//   1. wantID != "" && currentID == ""  — cold-start race (issue
+		//      #1470): live has not reported its id yet, but disk has a
+		//      session to resume from.
+		//
+		//   2. wantID == "" && currentID != ""  — /new survivor (issue #238
+		//      defense): cmdNew cleared disk, but the prior live process
+		//      somehow wasn't killed (cleanup race, idle reaper, …) and is
+		//      still alive with all the old context. Recycling here is the
+		//      only way the next message lands in a fresh session.
+		//
+		// When both are non-empty we trust live even if the ids differ
+		// (issue #1470 fix: stale disk + alive live means live is the
+		// user's real conversation — do not throw it away).
+		//
+		// When both are empty there is nothing to reuse and nothing to
+		// recycle; fall through to the cold spawn path below.
 		wantID := session.GetAgentSessionID()
 		currentID := state.agentSession.CurrentSessionID()
-		needRecycle := currentID == "" && wantID != ""
+		// XOR: "exactly one of (wantID=="") and (currentID=="") is true".
+		needRecycle := (wantID == "") != (currentID == "")
 		if !needRecycle {
 			return state
 		}
