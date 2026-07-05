@@ -176,7 +176,11 @@ func AppendFileRefs(prompt string, filePaths []string) string {
 	}
 	abs := make([]string, len(filePaths))
 	for i, p := range filePaths {
-		if filepath.IsAbs(p) {
+		// filepath.IsAbs is OS-native only: on Windows it rejects POSIX-style
+		// "/tmp/foo" paths, which filepath.Abs then reinterprets as rooted at
+		// the current drive. Treat a leading "/" as already-absolute on any
+		// OS so such inputs pass through unchanged instead of being rewritten.
+		if filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 			abs[i] = p
 			continue
 		}

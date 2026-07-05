@@ -243,7 +243,10 @@ func TestAppendFileRefs_AbsolutizesRelativePaths(t *testing.T) {
 			t.Errorf("AppendFileRefs emitted an empty entry: %q", got)
 			continue
 		}
-		if !filepath.IsAbs(entry) {
+		// filepath.IsAbs is OS-native only; also accept POSIX-style "/..."
+		// paths so this assertion matches AppendFileRefs' own cross-platform
+		// definition of "absolute" (see message.go).
+		if !filepath.IsAbs(entry) && !strings.HasPrefix(entry, "/") {
 			t.Errorf("AppendFileRefs left non-absolute entry %q in prompt %q", entry, got)
 		}
 	}
