@@ -944,8 +944,8 @@ func TestGeneralTopicIntakeCreatesTopicAndDispatchesSyntheticThreadMessage(t *te
 	if stubBot.editForumTopicCalls != 1 {
 		t.Fatalf("EditForumTopic calls = %d, want 1", stubBot.editForumTopicCalls)
 	}
-	if gotName := stubBot.editTopicParams[0].Name; gotName != "letter-824-build-the-thing" {
-		t.Fatalf("EditForumTopic name = %q, want letter-824-build-the-thing", gotName)
+	if gotName := stubBot.editTopicParams[0].Name; gotName != "letter-new-build-the-thing" {
+		t.Fatalf("EditForumTopic name = %q, want letter-new-build-the-thing", gotName)
 	}
 	if stubBot.SendMessageCallCount() != 2 {
 		t.Fatalf("SendMessage calls = %d, want 2 (topic bootstrap + General confirmation)", stubBot.SendMessageCallCount())
