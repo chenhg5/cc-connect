@@ -4240,6 +4240,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		if e.dataDir != "" {
 			envVars = append(envVars, "CC_DATA_DIR="+e.dataDir)
 			envVars = append(envVars, "CC_PERSONAS_DIR="+filepath.Join(e.dataDir, "personas"))
+			envVars = append(envVars, "CC_PERSONA_CLASS="+string(ResolvePersonaClass(e.name, e.UsesWorkspacePattern())))
 		}
 		if e.configPath != "" {
 			envVars = append(envVars, "CC_CONNECT_CONFIG="+e.configPath)
@@ -15977,6 +15978,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		if e.dataDir != "" {
 			envVars = append(envVars, "CC_DATA_DIR="+e.dataDir)
 			envVars = append(envVars, "CC_PERSONAS_DIR="+filepath.Join(e.dataDir, "personas"))
+			envVars = append(envVars, "CC_PERSONA_CLASS="+string(ResolvePersonaClass(e.name, e.UsesWorkspacePattern())))
 		}
 		if e.configPath != "" {
 			envVars = append(envVars, "CC_CONNECT_CONFIG="+e.configPath)

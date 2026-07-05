@@ -724,7 +724,7 @@ func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, fil
 	if cs.identityInjected.CompareAndSwap(false, true) {
 		// Parse sessionEnv for cc-connect context: project, session key,
 		// binary path, config path, and relay target.
-		var project, sessionKey, ccBin, ccConfig, ccDataDir, ccPersonasDir, relayTarget string
+		var project, sessionKey, ccBin, ccConfig, ccDataDir, ccPersonasDir, personaClass, relayTarget string
 		for _, kv := range cs.sessionEnv {
 			if idx := strings.IndexByte(kv, '='); idx >= 0 {
 				switch kv[:idx] {
@@ -740,6 +740,8 @@ func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, fil
 					ccDataDir = kv[idx+1:]
 				case "CC_PERSONAS_DIR":
 					ccPersonasDir = kv[idx+1:]
+				case "CC_PERSONA_CLASS":
+					personaClass = kv[idx+1:]
 				case "CC_RELAY_TARGET":
 					relayTarget = kv[idx+1:]
 				}
@@ -802,7 +804,8 @@ func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, fil
 				"After --tts or --audio, reply ONLY with NO_REPLY unless a text confirmation was also requested.\n"
 		}
 
-		// Load seat-specific persona file from CC_PERSONAS_DIR (e.g. data/personas/chef-seat.md).
+		// Load seat-specific persona file from CC_PERSONAS_DIR (e.g. data/personas/chef-seat.md),
+		// prefixed with the archive-first preamble selected by personaClass (L-0216).
 		// Falls back to {workDir}/{project}.md for backwards compatibility.
 		// File is optional — silently skipped if absent.
 		if project != "" && !cs.hasAgentArg {
@@ -812,10 +815,16 @@ func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, fil
 			} else if cs.workDir != "" {
 				personaFile = filepath.Join(cs.workDir, project+".md")
 			}
+			var rawPersona string
 			if personaFile != "" {
 				if data, err := os.ReadFile(personaFile); err == nil {
-					prompt += "\n\n" + strings.TrimSpace(string(data)) + "\n"
+					rawPersona = strings.TrimSpace(string(data))
 				}
+			}
+			if personaClass != "" {
+				prompt += "\n\n" + core.ComposePersona(ccPersonasDir, core.PersonaClass(personaClass), rawPersona) + "\n"
+			} else if rawPersona != "" {
+				prompt += "\n\n" + rawPersona + "\n"
 			}
 		}
 	}

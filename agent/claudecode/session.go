@@ -207,8 +207,8 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
-	// Extract project and ccPersonasDir from extraEnv
-	var project, ccPersonasDir string
+	// Extract project, ccPersonasDir, and personaClass from extraEnv
+	var project, ccPersonasDir, personaClass string
 	for _, env := range extraEnv {
 		if idx := strings.Index(env, "="); idx >= 0 {
 			switch env[:idx] {
@@ -216,11 +216,14 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 				project = env[idx+1:]
 			case "CC_PERSONAS_DIR":
 				ccPersonasDir = env[idx+1:]
+			case "CC_PERSONA_CLASS":
+				personaClass = env[idx+1:]
 			}
 		}
 	}
 
-	// Load seat-specific persona if present
+	// Load seat-specific persona if present, prefixed with the archive-first
+	// preamble selected by personaClass (L-0216).
 	var personaContent string
 	if project != "" {
 		personaFile := ""
@@ -229,10 +232,16 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		} else if workDir != "" {
 			personaFile = filepath.Join(workDir, project+".md")
 		}
+		var rawPersona string
 		if personaFile != "" {
 			if data, err := os.ReadFile(personaFile); err == nil {
-				personaContent = strings.TrimSpace(string(data))
+				rawPersona = strings.TrimSpace(string(data))
 			}
+		}
+		if personaClass != "" {
+			personaContent = core.ComposePersona(ccPersonasDir, core.PersonaClass(personaClass), rawPersona)
+		} else {
+			personaContent = rawPersona
 		}
 	}
 

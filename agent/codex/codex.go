@@ -458,6 +458,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 	}
 
+	syncArchiveFirstAGENTSMD(workDir, extraEnv)
+
 	if backend == "app_server" {
 		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
 	}
@@ -639,6 +641,38 @@ func uniqueCodexSkillDirs(paths []string) []string {
 		out = append(out, clean)
 	}
 	return out
+}
+
+// syncArchiveFirstAGENTSMD writes the archive-first preamble (L-0216) into a
+// cc-managed block in workDir/AGENTS.md, overwriting it on every spawn.
+// Codex has no native persona/system-prompt injection path (L-0131) — it
+// reads project memory from AGENTS.md instead, so this is Codex's equivalent
+// of the persona-preamble injection every other harness gets in its session
+// constructor. No-op when the seat has no CC_PERSONAS_DIR/CC_PERSONA_CLASS
+// (i.e. this Engine wiring hasn't reached the seat, or workDir is unset).
+func syncArchiveFirstAGENTSMD(workDir string, extraEnv []string) {
+	if workDir == "" {
+		return
+	}
+	var personasDir, personaClass string
+	for _, kv := range extraEnv {
+		if idx := strings.Index(kv, "="); idx >= 0 {
+			switch kv[:idx] {
+			case "CC_PERSONAS_DIR":
+				personasDir = kv[idx+1:]
+			case "CC_PERSONA_CLASS":
+				personaClass = kv[idx+1:]
+			}
+		}
+	}
+	if personasDir == "" || personaClass == "" {
+		return
+	}
+	preamble := core.ComposePersona(personasDir, core.PersonaClass(personaClass), "")
+	agentsPath := filepath.Join(workDir, "AGENTS.md")
+	if err := core.SyncManagedBlock(agentsPath, core.ArchiveFirstMarkerStart, core.ArchiveFirstMarkerEnd, preamble); err != nil {
+		slog.Warn("codex: failed to sync archive-first AGENTS.md block", "path", agentsPath, "error", err)
+	}
 }
 
 // ── MemoryFileProvider implementation ─────────────────────────

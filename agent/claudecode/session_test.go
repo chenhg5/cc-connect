@@ -821,3 +821,101 @@ func TestClaudeSession_LoadsPersona(t *testing.T) {
 		t.Errorf("expected prompt file to contain platform-prompt, got:\n%s", content)
 	}
 }
+
+// TestClaudeSession_ArchiveFirstPreamble asserts that when CC_PERSONA_CLASS
+// is set, the archive-first preamble (L-0216) is injected ahead of the
+// seat's own persona content in the system prompt, for both the write and
+// read variants.
+func TestClaudeSession_ArchiveFirstPreamble(t *testing.T) {
+	for _, class := range []string{"write", "read"} {
+		t.Run(class, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "claudecode-archive-first-test")
+			if err != nil {
+				t.Fatalf("failed to create temp dir: %v", err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			preambleDir := filepath.Join(tmpDir, "_preamble")
+			if err := os.MkdirAll(preambleDir, 0o755); err != nil {
+				t.Fatalf("failed to create preamble dir: %v", err)
+			}
+			preambleContent := "ARCHIVE_FIRST_PREAMBLE_" + strings.ToUpper(class)
+			if err := os.WriteFile(filepath.Join(preambleDir, "archive-first."+class+".md"), []byte(preambleContent), 0o644); err != nil {
+				t.Fatalf("failed to write preamble file: %v", err)
+			}
+
+			project := "test-seat"
+			personaContent := "TEST_PERSONA_INSTRUCTIONS_HERE"
+			if err := os.WriteFile(filepath.Join(tmpDir, project+".md"), []byte(personaContent), 0o644); err != nil {
+				t.Fatalf("failed to write persona file: %v", err)
+			}
+
+			extraEnv := []string{
+				"CC_PROJECT=" + project,
+				"CC_PERSONAS_DIR=" + tmpDir,
+				"CC_PERSONA_CLASS=" + class,
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			helperCmd := helperCommand(ctx, "stdin-eof-exit")
+
+			s, err := newClaudeSession(
+				ctx,
+				tmpDir,
+				helperCmd.Path,
+				helperCmd.Args[1:],
+				"",
+				"mock-model",
+				"",
+				"",
+				"auto",
+				"",
+				"",
+				nil,
+				nil,
+				nil,
+				extraEnv,
+				"",
+				true,
+				core.SpawnOptions{},
+				0,
+				tmpDir,
+			)
+			if err != nil {
+				t.Fatalf("newClaudeSession failed: %v", err)
+			}
+			defer s.Close()
+
+			var promptFilePath string
+			for i, arg := range s.cmd.Args {
+				if arg == "--append-system-prompt-file" && i+1 < len(s.cmd.Args) {
+					promptFilePath = s.cmd.Args[i+1]
+					break
+				}
+			}
+			if promptFilePath == "" {
+				t.Fatalf("expected --append-system-prompt-file argument in command line, args: %v", s.cmd.Args)
+			}
+
+			data, err := os.ReadFile(promptFilePath)
+			if err != nil {
+				t.Fatalf("failed to read prompt file %s: %v", promptFilePath, err)
+			}
+			content := string(data)
+
+			preambleIdx := strings.Index(content, preambleContent)
+			personaIdx := strings.Index(content, personaContent)
+			if preambleIdx == -1 {
+				t.Fatalf("expected prompt file to contain preamble %q, got:\n%s", preambleContent, content)
+			}
+			if personaIdx == -1 {
+				t.Fatalf("expected prompt file to contain persona content %q, got:\n%s", personaContent, content)
+			}
+			if preambleIdx > personaIdx {
+				t.Errorf("expected archive-first preamble to precede persona content, got:\n%s", content)
+			}
+		})
+	}
+}
