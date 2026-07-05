@@ -73,7 +73,7 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 	// CompareAndSwap (not Load/Store) atomically claims the slot — two concurrent
 	// Send() calls can't both run the injection.
 	if s.identityInjected.CompareAndSwap(false, true) {
-		var project, sessionKey, ccBin, ccDataDir, ccPersonasDir, personaClass, relayTarget string
+		var project, sessionKey, ccBin, ccDataDir, ccPersonasDir, personaClass, relayTarget, rehydrationDigest string
 		for _, kv := range s.sessionEnv {
 			if idx := strings.IndexByte(kv, '='); idx >= 0 {
 				switch kv[:idx] {
@@ -91,6 +91,8 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 					personaClass = kv[idx+1:]
 				case "CC_RELAY_TARGET":
 					relayTarget = kv[idx+1:]
+				case "CC_REHYDRATION_DIGEST":
+					rehydrationDigest = kv[idx+1:]
 				}
 			}
 		}
@@ -151,6 +153,9 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 				prompt += "\n\n" + core.ComposePersona(ccPersonasDir, core.PersonaClass(personaClass), rawPersona) + "\n"
 			} else if rawPersona != "" {
 				prompt += "\n\n" + rawPersona + "\n"
+			}
+			if rehydrationDigest != "" {
+				prompt += "\n\n" + rehydrationDigest + "\n"
 			}
 		}
 	}

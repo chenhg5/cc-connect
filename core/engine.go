@@ -4240,7 +4240,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		if e.dataDir != "" {
 			envVars = append(envVars, "CC_DATA_DIR="+e.dataDir)
 			envVars = append(envVars, "CC_PERSONAS_DIR="+filepath.Join(e.dataDir, "personas"))
-			envVars = append(envVars, "CC_PERSONA_CLASS="+string(ResolvePersonaClass(e.name, e.UsesWorkspacePattern())))
+			personaClass := ResolvePersonaClass(e.name, e.UsesWorkspacePattern())
+			envVars = append(envVars, "CC_PERSONA_CLASS="+string(personaClass))
+			messageContent := ""
+			if hist := session.GetHistory(1); len(hist) > 0 {
+				messageContent = hist[0].Content
+			}
+			envVars = e.appendRehydrationEnv(envVars, ccKey, sessionKey, messageContent, personaClass)
 		}
 		if e.configPath != "" {
 			envVars = append(envVars, "CC_CONNECT_CONFIG="+e.configPath)
@@ -15978,7 +15984,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		if e.dataDir != "" {
 			envVars = append(envVars, "CC_DATA_DIR="+e.dataDir)
 			envVars = append(envVars, "CC_PERSONAS_DIR="+filepath.Join(e.dataDir, "personas"))
-			envVars = append(envVars, "CC_PERSONA_CLASS="+string(ResolvePersonaClass(e.name, e.UsesWorkspacePattern())))
+			personaClass := ResolvePersonaClass(e.name, e.UsesWorkspacePattern())
+			envVars = append(envVars, "CC_PERSONA_CLASS="+string(personaClass))
+			envVars = e.appendRehydrationEnv(envVars, sourceSessionKey, "", message, personaClass)
 		}
 		if e.configPath != "" {
 			envVars = append(envVars, "CC_CONNECT_CONFIG="+e.configPath)
@@ -16662,6 +16670,54 @@ func (e *Engine) findLetterIDByTopic(topicID string) string {
 		}
 	}
 	return ""
+}
+
+func (e *Engine) resolveActiveLetterID(ccSessionKey, workspaceDir, messageContent string) string {
+	if letterID := normalizeLetterID(workspaceDir); letterID != "" {
+		return letterID
+	}
+	if e.workspacePattern != "" && workspaceDir != "" {
+		if letterID := extractLetterIDFromPath(e.workspacePattern, workspaceDir); letterID != "" {
+			return normalizeLetterID(letterID)
+		}
+	}
+	if threadID := extractThreadIDFromSessionKey(ccSessionKey); threadID != "" {
+		if letterID := e.findLetterIDByTopic(threadID); letterID != "" {
+			return letterID
+		}
+	}
+	return ExtractLetterIDFromText(messageContent)
+}
+
+func (e *Engine) appendRehydrationEnv(envVars []string, ccSessionKey, workspaceDir, messageContent string, personaClass PersonaClass) []string {
+	if e.dataDir == "" {
+		return envVars
+	}
+	archiveDir := DeriveArchiveDir(e.dataDir)
+	if archiveDir == "" {
+		return envVars
+	}
+	budget := RehydrationBudgetForPersonaClass(personaClass)
+	activeLetterID := e.resolveActiveLetterID(ccSessionKey, workspaceDir, messageContent)
+	digest := BuildRehydrationDigest(RehydrationConfig{
+		ArchiveDir:         archiveDir,
+		ActiveLetterID:     activeLetterID,
+		IndexTailLines:     budget.IndexTailLines,
+		ParentChainDepth:   budget.ParentChainDepth,
+		OpenSummaryEntries: budget.OpenSummaryEntries,
+		MaxTokens:          budget.MaxTokens,
+	})
+	if digest == "" {
+		return envVars
+	}
+	if activeLetterID != "" {
+		envVars = append(envVars, "CC_REHYDRATION_ACTIVE_LETTER="+activeLetterID)
+	}
+	envVars = append(envVars,
+		"CC_REHYDRATION_BUDGET="+budget.Name,
+		"CC_REHYDRATION_DIGEST="+digest,
+	)
+	return envVars
 }
 
 func (e *Engine) resolveWorkspacePattern(threadID string) string {

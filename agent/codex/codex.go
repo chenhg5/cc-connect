@@ -654,7 +654,7 @@ func syncArchiveFirstAGENTSMD(workDir string, extraEnv []string) {
 	if workDir == "" {
 		return
 	}
-	var personasDir, personaClass string
+	var personasDir, personaClass, rehydrationDigest string
 	for _, kv := range extraEnv {
 		if idx := strings.Index(kv, "="); idx >= 0 {
 			switch kv[:idx] {
@@ -669,10 +669,25 @@ func syncArchiveFirstAGENTSMD(workDir string, extraEnv []string) {
 		return
 	}
 	preamble := core.ComposePersona(personasDir, core.PersonaClass(personaClass), "")
+	rehydrationDigest = extractRehydrationDigest(extraEnv)
+	content := preamble
+	if rehydrationDigest != "" {
+		content += "\n\n---\n\n" + rehydrationDigest
+	}
 	agentsPath := filepath.Join(workDir, "AGENTS.md")
-	if err := core.SyncManagedBlock(agentsPath, core.ArchiveFirstMarkerStart, core.ArchiveFirstMarkerEnd, preamble); err != nil {
+	if err := core.SyncManagedBlock(agentsPath, core.ArchiveFirstMarkerStart, core.ArchiveFirstMarkerEnd, content); err != nil {
 		slog.Warn("codex: failed to sync archive-first AGENTS.md block", "path", agentsPath, "error", err)
 	}
+}
+
+// extractRehydrationDigest reads CC_REHYDRATION_DIGEST from extraEnv.
+func extractRehydrationDigest(extraEnv []string) string {
+	for _, kv := range extraEnv {
+		if idx := strings.Index(kv, "="); idx >= 0 && kv[:idx] == "CC_REHYDRATION_DIGEST" {
+			return kv[idx+1:]
+		}
+	}
+	return ""
 }
 
 // ── MemoryFileProvider implementation ─────────────────────────

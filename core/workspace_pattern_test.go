@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,39 @@ func TestWorkspacePatternHelpers(t *testing.T) {
 	pattern := `F:\nexus\worktrees\task-{{THREAD_ID}}`
 	if got := extractThreadIDFromPath(pattern, `F:\nexus\worktrees\task-123`); got != "123" {
 		t.Errorf("extractThreadIDFromPath(F:\\nexus\\worktrees\\task-123) = %q, want %q", got, "123")
+	}
+}
+
+func TestAppendRehydrationEnvUsesDispatchLetter(t *testing.T) {
+	root := t.TempDir()
+	seedArchive(t, root)
+
+	dataDir := filepath.Join(root, "data")
+	e := NewEngine("dev-pro", &stubAgent{}, nil, filepath.Join(root, "sessions.json"), LangEnglish)
+	e.SetDataDir(dataDir)
+	e.SetWorkspacePattern(filepath.Join(root, "worktrees", "letter-{{LETTER_ID}}"))
+
+	if err := e.ensureDispatchStore().upsert(DispatchExpectation{
+		Letter:          "L-0251",
+		Thread:          "rehydration-mechanism",
+		To:              "dev-pro",
+		TopicID:         "1091",
+		TopicSessionKey: "telegram:-1003917051393:1091:7664413698",
+		State:           dispatchStateDispatched,
+	}); err != nil {
+		t.Fatalf("upsert dispatch expectation: %v", err)
+	}
+
+	env := e.appendRehydrationEnv(nil, "telegram:-1003917051393:1091:7664413698", "", "", PersonaClassWrite)
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "CC_REHYDRATION_ACTIVE_LETTER=L-0251") {
+		t.Fatalf("missing active letter env:\n%s", joined)
+	}
+	if !strings.Contains(joined, "CC_REHYDRATION_BUDGET=write-heavy") {
+		t.Fatalf("missing write budget env:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Rehydration Digest") || !strings.Contains(joined, "实现方案 B") {
+		t.Fatalf("digest did not include active letter context:\n%s", joined)
 	}
 }
 

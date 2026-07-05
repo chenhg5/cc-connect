@@ -208,7 +208,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Extract project, ccPersonasDir, and personaClass from extraEnv
-	var project, ccPersonasDir, personaClass string
+	var project, ccPersonasDir, personaClass, rehydrationDigest string
 	for _, env := range extraEnv {
 		if idx := strings.Index(env, "="); idx >= 0 {
 			switch env[:idx] {
@@ -218,6 +218,8 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 				ccPersonasDir = env[idx+1:]
 			case "CC_PERSONA_CLASS":
 				personaClass = env[idx+1:]
+			case "CC_REHYDRATION_DIGEST":
+				rehydrationDigest = env[idx+1:]
 			}
 		}
 	}
@@ -317,6 +319,9 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	basePrompt := core.AgentSystemPrompt()
 	if personaContent != "" {
 		basePrompt += "\n\n" + personaContent + "\n"
+	}
+	if rehydrationDigest != "" {
+		basePrompt += "\n\n" + rehydrationDigest + "\n"
 	}
 	if appended := buildAppendSystemPrompt(basePrompt, platformPrompt, appendSystemPrompt); appended != "" {
 		if platformPrompt == "" && appendSystemPrompt == "" && personaContent == "" {
