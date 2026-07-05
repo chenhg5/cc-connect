@@ -58,6 +58,14 @@ type cujAgent struct {
 	// allows recovery-path CUJs to assert that the user can retry.
 	failStartCount int
 	failStartErr   error
+
+	// nextSessionEvents, when non-nil, is consumed by the next StartSession
+	// call: the new session's event sequence is initialized to this slice.
+	// Used by tests that need to drive a multi-event turn (text chunks +
+	// permission request + result) from a single Send call. See
+	// setNextSessionEvents on cujAgent.
+	nextSessionEvents    []Event
+	nextSessionDelayMs   int
 }
 
 func (a *cujAgent) Name() string { return "cuj" }
@@ -76,6 +84,10 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	a.nextID++
 	s := newCUJAgentSession()
 	a.sessions = append(a.sessions, s)
+	s.pendingEvents = a.nextSessionEvents
+	s.pendingDelayMs = a.nextSessionDelayMs
+	a.nextSessionEvents = nil
+	a.nextSessionDelayMs = 0
 	return s, nil
 }
 
@@ -102,6 +114,15 @@ type cujAgentSession struct {
 	// then return to normal replies. Use this to simulate tool failures,
 	// per-turn agent errors, etc.
 	nextEventOverride *Event
+
+	// pendingEvents, when non-nil, is the sequence of events emitted by
+	// Send's goroutine on the NEXT Send. Consumed atomically with the
+	// goroutine read, so callers (typically cujAgent.StartSession) can
+	// pre-set this once and have the engine process the whole sequence
+	// (e.g. text → permission request → text → result) from a single
+	// Send. pendingDelayMs is the gap between consecutive events.
+	pendingEvents  []Event
+	pendingDelayMs int
 
 	// observed
 	sentPrompts []string
@@ -131,9 +152,28 @@ func (s *cujAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttac
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
+	pending := s.pendingEvents
+	pendingDelay := s.pendingDelayMs
 	s.nextEventOverride = nil
+	s.pendingEvents = nil
+	s.pendingDelayMs = 0
 	s.mu.Unlock()
 	go func() {
+		if pending != nil {
+			for _, ev := range pending {
+				if pendingDelay > 0 {
+					time.Sleep(time.Duration(pendingDelay) * time.Millisecond)
+				}
+				select {
+				case s.events <- ev:
+				case <-time.After(5 * time.Second):
+					// Engine gone or stalled; stop emitting to avoid
+					// hanging the test goroutine.
+					return
+				}
+			}
+			return
+		}
 		if delay > 0 {
 			time.Sleep(time.Duration(delay) * time.Millisecond)
 		}
@@ -2006,6 +2046,283 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	}
 	if len(pB.getSent()) == 0 {
 		t.Fatal("platB received no replies")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming-aware platform + agent extension for CUJ tests that need to
+// exercise the streamPreview (sp) code path.
+//
+// Default cujEnv uses stubPlatformEngine, which only implements plain Send
+// and Reply. That platform does NOT support MessageUpdater, so the engine
+// skips sp entirely (sp.canPreview() returns false). For CUJs that need to
+// observe streaming behavior — e.g. the "streaming resumes after a
+// permission prompt" fix — we use cujStreamingPlatform, which implements
+// MessageUpdater + PreviewStarter and tracks preview activity separately
+// from regular Sends.
+// ---------------------------------------------------------------------------
+
+type cujStreamingUpdate struct {
+	Handle  any
+	Content string
+}
+
+type cujStreamingPlatform struct {
+	stubPlatformEngine
+	mu             sync.Mutex
+	previewOpens   []string
+	previewUpdates []cujStreamingUpdate
+	nextHandle     int
+}
+
+func (p *cujStreamingPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.mu.Lock()
+	p.nextHandle++
+	handle := fmt.Sprintf("preview-%d", p.nextHandle)
+	p.previewOpens = append(p.previewOpens, content)
+	p.mu.Unlock()
+	return handle, nil
+}
+
+func (p *cujStreamingPlatform) UpdateMessage(_ context.Context, handle any, content string) error {
+	p.mu.Lock()
+	p.previewUpdates = append(p.previewUpdates, cujStreamingUpdate{Handle: handle, Content: content})
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *cujStreamingPlatform) getPreviewOpens() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.previewOpens))
+	copy(out, p.previewOpens)
+	return out
+}
+
+func (p *cujStreamingPlatform) getPreviewUpdates() []cujStreamingUpdate {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]cujStreamingUpdate, len(p.previewUpdates))
+	copy(out, p.previewUpdates)
+	return out
+}
+
+func newCUJStreamingEnv(t *testing.T) *cujEnv {
+	t.Helper()
+	dir := t.TempDir()
+	plat := &cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agent := &cujAgent{}
+	storePath := dir + "/sessions.json"
+	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	// env.plat is typed *stubPlatformEngine so that userSends (which
+	// calls plat(env.plat) to bridge into a Platform interface) works.
+	// We point it at the same embedded instance the engine holds, so
+	// every observer (env.plat, env.streamingPlat()) sees one platform.
+	return &cujEnv{
+		t:       t,
+		engine:  e,
+		plat:    &plat.stubPlatformEngine,
+		agent:   agent,
+		tempDir: dir,
+	}
+}
+
+// sendStreaming drives the engine through ReceiveMessage using the full
+// cujStreamingPlatform (not just its embedded stubPlatformEngine). This is
+// essential for CUJs that need the engine to see MessageUpdater and
+// PreviewStarter capabilities — passing only the embedded stubPlatformEngine
+// would hide those methods from the engine's type assertions and the
+// streamPreview path would never activate.
+func (env *cujEnv) sendStreaming(userID, content string) string {
+	env.t.Helper()
+	sessionKey := "test:" + userID
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   "test",
+		MessageID:  "msg-" + content[:min(8, len(content))],
+		UserID:     userID,
+		UserName:   userID,
+		Content:    content,
+		ReplyCtx:   "ctx-" + userID,
+	}
+	env.engine.ReceiveMessage(env.streamingPlat(), msg)
+	return sessionKey
+}
+
+// streamingEnvPlat returns the underlying cujStreamingPlatform for a CUJ
+// test that used newCUJStreamingEnv. Engine holds a []Platform slice, so we
+// reach it back through the engine to expose the typed pointer for typed
+// assertions (getPreviewOpens, getPreviewUpdates).
+func (env *cujEnv) streamingPlat() *cujStreamingPlatform {
+	env.t.Helper()
+	for _, p := range env.engine.platforms {
+		if sp, ok := p.(*cujStreamingPlatform); ok {
+			return sp
+		}
+	}
+	env.t.Fatal("no cujStreamingPlatform registered with engine")
+	return nil
+}
+
+// nextSessionEvents lets a test preload the event sequence that the next
+// StartSession's session.Send goroutine will emit. Once consumed, it is
+// reset to nil so subsequent calls fall back to the default
+// "emit a single EventResult" behavior.
+//
+// Tests use this to drive multi-event turns such as
+// "text → permission request → (test resolves) → text → result"
+// which a single nextEventOverride cannot express.
+
+func (a *cujAgent) setNextSessionEvents(events []Event, delayMs int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.nextSessionEvents = append([]Event(nil), events...)
+	a.nextSessionDelayMs = delayMs
+}
+
+// ===========================================================================
+// CUJ-STREAM-1 · After a permission prompt (AskUserQuestion or regular
+// permission request) the agent emits more text in the same turn. The user
+// MUST see that text streamed into a NEW card via the platform's
+// MessageUpdater, not buffered until end of turn and sent as a single bulk
+// message. The bug shipped because the engine's EventPermissionRequest
+// handler called sp.freeze() + sp.detachPreview() which permanently
+// degraded the stream preview; sp.unfreeze() (added in
+// fix/stream-preview-after-permission) restores the preview so a fresh
+// card can open.
+//
+// SPOTLIGHT: 🟢 This is the regression CUJ for the user-reported
+// "no streaming after the agent asks me a question" bug. It exercises the
+// full engine + streamPreview path: text → permission request → freeze+detach
+// → user resolves → sp.unfreeze → new card opens → more text streams →
+// result finalizes the new card. The pre-fix code would have produced
+// exactly one preview open and one giant bulk Send of the post-resolution
+// text at end of turn.
+//
+// ≥3 user actions: (1) send prompt, (2) receive question card + tap an
+// option, (3) observe the agent's continuation stream.
+// ===========================================================================
+
+func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
+	env := newCUJStreamingEnv(t)
+	key := "test:jack"
+
+	// Pre-load the agent's event sequence for the upcoming turn:
+	//   1. text chunk the agent produced before needing to ask
+	//   2. permission request (AskUserQuestion) — engine freezes sp here
+	//   3. (engine is now blocked on pending.Resolved — test resolves)
+	//   4. text chunk the agent produced AFTER the user answered
+	//   5. final EventResult — engine finalizes the new card
+	preText := "pre-permission intro one two three four five six"
+	postText := "post-resolution reply one two three four five six"
+	finalText := "final summary text"
+	env.agent.setNextSessionEvents([]Event{
+		{Type: EventText, Content: preText},
+		{
+			Type:      EventPermissionRequest,
+			ToolName:  "AskUserQuestion",
+			RequestID: "req-cuj-stream-1",
+			Questions: []UserQuestion{
+				{
+					Question: "Continue?",
+					Options: []UserQuestionOption{
+						{Label: "Yes", Description: "keep going"},
+						{Label: "No", Description: "stop"},
+					},
+				},
+			},
+		},
+		{Type: EventText, Content: postText},
+		{Type: EventResult, Content: finalText, Done: true},
+	}, 0)
+
+	plat := env.streamingPlat()
+
+	// === User action 1: send a prompt. ===
+	env.sendStreaming("jack", "please do a thing")
+
+	// The engine reads the pre-permission text and the permission request
+	// before blocking on Resolved. We must observe:
+	//   - one preview open containing the pre-permission text
+	//   - the question card (regular Send, not preview)
+	env.waitFor("pre-permission preview open", 2*time.Second, func() bool {
+		opens := plat.getPreviewOpens()
+		return len(opens) >= 1 && strings.Contains(opens[0], "pre-permission")
+	})
+	env.waitFor("question card sent", 2*time.Second, func() bool {
+		for _, m := range plat.getSent() {
+			if strings.Contains(m, "Continue?") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Sanity: at this point, the engine is blocked on <-pending.Resolved.
+	// No post-resolution content should be visible yet on either channel.
+	if opens := plat.getPreviewOpens(); len(opens) != 1 {
+		t.Fatalf("pre-resolution preview opens = %d, want exactly 1 (the pre-permission card); got %#v", len(opens), opens)
+	}
+	for _, m := range plat.getSent() {
+		if strings.Contains(m, postText) {
+			t.Fatalf("post-resolution text leaked into getSent() before the user resolved the prompt: %v", plat.getSent())
+		}
+	}
+
+	// === User action 2: answer the question with "Yes" (option 1). ===
+	env.engine.handlePendingPermission(plat, &Message{
+		SessionKey: key,
+		UserID:     "jack",
+		Content:    "1",
+		ReplyCtx:   "ctx-jack",
+	}, "1", key)
+
+	// === User action 3: observe the post-resolution continuation stream. ===
+	// The FIX: a SECOND preview open must appear, containing only the
+	// post-resolution text. The pre-permission preview handle was detached
+	// during freeze(), so this is necessarily a fresh card.
+	env.waitFor("post-resolution preview open", 2*time.Second, func() bool {
+		opens := plat.getPreviewOpens()
+		return len(opens) >= 2 && strings.Contains(opens[1], "post-resolution")
+	})
+
+	// The post-resolution card must NOT contain the pre-permission text —
+	// that would mean we wrote new content on top of the frozen card
+	// instead of opening a new one.
+	opens := plat.getPreviewOpens()
+	if strings.Contains(opens[1], "pre-permission") {
+		t.Fatalf("post-resolution card contains pre-permission text: %q (regression: new card not a clean slate)", opens[1])
+	}
+
+	// Wait for the engine to finalize the turn. sp.finish() must succeed
+	// (preview was active) so the post-resolution text is delivered via
+	// UpdateMessage, NOT via a separate plain Send of fullResponse.
+	env.waitFor("turn finalizes", 2*time.Second, func() bool {
+		// Either the final update landed, or — if the bug regressed —
+		// the bulk send of the post-resolution text landed in getSent().
+		if env.sentContains(finalText) {
+			return true
+		}
+		for _, u := range plat.getPreviewUpdates() {
+			if strings.Contains(u.Content, finalText) {
+				return true
+			}
+		}
+		return false
+	})
+
+	// CRITICAL ASSERTION (the regression check):
+	// The post-resolution text must NOT have been bulk-sent via plain Send.
+	// On the fixed path, sp.finish() returns true (preview was active and
+	// UpdateMessage succeeded), so the engine skips the
+	// sendChunksWithStatusFooter fallback. On the buggy path, sp was
+	// permanently degraded, sp.finish() returned false, and the engine
+	// bulk-sent fullResponse via plain Send — which is the user-visible
+	// "I see everything at the end of the turn" symptom.
+	for _, m := range plat.getSent() {
+		if strings.Contains(m, postText) {
+			t.Fatalf("post-resolution text was bulk-sent via plain Send (regression: streaming broken after permission prompt). getSent=%#v", plat.getSent())
+		}
 	}
 }
 

@@ -125,6 +125,8 @@ level = "info" # debug, info, warn, error
 #                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 # reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+# hide_agent_footer = false      # Strip standalone model/token footer lines emitted by agents (default: false)
+#                                # 过滤 agent 自己混入正文的模型/token 统计 footer 行（默认 false 不过滤）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
@@ -139,6 +141,7 @@ level = "info" # debug, info, warn, error
 # [projects.display]
 # thinking_messages = false  # Override only this field; others inherit from global
 # tool_messages = false
+# hide_agent_footer = true   # Hide agent-emitted model/token footer only for this project
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
@@ -170,6 +173,21 @@ level = "info" # debug, info, warn, error
 # 默认值为 30 分钟（未设置时）。设为 0 可以禁用此行为，恢复始终继续上次会话。
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
+
+# Close an idle live agent process after a clean turn while preserving the
+# cc-connect session and saved agent session ID. The next message in the same
+# chat/thread starts a new agent process and resumes the same conversation.
+# This is per chat session/thread, unlike workspace_idle_timeout_mins which
+# reaps an entire workspace. Set to 0 or leave unset to disable.
+# Unlike reset_on_idle_mins, this defaults to disabled because closing a live
+# agent process is an opt-in resource optimization.
+# 在单次对话正常完成后，如果该聊天会话/主题长时间没有新消息，则关闭对应的 live agent
+# 进程，但保留 cc-connect 会话和已保存的 agent_session_id。下次同一会话有消息时会
+# 重新启动 agent 进程并续接原会话。这是按会话/主题生效，不同于按 workspace 回收的
+# workspace_idle_timeout_mins。设为 0 或不设置表示禁用。
+# 与 reset_on_idle_mins 不同，此项默认禁用，因为关闭 live agent 进程属于显式开启的资源优化。
+# [[projects]]
+# agent_session_idle_timeout_mins = 30
 
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)

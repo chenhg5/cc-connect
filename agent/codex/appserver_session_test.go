@@ -131,6 +131,52 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := newBlockingWriteCloser()
+	defer func() { _ = stdin.Close() }()
+
+	s := &appServerSession{
+		ctx:     ctx,
+		cancel:  cancel,
+		events:  make(chan core.Event),
+		stdin:   stdin,
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var out map[string]any
+		done <- s.requestWithTimeout("turn/start", map[string]any{
+			"input": strings.Repeat("x", 1024),
+		}, &out, 25*time.Millisecond)
+	}()
+
+	select {
+	case <-stdin.started:
+	case <-time.After(time.Second):
+		t.Fatal("request did not attempt to write to stdin")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("requestWithTimeout returned nil, want write timeout")
+		}
+		if !strings.Contains(err.Error(), "turn/start") || !strings.Contains(err.Error(), "write timed out") {
+			t.Fatalf("error = %q, want turn/start write timeout", err.Error())
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("requestWithTimeout did not return while stdin write was blocked")
+	}
+
+	if !stdin.Closed() {
+		t.Fatal("blocked stdin was not closed after timeout")
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
@@ -324,6 +370,50 @@ func (w *lockedWriteCloser) String() string {
 }
 
 var _ io.WriteCloser = (*lockedWriteCloser)(nil)
+
+type blockingWriteCloser struct {
+	started   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+
+	mu       sync.Mutex
+	isClosed bool
+}
+
+func newBlockingWriteCloser() *blockingWriteCloser {
+	return &blockingWriteCloser{
+		started: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (w *blockingWriteCloser) Write([]byte) (int, error) {
+	select {
+	case <-w.started:
+	default:
+		close(w.started)
+	}
+	<-w.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (w *blockingWriteCloser) Close() error {
+	w.closeOnce.Do(func() {
+		w.mu.Lock()
+		w.isClosed = true
+		w.mu.Unlock()
+		close(w.closed)
+	})
+	return nil
+}
+
+func (w *blockingWriteCloser) Closed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.isClosed
+}
+
+var _ io.WriteCloser = (*blockingWriteCloser)(nil)
 
 func serverRequestProbe(t *testing.T, idJSON, method string, params any) map[string]json.RawMessage {
 	t.Helper()
