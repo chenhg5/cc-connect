@@ -1,8 +1,17 @@
 package wpsagentspace
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/chenhg5/cc-connect/config"
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestDecryptWpsSid(t *testing.T) {
@@ -53,6 +62,26 @@ func TestGenerateUUID(t *testing.T) {
 	}
 	if uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-' {
 		t.Errorf("generateUUID() invalid format: %s", uuid)
+	}
+}
+
+func TestExpandPath(t *testing.T) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = os.Getenv("USERPROFILE")
+	}
+	tests := []struct {
+		in, want string
+	}{
+		{"/abs/path", "/abs/path"},
+		{"~", home},
+		{"~/foo", home + "/foo"},
+	}
+	for _, tt := range tests {
+		got := expandPath(tt.in)
+		if got != tt.want {
+			t.Errorf("expandPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 
@@ -123,5 +152,223 @@ func TestEncryptDecryptWpsSid(t *testing.T) {
 	}
 
 	t.Logf("Decrypted: %s", decrypted)
-	t.Log("✓ Encrypt/Decrypt round-trip successful")
+	t.Log("Encrypt/Decrypt round-trip successful")
+}
+
+func TestDecryptWpsSid_FallbackToDefaultKeySource(t *testing.T) {
+	// Token encrypted when appID was empty (uses defaultKeySource).
+	legacy := "legacy-token-no-appid"
+	encrypted, err := encryptWpsSid(legacy, "")
+	if err != nil {
+		t.Fatalf("encryptWpsSid() error: %v", err)
+	}
+
+	// Decrypted later after appID was configured — should fall back to
+	// defaultKeySource and recover the token.
+	got, err := decryptWpsSid(encrypted, "new-app-id")
+	if err != nil {
+		t.Fatalf("decryptWpsSid() error: %v", err)
+	}
+	if got != legacy {
+		t.Errorf("decryptWpsSid() = %q, want %q (fallback did not fire)", got, legacy)
+	}
+}
+
+func TestStart_DecryptsEncryptedToken(t *testing.T) {
+	raw := "test-wps-sid-for-start"
+	appID := "test-app-id-start"
+	encrypted, err := encryptWpsSid(raw, appID)
+	if err != nil {
+		t.Fatalf("encryptWpsSid() error: %v", err)
+	}
+
+	p := &Platform{
+		appID:      appID,
+		wpsSid:     encrypted,
+		deviceUuid: "dev-start",
+		deviceName: "test",
+	}
+	if err := p.Start(func(core.Platform, *core.Message) {}); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer p.Stop()
+
+	if p.wpsSid != raw {
+		t.Errorf("Start() did not decrypt wps_sid: got %q, want %q", p.wpsSid, raw)
+	}
+}
+
+func TestHandleFrame_DispatchesUserMessage(t *testing.T) {
+	var got *core.Message
+	handlerDone := make(chan struct{})
+	p := &Platform{
+		appID:      "AK",
+		deviceUuid: "dev",
+		deviceName: "test",
+	}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		got = msg
+		close(handlerDone)
+	}
+
+	data := messageData{
+		Role:      "user",
+		Type:      "text",
+		Content:   "hello",
+		SessionID: "s1",
+		ChatID:    "c1",
+		MessageID: "m1",
+		MediaURL:  "http://example.com/file.html",
+	}
+	raw, _ := json.Marshal(data)
+	if err := p.handleFrame(wsFrame{Event: "message", Data: raw}); err != nil {
+		t.Fatalf("handleFrame() error: %v", err)
+	}
+
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler was not called")
+	}
+
+	if got == nil {
+		t.Fatal("expected message, got nil")
+	}
+	if got.SessionKey != "wps-agentspace:s1" {
+		t.Errorf("SessionKey = %q, want %q", got.SessionKey, "wps-agentspace:s1")
+	}
+	if !strings.Contains(got.Content, "hello") {
+		t.Errorf("Content missing original text: %q", got.Content)
+	}
+	if !strings.Contains(got.Content, "http://example.com/file.html") {
+		t.Errorf("Content missing media URL: %q", got.Content)
+	}
+}
+
+func TestHandleFrame_FatalErrorReturnsErr(t *testing.T) {
+	p := &Platform{}
+	fatalCodes := []string{
+		"USER_NO_APP_PERMISSION",
+		"USER_NO_OPENCLAW_PERMISSION",
+		"OPENCLAW_NOT_CONFIGURED",
+		"NOT_OPENCLAW_APP",
+		"NOT_LOGIN",
+	}
+
+	for _, code := range fatalCodes {
+		raw, _ := json.Marshal(errorData{Code: code})
+		err := p.handleFrame(wsFrame{Event: "error", Data: raw})
+		if err == nil {
+			t.Errorf("handleFrame(%q) returned nil error", code)
+		}
+	}
+
+	raw, _ := json.Marshal(errorData{Code: "UNKNOWN_ERROR"})
+	if err := p.handleFrame(wsFrame{Event: "error", Data: raw}); err != nil {
+		t.Errorf("handleFrame(UNKNOWN_ERROR) returned unexpected error: %v", err)
+	}
+}
+
+func TestSaveToConfig_SurgicalUpdate(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	initial := `
+language = "zh"
+
+[[projects]]
+name = "wps-test"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "wps-agentspace"
+
+[projects.platforms.options]
+app_id = "AK123"
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Exercise the config.ConfigPath branch (the preferred discovery path):
+	// point it at our temp file and clear the env override so it's not used.
+	prevConfigPath := config.ConfigPath
+	config.ConfigPath = configPath
+	t.Cleanup(func() { config.ConfigPath = prevConfigPath })
+
+	if !saveToConfig("AK123", "encrypted-token-value") {
+		t.Fatal("saveToConfig returned false")
+	}
+
+	updated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	updatedStr := string(updated)
+
+	if !strings.Contains(updatedStr, `wps_sid = "encrypted-token-value"`) {
+		t.Errorf("config missing updated wps_sid:\n%s", updatedStr)
+	}
+	if !strings.Contains(updatedStr, "# auto-saved") {
+		t.Errorf("config missing auto-saved marker:\n%s", updatedStr)
+	}
+	// Preserve other fields/comments.
+	if !strings.Contains(updatedStr, `language = "zh"`) {
+		t.Errorf("language setting was lost:\n%s", updatedStr)
+	}
+}
+
+func TestAutoLogin_Success(t *testing.T) {
+	appID := "AK-auto-login"
+	expectedToken := "raw-token-from-wps"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login_url":
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]string{
+					"code":   "code-123",
+					"url":    "http://example.com/login",
+					"app_id": appID,
+				},
+			})
+		case "/user_token":
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]string{
+					"token": expectedToken,
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	originalLogin := loginURLAPI
+	originalToken := userTokenAPI
+	originalPoll := pollInterval
+	originalBrowser := openBrowser
+	loginURLAPI = server.URL + "/login_url"
+	userTokenAPI = server.URL + "/user_token"
+	pollInterval = 10 * time.Millisecond
+	openBrowser = func(string) {}
+
+	t.Cleanup(func() {
+		loginURLAPI = originalLogin
+		userTokenAPI = originalToken
+		pollInterval = originalPoll
+		openBrowser = originalBrowser
+	})
+
+	raw, encrypted, err := autoLogin(appID)
+	if err != nil {
+		t.Fatalf("autoLogin() error: %v", err)
+	}
+	if raw != expectedToken {
+		t.Errorf("autoLogin() raw = %q, want %q", raw, expectedToken)
+	}
+	if encrypted == "" {
+		t.Error("autoLogin() returned empty encrypted token")
+	}
 }

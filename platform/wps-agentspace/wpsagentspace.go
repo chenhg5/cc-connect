@@ -12,13 +12,18 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/toml"
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/scrypt"
 )
@@ -32,19 +37,19 @@ const (
 
 // Platform implements core.Platform for WPS Agentspace (数字员工).
 type Platform struct {
-	appID       string
-	wpsSid      string // encrypted token
-	deviceUuid  string
-	deviceName  string
-	baseURL     string
-	handler     core.MessageHandler
-	cancel      context.CancelFunc
-	conn        *websocket.Conn
-	mu          sync.Mutex
-	writeCh     chan any
-	dedup       core.MessageDedup
-	stopOnce    sync.Once
-	stopped     bool
+	appID      string
+	wpsSid     string // wps_sid token; encrypted until Start() decrypts it
+	deviceUuid string
+	deviceName string
+	baseURL    string
+	handler    core.MessageHandler
+	cancel     context.CancelFunc
+	conn       *websocket.Conn
+	mu         sync.Mutex
+	writeCh    chan any
+	dedup      core.MessageDedup
+	stopOnce   sync.Once
+	stopped    bool
 }
 
 // replyContext holds the context needed to reply to a specific message.
@@ -171,12 +176,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return fmt.Errorf("wps-agentspace: wps_sid is required")
 	}
 
-	// Try using original token (not decrypted) for now
-	slog.Info("wps-agentspace: token info",
-		"length", len(p.wpsSid),
-		"has_colons", strings.Contains(p.wpsSid, ":"),
-		"prefix", p.wpsSid[:min(20, len(p.wpsSid))])
-	// p.wpsSid = decryptedSid  // Comment out decryption for debugging
+	decryptedSid, err := decryptWpsSid(p.wpsSid, p.appID)
+	if err != nil {
+		return fmt.Errorf("wps-agentspace: failed to decrypt wps_sid: %w", err)
+	}
+	p.wpsSid = decryptedSid
+	slog.Info("wps-agentspace: token loaded", "length", len(p.wpsSid), "has_colons", strings.Contains(p.wpsSid, ":"))
 
 	if p.deviceUuid == "" {
 		p.deviceUuid = generateUUID()
@@ -474,6 +479,16 @@ func (p *Platform) handleFrame(frame wsFrame) error {
 		// Heartbeat response, ignore
 		return nil
 
+	case "ping":
+		// Server sends JSON ping frames in addition to WebSocket control pings;
+		// reply with a pong event so the server treats this device as responsive.
+		_ = p.writeJSON("pong", pingData{
+			DeviceUUID: p.deviceUuid,
+			DeviceName: p.deviceName,
+			Timestamp:  time.Now().UnixMilli(),
+		})
+		return nil
+
 	case "init":
 		var data struct {
 			DeviceUUID string `json:"device_uuid"`
@@ -508,6 +523,7 @@ func (p *Platform) handleFrame(frame wsFrame) error {
 		if err := json.Unmarshal(frame.Data, &data); err != nil {
 			return fmt.Errorf("wps-agentspace: parse message: %w", err)
 		}
+		slog.Debug("wps-agentspace: message frame", "role", data.Role, "type", data.Type, "content_len", len(data.Content))
 		if data.Role == "user" {
 			return p.handleUserMessage(data)
 		}
@@ -668,11 +684,16 @@ const (
 	ivLength         = 12
 	saltLength       = 16
 	defaultKeySource = "openclaw_agentspace"
+)
 
-	// OAuth endpoints
+// OAuth endpoints (variables so tests can override them).
+var (
 	loginURLAPI  = "https://agentspace.wps.cn/v7/devhub/users/login_url"
 	userTokenAPI = "https://agentspace.wps.cn/v7/devhub/users/user_token"
 	userInfoAPI  = "https://agentspace.wps.cn/v7/devhub/users/current"
+
+	// pollInterval controls how often autoLogin polls for the user token.
+	pollInterval = 3 * time.Second
 )
 
 // autoLogin performs OAuth login to get wps_sid.
@@ -725,8 +746,10 @@ func autoLogin(appID string) (string, string, error) {
 	slog.Info("wps-agentspace: waiting for login (polling every 3s, max 5 min)...")
 	deadline := time.Now().Add(5 * time.Minute)
 
+	client := &http.Client{Timeout: 10 * time.Second}
+
 	for time.Now().Before(deadline) {
-		time.Sleep(3 * time.Second)
+		time.Sleep(pollInterval)
 
 		pollBody, _ := json.Marshal(map[string]string{
 			"app_id": appID,
@@ -734,7 +757,7 @@ func autoLogin(appID string) (string, string, error) {
 			"state":  state,
 		})
 
-		resp, err := http.Post(userTokenAPI, "application/json", strings.NewReader(string(pollBody)))
+		pollResp, err := client.Post(userTokenAPI, "application/json", strings.NewReader(string(pollBody)))
 		if err != nil {
 			continue
 		}
@@ -744,11 +767,11 @@ func autoLogin(appID string) (string, string, error) {
 				Token string `json:"token"`
 			} `json:"data"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-			_ = resp.Body.Close()
+		decodeErr := json.NewDecoder(pollResp.Body).Decode(&tokenResp)
+		_ = pollResp.Body.Close()
+		if decodeErr != nil {
 			continue
 		}
-		_ = resp.Body.Close()
 
 		if tokenResp.Data.Token != "" {
 			slog.Info("wps-agentspace: login successful!")
@@ -770,27 +793,34 @@ func autoLogin(appID string) (string, string, error) {
 }
 
 // openBrowser opens URL in the default browser.
-func openBrowser(url string) {
+// Overridable for tests.
+var openBrowser = defaultOpenBrowser
+
+func defaultOpenBrowser(rawURL string) {
 	var cmd string
 	var args []string
 
 	switch {
 	case isMacOS():
 		cmd = "open"
-		args = []string{url}
+		args = []string{rawURL}
 	case isLinux():
 		cmd = "xdg-open"
-		args = []string{url}
+		args = []string{rawURL}
 	case isWindows():
+		// "start" is a cmd builtin; first quoted arg is the window title.
 		cmd = "cmd"
-		args = []string{"/c", "start", url}
+		args = []string{"/c", "start", "", rawURL}
 	default:
-		fmt.Printf("请手动打开: %s\n", url)
+		fmt.Printf("请手动打开: %s\n", rawURL)
 		return
 	}
 
 	go func() {
-		_ = exec.Command(cmd, args...).Run()
+		if err := exec.Command(cmd, args...).Run(); err != nil {
+			slog.Warn("wps-agentspace: failed to open browser", "url", rawURL, "error", err)
+			fmt.Printf("请手动打开: %s\n", rawURL)
+		}
 	}()
 }
 
@@ -806,62 +836,35 @@ func isWindows() bool {
 	return runtime.GOOS == "windows"
 }
 
-// saveToConfig saves token to cc-connect config file
+// saveToConfig saves the encrypted token to the cc-connect config file.
+// It validates the file as TOML first, then performs a surgical line-level
+// update inside the wps-agentspace platform options block so comments and
+// field order outside that block are preserved.
 func saveToConfig(appID, encryptedToken string) bool {
-	// Find config file
 	configPath := findConfigFile()
 	if configPath == "" {
 		return false
 	}
 
-	// Read existing config
 	data, err := readFile(configPath)
 	if err != nil {
 		slog.Warn("wps-agentspace: failed to read config", "error", err)
 		return false
 	}
 
-	// Simple string replacement to add/update wps_sid
-	// This is a basic implementation - in production you'd use a TOML parser
-	lines := strings.Split(string(data), "\n")
-	found := false
-	for i, line := range lines {
-		if strings.Contains(line, "wps_sid") && strings.Contains(line, "=") {
-			lines[i] = fmt.Sprintf(`wps_sid = "%s"  # auto-saved`, encryptedToken)
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		// Find the wps-agentspace options section and add wps_sid
-		for i, line := range lines {
-			if strings.Contains(line, "type = \"wps-agentspace\"") {
-				// Find the options section after this
-				for j := i + 1; j < len(lines); j++ {
-					if strings.Contains(lines[j], "[projects.platforms.options]") {
-						// Insert wps_sid after this line
-						newLines := make([]string, len(lines)+1)
-						copy(newLines, lines[:j+1])
-						newLines[j+1] = fmt.Sprintf(`wps_sid = "%s"  # auto-saved`, encryptedToken)
-						copy(newLines[j+2:], lines[j+1:])
-						lines = newLines
-						found = true
-						break
-					}
-				}
-				break
-			}
-		}
-	}
-
-	if !found {
+	// Validate existing TOML before modifying it. If it's already broken,
+	// don't risk making it worse.
+	if _, err := toml.Decode(string(data), &struct{}{}); err != nil {
+		slog.Warn("wps-agentspace: config is not valid TOML, skipping auto-save", "error", err)
 		return false
 	}
 
-	// Write back
-	err = writeFile(configPath, strings.Join(lines, "\n"))
-	if err != nil {
+	updated, ok := updateWpsSidLine(string(data), encryptedToken)
+	if !ok {
+		return false
+	}
+
+	if err := writeFile(configPath, updated); err != nil {
 		slog.Warn("wps-agentspace: failed to write config", "error", err)
 		return false
 	}
@@ -869,9 +872,85 @@ func saveToConfig(appID, encryptedToken string) bool {
 	return true
 }
 
-// findConfigFile finds the cc-connect config file
+// updateWpsSidLine replaces or inserts the wps_sid key inside the
+// wps-agentspace platform options block. It returns the updated content and
+// true on success.
+func updateWpsSidLine(content, encryptedToken string) (string, bool) {
+	lines := strings.Split(content, "\n")
+
+	typeLine := regexp.MustCompile(`^\s*type\s*=\s*"wps-agentspace"\s*$`)
+	optsHeader := regexp.MustCompile(`^\s*\[projects\.platforms\.options\]\s*$`)
+	wpsSidLine := regexp.MustCompile(`^\s*wps_sid\s*=.*$`)
+	sectionStart := regexp.MustCompile(`^\s*\[`)
+
+	for i, line := range lines {
+		if !typeLine.MatchString(line) {
+			continue
+		}
+
+		// Find the options header that belongs to this platform entry.
+		optsIdx := -1
+		for j := i + 1; j < len(lines); j++ {
+			if sectionStart.MatchString(lines[j]) && !optsHeader.MatchString(lines[j]) {
+				break
+			}
+			if optsHeader.MatchString(lines[j]) {
+				optsIdx = j
+				break
+			}
+		}
+		if optsIdx == -1 {
+			continue
+		}
+
+		// Look for an existing wps_sid inside this options block.
+		for k := optsIdx + 1; k < len(lines); k++ {
+			if sectionStart.MatchString(lines[k]) {
+				break
+			}
+			if wpsSidLine.MatchString(lines[k]) {
+				lines[k] = fmt.Sprintf(`wps_sid = "%s"  # auto-saved`, quoteTomlBasicString(encryptedToken))
+				return strings.Join(lines, "\n"), true
+			}
+		}
+
+		// Not found: insert after the options header.
+		newSidLine := fmt.Sprintf(`wps_sid = "%s"  # auto-saved`, quoteTomlBasicString(encryptedToken))
+		newLines := make([]string, len(lines)+1)
+		copy(newLines, lines[:optsIdx+1])
+		newLines[optsIdx+1] = newSidLine
+		copy(newLines[optsIdx+2:], lines[optsIdx+1:])
+		return strings.Join(newLines, "\n"), true
+	}
+
+	return "", false
+}
+
+// quoteTomlBasicString escapes characters that are special in a TOML basic string.
+func quoteTomlBasicString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
+// findConfigFile finds the cc-connect config file. It prefers the path cc-connect
+// actually loaded (set by main via config.ConfigPath, so --config flags and
+// non-default locations just work), falls back to an explicit CC_CONNECT_CONFIG
+// env override, then to the default discovery locations.
 func findConfigFile() string {
-	// Check common locations
+	// Prefer the path cc-connect actually loaded at startup.
+	if cp := config.ConfigPath; cp != "" && fileExists(cp) {
+		return cp
+	}
+
+	// Allow explicit override via environment variable.
+	if envPath := os.Getenv("CC_CONNECT_CONFIG"); envPath != "" {
+		expanded := expandPath(envPath)
+		if fileExists(expanded) {
+			return expanded
+		}
+	}
+
 	locations := []string{
 		"config.toml",
 		"~/.cc-connect/config.toml",
@@ -887,14 +966,36 @@ func findConfigFile() string {
 }
 
 func expandPath(path string) string {
-	if strings.HasPrefix(path, "~") {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+
+	// "~" or "~/..." → current user's home.
+	if path == "~" || strings.HasPrefix(path, "~/") {
 		home := os.Getenv("HOME")
 		if home == "" {
 			home = os.Getenv("USERPROFILE")
 		}
 		return strings.Replace(path, "~", home, 1)
 	}
-	return path
+
+	// "~user" or "~user/..." → that user's home directory.
+	rest := path[1:]
+	end := strings.IndexByte(rest, '/')
+	name := rest
+	if end != -1 {
+		name = rest[:end]
+	}
+	u, err := user.Lookup(name)
+	if err != nil {
+		// Can't resolve (unknown user, headless/CGO-disabled build, Windows).
+		// Leave the path untouched rather than returning a broken value.
+		return path
+	}
+	if end == -1 {
+		return u.HomeDir
+	}
+	return u.HomeDir + rest[end:]
 }
 
 func fileExists(path string) bool {
@@ -907,10 +1008,8 @@ func readFile(path string) ([]byte, error) {
 }
 
 func writeFile(path string, data string) error {
-	return os.WriteFile(path, []byte(data), 0644)
+	return os.WriteFile(path, []byte(data), 0o644)
 }
-
-
 
 // getEnvWithPrefix gets environment variable
 func getEnvWithPrefix(key, defaultVal string) string {
@@ -1004,40 +1103,55 @@ func decryptWpsSid(encrypted, appId string) (string, error) {
 		keySource = defaultKeySource
 	}
 
-	// Node.js crypto.scryptSync default: N=16384, r=8, p=1
-	key, err := scrypt.Key([]byte(keySource), salt, 16384, 8, 1, keyLength)
+	plaintext, err := decryptGCM(salt, iv, authTag, ciphertext, keySource)
 	if err != nil {
-		return "", fmt.Errorf("derive key: %w", err)
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", fmt.Errorf("aes cipher: %w", err)
-	}
-
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("gcm: %w", err)
-	}
-
-	// Append auth tag to ciphertext for GCM
-	ciphertext = append(ciphertext, authTag...)
-
-	plaintext, err := aesGCM.Open(nil, iv, ciphertext, nil)
-	if err != nil {
-		return "", fmt.Errorf("decrypt: %w", err)
+		// Fallback: a token encrypted before an appID change (or while appID
+		// was empty) used defaultKeySource. Retry with it. AES-GCM
+		// authenticates via the auth tag, so a wrong key fails cleanly
+		// instead of returning garbage — the fallback is safe.
+		if keySource != defaultKeySource {
+			plaintext, err = decryptGCM(salt, iv, authTag, ciphertext, defaultKeySource)
+		}
+		if err != nil {
+			return "", fmt.Errorf("decrypt: %w", err)
+		}
 	}
 
 	return string(plaintext), nil
 }
 
-// generateUUID generates a random UUID.
+// decryptGCM derives a key from keySource and decrypts the GCM ciphertext.
+// ciphertext and authTag are not mutated.
+func decryptGCM(salt, iv, authTag, ciphertext []byte, keySource string) ([]byte, error) {
+	// Node.js crypto.scryptSync default: N=16384, r=8, p=1
+	key, err := scrypt.Key([]byte(keySource), salt, 16384, 8, 1, keyLength)
+	if err != nil {
+		return nil, fmt.Errorf("derive key: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aes cipher: %w", err)
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("gcm: %w", err)
+	}
+
+	// GCM expects the auth tag appended to the ciphertext. Copy into a new
+	// slice so the caller's ciphertext is not mutated (needed for the
+	// defaultKeySource fallback retry).
+	gcmPayload := make([]byte, 0, len(ciphertext)+len(authTag))
+	gcmPayload = append(gcmPayload, ciphertext...)
+	gcmPayload = append(gcmPayload, authTag...)
+
+	return aesGCM.Open(nil, iv, gcmPayload, nil)
+}
+
+// generateUUID generates a random v4 UUID.
 func generateUUID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	return uuid.NewString()
 }
 
 // truncate truncates a string to maxLen characters.
