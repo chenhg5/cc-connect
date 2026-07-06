@@ -175,21 +175,21 @@ MiniMax M3 突破 Coding 与 Agentic AI 前沿，基于 MiniMax Sparse Attention
 </p>
 
 
-## 🆕 v1.3.3 更新了什么
+## 🆕 v1.5.0-beta.1 更新了什么
 
-1.3.3 系列首个正式版 —— 把 beta.1 → beta.5（自 v1.3.2 起约 235 个 PR）与 7 个 post-beta 修复一并稳定下来。亮点：
+v1.5.0 系列首个 beta —— 自 v1.4.1 起 **三个新集成面** + agent 生命周期与平台层 polish。
 
-- **新增 Agent** — Devin CLI、Google Antigravity (`agy`)、GitHub Copilot CLI 均为一等公民 agent (#672, #1123, #865)；Cursor / OpenCode / Qoder / Kimi / Pi 覆盖大幅加强。
-- **平台能力扩展** — QQ (OneBot) 文件收发 (#323)、QQ Bot 内联键盘 (#1131)、企业微信 WebSocket `SendFile` (#1199)、飞书原生音视频附件 (#1202)、Slack Assistant API (#844)、MAX webhook 投递模式 (#818)、钉钉 @mention / richText / 图片 / 文件入站 (#1188, #828, #1357)、微博私信能力扩充、WPS 协作（金山协作）。
-- **长任务保护** — 新增 `max_turn_time_mins` 绝对墙钟上限，软停 + 强杀 + 下一条消息自动 `--resume`，避免长跑的 bash / test 命令把 session 永久锁住 (#1091)。
-- **新核心命令** — `/timer`（一次性延时任务）、`/cancel`（中断当前 turn）、`/ps`（替代 `/btw`，`/btw` 保留为别名）、`cron add --silent`、agent 主动 TTS 输出。
-- **多用户 / 权限** — 可选「回复未授权 IM 发件人」、`@Bot/permit` ≡ `/permit` 关键字匹配、Bridge 启用时必须配置 token。
-- **Provider 生态** — 新增 NekoCode、VisionCoder、AIHubMix、MiniMax M3 预设；Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks；Codex `request_user_input` app-server 事件；可配置 `shell` 与 shell profile。
-- **可观测性** — Blackbox 测试框架（P0/P1/P2 + config-switch 矩阵）、CUJ 测试框架、codex/opencode/kimi 的 provider-resume 回归套件、Pi 在 reply footer 输出 context 用量。
+- **新增平台** — **腾讯元宝 Bot API** 一等公民适配器 (#1445, @skyblue)；**cloud_web** 自托管 IM Gateway (CWIP v1, websocket / long_poll / gateway) (#1282, @jiagou123)。
+- **新增 Agent** — **Reasonix** HTTP serve API 适配器, 支持 default/yolo/plan 权限模式 (#1281, @mchenziyi)。
+- **`agent_session_idle_timeout_mins`** — 空闲 live agent 进程在干净 turn 结束后自动关闭, 保留 cc-connect session 与 saved agent session ID; 下一条消息 resume 同一会话 (#1338, @hl1221hl)。
+- **Pi RPC 模式** — RPC mode + `extension_ui` 权限转发 (#1440, @happyTonakai)。
+- **飞书升级** — `mention_map` 出站 bot-to-bot `@` 解析 (#1341); 跨 bot relay 回写到 caller 线程 (#1413)。
+- **俄语 (ru) i18n** — Web 管理后台俄语 (#1449, @sonsay)。
+- **可靠性修复** — permission 后恢复 stream preview (#1451); `SaveFilesToDisk` / `AppendFileRefs` 绝对路径 (#1462); session lock 前 queue placeholder (#1389); codex app-server write 超时 (#1448); Slack streaming-card `NO_REPLY` 抑制 (#1397); 隐藏 agent footer 行 (#1416)。
 
-⚠️ **行为变更（可能需要改配置）**：Telegram / Discord `progress_style` 默认值改为 `compact`（设回 `legacy` 可还原）；QQ Bot 默认 `intents` 现在包含 `INTERACTION_CREATE`，若自定义 `intents` 需手动包含 `1<<26`；钉钉 `msgtype=file` 入站现在送达 agent；引擎权限关键字容忍 @mention；`reset_on_idle_mins` 默认值改为 30 分钟；Bridge 未配置 token 时拒绝启动。完整主题汇总见 `changelogs/v1.3.3.md`。
+⚠️ **升级提示**：所有新配置项均为可选且有安全默认值。v1.4.1 已有配置可直接升级。
 
-无任何破坏性变更（No breaking changes）。从任意 v1.3.3-beta.\* 升级到 v1.3.3 是 fix-only 的小升级。
+完整主题汇总（含致谢）见 `changelogs/v1.5.0-beta.1.md`。
 
 
 ## 🧩 平台能力一览

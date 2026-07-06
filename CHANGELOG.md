@@ -1,25 +1,40 @@
 ﻿# Changelog
 
-## Unreleased
+## v1.5.0-beta.1 (2026-07-06)
 
-### Added
-- **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
-- **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
-- **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+First beta of the v1.5.0 series since v1.4.1 stable. **Three new integration surfaces** join the family: Tencent Yuanbao Bot API, self-hosted `cloud_web` IM gateway (CWIP v1), and the Reasonix agent adapter — plus Pi RPC mode, Russian i18n, per-session agent idle timeout, and a batch of platform/core fixes.
 
-## Unreleased
+See `changelogs/v1.5.0-beta.1.md` for the full themed summary with credits.
 
-### Added
-- **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
+### New Platforms
+- **Tencent Yuanbao Bot API** — first-class Yuanbao platform adapter (#1445, @skyblue).
+- **cloud_web** — self-hosted IM gateway platform (CWIP v1 protocol; websocket / long_poll / gateway transports). See `docs/cloud-web.md` (#1282, @jiagou123).
+
+### New Agents
+- **Reasonix** — HTTP serve API adapter (POST /submit, SSE /events, POST /approve) with default/yolo/plan permission modes (#1281, @mchenziyi).
+
+### Features
+- **`agent_session_idle_timeout_mins`** — per-project config to close idle live agent processes after a clean turn while preserving session + saved agent session ID; next message resumes the same conversation (#1338, @hl1221hl).
+- **Pi RPC mode** — RPC mode with `extension_ui` permission forwarding (#1440, @happyTonakai).
+- **Feishu `mention_map`** — outbound bot-to-bot `@` resolution via configurable name → open_id mapping (#1341 fixing #1322, @generspooler).
+- **Feishu relay** — route inter-bot visibility echoes back into caller's Feishu thread (#1413, @zhangshuaimk-boop).
+- **Russian (ru) i18n** — Web admin UI Russian locale (#1449, @sonsay).
 
 ### Fixed
-- **Feishu recall fallback probes**: throttle repeated active-message recall checks so long-running turns do not continuously call platform message APIs.
-- **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
-- **Feishu: tighter `@` mention detection in `SendWithStatusFooter` / `buildReplyContent`** — a bare `@` inside an email address, URL, or escaped character no longer false-positives as a mention. Mention detection now checks for the resolved `<at user_id="...">` tag instead of a substring match, so card rendering (and the notation-style status footer) is preserved for content that merely contains `@`. Real `@mentions` still force `MsgTypeText` so Feishu fires the mention event (#1322).
-- **feishu**: coalesce consecutive image messages from the same session into a single multi-image dispatch to fix first-image drop on batch sends (#1395). When the Feishu mobile client sends N images in quick succession, each image arrives as a separate `image` event with very close `create_time` values. Dispatching each immediately caused core/engine's `create_time` watermark (PR #1168) to drop the oldest image, so the agent only saw N-1 images. A per-session image buffer with a 150ms quiet window now merges the burst into one `core.Message` carrying all images, in send order. Single-image sends and quoted-image replies are unaffected.
-- **claudecode**: fix per-spawn system-prompt temp file EACCES under `run_as_user` (#1429). The per-spawn temp file written by `writeTempAppendPromptFile` (the 1% edge-case path used when the prompt has session-specific platform formatting or user `append_system_prompt`) inherited `os.CreateTemp`'s 0600 mode and was owned by the cc-connect process user (often root under systemd). When the agent was spawned under a different `run_as_user`, it could not read the file and exited before any prompt was loaded. The file is now `chmod 0o644` immediately after write, matching the shared `ensureSharedSystemPromptFile` path. Prompt content is non-secret (a superset of the already-shared base prompt), so 0644 is consistent with the shared file. Does not affect the shared-file path (already 0644 since #1376) or the daemon-mode path resolution (#1419).
-- **core**: queue post-restart notification and dispatch on platform ready (#1383). Previously `/restart` sent the success notification immediately after engine startup, racing the platform's async connect window (Telegram: ~2.6s). On a not-yet-ready platform the send was silently dropped at debug log level. The notify is now queued on the engine and dispatched when the target platform reaches `OnPlatformReady`, with bounded retry (3 attempts, 0/500/1500 ms backoff) on transient send failure. Failed sends log at warn level. A 10s safety timeout drops the notify with a warning if the target platform never reaches ready, so startup is never blocked indefinitely. Also covers Discord / Weixin / Matrix (other AsyncRecoverablePlatform implementations) for free.
-- **core**: `SaveFilesToDisk` / `AppendFileRefs` always emit absolute paths (#1459). When a user configured a relative `work_dir` (e.g. `~/project` or `.cc-connect`), `SaveFilesToDisk` joined relative paths into the attachments directory and the resulting paths were passed verbatim into the agent's prompt. The spawned agent process — typically run from a different cwd by the platform adapter — could not resolve them and silently dropped every attachment. `SaveFilesToDisk` now calls `filepath.Abs(workDir)` up front and falls back to the raw value on error, and `AppendFileRefs` defensively absolutizes each entry. Both behaviors are covered by new tests for relative, absolute, and empty workDir; the empty-workDir case falls back to the process cwd so misconfigured deploys still get a writable attachments directory.
+- **display**: hide agent footer lines in progress output (#1416, @AaronZ345).
+- **core**: resume stream preview after permission prompt resolves (#1451, @happyTonakai).
+- **core**: always emit absolute paths from `SaveFilesToDisk` / `AppendFileRefs` — fixes relative `work_dir` attachments silently dropped by agent (#1462 fixing #1459, @chenhg5).
+- **core**: create queue placeholder before session lock — prevents concurrent message queue miss (#1389, @xxb).
+- **codex**: time out blocked app-server writes (#1448, @AaronZ345).
+- **slack**: suppress `NO_REPLY` marker on streaming-card silent replies (#1397, @spinsirr).
+
+## v1.4.1 (2026-06-28)
+
+Patch release: Kimi CLI `--print` compatibility (#1461 fixing #1456). See `changelogs/v1.4.1.md`.
+
+## v1.4.0 (2026-06-28)
+
+Stable release: Webex + Matrix E2EE platforms, agent option parsing refactor (#1297), 30+ fixes. See `changelogs/v1.4.0.md`.
 
 ## v1.3.3 (2026-06-15)
 
