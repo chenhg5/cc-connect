@@ -3,6 +3,7 @@ package moltybot
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,21 +29,27 @@ type session struct {
 
 	mu        sync.Mutex
 	sessionID string
+	source    bridgeSource
 	closeOnce sync.Once
 }
 
 type bridgeMessageRequest struct {
-	SessionKey string             `json:"sessionKey,omitempty"`
-	SessionID  string             `json:"sessionId,omitempty"`
-	Text       string             `json:"text"`
-	Images     []bridgeAttachment `json:"images,omitempty"`
-	Files      []bridgeAttachment `json:"files,omitempty"`
+	Source      bridgeSource       `json:"source"`
+	Text        string             `json:"text"`
+	Attachments []bridgeAttachment `json:"attachments,omitempty"`
+}
+
+type bridgeSource struct {
+	Platform       string `json:"platform,omitempty"`
+	PlatformUserID string `json:"platformUserId,omitempty"`
+	MessageID      string `json:"messageId,omitempty"`
 }
 
 type bridgeAttachment struct {
-	MimeType string `json:"mimeType,omitempty"`
-	FileName string `json:"fileName,omitempty"`
-	Data     []byte `json:"data,omitempty"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name,omitempty"`
+	MimeType   string `json:"mimeType,omitempty"`
+	DataBase64 string `json:"dataBase64,omitempty"`
 }
 
 type bridgeMessageResponse struct {
@@ -64,6 +71,7 @@ func newSession(ctx context.Context, client *http.Client, baseURL, token, sessio
 		cancel:      cancel,
 		events:      make(chan core.Event, 128),
 		sessionID:   bridgeSessionID,
+		source:      bridgeSourceFromSessionID(sessionID),
 	}
 	s.alive.Store(true)
 	return s
@@ -74,13 +82,10 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 		return fmt.Errorf("moltybot: session is closed")
 	}
 
-	sessionID := s.CurrentSessionID()
 	body := bridgeMessageRequest{
-		SessionKey: sessionID,
-		SessionID:  sessionID,
-		Text:       prompt,
-		Images:     convertImageAttachments(images),
-		Files:      convertFileAttachments(files),
+		Source:      s.Source(),
+		Text:        prompt,
+		Attachments: convertAttachments(images, files),
 	}
 
 	var payload bytes.Buffer
@@ -109,7 +114,7 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 		if detail == "" {
 			detail = resp.Status
 		}
-		return fmt.Errorf("moltybot: bridge returned HTTP %d: %s", resp.StatusCode, detail)
+		return s.emitError(fmt.Errorf("moltybot: bridge returned HTTP %d: %s", resp.StatusCode, detail))
 	}
 
 	var result bridgeMessageResponse
@@ -121,7 +126,7 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 		if detail == "" {
 			detail = "unknown bridge error"
 		}
-		return fmt.Errorf("moltybot: bridge rejected message: %s", detail)
+		return s.emitError(fmt.Errorf("moltybot: bridge rejected message: %s", detail))
 	}
 
 	if result.SessionKey != "" {
@@ -152,6 +157,12 @@ func (s *session) CurrentSessionID() string {
 	return s.sessionID
 }
 
+func (s *session) Source() bridgeSource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.source
+}
+
 func (s *session) Alive() bool { return s.alive.Load() }
 
 func (s *session) Close() error {
@@ -169,6 +180,17 @@ func (s *session) emit(ev core.Event) {
 	case s.events <- ev:
 	case <-s.ctx.Done():
 	}
+}
+
+func (s *session) emitError(err error) error {
+	s.emit(core.Event{
+		Type:      core.EventError,
+		Content:   err.Error(),
+		SessionID: s.CurrentSessionID(),
+		Done:      true,
+		Error:     err,
+	})
+	return err
 }
 
 func bridgeSessionKey(sessionMode, sessionID string) string {
@@ -191,31 +213,46 @@ func bridgeSessionKey(sessionMode, sessionID string) string {
 	return "remote:" + platform + ":" + user
 }
 
-func convertImageAttachments(images []core.ImageAttachment) []bridgeAttachment {
-	if len(images) == 0 {
-		return nil
+func bridgeSourceFromSessionID(sessionID string) bridgeSource {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return bridgeSource{}
 	}
-	out := make([]bridgeAttachment, 0, len(images))
-	for _, image := range images {
-		out = append(out, bridgeAttachment{
-			MimeType: image.MimeType,
-			FileName: image.FileName,
-			Data:     image.Data,
-		})
+	if strings.HasPrefix(sessionID, "remote:") {
+		parts := strings.SplitN(sessionID, ":", 3)
+		if len(parts) == 3 {
+			return bridgeSource{Platform: parts[1], PlatformUserID: parts[2]}
+		}
 	}
-	return out
+	parts := strings.Split(sessionID, ":")
+	if len(parts) == 1 {
+		return bridgeSource{Platform: parts[0], PlatformUserID: parts[0]}
+	}
+	return bridgeSource{
+		Platform:       parts[0],
+		PlatformUserID: parts[len(parts)-1],
+	}
 }
 
-func convertFileAttachments(files []core.FileAttachment) []bridgeAttachment {
-	if len(files) == 0 {
+func convertAttachments(images []core.ImageAttachment, files []core.FileAttachment) []bridgeAttachment {
+	if len(images) == 0 && len(files) == 0 {
 		return nil
 	}
-	out := make([]bridgeAttachment, 0, len(files))
+	out := make([]bridgeAttachment, 0, len(images)+len(files))
+	for _, image := range images {
+		out = append(out, bridgeAttachment{
+			Kind:       "image",
+			Name:       image.FileName,
+			MimeType:   image.MimeType,
+			DataBase64: base64.StdEncoding.EncodeToString(image.Data),
+		})
+	}
 	for _, file := range files {
 		out = append(out, bridgeAttachment{
-			MimeType: file.MimeType,
-			FileName: file.FileName,
-			Data:     file.Data,
+			Kind:       "file",
+			Name:       file.FileName,
+			MimeType:   file.MimeType,
+			DataBase64: base64.StdEncoding.EncodeToString(file.Data),
 		})
 	}
 	return out
