@@ -1,6 +1,9 @@
 package codex
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +19,7 @@ func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 	// to be installed on the test runner.
 	opts := map[string]any{
 		"work_dir": t.TempDir(),
-		"cmd": "go",
+		"cmd":      "go",
 		"env": map[string]string{
 			"HTTPS_PROXY": "http://127.0.0.1:10808",
 			"HTTP_PROXY":  "http://127.0.0.1:10808",
@@ -50,7 +53,7 @@ func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 	opts := map[string]any{
 		"work_dir": t.TempDir(),
-		"cmd": "go",
+		"cmd":      "go",
 		"env": map[string]any{
 			"OPENAI_BASE_URL": "https://api.example.com/v1",
 			"CUSTOM_FLAG":     "yes",
@@ -80,7 +83,7 @@ func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 func TestNew_NoEnvOpts(t *testing.T) {
 	opts := map[string]any{
 		"work_dir": t.TempDir(),
-		"cmd": "go",
+		"cmd":      "go",
 	}
 
 	a, err := New(opts)
@@ -119,5 +122,36 @@ func TestNew_ParsesProjectPromptsFromOpts(t *testing.T) {
 	}
 	if agent.appendPrompt != "Always use linear-bug-intake." {
 		t.Fatalf("appendPrompt = %q", agent.appendPrompt)
+	}
+}
+
+func TestSyncArchiveFirstAGENTSMD_ConsumesRehydrationDigest(t *testing.T) {
+	workDir := t.TempDir()
+	personasDir := t.TempDir()
+	preambleDir := filepath.Join(personasDir, "_preamble")
+	if err := os.MkdirAll(preambleDir, 0o755); err != nil {
+		t.Fatalf("mkdir preamble dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(preambleDir, "archive-first.write.md"), []byte("ARCHIVE FIRST"), 0o644); err != nil {
+		t.Fatalf("write preamble: %v", err)
+	}
+	digest := strings.Repeat("REHYDRATION_DIGEST ", 2000)
+
+	syncArchiveFirstAGENTSMD(workDir, []string{
+		"CC_PERSONAS_DIR=" + personasDir,
+		"CC_PERSONA_CLASS=write",
+		"CC_REHYDRATION_DIGEST=" + digest,
+	})
+
+	data, err := os.ReadFile(filepath.Join(workDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "ARCHIVE FIRST") {
+		t.Fatal("expected AGENTS.md to contain archive-first preamble")
+	}
+	if !strings.Contains(content, digest) {
+		t.Fatal("expected AGENTS.md to contain rehydration digest")
 	}
 }

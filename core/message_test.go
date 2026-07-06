@@ -48,6 +48,28 @@ func TestUnauthorizedAccessMessage(t *testing.T) {
 	}
 }
 
+func TestRemoveEnvKeys(t *testing.T) {
+	env := []string{"A=1", "CC_REHYDRATION_DIGEST=large", "B=2"}
+	got := RemoveEnvKeys(env, "CC_REHYDRATION_DIGEST")
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, "CC_REHYDRATION_DIGEST=") {
+		t.Fatalf("RemoveEnvKeys kept digest env: %v", got)
+	}
+	if !strings.Contains(joined, "A=1") || !strings.Contains(joined, "B=2") {
+		t.Fatalf("RemoveEnvKeys removed unrelated env: %v", got)
+	}
+}
+
+func TestStderrPreview(t *testing.T) {
+	got := StderrPreview(" first line\r\nsecond\tline ", 18)
+	if got != "first line seco..." {
+		t.Fatalf("StderrPreview = %q, want bounded single-line preview", got)
+	}
+	if got := StderrPreview("short", 500); got != "short" {
+		t.Fatalf("StderrPreview short = %q, want short", got)
+	}
+}
+
 // TestSaveFilesToDisk_RejectsPathTraversal is a regression test for a real
 // path-traversal vulnerability in SaveFilesToDisk: the attachment FileName
 // (which comes from user-controlled IM/HTTP upload metadata) was passed

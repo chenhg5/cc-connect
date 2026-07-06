@@ -323,8 +323,9 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	if rehydrationDigest != "" {
 		basePrompt += "\n\n" + rehydrationDigest + "\n"
 	}
+	extraEnv = core.RemoveEnvKeys(extraEnv, "CC_REHYDRATION_DIGEST")
 	if appended := buildAppendSystemPrompt(basePrompt, platformPrompt, appendSystemPrompt); appended != "" {
-		if platformPrompt == "" && appendSystemPrompt == "" && personaContent == "" {
+		if platformPrompt == "" && appendSystemPrompt == "" && personaContent == "" && rehydrationDigest == "" {
 			path, err := ensureSharedSystemPromptFile(ccDataDir, appended)
 			if err != nil {
 				cancel()
@@ -576,7 +577,8 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 			stderrMsg = strings.TrimSpace(stderrBuf.String())
 		}
 		if stderrMsg != "" {
-			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			stderrPreview := core.StderrPreview(stderrMsg, 500)
+			slog.Error("claudeSession: process failed", "error", err, "stderr_preview", stderrPreview)
 			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 			select {
 			case cs.events <- evt:

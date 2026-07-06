@@ -177,7 +177,7 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 		"session_id": "test-session",
 		"usage": map[string]any{
 			"input_tokens":                float64(130),
-			"output_tokens":               float64(648),       // real turn total
+			"output_tokens":               float64(648), // real turn total
 			"cache_creation_input_tokens": float64(2_000),
 			"cache_read_input_tokens":     float64(8_000_000), // summed, would inflate ctx
 		},
@@ -608,10 +608,10 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
 				"message": map[string]any{
 					"content": []any{
 						map[string]any{
-							"type":          "tool_result",
-							"tool_use_id":   "toolu_abc",
-							"is_error":      false,
-							"content":       "command output here",
+							"type":        "tool_result",
+							"tool_use_id": "toolu_abc",
+							"is_error":    false,
+							"content":     "command output here",
 						},
 					},
 				},
@@ -819,6 +819,65 @@ func TestClaudeSession_LoadsPersona(t *testing.T) {
 	}
 	if !strings.Contains(content, "platform-prompt") {
 		t.Errorf("expected prompt file to contain platform-prompt, got:\n%s", content)
+	}
+}
+
+func TestClaudeSession_RehydrationDigestDoesNotLeakToChildEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	digest := strings.Repeat("REHYDRATION_DIGEST ", 2000)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	helperCmd := helperCommand(ctx, "stdin-eof-exit")
+	s, err := newClaudeSession(
+		ctx,
+		tmpDir,
+		helperCmd.Path,
+		helperCmd.Args[1:],
+		"",
+		"mock-model",
+		"",
+		"",
+		"auto",
+		"",
+		"",
+		nil,
+		nil,
+		nil,
+		[]string{"CC_REHYDRATION_DIGEST=" + digest},
+		"",
+		true,
+		core.SpawnOptions{},
+		0,
+		tmpDir,
+	)
+	if err != nil {
+		t.Fatalf("newClaudeSession failed: %v", err)
+	}
+	defer s.Close()
+
+	var promptFilePath string
+	for i, arg := range s.cmd.Args {
+		if arg == "--append-system-prompt-file" && i+1 < len(s.cmd.Args) {
+			promptFilePath = s.cmd.Args[i+1]
+			break
+		}
+	}
+	if promptFilePath == "" {
+		t.Fatalf("expected --append-system-prompt-file argument in command line, args: %v", s.cmd.Args)
+	}
+	data, err := os.ReadFile(promptFilePath)
+	if err != nil {
+		t.Fatalf("failed to read prompt file %s: %v", promptFilePath, err)
+	}
+	if !strings.Contains(string(data), digest) {
+		t.Fatal("expected prompt file to contain rehydration digest")
+	}
+	for _, kv := range s.cmd.Env {
+		if strings.HasPrefix(kv, "CC_REHYDRATION_DIGEST=") {
+			t.Fatalf("child env leaked CC_REHYDRATION_DIGEST of length %d", len(kv))
+		}
 	}
 }
 

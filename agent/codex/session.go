@@ -303,7 +303,8 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
-				slog.Error("codexSession: process failed", "error", err, "stderr", stderrMsg)
+				stderrPreview := core.StderrPreview(stderrMsg, 500)
+				slog.Error("codexSession: process failed", "error", err, "stderr_preview", stderrPreview)
 				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 				select {
 				case cs.events <- evt:

@@ -273,7 +273,8 @@ func (cs *copilotSession) readLoop(stderrBuf *bytes.Buffer) {
 		if err := cs.cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
-				slog.Error("copilotSession: process failed", "error", err, "stderr", stderrMsg)
+				stderrPreview := core.StderrPreview(stderrMsg, 500)
+				slog.Error("copilotSession: process failed", "error", err, "stderr_preview", stderrPreview)
 				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 				select {
 				case cs.events <- evt:

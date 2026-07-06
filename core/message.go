@@ -34,6 +34,46 @@ func MergeEnv(base, extra []string) []string {
 	return append(merged, extra...)
 }
 
+// RemoveEnvKeys returns env without entries whose key is in keys.
+func RemoveEnvKeys(env []string, keys ...string) []string {
+	if len(env) == 0 || len(keys) == 0 {
+		return env
+	}
+	remove := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		remove[key] = struct{}{}
+	}
+	out := env[:0]
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if !ok {
+			out = append(out, e)
+			continue
+		}
+		if _, drop := remove[k]; drop {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// StderrPreview returns a single-line bounded stderr excerpt for process logs.
+func StderrPreview(stderr string, limit int) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" || limit <= 0 {
+		return ""
+	}
+	stderr = strings.Join(strings.Fields(stderr), " ")
+	if len(stderr) <= limit {
+		return stderr
+	}
+	if limit <= 3 {
+		return stderr[:limit]
+	}
+	return stderr[:limit-3] + "..."
+}
+
 // CheckAllowFrom logs a security warning at startup when allow_from is not
 // configured (defaults to permit-all). Platforms should call this during init.
 func CheckAllowFrom(platform, allowFrom string) {
