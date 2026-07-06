@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -49,7 +50,7 @@ type Platform struct {
 	writeCh    chan any
 	dedup      core.MessageDedup
 	stopOnce   sync.Once
-	stopped    bool
+	stopped    atomic.Bool
 }
 
 // replyContext holds the context needed to reply to a specific message.
@@ -286,7 +287,7 @@ func (p *Platform) saveAttachment(name string, data []byte) (string, error) {
 // Stop gracefully shuts down the platform.
 func (p *Platform) Stop() error {
 	p.stopOnce.Do(func() {
-		p.stopped = true
+		p.stopped.Store(true)
 		if p.cancel != nil {
 			p.cancel()
 		}
@@ -303,7 +304,7 @@ func (p *Platform) Stop() error {
 func (p *Platform) connectLoop(ctx context.Context) {
 	attempt := 0
 	for {
-		if p.stopped {
+		if p.stopped.Load() {
 			return
 		}
 
@@ -444,7 +445,7 @@ func (p *Platform) heartbeatLoop(ctx context.Context) {
 // readLoop processes incoming WebSocket messages.
 func (p *Platform) readLoop(conn *websocket.Conn, ctx context.Context) error {
 	for {
-		if p.stopped {
+		if p.stopped.Load() {
 			return nil
 		}
 
@@ -665,7 +666,7 @@ func (p *Platform) writeJSON(event string, data any) error {
 // writeLoop serializes all WebSocket writes.
 func (p *Platform) writeLoop(conn *websocket.Conn) {
 	for msg := range p.writeCh {
-		if p.stopped {
+		if p.stopped.Load() {
 			return
 		}
 		// msg is already JSON-encoded bytes from writeJSON
