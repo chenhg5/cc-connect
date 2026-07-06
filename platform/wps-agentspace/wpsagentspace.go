@@ -690,7 +690,6 @@ const (
 var (
 	loginURLAPI  = "https://agentspace.wps.cn/v7/devhub/users/login_url"
 	userTokenAPI = "https://agentspace.wps.cn/v7/devhub/users/user_token"
-	userInfoAPI  = "https://agentspace.wps.cn/v7/devhub/users/current"
 
 	// pollInterval controls how often autoLogin polls for the user token.
 	pollInterval = 3 * time.Second

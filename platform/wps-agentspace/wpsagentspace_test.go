@@ -191,7 +191,7 @@ func TestStart_DecryptsEncryptedToken(t *testing.T) {
 	if err := p.Start(func(core.Platform, *core.Message) {}); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
-	defer p.Stop()
+	defer func() { _ = p.Stop() }()
 
 	if p.wpsSid != raw {
 		t.Errorf("Start() did not decrypt wps_sid: got %q, want %q", p.wpsSid, raw)
@@ -326,7 +326,7 @@ func TestAutoLogin_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/login_url":
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]string{
 					"code":   "code-123",
 					"url":    "http://example.com/login",
@@ -334,7 +334,7 @@ func TestAutoLogin_Success(t *testing.T) {
 				},
 			})
 		case "/user_token":
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]string{
 					"token": expectedToken,
 				},
