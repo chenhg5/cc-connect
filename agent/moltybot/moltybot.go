@@ -39,9 +39,9 @@ type Agent struct {
 //
 // Required option:
 //   - base_url: local MoltyBot bridge base URL, for example http://127.0.0.1:48999
+//   - token: bearer token sent to the bridge
 //
 // Optional options:
-//   - token: bearer token sent to the bridge
 //   - session_mode: per_remote_user (default) or passthrough
 func New(opts map[string]any) (core.Agent, error) {
 	baseURL, _ := opts["base_url"].(string)
@@ -58,6 +58,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	token, _ := opts["token"].(string)
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("moltybot: token is required")
+	}
 	sessionMode, err := parseSessionMode(opts["session_mode"])
 	if err != nil {
 		return nil, err
@@ -71,7 +75,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	)
 	return &Agent{
 		baseURL:     baseURL,
-		token:       strings.TrimSpace(token),
+		token:       token,
 		sessionMode: sessionMode,
 		client: &http.Client{
 			Timeout: defaultBridgeRequestTimeout,
