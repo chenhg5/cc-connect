@@ -485,6 +485,10 @@ type Engine struct {
 	dispatchConfig         DispatchConfig
 	dispatchStore          *dispatchStore
 	dispatchWatcherStarted bool
+
+	notifyConfig         NotifyConfig
+	notifyStore          *notifyStore
+	notifyWatcherStarted bool
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.

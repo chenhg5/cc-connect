@@ -556,6 +556,46 @@ func main() {
 				PollInterval:        time.Duration(pollSecs) * time.Second,
 			})
 		}
+		if enabled, _ := proj.Agent.Options["notify_enabled"].(bool); enabled {
+			indexPath, _ := proj.Agent.Options["notify_index_path"].(string)
+			sessionKey, _ := proj.Agent.Options["notify_session_key"].(string)
+			if strings.TrimSpace(sessionKey) == "" {
+				sessionKey, _ = proj.Agent.Options["dispatch_session_key"].(string)
+			}
+			platform, _ := proj.Agent.Options["notify_platform"].(string)
+			telegramEnabled := true
+			if v, ok := proj.Agent.Options["notify_telegram_enabled"].(bool); ok {
+				telegramEnabled = v
+			}
+			toastEnabled := true
+			if v, ok := proj.Agent.Options["notify_toast_enabled"].(bool); ok {
+				toastEnabled = v
+			}
+			pollSecs := 10
+			switch v := proj.Agent.Options["notify_poll_secs"].(type) {
+			case int:
+				if v > 0 {
+					pollSecs = v
+				}
+			case int64:
+				if v > 0 {
+					pollSecs = int(v)
+				}
+			case float64:
+				if v > 0 {
+					pollSecs = int(v)
+				}
+			}
+			engine.SetNotifyConfig(core.NotifyConfig{
+				Enabled:         true,
+				IndexPath:       indexPath,
+				SessionKey:      sessionKey,
+				Platform:        platform,
+				TelegramEnabled: telegramEnabled,
+				ToastEnabled:    toastEnabled,
+				PollInterval:    time.Duration(pollSecs) * time.Second,
+			})
+		}
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" || proj.WorkspacePattern != "" {
