@@ -254,3 +254,22 @@ func (a *dummyAgentWithWorkDir) Name() string {
 func (a *dummyAgentWithWorkDir) GetWorkDir() string {
 	return a.workDir
 }
+
+func TestWorkspacePattern_DispatchBranchIsolation(t *testing.T) {
+	root := t.TempDir()
+	e := NewEngine("dev-pro", &stubAgent{}, nil, filepath.Join(root, "sessions.json"), LangEnglish)
+	e.SetDataDir(root)
+	e.SetWorkspacePattern(filepath.Join(root, "worktrees", "letter-{{LETTER_ID}}"))
+
+	// By default, dispatchBranchIsolation is true, so it returns "letter/L-XXXX"
+	wantLetter := filepath.Join(root, "worktrees", "letter-L-0158")
+	if got := e.branchNameForWorkspace(wantLetter); got != "letter/L-0158" {
+		t.Fatalf("default branchNameForWorkspace() = %q, want %q", got, "letter/L-0158")
+	}
+
+	// When set to false, it should return "main"
+	e.SetDispatchBranchIsolation(false)
+	if got := e.branchNameForWorkspace(wantLetter); got != "main" {
+		t.Fatalf("dispatchBranchIsolation=false branchNameForWorkspace() = %q, want %q", got, "main")
+	}
+}

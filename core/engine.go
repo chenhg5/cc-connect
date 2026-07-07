@@ -428,6 +428,7 @@ type Engine struct {
 	multiWorkspace               bool
 	workspacePattern             string
 	dispatchTopicIsolation       bool
+	dispatchBranchIsolation      bool
 	baseDir                      string
 	skipGit                      bool
 	workspaceInitAllowLocalPaths bool
@@ -762,6 +763,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		shell:                 defaultShell(),
 		shellFlag:             defaultShellFlag(),
 		pendingRestartTimeout: defaultPendingRestartTimeout,
+		dispatchBranchIsolation: true,
 	}
 
 	if ag != nil {
@@ -826,6 +828,12 @@ func (e *Engine) SetDispatchTopicIsolation(enabled bool) {
 		}
 		e.interactiveMu.Unlock()
 	}
+}
+
+// SetDispatchBranchIsolation controls whether worktrees use branch isolation (letter/L-XXXX)
+// or check out directly onto main branch (detached HEAD).
+func (e *Engine) SetDispatchBranchIsolation(enabled bool) {
+	e.dispatchBranchIsolation = enabled
 }
 
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
@@ -4109,7 +4117,18 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 					remoteBranchExists := checkRemoteCmd.Run() == nil
 
 					var gitArgs []string
-					if branchExists {
+					if !e.dispatchBranchIsolation {
+						// Pre-flight sync: Pull origin main into baseRepo before creating detached worktree.
+						slog.Info("pre-flight sync: pulling origin main in base repo", "base_repo", baseRepo)
+						pullCmd := exec.Command("git", "-C", baseRepo, "pull", "origin", "main")
+						if output, err := pullCmd.CombinedOutput(); err != nil {
+							slog.Warn("pre-flight sync: failed to pull origin main", "base_repo", baseRepo, "error", err, "output", string(output))
+						} else {
+							slog.Info("pre-flight sync: base repo main successfully pulled")
+						}
+						// Create a detached worktree pointing to main
+						gitArgs = []string{"-C", baseRepo, "worktree", "add", "--detach", workspace, "main"}
+					} else if branchExists {
 						// Use existing branch
 						gitArgs = []string{"-C", baseRepo, "worktree", "add", workspace, branchName}
 					} else if remoteBranchExists {
@@ -16981,6 +17000,9 @@ func (e *Engine) resolveWorkspacePattern(threadID string, messageHint string) st
 }
 
 func (e *Engine) branchNameForWorkspace(workspace string) string {
+	if !e.dispatchBranchIsolation {
+		return "main"
+	}
 	if strings.Contains(e.workspacePattern, "{{LETTER_ID}}") {
 		letterID := extractLetterIDFromPath(e.workspacePattern, workspace)
 		if letterID != "" {
@@ -17834,37 +17856,70 @@ func (e *Engine) cmdPrune(p Platform, msg *Message, args []string) {
 
 	lines := strings.Split(string(output), "\n")
 	var currentPath string
+	var currentBranch string
+	var isDetached bool
 	var pruned []string
 	var failed []string
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch refs/heads/") && currentPath != "" {
-			branch := strings.TrimPrefix(line, "branch refs/heads/")
-			threadID := extractThreadIDFromPath(e.workspacePattern, currentPath)
-			letterID := extractLetterIDFromPath(e.workspacePattern, currentPath)
-			shouldPrune := false
-			if threadID != "" && isThreadWorktreeBranch(branch) {
+	processCurrent := func() {
+		if currentPath == "" {
+			return
+		}
+		threadID := extractThreadIDFromPath(e.workspacePattern, currentPath)
+		letterID := extractLetterIDFromPath(e.workspacePattern, currentPath)
+		shouldPrune := false
+
+		if !e.dispatchBranchIsolation || isDetached {
+			// For detached worktrees or when branch isolation is disabled,
+			// we prune solely based on active letters / active threads.
+			if letterID != "" {
+				shouldPrune = !activeLetters[letterID]
+			} else if threadID != "" {
 				shouldPrune = !activeThreads[threadID]
-			} else if letterID != "" && branch == "letter/"+letterID {
+			}
+		} else {
+			// Legacy/default behavior matching branch name
+			if threadID != "" && isThreadWorktreeBranch(currentBranch) {
+				shouldPrune = !activeThreads[threadID]
+			} else if letterID != "" && currentBranch == "letter/"+letterID {
 				shouldPrune = !activeLetters[letterID]
 			}
-			if shouldPrune {
-				// Prune! Only delete the worktree, KEEP the branch.
-				rmCmd := exec.Command("git", "-C", baseRepo, "worktree", "remove", currentPath)
-				if rmOut, rmErr := rmCmd.CombinedOutput(); rmErr != nil {
-					slog.Error("prune: failed to remove worktree", "path", currentPath, "error", rmErr, "output", string(rmOut))
-					failed = append(failed, fmt.Sprintf("%s (%v)", currentPath, rmErr))
-				} else {
-					slog.Info("prune: successfully removed worktree", "path", currentPath)
-					pruned = append(pruned, currentPath)
-				}
+		}
+
+		if shouldPrune {
+			// Prune! Only delete the worktree, KEEP the branch.
+			rmCmd := exec.Command("git", "-C", baseRepo, "worktree", "remove", currentPath)
+			if rmOut, rmErr := rmCmd.CombinedOutput(); rmErr != nil {
+				slog.Error("prune: failed to remove worktree", "path", currentPath, "error", rmErr, "output", string(rmOut))
+				failed = append(failed, fmt.Sprintf("%s (%v)", currentPath, rmErr))
+			} else {
+				slog.Info("prune: successfully removed worktree", "path", currentPath)
+				pruned = append(pruned, currentPath)
 			}
-			currentPath = ""
 		}
 	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			processCurrent()
+			currentPath = ""
+			currentBranch = ""
+			isDetached = false
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			processCurrent()
+			currentPath = strings.TrimPrefix(line, "worktree ")
+			currentBranch = ""
+			isDetached = false
+		} else if strings.HasPrefix(line, "branch refs/heads/") {
+			currentBranch = strings.TrimPrefix(line, "branch refs/heads/")
+		} else if line == "detached" {
+			isDetached = true
+		}
+	}
+	processCurrent()
 
 	var response strings.Builder
 	if len(pruned) > 0 {

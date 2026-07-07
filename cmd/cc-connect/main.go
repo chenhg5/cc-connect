@@ -506,6 +506,11 @@ func main() {
 		if proj.DispatchTopicIsolation {
 			engine.SetDispatchTopicIsolation(true)
 		}
+		dispatchBranchIsolation := true
+		if proj.DispatchBranchIsolation != nil {
+			dispatchBranchIsolation = *proj.DispatchBranchIsolation
+		}
+		engine.SetDispatchBranchIsolation(dispatchBranchIsolation)
 		if hf, ok := proj.Agent.Options["handoff_file"].(string); ok && hf != "" {
 			engine.SetHandoffFile(hf)
 		}
