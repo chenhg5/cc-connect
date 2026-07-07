@@ -545,6 +545,13 @@ type ProjectConfig struct {
 	DisabledCommands       []string     `toml:"disabled_commands,omitempty"`        // commands to disable for this project (e.g. ["restart", "upgrade"])
 	WorkspacePattern       string       `toml:"workspace_pattern,omitempty"`        // template pattern for thread-scoped worktrees (e.g. "F:\\nexus\\worktrees\\task-${THREAD_ID}")
 	DispatchTopicIsolation bool         `toml:"dispatch_topic_isolation,omitempty"` // create a dispatch Topic/session without enabling git worktree routing
+	// GeneralMentionStateless forces a fresh agent session (no --resume) at the
+	// start of every General-topic (threadID==0) @-mention turn for this
+	// project. Intended for advisory seats whose General @-mentions are
+	// meant to be one-off "hallway" questions with no memory carried across
+	// unrelated turns (L-0334/L-0337). Does not affect DISPATCH-created Topic
+	// sessions or workspace_pattern routing.
+	GeneralMentionStateless bool         `toml:"general_mention_stateless,omitempty"`
 	DispatchBranchIsolation *bool        `toml:"dispatch_branch_isolation,omitempty"` // if false, use main branch (detached) instead of letter/L-XXXX
 	AdminFrom              string       `toml:"admin_from,omitempty"`               // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users                  *UsersConfig `toml:"users,omitempty"`                    // per-user role config; nil = legacy behavior
