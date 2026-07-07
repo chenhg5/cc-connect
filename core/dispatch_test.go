@@ -234,3 +234,96 @@ Type: QUERY
 		t.Errorf("unexpected expectation: %+v", exp)
 	}
 }
+
+type orderingTestAgent struct {
+	stubAgent
+}
+
+func (a *orderingTestAgent) Name() string {
+	return "ordering-test-agent"
+}
+
+func TestExecuteDispatch_LedgerOrdering(t *testing.T) {
+	root := t.TempDir()
+	threadDir := filepath.Join(root, "threads", "topology-reframe")
+	if err := os.MkdirAll(threadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	queryPath := filepath.Join(threadDir, "L-0275.query.md")
+	query := `---
+ID: L-0275
+Thread: topology-reframe
+Type: QUERY
+---
+
+## Query
+`
+	if err := os.WriteFile(queryPath, []byte(query), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	workDirChan := make(chan string, 1)
+	RegisterAgent("ordering-test-agent", func(opts map[string]any) (Agent, error) {
+		if wd, ok := opts["work_dir"].(string); ok {
+			workDirChan <- wd
+		}
+		return &orderingTestAgent{}, nil
+	})
+
+	p := &mockTaskTopicPlatform{
+		stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}},
+		createTaskTopicFunc: func(ctx context.Context, dashboardSessionKey, title, content string) (*TaskTopic, error) {
+			return &TaskTopic{
+				SessionKey: "telegram:-1003917051393:1234:7664413698",
+				ReplyCtx:   "mock-reply-ctx",
+				ThreadID:   "1234",
+				Name:       "letter-L-0275",
+			}, nil
+		},
+		reconstructFunc: func(sessionKey string) (any, error) {
+			return "reconstructed-ctx", nil
+		},
+	}
+
+	ta := &orderingTestAgent{}
+	targetEngine := NewEngine("dev-pro", ta, []Platform{p}, "", LangEnglish)
+	targetEngine.SetMultiWorkspace(root, filepath.Join(root, "bindings.json"))
+	targetEngine.SetWorkspacePattern(filepath.Join(root, "worktrees", "letter-{{LETTER_ID}}"))
+	targetEngine.dataDir = root
+
+	sourceEngine := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sourceEngine.dataDir = root
+	sourceEngine.relayManager = NewRelayManager(root)
+	sourceEngine.relayManager.RegisterEngine("dev-pro", targetEngine)
+	sourceEngine.relayManager.RegisterEngine("secretary-seat", sourceEngine)
+
+	sourceEngine.configureDispatch(DispatchConfig{
+		Enabled:             true,
+		SourceProject:       "secretary-seat",
+		DashboardSessionKey: "telegram:-1003917051393:7664413698",
+		PollInterval:        1 * time.Second,
+	})
+
+	req := dispatchRequest{
+		To:     "dev-pro",
+		Letter: "L-0275",
+		Thread: "topology-reframe",
+		Path:   queryPath,
+	}
+
+	_, err := sourceEngine.executeDispatch(p, "telegram:-1003917051393:7664413698", req)
+	if err != nil {
+		t.Fatalf("executeDispatch failed: %v", err)
+	}
+
+	select {
+	case gotWorkDir := <-workDirChan:
+		wantWorkDir := filepath.Join(root, "worktrees", "letter-L-0275")
+		if gotWorkDir != wantWorkDir {
+			t.Errorf("expected workspace work_dir %q, got %q (ledger resolution failed/fallback used)", wantWorkDir, gotWorkDir)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for workspace agent creation")
+	}
+}
+

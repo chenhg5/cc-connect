@@ -481,8 +481,11 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 		replyCtx = sessionKey
 	}
 
-	target.dispatchSyntheticMessage(platformName, sessionKey, channelKey, replyCtx, dispatchMessage)
-
+	// Write dispatch ledger BEFORE dispatching the synthetic message so
+	// the target engine's findLetterIDByTopic always finds the mapping
+	// (workspace resolution with {{LETTER_ID}} depends on the ledger being
+	// populated when the async handleMessage goroutine runs). Fixes L-0275
+	// where worktrees were named letter-L-2433 instead of letter-L-0275.
 	exp := DispatchExpectation{
 		Letter:              req.Letter,
 		Thread:              req.Thread,
@@ -503,6 +506,8 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 	if err := e.ensureDispatchStore().upsert(exp); err != nil {
 		return "", fmt.Errorf("write dispatch ledger: %w", err)
 	}
+
+	target.dispatchSyntheticMessage(platformName, sessionKey, channelKey, replyCtx, dispatchMessage)
 
 	if topicID != "" {
 		return fmt.Sprintf("✅ Dispatched %s to %s in Topic #%s", req.Letter, req.To, topicID), nil
