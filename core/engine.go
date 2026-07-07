@@ -16970,6 +16970,16 @@ func (e *Engine) appendRehydrationEnv(envVars []string, ccSessionKey, workspaceD
 
 func (e *Engine) resolveWorkspacePattern(threadID string, messageHint string) string {
 	if strings.TrimSpace(threadID) == "" {
+		if e.workspacePattern != "" && !strings.Contains(e.workspacePattern, "{{THREAD_ID}}") && strings.Contains(e.workspacePattern, "{{LETTER_ID}}") {
+			if letterID := ExtractLetterIDFromText(messageHint); letterID != "" {
+				return strings.ReplaceAll(e.workspacePattern, "{{LETTER_ID}}", letterID)
+			}
+		}
+		if e.dispatchTopicIsolation {
+			if letterID := ExtractLetterIDFromText(messageHint); letterID != "" {
+				return letterID
+			}
+		}
 		return ""
 	}
 	if e.workspacePattern == "" {

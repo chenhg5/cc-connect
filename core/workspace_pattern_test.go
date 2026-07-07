@@ -273,3 +273,31 @@ func TestWorkspacePattern_DispatchBranchIsolation(t *testing.T) {
 		t.Fatalf("dispatchBranchIsolation=false branchNameForWorkspace() = %q, want %q", got, "main")
 	}
 }
+
+func TestWorkspacePattern_EmptyThreadIDBypass(t *testing.T) {
+	root := t.TempDir()
+	e := NewEngine("dev-swift", &stubAgent{}, nil, filepath.Join(root, "sessions.json"), LangEnglish)
+	e.SetDataDir(root)
+
+	// Scenario 1: pattern doesn't contain {{THREAD_ID}} but contains {{LETTER_ID}}
+	e.SetWorkspacePattern(filepath.Join(root, "worktrees", "letter-{{LETTER_ID}}"))
+	want1 := filepath.Join(root, "worktrees", "letter-L-0319")
+	if got1 := e.resolveWorkspacePattern("", "process L-0319"); got1 != want1 {
+		t.Fatalf("resolveWorkspacePattern with empty threadID (pattern with LETTER_ID) = %q, want %q", got1, want1)
+	}
+
+	// Scenario 2: dispatchTopicIsolation is true (and workspacePattern is empty)
+	e.SetWorkspacePattern("")
+	e.SetDispatchTopicIsolation(true)
+	want2 := "L-0319"
+	if got2 := e.resolveWorkspacePattern("", "process L-0319"); got2 != want2 {
+		t.Fatalf("resolveWorkspacePattern with empty threadID (dispatchTopicIsolation) = %q, want %q", got2, want2)
+	}
+
+	// Scenario 3: default case (returns "")
+	e.SetWorkspacePattern("")
+	e.SetDispatchTopicIsolation(false)
+	if got3 := e.resolveWorkspacePattern("", "process L-0319"); got3 != "" {
+		t.Fatalf("resolveWorkspacePattern with empty threadID (default fallback) = %q, want empty", got3)
+	}
+}
