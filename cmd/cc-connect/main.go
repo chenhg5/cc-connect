@@ -601,7 +601,7 @@ func main() {
 		}
 
 		// Wire multi-workspace mode
-		if proj.Mode == "multi-workspace" || proj.WorkspacePattern != "" {
+		if proj.Mode == "multi-workspace" || proj.WorkspacePattern != "" || proj.DispatchTopicIsolation {
 			baseDir := proj.BaseDir
 			if baseDir == "" && proj.WorkspacePattern != "" {
 				baseDir = filepath.Dir(proj.WorkspacePattern)

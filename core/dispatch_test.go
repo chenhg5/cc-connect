@@ -235,6 +235,18 @@ Type: QUERY
 	}
 }
 
+type topicIsolationTestAgent struct {
+	stubAgent
+}
+
+func (a *topicIsolationTestAgent) Name() string {
+	return "topic-isolation-test-agent"
+}
+
+func (a *topicIsolationTestAgent) GetWorkDir() string {
+	return "/mock/parent/workdir"
+}
+
 func TestExecuteDispatch_TopicIsolationWithoutWorkspacePattern(t *testing.T) {
 	root := t.TempDir()
 	threadDir := filepath.Join(root, "threads", "advisory-seat-isolation")
@@ -259,7 +271,7 @@ Type: QUERY
 		if wd, ok := opts["work_dir"].(string); ok {
 			workDirChan <- wd
 		}
-		return &orderingTestAgent{}, nil
+		return &topicIsolationTestAgent{}, nil
 	})
 
 	createTopicCalls := 0
@@ -279,7 +291,7 @@ Type: QUERY
 		},
 	}
 
-	targetEngine := NewEngine("researcher-seat", &orderingTestAgent{}, []Platform{p}, "", LangEnglish)
+	targetEngine := NewEngine("researcher-seat", &topicIsolationTestAgent{}, []Platform{p}, "", LangEnglish)
 	targetEngine.SetDispatchTopicIsolation(true)
 
 	sourceEngine := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -327,9 +339,11 @@ Type: QUERY
 
 	select {
 	case gotWorkDir := <-workDirChan:
-		t.Fatalf("topic-only isolation should not create a workspace agent, got work_dir %q", gotWorkDir)
-	case <-time.After(200 * time.Millisecond):
-		// Static work_dir path: the original agent/session handles the topic.
+		if gotWorkDir != "/mock/parent/workdir" {
+			t.Errorf("got work_dir %q, want %q", gotWorkDir, "/mock/parent/workdir")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected workspace agent to be created with inherited parent workdir")
 	}
 }
 
