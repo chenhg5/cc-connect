@@ -429,6 +429,7 @@ type Engine struct {
 	workspacePattern             string
 	dispatchTopicIsolation       bool
 	dispatchBranchIsolation      bool
+	generalMentionStateless      bool
 	baseDir                      string
 	skipGit                      bool
 	workspaceInitAllowLocalPaths bool
@@ -834,6 +835,19 @@ func (e *Engine) SetDispatchTopicIsolation(enabled bool) {
 // or check out directly onto main branch (detached HEAD).
 func (e *Engine) SetDispatchBranchIsolation(enabled bool) {
 	e.dispatchBranchIsolation = enabled
+}
+
+// SetGeneralMentionStateless enables forced-fresh sessions for General-topic
+// (threadID==0) @-mention turns. See the generalMentionStateless field doc
+// and maybeAutoResetSessionOnIdle for the reset path.
+func (e *Engine) SetGeneralMentionStateless(enabled bool) {
+	e.generalMentionStateless = enabled
+}
+
+// UsesGeneralMentionStateless reports whether General-topic @-mention turns
+// force a fresh agent session for this project.
+func (e *Engine) UsesGeneralMentionStateless() bool {
+	return e.generalMentionStateless
 }
 
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
@@ -3259,13 +3273,28 @@ sessionLocked:
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
-	if e.resetOnIdle <= 0 || session == nil {
+	if session == nil {
 		return nil
 	}
 
-	hasBackend := session.GetAgentSessionID() != ""
-	hasHistory := len(session.GetHistory(1)) > 0
-	if !hasBackend && !hasHistory {
+	// general_mention_stateless (L-0334/L-0337): a General-topic (threadID==0)
+	// @-mention is treated as a one-off "hallway" question, not a continuing
+	// conversation — force a fresh session on every such turn regardless of
+	// idle time. This is deliberately evaluated as "reset before the next
+	// turn starts" rather than "clear right after the previous reply": doing
+	// it here reuses the same proven reset path as reset_on_idle_mins instead
+	// of threading a success/failure signal out of the ~1400-line
+	// processInteractiveEvents event loop, and it has a useful side effect —
+	// if the previous turn's reply delivery failed, its session is still
+	// intact for a retry, because nothing is cleared until a genuinely new
+	// message actually arrives.
+	if e.generalMentionStateless && msg.WasMentioned && extractThreadIDFromSessionKey(msg.SessionKey) == "" {
+		if rotated := e.resetSessionForTurn(p, msg, sessions, interactiveKey, session, "general mention stateless", false, 0); rotated != nil {
+			return rotated
+		}
+	}
+
+	if e.resetOnIdle <= 0 {
 		return nil
 	}
 
@@ -3281,11 +3310,27 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
-	slog.Info("auto-resetting idle session",
+	return e.resetSessionForTurn(p, msg, sessions, interactiveKey, session, "idle timeout", true, e.resetOnIdle)
+}
+
+// resetSessionForTurn closes any live agent process for interactiveKey and
+// starts a fresh, unbound Session for msg.SessionKey (no --resume ID). It
+// returns nil (no-op) when the session has nothing worth resetting yet.
+// When announce is true, the user is told why (idle timeout); the
+// general_mention_stateless trigger is silent by design — a cold start on
+// every unrelated "hallway" question is the intended behavior, not an error
+// condition worth narrating on every single turn.
+func (e *Engine) resetSessionForTurn(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session, reason string, announce bool, idleThreshold time.Duration) *Session {
+	hasBackend := session.GetAgentSessionID() != ""
+	hasHistory := len(session.GetHistory(1)) > 0
+	if !hasBackend && !hasHistory {
+		return nil
+	}
+
+	slog.Info("auto-resetting session",
 		"session_key", msg.SessionKey,
 		"session_id", session.ID,
-		"idle_for", time.Since(lastActive),
-		"threshold", e.resetOnIdle,
+		"reason", reason,
 	)
 
 	// Check if the old session has an agent process that needs graceful
@@ -3307,11 +3352,13 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 
 	newSession := sessions.NewSession(msg.SessionKey, "")
 	if !newSession.TryLock() {
-		slog.Error("failed to lock new session after idle auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID)
+		slog.Error("failed to lock new session after auto-reset", "session_key", msg.SessionKey, "new_session", newSession.ID, "reason", reason)
 		return nil
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	if announce {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(idleThreshold/time.Minute)))
+	}
 	return newSession
 }
 

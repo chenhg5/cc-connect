@@ -15208,6 +15208,66 @@ func TestMaybeAutoResetSessionOnIdle_NotFiredWhenUserActivityRecent(t *testing.T
 	}
 }
 
+// TestMaybeAutoResetSessionOnIdle_GeneralMentionStateless_ResetsOnGeneralMention
+// is a regression test for L-0334/L-0337: an advisory seat with
+// general_mention_stateless=true must get a fresh session on every General
+// (threadID==0) @-mention, even when the previous turn was seconds ago
+// (i.e. it must NOT depend on reset_on_idle_mins / idle time at all).
+func TestMaybeAutoResetSessionOnIdle_GeneralMentionStateless_ResetsOnGeneralMention(t *testing.T) {
+	e := newTestEngine()
+	e.SetGeneralMentionStateless(true)
+	// resetOnIdle intentionally left at zero to prove this path is independent
+	// of idle-timeout config.
+
+	sm := NewSessionManager(t.TempDir())
+	session := sm.GetOrCreateActive("user:general-sk")
+	session.AddHistory("user", "unrelated question #1")
+	session.SetAgentSessionID("agent-id-general", "claudecode")
+	session.TryLock()
+	session.mu.Lock()
+	session.LastUserActivity = time.Now() // just active — would NOT idle-reset
+	session.mu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	// No thread segment => General topic per buildSessionKey's threadID==0 case.
+	msg := &Message{SessionKey: "telegram:-100123:456", ReplyCtx: "ctx", WasMentioned: true}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:general-sk", session)
+	if rotated == nil {
+		t.Fatal("expected general_mention_stateless to force a fresh session on a General @-mention, but it did not")
+	}
+	if rotated.GetAgentSessionID() != "" {
+		t.Fatalf("expected fresh session to have no resume ID, got %q", rotated.GetAgentSessionID())
+	}
+}
+
+// TestMaybeAutoResetSessionOnIdle_GeneralMentionStateless_NotFiredInDispatchTopic
+// verifies the stateless reset does not fire for a dispatch-created Topic
+// session (sessionKey carries a non-zero threadID) — general_mention_stateless
+// must only affect the General-topic "hallway" path, not Task-isolated Topics.
+func TestMaybeAutoResetSessionOnIdle_GeneralMentionStateless_NotFiredInDispatchTopic(t *testing.T) {
+	e := newTestEngine()
+	e.SetGeneralMentionStateless(true)
+
+	sm := NewSessionManager(t.TempDir())
+	session := sm.GetOrCreateActive("user:topic-sk")
+	session.AddHistory("user", "letter context turn 1")
+	session.SetAgentSessionID("agent-id-topic", "claudecode")
+	session.TryLock()
+	session.mu.Lock()
+	session.LastUserActivity = time.Now()
+	session.mu.Unlock()
+
+	p := &stubPlatformEngine{n: "test"}
+	// Non-zero thread segment => dispatch-created Topic, not General.
+	msg := &Message{SessionKey: "telegram:-100123:789:456", ReplyCtx: "ctx", WasMentioned: true}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:topic-sk", session)
+	if rotated != nil {
+		t.Fatal("expected no reset for a dispatch Topic session, but general_mention_stateless fired anyway")
+	}
+}
+
 // TestHandlePendingPermission_StalePermissionCallback_Dropped verifies that
 // permission-callback messages synthesized by inline-button / card-action paths
 // (Telegram callback_query, Feishu card_action, QQBot interaction button, and

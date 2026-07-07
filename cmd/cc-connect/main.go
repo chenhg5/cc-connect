@@ -506,6 +506,9 @@ func main() {
 		if proj.DispatchTopicIsolation {
 			engine.SetDispatchTopicIsolation(true)
 		}
+		if proj.GeneralMentionStateless {
+			engine.SetGeneralMentionStateless(true)
+		}
 		dispatchBranchIsolation := true
 		if proj.DispatchBranchIsolation != nil {
 			dispatchBranchIsolation = *proj.DispatchBranchIsolation
