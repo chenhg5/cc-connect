@@ -177,3 +177,80 @@ func TestResolveWorkspacePattern_ManualDispatchUsesMessageHint(t *testing.T) {
 		t.Fatalf("resolveWorkspacePattern(no hint) = %q, want %q", gotFallback, wantFallback)
 	}
 }
+
+func TestWorkspacePatternRouting_DispatchTopicIsolation(t *testing.T) {
+	root := t.TempDir()
+
+	// Create a dummy agent that implements GetWorkDir() string
+	dummyWorkDir := filepath.Join(root, "my_workdir")
+	agent := &dummyAgentWithWorkDir{
+		stubAgent: stubAgent{},
+		workDir:   dummyWorkDir,
+	}
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("reviewer-seat", agent, []Platform{p}, filepath.Join(root, "sessions.json"), LangEnglish)
+	e.SetDataDir(root)
+	e.SetDispatchTopicIsolation(true)
+
+	// Verify that multiWorkspace is enabled and workspacePool is initialized
+	if !e.multiWorkspace {
+		t.Fatalf("expected multiWorkspace to be true")
+	}
+	if e.workspacePool == nil {
+		t.Fatalf("expected workspacePool to be initialized")
+	}
+
+	// We simulate a message in threadID "2793" with content "处理 L-0323"
+	msg := &Message{
+		SessionKey: "telegram:-1003917051393:2793:7664413698",
+		ChannelKey: "-1003917051393:2793",
+		Platform:   "telegram",
+		Content:    "处理 L-0323",
+	}
+
+	// Make sure the agent type is registered in the pool
+	RegisterAgent("reviewer-seat-agent", func(opts map[string]any) (Agent, error) {
+		return agent, nil
+	})
+	// Change dummy name to match
+	agent.name = "reviewer-seat-agent"
+
+	// Resolve the command context
+	wsAgent, wsSessions, interactiveKey, effectiveDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify that the workspace is L-0323 (derived from message hint)
+	if interactiveKey != "L-0323:telegram:-1003917051393:2793:7664413698" {
+		t.Errorf("unexpected interactiveKey: %q", interactiveKey)
+	}
+
+	// The effective directory should NOT be the virtual workspace "L-0323"
+	// but the agent's workdir because "L-0323" is not an absolute path.
+	if effectiveDir != dummyWorkDir {
+		t.Errorf("effectiveDir = %q, want %q", effectiveDir, dummyWorkDir)
+	}
+
+	if wsAgent == nil || wsSessions == nil {
+		t.Fatalf("expected non-nil wsAgent and wsSessions")
+	}
+}
+
+type dummyAgentWithWorkDir struct {
+	stubAgent
+	workDir string
+	name    string
+}
+
+func (a *dummyAgentWithWorkDir) Name() string {
+	if a.name != "" {
+		return a.name
+	}
+	return "dummy-agent-with-workdir"
+}
+
+func (a *dummyAgentWithWorkDir) GetWorkDir() string {
+	return a.workDir
+}

@@ -818,6 +818,14 @@ func (e *Engine) SetWorkspacePattern(pattern string) {
 // enabling workspace_pattern's git worktree routing.
 func (e *Engine) SetDispatchTopicIsolation(enabled bool) {
 	e.dispatchTopicIsolation = enabled
+	if enabled {
+		e.multiWorkspace = true
+		e.interactiveMu.Lock()
+		if e.workspacePool == nil {
+			e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
+		}
+		e.interactiveMu.Unlock()
+	}
 }
 
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
@@ -3010,7 +3018,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		var workspace string
 		var channelName string
 		var err error
-		if e.workspacePattern != "" {
+		if e.workspacePattern != "" || e.dispatchTopicIsolation {
 			threadID := extractThreadID(channelID)
 			workspace = e.resolveWorkspacePattern(threadID, msg.Content)
 		}
@@ -4144,7 +4152,11 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	}
 
 	// workspace-specific overrides always win
-	opts["work_dir"] = workspace
+	if filepath.IsAbs(workspace) {
+		opts["work_dir"] = workspace
+	} else if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+		opts["work_dir"] = wd.GetWorkDir()
+	}
 
 	if e.projectState != nil {
 		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
@@ -4246,7 +4258,13 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 	if err != nil {
 		return nil, nil, "", "", err
 	}
-	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
+	physicalDir := effectiveDir
+	if !filepath.IsAbs(physicalDir) {
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			physicalDir = wd.GetWorkDir()
+		}
+	}
+	return wsAgent, wsSessions, interactiveKey, physicalDir, nil
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
@@ -16931,13 +16949,21 @@ func (e *Engine) appendRehydrationEnv(envVars []string, ccSessionKey, workspaceD
 	return envVars
 }
 
-// resolveWorkspacePattern resolves a workspace_pattern template using the
-// Telegram threadID and an optional messageHint (the user's message text).
-// When the dispatch ledger has no topic→letter mapping (manual dispatch),
-// the hint lets us extract the letter ID from the message content (e.g.
-// "处理 L-0313") instead of fabricating L-<topicID>. Fixes L-0320.
 func (e *Engine) resolveWorkspacePattern(threadID string, messageHint string) string {
-	if e.workspacePattern == "" || strings.TrimSpace(threadID) == "" {
+	if strings.TrimSpace(threadID) == "" {
+		return ""
+	}
+	if e.workspacePattern == "" {
+		if e.dispatchTopicIsolation {
+			letterID := e.findLetterIDByTopic(threadID)
+			if letterID == "" && messageHint != "" {
+				letterID = ExtractLetterIDFromText(messageHint)
+			}
+			if letterID == "" {
+				letterID = "L-" + threadID
+			}
+			return letterID
+		}
 		return ""
 	}
 	workspace := strings.ReplaceAll(e.workspacePattern, "{{THREAD_ID}}", threadID)
@@ -16974,7 +17000,7 @@ func (e *Engine) branchNameForWorkspace(workspace string) string {
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
-	if e.workspacePattern != "" {
+	if e.workspacePattern != "" || e.dispatchTopicIsolation {
 		channelID := effectiveChannelID(msg)
 		threadID := extractThreadID(channelID)
 		if threadID != "" {
