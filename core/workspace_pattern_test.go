@@ -29,7 +29,7 @@ func TestWorkspacePatternResolvesLetterIDFromDispatchLedger(t *testing.T) {
 	}
 
 	want := filepath.Join(root, "worktrees", "letter-L-0158")
-	if got := e.resolveWorkspacePattern("1091"); got != want {
+	if got := e.resolveWorkspacePattern("1091", ""); got != want {
 		t.Fatalf("resolveWorkspacePattern() = %q, want %q", got, want)
 	}
 	if got := e.branchNameForWorkspace(want); got != "letter/L-0158" {
@@ -44,7 +44,7 @@ func TestWorkspacePatternLetterFallbackUsesTaskBranch(t *testing.T) {
 	e.SetWorkspacePattern(filepath.Join(root, "worktrees", "letter-{{LETTER_ID}}"))
 
 	want := filepath.Join(root, "worktrees", "letter-L-2222")
-	if got := e.resolveWorkspacePattern("2222"); got != want {
+	if got := e.resolveWorkspacePattern("2222", ""); got != want {
 		t.Fatalf("resolveWorkspacePattern() = %q, want %q", got, want)
 	}
 	if got := e.branchNameForWorkspace(want); got != "letter/L-2222" {
@@ -147,5 +147,33 @@ func TestIsThreadWorktreeBranch(t *testing.T) {
 		if got := isThreadWorktreeBranch(tc.branch); got != tc.want {
 			t.Fatalf("isThreadWorktreeBranch(%q) = %v, want %v", tc.branch, got, tc.want)
 		}
+	}
+}
+
+// Regression test for L-0320: manual dispatch (no ledger entry) should extract
+// the letter ID from the message content (e.g. "处理 L-0313") instead of
+// fabricating L-<topicID> (e.g. L-2793).
+func TestResolveWorkspacePattern_ManualDispatchUsesMessageHint(t *testing.T) {
+	root := t.TempDir()
+	e := NewEngine("dev-swift", &stubAgent{}, nil, filepath.Join(root, "sessions.json"), LangEnglish)
+	e.SetDataDir(root)
+	e.SetWorkspacePattern(filepath.Join(root, "worktrees", "letter-{{LETTER_ID}}"))
+
+	// No ledger entry — simulates manual dispatch (@bot 处理 L-0313)
+	// with Telegram topic ID 2793.
+	want := filepath.Join(root, "worktrees", "letter-L-0313")
+	got := e.resolveWorkspacePattern("2793", "处理 L-0313")
+	if got != want {
+		t.Fatalf("resolveWorkspacePattern(manual dispatch) = %q, want %q", got, want)
+	}
+	if branch := e.branchNameForWorkspace(want); branch != "letter/L-0313" {
+		t.Fatalf("branchNameForWorkspace() = %q, want %q", branch, "letter/L-0313")
+	}
+
+	// Without message hint, falls back to L-<topicID> (existing behavior)
+	wantFallback := filepath.Join(root, "worktrees", "letter-L-2793")
+	gotFallback := e.resolveWorkspacePattern("2793", "")
+	if gotFallback != wantFallback {
+		t.Fatalf("resolveWorkspacePattern(no hint) = %q, want %q", gotFallback, wantFallback)
 	}
 }

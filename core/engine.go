@@ -3012,7 +3012,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		var err error
 		if e.workspacePattern != "" {
 			threadID := extractThreadID(channelID)
-			workspace = e.resolveWorkspacePattern(threadID)
+			workspace = e.resolveWorkspacePattern(threadID, msg.Content)
 		}
 		if workspace == "" {
 			workspace, channelName, err = e.resolveWorkspace(p, channelID)
@@ -16107,7 +16107,7 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 	// bindings — resolveWorkspace only knows about DB bindings and conventions.
 	if e.workspacePattern != "" {
 		if threadID := extractThreadIDFromSessionKey(sourceSessionKey); threadID != "" {
-			workspace := e.resolveWorkspacePattern(threadID)
+			workspace := e.resolveWorkspacePattern(threadID, "")
 			if workspace == "" {
 				return nil, nil, "", fmt.Errorf("resolve relay workspace from thread %q", threadID)
 			}
@@ -16931,13 +16931,21 @@ func (e *Engine) appendRehydrationEnv(envVars []string, ccSessionKey, workspaceD
 	return envVars
 }
 
-func (e *Engine) resolveWorkspacePattern(threadID string) string {
+// resolveWorkspacePattern resolves a workspace_pattern template using the
+// Telegram threadID and an optional messageHint (the user's message text).
+// When the dispatch ledger has no topic→letter mapping (manual dispatch),
+// the hint lets us extract the letter ID from the message content (e.g.
+// "处理 L-0313") instead of fabricating L-<topicID>. Fixes L-0320.
+func (e *Engine) resolveWorkspacePattern(threadID string, messageHint string) string {
 	if e.workspacePattern == "" || strings.TrimSpace(threadID) == "" {
 		return ""
 	}
 	workspace := strings.ReplaceAll(e.workspacePattern, "{{THREAD_ID}}", threadID)
 	if strings.Contains(workspace, "{{LETTER_ID}}") {
 		letterID := e.findLetterIDByTopic(threadID)
+		if letterID == "" && messageHint != "" {
+			letterID = ExtractLetterIDFromText(messageHint)
+		}
 		if letterID == "" {
 			letterID = "L-" + threadID
 		}
@@ -16970,7 +16978,7 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 		channelID := effectiveChannelID(msg)
 		threadID := extractThreadID(channelID)
 		if threadID != "" {
-			workspace := e.resolveWorkspacePattern(threadID)
+			workspace := e.resolveWorkspacePattern(threadID, msg.Content)
 			agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				return nil, nil, "", "", err
@@ -17011,7 +17019,7 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if e.workspacePattern != "" {
 		threadID := extractThreadIDFromSessionKey(sessionKey)
 		if threadID != "" {
-			workspace := e.resolveWorkspacePattern(threadID)
+			workspace := e.resolveWorkspacePattern(threadID, "")
 			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 				return wsAgent, wsSessions
 			}
