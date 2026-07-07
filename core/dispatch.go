@@ -485,7 +485,7 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 	// the target engine's findLetterIDByTopic always finds the mapping
 	// (workspace resolution with {{LETTER_ID}} depends on the ledger being
 	// populated when the async handleMessage goroutine runs). Fixes L-0275
-	// where worktrees were named letter-L-2433 instead of letter-L-0274.
+	// where worktrees were named letter-L-2433 instead of letter-L-0275.
 	exp := DispatchExpectation{
 		Letter:              req.Letter,
 		Thread:              req.Thread,
