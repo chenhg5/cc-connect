@@ -528,3 +528,66 @@ func TestRehydrationBudgetForPersonaClass(t *testing.T) {
 		t.Fatalf("secretary should keep more open rows than read seats")
 	}
 }
+
+func TestNormalizeLetterID(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Canonical L-XXXX format
+		{"L-0319", "L-0319"},
+		{"L-1000", "L-1000"},
+		{"L-12345", "L-12345"},
+
+		// Variations with casing / formatting
+		{"l-0319", "L-0319"},
+		{"L0319", "L-0319"},
+		{"l0319", "L-0319"},
+
+		// Bare numbers with leading zeros
+		{"0319", "L-0319"},
+		{"0042", "L-0042"},
+
+		// Preceded by keywords
+		{"process 0319", "L-0319"},
+		{"process 1005", "L-1005"},
+		{"letter 0319", "L-0319"},
+		{"letter 1005", "L-1005"},
+		{"id 0319", "L-0319"},
+		{"id 1005", "L-1005"},
+		{"thread 1005", "L-1005"},
+		{"query 1005", "L-1005"},
+		{"result 1005", "L-1005"},
+
+		// Standalone bare numbers (trimmed)
+		{"1005", "L-1005"},
+		{"  1024  ", "L-1024"},
+
+		// Inside paths
+		{`F:\foundry\worktrees\letter-L-0319`, "L-0319"},
+		{`F:\foundry\worktrees\letter-0319`, "L-0319"},
+		{`F:\foundry\worktrees\0319`, "L-0319"},
+
+		// Non-matching inputs (ports, PIDs, other contexts)
+		{"port 8080", ""},
+		{"cc-switch proxy on 15731", ""},
+		{"PID 33884", ""},
+		{"some random text", ""},
+		{"L-12", ""}, // too short
+		{"12", ""},   // too short
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := normalizeLetterID(tc.input)
+			if got != tc.want {
+				t.Errorf("normalizeLetterID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+			gotFromText := ExtractLetterIDFromText(tc.input)
+			if gotFromText != tc.want {
+				t.Errorf("ExtractLetterIDFromText(%q) = %q, want %q", tc.input, gotFromText, tc.want)
+			}
+		})
+	}
+}
+

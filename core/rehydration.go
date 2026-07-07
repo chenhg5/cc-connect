@@ -10,7 +10,12 @@ import (
 	"strings"
 )
 
-var rehydrationLetterRe = regexp.MustCompile(`\bL-\d{4,}\b`)
+var (
+	rehydrationLetterRe = regexp.MustCompile(`(?i)\bL-?(\d{4,})\b`)
+	leadingZeroRe       = regexp.MustCompile(`\b0\d{3,}\b`)
+	keywordLetterRe     = regexp.MustCompile(`(?i)\b(?:process|letter|id|thread|query|result)\s+(\d{4,})\b`)
+	standaloneDigitsRe  = regexp.MustCompile(`^\s*(\d{4,})\s*$`)
+)
 
 // ── RehydrationConfig ────────────────────────────────────────────
 
@@ -553,7 +558,19 @@ func normalizeLetterID(value string) string {
 	if value == "" {
 		return ""
 	}
-	return rehydrationLetterRe.FindString(value)
+	if m := rehydrationLetterRe.FindStringSubmatch(value); len(m) > 1 {
+		return "L-" + m[1]
+	}
+	if m := keywordLetterRe.FindStringSubmatch(value); len(m) > 1 {
+		return "L-" + m[1]
+	}
+	if m := leadingZeroRe.FindString(value); m != "" {
+		return "L-" + m
+	}
+	if m := standaloneDigitsRe.FindStringSubmatch(value); len(m) > 1 {
+		return "L-" + m[1]
+	}
+	return ""
 }
 
 func ExtractLetterIDFromText(text string) string {
