@@ -1261,14 +1261,19 @@ func shellJoinArgs(args []string) string {
 // claudeContextWindow returns the context window size (tokens) that best
 // matches the given Claude model id. Used as a fallback when the stream-json
 // result event does not carry a modelUsage map. The "[1m]" suffix
-// (case-insensitive) signals the 1M-context variants; everything else
-// defaults to the standard 200k window.
+// (case-insensitive) signals the 1M-context variants of 200k-window models
+// (e.g. "sonnet[1m]"). Mythos-class models (Fable/Mythos, Claude 5 family)
+// ship with a native 1M window and no suffix in their model ids; everything
+// else defaults to the standard 200k window.
 func claudeContextWindow(model string) int {
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if lower == "" {
 		return 200_000
 	}
 	if strings.Contains(lower, "[1m]") {
+		return 1_000_000
+	}
+	if strings.Contains(lower, "fable") || strings.Contains(lower, "mythos") {
 		return 1_000_000
 	}
 	return 200_000
