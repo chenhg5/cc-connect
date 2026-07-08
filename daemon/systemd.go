@@ -188,6 +188,14 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	if cfg.EnvPATH != "" {
 		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", cfg.EnvPATH)
 	}
+	// HOME: systemd does not propagate HOME to system units by default.
+	// Without this line, os.UserHomeDir() fails in the daemon and any
+	// subprocess it spawns; config.Load then falls back to a relative
+	// data_dir which agents (cd'd into work_dir) resolve to the wrong
+	// place, e.g. <work_dir>/.cc-connect instead of <HOME>/.cc-connect.
+	if cfg.HomeDir != "" {
+		fmt.Fprintf(&sb, "Environment=\"HOME=%s\"\n", escapeSystemdEnvValue(cfg.HomeDir))
+	}
 	if len(cfg.EnvExtra) > 0 {
 		keys := make([]string, 0, len(cfg.EnvExtra))
 		for key := range cfg.EnvExtra {

@@ -72,6 +72,46 @@ func TestBuildUnit_DropsEmptyValue(t *testing.T) {
 	}
 }
 
+// TestBuildUnit_IncludesHOME regresses the "Append system prompt file not
+// found" bug: systemd does not inherit HOME from the user's shell for
+// system units, so the daemon (and any subprocess it spawns) would fail
+// os.UserHomeDir() and config.Load would fall back to a relative
+// data_dir that resolves against work_dir instead of the user home.
+// The install-time capture of HomeDir is now baked into the unit as an
+// Environment= line to guarantee the daemon sees the correct home.
+func TestBuildUnit_IncludesHOME(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		HomeDir:    "/home/app",
+	}
+	out := mgr.buildUnit(cfg)
+	if !strings.Contains(out, `Environment="HOME=/home/app"`) {
+		t.Fatalf("unit should include HOME=/home/app when HomeDir is set; got:\n%s", out)
+	}
+}
+
+// TestBuildUnit_OmitsHOMEWhenEmpty ensures the unit does not emit an
+// empty HOME= line when the caller could not determine one.
+func TestBuildUnit_OmitsHOMEWhenEmpty(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	out := mgr.buildUnit(cfg)
+	if strings.Contains(out, `Environment="HOME=`) {
+		t.Fatalf("unit should omit HOME= when HomeDir empty; got:\n%s", out)
+	}
+}
+
 // TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
 // path: os.WriteFile would truncate-in-place and KEEP the old 0644
 // permissions of a unit file left over from earlier cc-connect

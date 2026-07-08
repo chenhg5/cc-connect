@@ -583,6 +583,63 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	}
 }
 
+// TestLoad_DataDirAbsoluteWhenExplicitlyRelative regresses the
+// "Append system prompt file not found" bug: even when a user sets
+// data_dir to a relative path in config.toml, Load must anchor it to
+// an absolute path so that agent subprocesses (which cd into
+// project.work_dir before reading system prompt files) do not resolve
+// data_dir against the child's working directory instead of the
+// supervisor's.
+func TestLoad_DataDirAbsoluteWhenExplicitlyRelative(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "data_dir = \"./my-data\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path", cfg.DataDir)
+	}
+	if !strings.HasSuffix(cfg.DataDir, "my-data") {
+		t.Fatalf("Load() data_dir = %q, want suffix my-data", cfg.DataDir)
+	}
+}
+
+// TestLoad_DataDirAbsoluteWhenHOMEEmpty covers the fallback path when
+// os.UserHomeDir fails. This is exercised by service managers like
+// launchd (gui/... bootstrap) and systemd (system units) that do not
+// propagate HOME. Even in that degraded state, Load must still return
+// an absolute data_dir so subprocesses do not silently write to
+// <work_dir>/.cc-connect. Windows uses USERPROFILE, which we cannot
+// reliably clear from a test.
+func TestLoad_DataDirAbsoluteWhenHOMEEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME does not gate os.UserHomeDir on windows")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(baseConfigTOML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("HOME", "")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path even when HOME unset", cfg.DataDir)
+	}
+}
+
 func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
 
 	root := t.TempDir()
