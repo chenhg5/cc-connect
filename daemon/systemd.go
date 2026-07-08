@@ -17,6 +17,16 @@ const (
 	systemdServiceName = ServiceName + ".service"
 )
 
+// systemdTemplateOwnedEnvKeys are keys the unit template renders directly; if
+// they also appear in cfg.EnvExtra the template version wins.
+var systemdTemplateOwnedEnvKeys = map[string]struct{}{
+	"CC_LOG_FILE":        {},
+	"CC_LOG_MAX_SIZE":    {},
+	"CC_LOG_MAX_BACKUPS": {},
+	"PATH":               {},
+	"HOME":               {},
+}
+
 type systemdManager struct {
 	system bool // true = system-level (/etc/systemd/system), false = user-level (~/.config/systemd/user)
 }
@@ -203,6 +213,9 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
+			if _, owned := systemdTemplateOwnedEnvKeys[key]; owned {
+				continue
+			}
 			if !isValidEnvName(key) {
 				slog.Warn("daemon: systemd: dropping invalid env name from EnvExtra",
 					"key", key)

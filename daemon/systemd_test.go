@@ -112,6 +112,26 @@ func TestBuildUnit_OmitsHOMEWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildUnit_EnvExtraHOMEDoesNotOverrideTemplateHOME(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		HomeDir:    "/home/app",
+		EnvExtra:   map[string]string{"HOME": "/should-not-override"},
+	}
+	out := mgr.buildUnit(cfg)
+	if strings.Contains(out, "/should-not-override") {
+		t.Fatalf("EnvExtra HOME leaked past template ownership: %s", out)
+	}
+	if !strings.Contains(out, `Environment="HOME=/home/app"`) {
+		t.Fatalf("expected template HOME /home/app to survive; got:\n%s", out)
+	}
+}
+
 // TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
 // path: os.WriteFile would truncate-in-place and KEEP the old 0644
 // permissions of a unit file left over from earlier cc-connect
