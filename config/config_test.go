@@ -612,6 +612,27 @@ func TestLoad_DataDirAbsoluteWhenExplicitlyRelative(t *testing.T) {
 	}
 }
 
+func TestLoad_DataDirExpandsCurrentUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	body := "data_dir = \"~/.cc-connect\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	want := filepath.Join(home, ".cc-connect")
+	if cfg.DataDir != want {
+		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
+	}
+}
+
 // TestLoad_DataDirAbsoluteWhenHOMEEmpty covers the fallback path when
 // os.UserHomeDir fails. This is exercised by service managers like
 // launchd (gui/... bootstrap) and systemd (system units) that do not

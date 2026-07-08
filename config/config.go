@@ -640,6 +640,7 @@ func load(path string) (*Config, error) {
 			slog.Warn("config: data_dir empty and HOME unset; falling back to relative path. Set data_dir to an absolute path in config.toml, or ensure the service manager injects HOME.")
 		}
 	}
+	cfg.DataDir = expandUserPath(cfg.DataDir)
 	// Always resolve to an absolute path so a data_dir written by the
 	// supervisor is read back at the same location by agent subprocesses
 	// regardless of their working directory. Users who write a relative
