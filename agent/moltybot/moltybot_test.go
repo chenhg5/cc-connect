@@ -112,6 +112,98 @@ func TestSessionSendPostsToBridge(t *testing.T) {
 	}
 }
 
+func TestSessionSendEmitsBridgeResponseAttachments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":         true,
+			"sessionKey": "remote:weixin:u1",
+			"replyText":  "已生成。",
+			"attachments": []map[string]any{
+				{"kind": "image", "name": "generated.png", "mimeType": "image/png", "dataBase64": "AQID"},
+				{"kind": "file", "name": "report.txt", "mimeType": "text/plain", "dataBase64": "aGk="},
+			},
+		})
+	}))
+	defer server.Close()
+
+	agent, err := New(map[string]any{
+		"base_url": server.URL,
+		"token":    "secret",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	session, err := agent.StartSession(context.Background(), "weixin:chat:u1")
+	if err != nil {
+		t.Fatalf("StartSession returned error: %v", err)
+	}
+	if err := session.Send("画图", nil, nil); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+
+	ev := <-session.Events()
+	if ev.Type != core.EventResult || ev.Content != "已生成。" {
+		t.Fatalf("event = %#v, want result 已生成。", ev)
+	}
+	if len(ev.Images) != 1 || ev.Images[0].FileName != "generated.png" || string(ev.Images[0].Data) != "\x01\x02\x03" {
+		t.Fatalf("images = %#v", ev.Images)
+	}
+	if len(ev.Files) != 1 || ev.Files[0].FileName != "report.txt" || string(ev.Files[0].Data) != "hi" {
+		t.Fatalf("files = %#v", ev.Files)
+	}
+}
+
+func TestSessionSendUsesInjectedCCSessionKeyWhenStartingFresh(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":         true,
+			"sessionKey": "remote:weixin:u1",
+			"replyText":  "收到",
+		})
+	}))
+	defer server.Close()
+
+	agent, err := New(map[string]any{
+		"base_url":     server.URL,
+		"token":        "secret",
+		"session_mode": "per_remote_user",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	inj, ok := agent.(core.SessionEnvInjector)
+	if !ok {
+		t.Fatal("moltybot agent does not implement core.SessionEnvInjector")
+	}
+	inj.SetSessionEnv([]string{"CC_PROJECT=moltybot", "CC_SESSION_KEY=weixin:dm:u1"})
+
+	session, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession returned error: %v", err)
+	}
+	if got := session.CurrentSessionID(); got != "remote:weixin:u1" {
+		t.Fatalf("CurrentSessionID = %q, want remote:weixin:u1", got)
+	}
+	if err := session.Send("你好", nil, nil); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+
+	source, ok := request["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("source = %#v, want object", request["source"])
+	}
+	if source["platform"] != "weixin" {
+		t.Fatalf("source.platform = %#v, want weixin", source["platform"])
+	}
+	if source["platformUserId"] != "u1" {
+		t.Fatalf("source.platformUserId = %#v, want u1", source["platformUserId"])
+	}
+}
+
 func TestSessionSendEmitsEventErrorOnBridgeError(t *testing.T) {
 	const token = "secret-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

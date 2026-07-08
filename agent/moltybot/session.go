@@ -53,10 +53,11 @@ type bridgeAttachment struct {
 }
 
 type bridgeMessageResponse struct {
-	OK         bool   `json:"ok"`
-	SessionKey string `json:"sessionKey,omitempty"`
-	ReplyText  string `json:"replyText,omitempty"`
-	Error      string `json:"error,omitempty"`
+	OK          bool               `json:"ok"`
+	SessionKey  string             `json:"sessionKey,omitempty"`
+	ReplyText   string             `json:"replyText,omitempty"`
+	Attachments []bridgeAttachment `json:"attachments,omitempty"`
+	Error       string             `json:"error,omitempty"`
 }
 
 func newSession(ctx context.Context, client *http.Client, baseURL, token, sessionMode, sessionID string) *session {
@@ -134,10 +135,16 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 		s.sessionID = result.SessionKey
 		s.mu.Unlock()
 	}
+	resultImages, resultFiles, err := convertResponseAttachments(result.Attachments)
+	if err != nil {
+		return s.emitError(fmt.Errorf("moltybot: decode bridge response attachments: %w", err))
+	}
 
 	s.emit(core.Event{
 		Type:      core.EventResult,
 		Content:   result.ReplyText,
+		Images:    resultImages,
+		Files:     resultFiles,
 		SessionID: s.CurrentSessionID(),
 		Done:      true,
 	})
@@ -256,6 +263,45 @@ func convertAttachments(images []core.ImageAttachment, files []core.FileAttachme
 		})
 	}
 	return out
+}
+
+func convertResponseAttachments(attachments []bridgeAttachment) ([]core.ImageAttachment, []core.FileAttachment, error) {
+	if len(attachments) == 0 {
+		return nil, nil, nil
+	}
+	images := make([]core.ImageAttachment, 0)
+	files := make([]core.FileAttachment, 0)
+	for _, attachment := range attachments {
+		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(attachment.DataBase64))
+		if err != nil {
+			return nil, nil, fmt.Errorf("attachment %q: invalid base64: %w", attachment.Name, err)
+		}
+		if len(data) == 0 {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(attachment.Kind))
+		mimeType := strings.TrimSpace(attachment.MimeType)
+		if kind == "" && strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+			kind = "image"
+		}
+		switch kind {
+		case "image":
+			images = append(images, core.ImageAttachment{
+				MimeType: mimeType,
+				FileName: attachment.Name,
+				Data:     data,
+			})
+		case "file":
+			files = append(files, core.FileAttachment{
+				MimeType: mimeType,
+				FileName: attachment.Name,
+				Data:     data,
+			})
+		default:
+			return nil, nil, fmt.Errorf("attachment %q: unsupported kind %q", attachment.Name, attachment.Kind)
+		}
+	}
+	return images, files, nil
 }
 
 var _ core.AgentSession = (*session)(nil)

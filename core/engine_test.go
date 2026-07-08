@@ -1087,6 +1087,39 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 }
 
+func TestProcessInteractiveEvents_SendsEventResultAttachments(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "已生成。",
+		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "generated.png"}},
+		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
+		Done:    true,
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != "已生成。" {
+		t.Fatalf("sent text = %#v, want generated text", got)
+	}
+	if len(p.images) != 1 || p.images[0].FileName != "generated.png" {
+		t.Fatalf("images = %#v", p.images)
+	}
+	if len(p.files) != 1 || p.files[0].FileName != "report.txt" {
+		t.Fatalf("files = %#v", p.files)
+	}
+}
+
 // TestProcessInteractiveEvents_NonTerminalResultContinuesTurn pins issue #481:
 // when Claude Code emits a mid-turn compaction result (Done=false), the engine
 // must NOT treat it as turn completion. Subsequent EventText (analogous to a
@@ -1100,10 +1133,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -15016,8 +15049,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15045,7 +15078,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
