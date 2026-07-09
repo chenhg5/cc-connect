@@ -232,7 +232,7 @@ func extractToolCallContentText(blocks []struct {
 func mapSessionUpdateFallback(sessionID string, kind string, update json.RawMessage) []core.Event {
 	// Some agents may send reasoning as a dedicated discriminator; map to EventThinking.
 	switch strings.ToLower(kind) {
-	case "reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk":
+	case "reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk", "agent_thought_chunk":
 		var u struct {
 			Content struct {
 				Type string `json:"type"`
