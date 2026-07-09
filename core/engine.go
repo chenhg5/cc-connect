@@ -4524,6 +4524,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			// Mark workspace active on first event.
 			if !turnActive {
 				turnActive = true
+				// The session is doing background work: stop the pending
+				// idle-close timer so it cannot kill the live agent mid-turn.
+				e.cancelAgentSessionIdleClose(state)
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.BeginTurn()
@@ -4597,6 +4600,12 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				state.mu.Lock()
 				state.eventsNeedResync = false
 				state.mu.Unlock()
+
+				// The background turn finished cleanly: restart the idle
+				// clock, mirroring the foreground turn-end scheduling. Must
+				// run after eventsNeedResync is cleared — scheduling is
+				// refused while a resync is pending.
+				e.scheduleAgentSessionIdleClose(sessionKey, state)
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,

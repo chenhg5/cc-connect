@@ -7405,6 +7405,85 @@ func TestProcessInteractiveMessage_SchedulesAgentSessionIdleCloseAfterCleanTurn(
 	waitForInteractiveStateRemoved(t, e, "test:chat:user1")
 }
 
+// waitForIdleTimerState polls until the presence of a scheduled idle-close
+// timer on state matches want, failing the test on timeout.
+func waitForIdleTimerState(t *testing.T, state *interactiveState, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state.mu.Lock()
+		armed := state.agentSessionIdleCancel != nil
+		state.mu.Unlock()
+		if armed == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("idle timer armed state did not become %v", want)
+}
+
+// TestAgentSessionIdleTimeout_UnsolicitedTurnCancelsClose is the regression
+// test for the unsolicited-activity gap: a session relaying background events
+// (an in-flight unsolicited turn) must not have its live agent killed by the
+// idle-close timer.
+func TestAgentSessionIdleTimeout_UnsolicitedTurnCancelsClose(t *testing.T) {
+	e := newTestEngine()
+	e.SetAgentSessionIdleTimeout(40 * time.Millisecond)
+	key := "test:user1"
+	sess := newControllableSession("s1")
+	p := &stubPlatformEngine{n: "test"}
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx", eventsNeedResync: false}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+
+	e.scheduleAgentSessionIdleClose(key, state)
+	waitForIdleTimerState(t, state, true)
+
+	// Background activity begins: the reader must cancel the armed timer.
+	sess.events <- Event{Type: EventText, Content: "background work"}
+	waitForIdleTimerState(t, state, false)
+
+	select {
+	case <-sess.closed:
+		t.Fatal("idle close killed a session with an active unsolicited turn")
+	case <-time.After(120 * time.Millisecond):
+	}
+}
+
+// TestAgentSessionIdleTimeout_ReschedulesAfterUnsolicitedTurn verifies the
+// complementary half: once the background turn finishes cleanly, the idle
+// clock restarts and the session is closed after the timeout.
+func TestAgentSessionIdleTimeout_ReschedulesAfterUnsolicitedTurn(t *testing.T) {
+	e := newTestEngine()
+	e.SetAgentSessionIdleTimeout(40 * time.Millisecond)
+	key := "test:user1"
+	sess := newControllableSession("s1")
+	p := &stubPlatformEngine{n: "test"}
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx", eventsNeedResync: false}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+
+	sess.events <- Event{Type: EventText, Content: "background work"}
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent session was not closed after the unsolicited turn went idle")
+	}
+	waitForInteractiveStateRemoved(t, e, key)
+}
+
 // TestCleanupCAS_ConcurrentUnconditionalCloseOnce verifies that two concurrent
 // unconditional cleanups for the same key only Close() the agent session once.
 func TestCleanupCAS_ConcurrentUnconditionalCloseOnce(t *testing.T) {
