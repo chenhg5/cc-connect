@@ -12735,6 +12735,32 @@ func splitMessage(text string, maxLen int) []string {
 			}
 		}
 
+		// 表格保护：如果切点落在 markdown 表格内部，把切点移到表格开始前。
+		// 防止 splitMessage 在表格行之间切分导致飞书无法渲染表格。
+		chunk := string(runes[:end])
+		chunkLines := strings.Split(chunk, "\n")
+		tableStart := len(chunkLines)
+		consecutiveTableLines := 0
+		for i := len(chunkLines) - 1; i >= 0; i-- {
+			trimmed := strings.TrimSpace(chunkLines[i])
+			if strings.HasPrefix(trimmed, "|") {
+				consecutiveTableLines++
+				tableStart = i
+			} else if trimmed != "" {
+				break // 遇到非空非表格行，停止往前找
+			}
+			// 空行跳过（不中断计数，但也不算表格行）
+		}
+		// 表格行 >= 2 行（至少表头 + 分隔行）才保护
+		if consecutiveTableLines >= 2 && tableStart > 0 {
+			beforeTable := strings.Join(chunkLines[:tableStart], "\n")
+			beforeTableRunes := utf8.RuneCountInString(beforeTable)
+			// 确保切点不会太靠前（避免过短碎片），至少保留 maxLen/2 的内容
+			if beforeTableRunes >= maxLen/2 {
+				end = beforeTableRunes + 1
+			}
+		}
+
 		chunks = append(chunks, string(runes[:end]))
 		runes = runes[end:]
 	}
