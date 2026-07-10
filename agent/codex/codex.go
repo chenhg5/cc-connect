@@ -145,14 +145,22 @@ func normalizeReasoningEffort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return ""
+	case "none", "off", "disabled", "disable":
+		return "none"
+	case "minimal", "min":
+		return "minimal"
 	case "low":
 		return "low"
 	case "medium", "med":
 		return "medium"
 	case "high":
 		return "high"
-	case "xhigh", "x-high", "very-high":
+	case "xhigh", "x-high", "extra-high", "extra_high", "very-high":
 		return "xhigh"
+	case "max", "maximum":
+		return "max"
+	case "ultra":
+		return "ultra"
 	default:
 		return ""
 	}
@@ -200,7 +208,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh"}
+	return []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -222,7 +230,28 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := readCodexCachedModels(); len(models) > 0 {
 		return models
 	}
+	return defaultCodexModels()
+}
+
+var openaiChatModels = map[string]bool{
+	"gpt-5.6": true, "gpt-5.6-sol": true, "gpt-5.6-terra": true, "gpt-5.6-luna": true,
+	"gpt-5.5": true, "gpt-5.4": true, "gpt-5.4-mini": true, "gpt-5.3-codex-spark": true,
+	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
+	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
+	"gpt-4o": true, "gpt-4o-mini": true,
+	"codex-mini-latest": true,
+}
+
+func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
+		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
+		{Name: "gpt-5.6-terra", Desc: "GPT-5.6 Terra (balanced everyday Codex work)"},
+		{Name: "gpt-5.6-luna", Desc: "GPT-5.6 Luna (fast, efficient GPT-5.6 model)"},
+		{Name: "gpt-5.6", Desc: "GPT-5.6 (recommended Codex model family default)"},
+		{Name: "gpt-5.5", Desc: "GPT-5.5 (previous frontier Codex model)"},
+		{Name: "gpt-5.4", Desc: "GPT-5.4 (frontier Codex model)"},
+		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast Codex model)"},
+		{Name: "gpt-5.3-codex-spark", Desc: "GPT-5.3 Codex Spark (fast text-only iteration)"},
 		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
 		{Name: "o3", Desc: "O3 (most capable reasoning)"},
 		{Name: "gpt-4.1", Desc: "GPT-4.1 (balanced)"},
@@ -353,7 +382,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +426,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
