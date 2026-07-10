@@ -105,8 +105,55 @@ func TestReadCodexModelCatalog_NoConfigFile(t *testing.T) {
 	models := a.AvailableModels(context.Background())
 
 	// No config.toml → no model_catalog.json → no models_cache.json
-	// → no OPENAI_API_KEY → all the way to hardcoded fallback (6 models)
-	if len(models) != 6 {
-		t.Fatalf("expected 6 hardcoded fallback models, got %d: %v", len(models), models)
+	// → no OPENAI_API_KEY → all the way to hardcoded fallback.
+	want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"}
+	if len(models) != len(defaultCodexModels()) {
+		t.Fatalf("expected %d hardcoded fallback models, got %d: %v", len(defaultCodexModels()), len(models), models)
+	}
+	for i, name := range want {
+		if models[i].Name != name {
+			t.Fatalf("fallback model %d = %q, want %q; models=%v", i, models[i].Name, name, models)
+		}
+	}
+}
+
+func TestAvailableModels_APIIncludesGPT56Models(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/v1/models" {
+			t.Fatalf("request path = %q, want /v1/models", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "data": [
+    {"id":"gpt-5.6-sol"},
+    {"id":"gpt-5.6-terra"},
+    {"id":"gpt-5.6-luna"},
+    {"id":"gpt-5.5"},
+    {"id":"not-a-chat-model"}
+  ]
+}`))
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", srv.URL)
+
+	a := &Agent{activeIdx: -1}
+	models := a.AvailableModels(context.Background())
+	got := make([]string, 0, len(models))
+	for _, m := range models {
+		got = append(got, m.Name)
+	}
+
+	want := []string{"gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
+	if len(got) != len(want) {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("models = %v, want %v", got, want)
+		}
 	}
 }
