@@ -27,6 +27,19 @@ func init() {
 type replyContext struct {
 	channel   string
 	timestamp string // thread_ts for threading replies
+	msgTS     string // ts of the message that triggered this turn (reaction target)
+}
+
+// reactionTS returns the timestamp reactions should target: the triggering
+// message itself when known, otherwise the thread root. This matters in
+// threads, where the root can be an unrelated message posted days earlier by
+// someone else — the working indicator belongs on the message that summoned
+// the bot.
+func (rc replyContext) reactionTS() string {
+	if rc.msgTS != "" {
+		return rc.msgTS
+	}
+	return rc.timestamp
 }
 
 type Platform struct {
@@ -218,7 +231,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ev.TimeStamp},
 				}
 				p.handler(p, msg)
 
@@ -279,7 +292,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -681,11 +694,11 @@ func (p *Platform) FormattingInstructions() string {
 // All reactions are removed when the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok || rc.channel == "" || rc.reactionTS() == "" {
 		return func() {}
 	}
 
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.reactionTS()}
 	var mu sync.Mutex
 	var added []string
 
