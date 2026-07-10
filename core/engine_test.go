@@ -15799,6 +15799,7 @@ type recordingStreamCard struct {
 	mu      sync.Mutex
 	final   bool
 	content string
+	failed  bool // when true, Failed() reports the card as terminal (fallback path)
 }
 
 func (c *recordingStreamCard) Update(_ context.Context, _ string) error { return nil }
@@ -15809,7 +15810,11 @@ func (c *recordingStreamCard) Finalize(_ context.Context, content string) error 
 	c.mu.Unlock()
 	return nil
 }
-func (c *recordingStreamCard) Failed() bool { return false }
+func (c *recordingStreamCard) Failed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.failed
+}
 func (c *recordingStreamCard) finalized() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -15865,5 +15870,140 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+// runHiddenProgressStreamCardTurn drives one turn with tool and thinking
+// progress messages hidden \u2014 the reproducing condition \u2014 on a streaming-card
+// platform that does NOT support message-preview editing (no MessageUpdater, so
+// sp.canPreview() is false, e.g. DingTalk). Compact mode is used as a
+// representative config; full mode with tool_messages/thinking_messages = false
+// takes the identical non-quiet flush branch. Returns the platform's captured
+// standalone sends and the card.
+func runHiddenProgressStreamCardTurn(t *testing.T, card *recordingStreamCard, events []Event) (*recordingStreamCardPlatform, []string) {
+	t.Helper()
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "dingtalk"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", ThinkingMessages: false, ToolMessages: false})
+	e.SetReplyFooterEnabled(false)
+
+	sessionKey := "dingtalk:streamcard"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("s-streamcard")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-streamcard"}
+	e.interactiveStates[sessionKey] = state
+
+	for _, ev := range events {
+		sess.events <- ev
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard", time.Now(), nil, nil, state.replyCtx)
+	return p, p.getSent()
+}
+
+// TestProcessInteractiveEvents_HiddenProgressStreamCard_NoDuplicateAtToolBoundary
+// is the primary regression test: with tool/thinking progress hidden on a
+// streaming-card platform without message-preview editing, the pre-tool lead-in
+// was flushed as a standalone plain message at the EventToolUse boundary even
+// though the streaming card already rendered it \u2014 duplicating the text. With a
+// healthy card active, the standalone flush must be suppressed.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoDuplicateAtToolBoundary(t *testing.T) {
+	card := &recordingStreamCard{}
+	_, sent := runHiddenProgressStreamCardTurn(t, card, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	if len(sent) != 0 {
+		t.Fatalf("expected no standalone messages (card owns the text), got %d: %#v", len(sent), sent)
+	}
+	if !card.finalized() {
+		t.Fatalf("expected the streaming card to be finalized")
+	}
+	if !strings.Contains(card.finalContent(), "Final answer.") {
+		t.Fatalf("finalized card missing the answer: %q", card.finalContent())
+	}
+}
+
+// TestProcessInteractiveEvents_HiddenProgressStreamCard_NoDuplicateAtThinkingBoundary
+// guards the second flush site: a thinking event arriving after a pre-tool
+// lead-in must not flush that lead-in as a standalone message either. This case
+// fails if only the EventToolUse block is guarded.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoDuplicateAtThinkingBoundary(t *testing.T) {
+	card := &recordingStreamCard{}
+	_, sent := runHiddenProgressStreamCardTurn(t, card, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventThinking, Content: "pondering"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	if len(sent) != 0 {
+		t.Fatalf("expected no standalone messages at the thinking boundary, got %d: %#v", len(sent), sent)
+	}
+}
+
+// TestProcessInteractiveEvents_HiddenProgressStreamCard_SplitLeadIn covers a
+// lead-in split across two EventText chunks before the tool boundary \u2014 still
+// no standalone messages.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_SplitLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	_, sent := runHiddenProgressStreamCardTurn(t, card, []Event{
+		{Type: EventText, Content: "Let me create something."},
+		{Type: EventText, Content: "I'll generate the image."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "node gen.js"},
+		{Type: EventText, Content: "Done."},
+		{Type: EventResult, Content: "Done.", Done: true},
+	})
+	if len(sent) != 0 {
+		t.Fatalf("expected no standalone messages for a split lead-in, got %d: %#v", len(sent), sent)
+	}
+}
+
+// TestProcessInteractiveEvents_HiddenProgressStreamCard_FallbackWhenCardFailed
+// proves the guard only suppresses the flush while the card is healthy: a failed
+// card is no longer a usable surface, so the pre-tool segment must still be sent
+// as a plain message (fallback integrity).
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_FallbackWhenCardFailed(t *testing.T) {
+	card := &recordingStreamCard{failed: true}
+	_, sent := runHiddenProgressStreamCardTurn(t, card, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	if len(sent) == 0 {
+		t.Fatalf("expected the pre-tool segment to be sent as a standalone message when the card has failed")
+	}
+}
+
+// TestProcessInteractiveEvents_HiddenProgressStreamCard_FinalizeShowsPostBoundaryOnly
+// pins the finalize behavior the duplication fix exposes: a healthy streaming
+// card finalizes with fullResponse (for Claude Code, the post-tool answer), NOT
+// the accumulated lead-in. Previously the lead-in was persisted only via the
+// duplicate standalone message; with that removed, the finalized card shows the
+// post-boundary answer only (plan R2). Whether the finalized card should instead
+// render the full turn text (lead-in + answer) is Track B's call, and changing
+// it should update this test deliberately.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_FinalizeShowsPostBoundaryOnly(t *testing.T) {
+	card := &recordingStreamCard{}
+	_, sent := runHiddenProgressStreamCardTurn(t, card, []Event{
+		{Type: EventText, Content: "Lead-in narration."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "The answer."},
+		{Type: EventResult, Content: "The answer.", Done: true},
+	})
+	if len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %d: %#v", len(sent), sent)
+	}
+	final := card.finalContent()
+	if !strings.Contains(final, "The answer.") {
+		t.Fatalf("finalized card missing the post-tool answer: %q", final)
+	}
+	if strings.Contains(final, "Lead-in narration.") {
+		t.Fatalf("finalized card unexpectedly persisted the pre-tool lead-in (Track B may revisit): %q", final)
 	}
 }
