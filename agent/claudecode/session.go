@@ -43,6 +43,12 @@ type claudeSession struct {
 	done            chan struct{}
 	alive           atomic.Bool
 
+	// exitErr stores the trimmed fatal stderr captured when the process
+	// exited with an error (e.g. an immediate EPERM death right after
+	// spawn). Exposed via ExitError (core.ExitErrorReporter) so the engine
+	// can tell the user why a turn produced no reply.
+	exitErr atomic.Value // stores string
+
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
 	// carried a model field yet; callers should fall back to the Agent's
@@ -520,6 +526,7 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 		}
 		if stderrMsg != "" {
 			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			cs.exitErr.Store(stderrMsg)
 			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 			select {
 			case cs.events <- evt:
@@ -1166,6 +1173,16 @@ func (cs *claudeSession) GetContextUsage() *core.ContextUsage {
 
 func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
+}
+
+// ExitError implements core.ExitErrorReporter. It returns the trimmed fatal
+// stderr of the dead process, or "" while the process is alive or when it
+// exited cleanly.
+func (cs *claudeSession) ExitError() string {
+	if v, ok := cs.exitErr.Load().(string); ok {
+		return v
+	}
+	return ""
 }
 
 func (cs *claudeSession) Close() error {

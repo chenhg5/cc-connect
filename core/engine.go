@@ -5990,11 +5990,39 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
+	// Capture the exit reason and stop flag BEFORE cleanup nils out
+	// state.agentSession — cleanup also marks the state stopped, so reading
+	// afterwards could not distinguish a user-initiated stop from a crash.
+	var exitDetail string
 	state.mu.Lock()
+	if reporter, ok := state.agentSession.(ExitErrorReporter); ok {
+		exitDetail = reporter.ExitError()
+	}
+	wasStopped := state.stopped
 	state.eventsNeedResync = true
 	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
+
+	if len(textParts) == 0 {
+		// The process died without producing any reply for this turn. Unless
+		// the user stopped it on purpose, say so instead of going silent —
+		// e.g. a spawn-then-immediate-death on macOS TCC EPERM otherwise
+		// looks like the bot simply ignoring the message.
+		if !wasStopped {
+			state.mu.Lock()
+			p := state.platform
+			state.mu.Unlock()
+			cp.Finalize(ProgressCardStateFailed)
+			sp.discard()
+			userMsg := e.i18n.T(MsgAgentExitedAbnormally)
+			if exitDetail != "" {
+				userMsg = fmt.Sprintf(e.i18n.T(MsgAgentExitedAbnormallyDetail), truncateIf(exitDetail, 300))
+			}
+			e.send(p, replyCtx, userMsg)
+		}
+		return
+	}
 
 	if len(textParts) > 0 {
 		state.mu.Lock()

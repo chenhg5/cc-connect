@@ -421,6 +421,16 @@ type AgentSession interface {
 	Close() error
 }
 
+// ExitErrorReporter is an optional interface an AgentSession may implement to
+// expose the fatal stderr captured when its underlying process died. The
+// engine uses it to surface actionable exit reasons (e.g. a macOS TCC EPERM
+// right after spawn) to the IM user instead of failing silently.
+type ExitErrorReporter interface {
+	// ExitError returns the trimmed stderr of the dead process, or "" if the
+	// process is alive or exited cleanly.
+	ExitError() string
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"
