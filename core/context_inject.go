@@ -200,7 +200,7 @@ func formatGroupContext(entries []aggregatedEntry, n int) string {
 
 // StripGroupContext removes any prepended group context block from the user message.
 func StripGroupContext(content string) string {
-	if !strings.HasPrefix(content, "[Group context (") {
+	if !strings.HasPrefix(content, "[Group context (last ") {
 		return content
 	}
 	if idx := strings.Index(content, "\n---\n"); idx >= 0 {

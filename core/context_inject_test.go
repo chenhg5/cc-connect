@@ -86,6 +86,7 @@ func TestStripGroupContext(t *testing.T) {
 		{"[Group context (last 3)]\n12:00 Jay: hello\n---\nactual content", "actual content"},
 		{"[Group context (last 3)]\n12:00 Jay: hello", ""},
 		{"[Group context (last 3)]\n12:00 Jay: hello\n---\n", ""},
+		{"[Group context (foo)]\n12:00 Jay: hello\n---\nactual content", "[Group context (foo)]\n12:00 Jay: hello\n---\nactual content"},
 	}
 	for _, tc := range tests {
 		got := StripGroupContext(tc.input)

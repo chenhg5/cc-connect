@@ -205,6 +205,9 @@ func (e *Engine) loadPersonaContent() string {
 	if data, err := os.ReadFile(personaFile); err == nil {
 		rawPersona = strings.TrimSpace(string(data))
 	} else {
+		if !os.IsNotExist(err) {
+			slog.Warn("failed to read persona file", "path", personaFile, "err", err)
+		}
 		return ""
 	}
 	personaClass := ResolvePersonaClass(e.name, e.UsesWorkspacePattern())
