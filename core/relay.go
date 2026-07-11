@@ -240,8 +240,11 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		toName = binding.Bots[req.To]
 	}
 
-	// Post the forwarded message to the group chat for visibility.
-	groupSessionKey := platform + ":" + chatID + ":relay"
+	// Post the forwarded message to the group chat for visibility.  The
+	// default target is "<platform>:<chatID>:relay"; platforms that
+	// understand thread / topic semantics can override this by
+	// implementing core.RelayGroupVisibilityTarget on their Platform impl.
+	groupSessionKey := rm.resolveGroupVisibilityKey(platform, chatID, req.SessionKey, sourceEngine)
 	if sourceEngine != nil && visibility != RelayVisibilityNone {
 		label := relayVisibilityRequestLabel(visibility, fromName, toName, req.Message)
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
@@ -346,6 +349,36 @@ func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error
 		return parts[0], parts[2], nil
 	}
 	return parts[0], parts[1], nil
+}
+
+// resolveGroupVisibilityKey computes the session key used for relay
+// visibility echoes.  It defaults to "<platform>:<chatID>:relay" and
+// gives the caller's platform a chance to override via the optional
+// core.RelayGroupVisibilityTarget interface.
+//
+// Looking the platform up via sourceEngine.platforms (not targetEngine)
+// matches the existing sendToGroup() resolution path — the visibility
+// echo is dispatched as the source bot, so the source engine's
+// platform impl is authoritative for the key format.
+func (rm *RelayManager) resolveGroupVisibilityKey(platform, chatID, callerSessionKey string, sourceEngine *Engine) string {
+	defaultKey := platform + ":" + chatID + ":relay"
+	if sourceEngine == nil {
+		return defaultKey
+	}
+	for _, p := range sourceEngine.platforms {
+		if p.Name() != platform {
+			continue
+		}
+		d, ok := p.(RelayGroupVisibilityTarget)
+		if !ok {
+			return defaultKey
+		}
+		if k, ok := d.RelayGroupVisibilityKey(callerSessionKey); ok && k != "" {
+			return k
+		}
+		return defaultKey
+	}
+	return defaultKey
 }
 
 // ── Persistence ─────────────────────────────────────────────

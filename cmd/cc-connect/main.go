@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,11 @@ var (
 	commit    = "none"
 	buildTime = "unknown"
 )
+
+// globalAPIServer holds the running API server so the config-reload path can
+// re-apply hot-reloadable settings (e.g. max attachment size) without threading
+// it through the engine's reload closure. nil when the API server is disabled.
+var globalAPIServer *core.APIServer
 
 // defaultResetOnIdleMins is applied when a project does not set
 // reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
@@ -109,6 +115,82 @@ func preScanLogMaxSizeFlag(args []string) string {
 	return ""
 }
 
+// logBackupsSource describes where the resolved max-backups count came
+// from, mirroring logSizeSource so operators can audit the active value
+// from the startup log line alone.
+type logBackupsSource string
+
+const (
+	logBackupsSourceFlag    logBackupsSource = "flag"
+	logBackupsSourceEnv     logBackupsSource = "env"
+	logBackupsSourceDefault logBackupsSource = "default"
+)
+
+// resolveLogMaxBackups picks the effective number of rotated log backups
+// to retain, with the same priority order as resolveLogMaxSize: explicit
+// flag value > CC_LOG_MAX_BACKUPS env var > built-in default. Returns
+// the count and which source won. Invalid inputs are logged to stderr
+// and the value is ignored so a typo never silently downgrades to "0".
+func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogBackups(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+		} else {
+			return n, logBackupsSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
+		n, err := daemon.ParseLogBackups(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+		} else {
+			return n, logBackupsSourceEnv
+		}
+	}
+	return daemon.DefaultLogMaxBackups, logBackupsSourceDefault
+}
+
+// preScanLogMaxBackupsFlag returns the value passed via --log-max-backups
+// before flag.Parse() runs, mirroring preScanLogMaxSizeFlag. Returns ""
+// if the flag is absent.
+func preScanLogMaxBackupsFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-backups" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-backups=") {
+			return strings.TrimPrefix(a, "--log-max-backups=")
+		}
+	}
+	return ""
+}
+
+// resolveMaxAttachmentSize returns the per-attachment size limit in bytes for
+// the /send API. Priority: CC_MAX_ATTACHMENT_SIZE_MB env var (MiB) >
+// config max_attachment_size_mb > core.DefaultMaxAttachmentSize. The env var
+// intentionally uses the same MiB unit as the config field so the two knobs
+// cannot silently disagree by a factor of 1<<20. A malformed or non-positive
+// env value is ignored (falling through to config/default) rather than being
+// fatal — the same lenient posture as resolveLogMaxSize, which also warns so
+// a typo never silently downgrades the setting.
+func resolveMaxAttachmentSize(cfg *config.Config) int64 {
+	if v := strings.TrimSpace(os.Getenv("CC_MAX_ATTACHMENT_SIZE_MB")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n << 20
+		}
+		fmt.Fprintf(os.Stderr, "warning: ignoring CC_MAX_ATTACHMENT_SIZE_MB=%q: must be a positive integer (MiB)\n", v)
+	}
+	if cfg != nil && cfg.MaxAttachmentSizeMB > 0 {
+		return int64(cfg.MaxAttachmentSizeMB) << 20
+	}
+	return core.DefaultMaxAttachmentSize
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -167,6 +249,9 @@ func main() {
 		case "weixin":
 			runWeixin(os.Args[2:])
 			return
+		case "yuanbao":
+			runYuanbao(os.Args[2:])
+			return
 		case "doctor":
 			runDoctor(os.Args[2:])
 			return
@@ -185,8 +270,9 @@ func main() {
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
 		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
-		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s)\n", logFile, maxSize, maxSizeSrc)
-		w, err := daemon.NewRotatingWriter(logFile, maxSize)
+		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
+		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
 			os.Exit(1)
@@ -202,6 +288,7 @@ func main() {
 	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	logMaxSizeFlag := flag.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
+	logMaxBackupsFlag := flag.Int("log-max-backups", 0, "number of rotated log files to retain (.log.1 .. .log.N); overrides CC_LOG_MAX_BACKUPS env var (default: 3)")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -214,6 +301,9 @@ func main() {
 		if _, err := daemon.ParseLogSize(*logMaxSizeFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", *logMaxSizeFlag, err)
 		}
+	}
+	if *logMaxBackupsFlag < 0 {
+		fmt.Fprintf(os.Stderr, "warning: --log-max-backups=%d must be >= 0 (0 means use env/default)\n", *logMaxBackupsFlag)
 	}
 
 	if *showVersion {
@@ -347,7 +437,7 @@ func main() {
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
-		_, _, _, _, _, showCtx, showFooter := config.EffectiveDisplay(cfg, &proj)
+		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
 		showWorkdir := true
 		if proj.ShowWorkdirIndicator != nil {
@@ -477,7 +567,8 @@ func main() {
 
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			mode, tm, tool, tmlen, toollen, _, _ := config.EffectiveDisplay(cfg, &proj)
+			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
+			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
 				Mode:             mode,
 				CardMode:         config.EffectiveCardMode(cfg, &proj),
@@ -485,6 +576,8 @@ func main() {
 				ThinkingMaxLen:   tmlen,
 				ToolMaxLen:       toollen,
 				ToolMessages:     tool,
+				HistoryMaxLen:    &historyMaxLen,
+				HideAgentFooter:  hideAgentFooter,
 			})
 		}
 
@@ -632,6 +725,14 @@ func main() {
 		if defaulted {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
+		}
+		if proj.AgentSessionIdleTimeoutMins != nil {
+			mins := *proj.AgentSessionIdleTimeoutMins
+			if mins <= 0 {
+				engine.SetAgentSessionIdleTimeout(0)
+			} else {
+				engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+			}
 		}
 
 		// Wire sender injection
@@ -1175,6 +1276,9 @@ func main() {
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
+		globalAPIServer = apiSrv
+		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+
 		relayMgr := core.NewRelayManager(cfg.DataDir)
 		if cfg.Relay.TimeoutSecs != nil {
 			secs := *cfg.Relay.TimeoutSecs
@@ -1213,11 +1317,15 @@ func main() {
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
-	// After startup, check if we were restarted and send success notification
+	// After startup, check if we were restarted and queue the success
+	// notification. The engine dispatches it on the first OnPlatformReady
+	// for the target platform (or with a 10s safety timeout), so async
+	// platforms that need 2-3s to actually connect (e.g. Telegram) do not
+	// silently drop the notify. See issue #1383.
 	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
-		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
+		slog.Info("post-restart: queuing success notification", "platform", notify.Platform, "session", notify.SessionKey)
 		for _, e := range engines {
-			e.SendRestartNotification(notify.Platform, notify.SessionKey)
+			e.SetPendingRestartNotify(notify)
 		}
 	}
 
@@ -1536,6 +1644,7 @@ Examples:
   cc-connect cron list                List all scheduled tasks
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
+  cc-connect yuanbao setup            Setup Yuanbao bot with --token app_key:app_secret
   cc-connect update                   Update to the latest version
   cc-connect config format            Format the config file
   cc-connect config example > c.toml  Save example config to a file
@@ -1573,6 +1682,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	result := &core.ConfigReloadResult{}
 
+	// Re-apply process-global hot-reloadable settings.
+	if globalAPIServer != nil {
+		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+	}
+
 	// Find the matching project
 	var proj *config.ProjectConfig
 	for i := range cfg.Projects {
@@ -1586,7 +1700,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	mode, tm, tool, tmlen, toollen, showCtx, showFooter := config.EffectiveDisplay(cfg, proj)
+	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
+	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
 		Mode:             mode,
 		CardMode:         config.EffectiveCardMode(cfg, proj),
@@ -1594,6 +1709,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ThinkingMaxLen:   tmlen,
 		ToolMaxLen:       toollen,
 		ToolMessages:     tool,
+		HistoryMaxLen:    &historyMaxLen,
+		HideAgentFooter:  hideAgentFooter,
 	})
 	result.DisplayUpdated = true
 
@@ -1625,6 +1742,18 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	if defaulted {
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
+	}
+	if proj.AgentSessionIdleTimeoutMins != nil {
+		mins := *proj.AgentSessionIdleTimeoutMins
+		if mins <= 0 {
+			engine.SetAgentSessionIdleTimeout(0)
+		} else {
+			engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+		}
+	} else {
+		// A reload may remove this option after timers were scheduled; reset
+		// explicitly so those stale idle-close timers cannot fire later.
+		engine.SetAgentSessionIdleTimeout(0)
 	}
 
 	// Reload instant reply

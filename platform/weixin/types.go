@@ -145,7 +145,7 @@ type sendTypingReq struct {
 }
 
 type getConfigReq struct {
-	UserID       string   `json:"user_id"`
+	UserID       string   `json:"ilink_user_id"`
 	ContextToken string   `json:"context_token,omitempty"`
 	BaseInfo     baseInfo `json:"base_info"`
 }

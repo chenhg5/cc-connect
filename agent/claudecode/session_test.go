@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +43,73 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	}
 	if evt.OutputTokens != 2000 {
 		t.Errorf("OutputTokens = %d, want 2000", evt.OutputTokens)
+	}
+	if !evt.Done {
+		t.Errorf("regular result event Done = false, want true")
+	}
+}
+
+// TestHandleResultCompactionSubtypeIsNotTerminal is a regression test for
+// issue #481: Claude Code's mid-turn context compaction emits a
+// `type:"result"` event with `subtype:"compact"` (newer CLI) or
+// `subtype:"compaction"` (older CLI). The engine must keep the turn
+// running, so the emitted EventResult must have Done=false.
+func TestHandleResultCompactionSubtypeIsNotTerminal(t *testing.T) {
+	cases := []string{"compact", "compaction"}
+	for _, subtype := range cases {
+		t.Run(subtype, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cs := &claudeSession{
+				events: make(chan core.Event, 4),
+				ctx:    ctx,
+			}
+			cs.sessionID.Store("test-session")
+			cs.alive.Store(true)
+
+			cs.handleResult(map[string]any{
+				"type":       "result",
+				"subtype":    subtype,
+				"isCompact":  true,
+				"session_id": "test-session",
+			})
+
+			select {
+			case evt := <-cs.events:
+				if evt.Type != core.EventResult {
+					t.Fatalf("event type = %q, want %q", evt.Type, core.EventResult)
+				}
+				if evt.Done {
+					t.Errorf("compaction result Done = true, want false (turn must continue)")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for EventResult")
+			}
+		})
+	}
+}
+
+// TestIsCompactionResult covers both accepted subtype spellings and the
+// negative case (regular result with no subtype).
+func TestIsCompactionResult(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want bool
+	}{
+		{"nil_subtype", map[string]any{"type": "result"}, false},
+		{"empty_subtype", map[string]any{"type": "result", "subtype": ""}, false},
+		{"success_subtype", map[string]any{"type": "result", "subtype": "success"}, false},
+		{"compact_subtype", map[string]any{"type": "result", "subtype": "compact"}, true},
+		{"compaction_subtype", map[string]any{"type": "result", "subtype": "compaction"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCompactionResult(tc.raw); got != tc.want {
+				t.Errorf("isCompactionResult(%v) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -108,7 +177,7 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 		"session_id": "test-session",
 		"usage": map[string]any{
 			"input_tokens":                float64(130),
-			"output_tokens":               float64(648),       // real turn total
+			"output_tokens":               float64(648), // real turn total
 			"cache_creation_input_tokens": float64(2_000),
 			"cache_read_input_tokens":     float64(8_000_000), // summed, would inflate ctx
 		},
@@ -385,6 +454,293 @@ func TestBuildAppendSystemPrompt(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("buildAppendSystemPrompt(%q, %q, %q)\n  got  = %q\n  want = %q",
 					tt.agentPrompt, tt.platformPrompt, tt.userAppend, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnsureSharedSystemPromptFile_WritesOnceAndReuses covers the 99%
+// case for the #1376 workaround. The cc-connect default
+// AgentSystemPrompt is written once to <ccDataDir>/agent-prompts/
+// cc-connect-system.md and reused across spawns — no per-spawn write,
+// no cleanup. claude only reads the file, so reuse is safe under
+// concurrent spawns.
+func TestEnsureSharedSystemPromptFile_WritesOnceAndReuses(t *testing.T) {
+	dir := t.TempDir()
+	content := "## cc-connect prompt\n" + makeFiller(10*1024)
+
+	// First call must create the file.
+	path1, err := ensureSharedSystemPromptFile(dir, content)
+	if err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(path1), "agent-prompts/cc-connect-system.md") {
+		t.Errorf("path %q does not end in agent-prompts/cc-connect-system.md", path1)
+	}
+	got, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("content mismatch after first write")
+	}
+	stat1, err := os.Stat(path1)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Second call with identical content must NOT rewrite the file
+	// (mtime stays the same). This is what gives the common case
+	// zero per-spawn overhead.
+	time.Sleep(20 * time.Millisecond)
+	path2, err := ensureSharedSystemPromptFile(dir, content)
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if path2 != path1 {
+		t.Errorf("path drifted between calls: %q vs %q", path1, path2)
+	}
+	stat2, err := os.Stat(path2)
+	if err != nil {
+		t.Fatalf("stat 2: %v", err)
+	}
+	if !stat1.ModTime().Equal(stat2.ModTime()) {
+		t.Errorf("file was rewritten despite identical content: mtime %v -> %v",
+			stat1.ModTime(), stat2.ModTime())
+	}
+}
+
+// TestEnsureSharedSystemPromptFile_RewritesOnContentChange covers
+// cc-connect upgrades: when AgentSystemPrompt content changes between
+// releases, the shared file must be refreshed automatically.
+func TestEnsureSharedSystemPromptFile_RewritesOnContentChange(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ensureSharedSystemPromptFile(dir, "v1"); err != nil {
+		t.Fatalf("ensure v1: %v", err)
+	}
+	path, err := ensureSharedSystemPromptFile(dir, "v2 — upgraded prompt")
+	if err != nil {
+		t.Fatalf("ensure v2: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "v2 — upgraded prompt" {
+		t.Fatalf("file did not refresh after content change: got %q", string(got))
+	}
+}
+
+// TestEnsureSharedSystemPromptFile_EmptyDirUsesTempDir guards the
+// degraded path where ccDataDir was not injected (e.g. older host
+// code or test harnesses) — the shared file still lands somewhere
+// writable instead of failing the spawn.
+func TestEnsureSharedSystemPromptFile_EmptyDirUsesTempDir(t *testing.T) {
+	path, err := ensureSharedSystemPromptFile("", "hello")
+	if err != nil {
+		t.Fatalf("ensure with empty dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	if !strings.Contains(filepath.ToSlash(path), "/agent-prompts/cc-connect-system.md") {
+		t.Errorf("unexpected fallback path: %q", path)
+	}
+}
+
+// TestWriteTempAppendPromptFile_UniquePerCall covers the 1% edge case:
+// when the prompt includes per-session pieces (platform formatting or
+// user append) two concurrent spawns must each get their own file so
+// they cannot overwrite each other's content before claude reads it.
+func TestWriteTempAppendPromptFile_UniquePerCall(t *testing.T) {
+	// dir is auto-cleaned by t.TempDir(), so per-file Remove is unnecessary.
+	dir := t.TempDir()
+	a, err := writeTempAppendPromptFile(dir, "session A")
+	if err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	b, err := writeTempAppendPromptFile(dir, "session B")
+	if err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+	if a == b {
+		t.Fatalf("two writeTempAppendPromptFile calls returned the same path %q "+
+			"— concurrent customised sessions would overwrite each other", a)
+	}
+
+	// Files must contain their own content (no cross-talk).
+	gotA, _ := os.ReadFile(a)
+	gotB, _ := os.ReadFile(b)
+	if string(gotA) != "session A" || string(gotB) != "session B" {
+		t.Errorf("cross-talk: A=%q B=%q", string(gotA), string(gotB))
+	}
+}
+
+// TestWriteTempAppendPromptFile_ReadableByOtherUser guards the
+// run_as_user regression from issue #1429. os.CreateTemp defaults to
+// 0600 owned by the cc-connect process user; when the agent is
+// spawned as a different OS user (via run_as_user), a 0600 root-owned
+// file is unreadable and the agent exits with EACCES before reading
+// any prompt at all. The fix is to chmod 0o644 immediately after
+// write, matching ensureSharedSystemPromptFile (which writes 0o644
+// via writeFileAtomic).
+//
+// We assert the contract two ways: (1) the on-disk mode is 0o644 —
+// any reader path bit is set, no execute bits, no setuid/sticky; and
+// (2) a non-owner stat-open succeeds in O_RDONLY, which is the same
+// access path the spawned agent uses when it calls os.Open on the
+// file path passed via --append-system-prompt-file.
+func TestWriteTempAppendPromptFile_ReadableByOtherUser(t *testing.T) {
+	dir := t.TempDir()
+	path, err := writeTempAppendPromptFile(dir, "session X")
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	want := os.FileMode(0o644)
+	if info.Mode().Perm() != want {
+		t.Fatalf("per-spawn prompt file mode = %o, want %o — run_as_user target user would get EACCES (#1429)",
+			info.Mode().Perm(), want)
+	}
+
+	// Non-owner open simulates the spawned agent's read path. On root
+	// the kernel bypasses the mode bits, so this only fails for a
+	// truly 0o000 file. We still assert it to make the regression
+	// observable on systems where the test runs as a non-root user
+	// (CI matrix, dev laptops).
+	if _, err := os.OpenFile(path, os.O_RDONLY, 0); err != nil {
+		t.Fatalf("open O_RDONLY as a non-owner: %v — file is unreadable even for an unprivileged reader", err)
+	}
+}
+
+func makeFiller(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 'a' + byte(i%26)
+	}
+	return string(b)
+}
+
+// TestHandleUserEmitsToolResult is a regression test for the bug where
+// claudeSession.handleUser silently dropped tool_result content blocks
+// (only logging when is_error=true) instead of emitting EventToolResult.
+// Without this event, engine never sees tool output and the Feishu/Slack/
+// Discord progress card never renders tool results — only the final
+// assistant text reaches the user.
+//
+// Cases covered:
+//  - string content (plain text result)
+//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+//  - is_error=true (exit code 1, success=false)
+func TestHandleUserEmitsToolResult(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         map[string]any
+		wantResult  string
+		wantCode    int
+		wantSuccess bool
+	}{
+		{
+			name: "string content",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":          "tool_result",
+							"tool_use_id":   "toolu_abc",
+							"is_error":      false,
+							"content":       "command output here",
+						},
+					},
+				},
+			},
+			wantResult:  "command output here",
+			wantCode:    0,
+			wantSuccess: true,
+		},
+		{
+			name: "array content",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_def",
+							"is_error":    false,
+							"content": []any{
+								map[string]any{"type": "text", "text": "line one"},
+								map[string]any{"type": "text", "text": "line two"},
+							},
+						},
+					},
+				},
+			},
+			wantResult:  "line one\nline two",
+			wantCode:    0,
+			wantSuccess: true,
+		},
+		{
+			name: "error result",
+			raw: map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"content": []any{
+						map[string]any{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_err",
+							"is_error":    true,
+							"content":     "boom",
+						},
+					},
+				},
+			},
+			wantResult:  "boom",
+			wantCode:    1,
+			wantSuccess: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cs := &claudeSession{
+				events: make(chan core.Event, 4),
+				ctx:    ctx,
+			}
+			cs.alive.Store(true)
+
+			cs.handleUser(tc.raw)
+
+			select {
+			case evt := <-cs.events:
+				if evt.Type != core.EventToolResult {
+					t.Fatalf("event type = %q, want %q", evt.Type, core.EventToolResult)
+				}
+				if evt.ToolResult != tc.wantResult {
+					t.Errorf("ToolResult = %q, want %q", evt.ToolResult, tc.wantResult)
+				}
+				if evt.ToolExitCode == nil || *evt.ToolExitCode != tc.wantCode {
+					got := -1
+					if evt.ToolExitCode != nil {
+						got = *evt.ToolExitCode
+					}
+					t.Errorf("ToolExitCode = %d, want %d", got, tc.wantCode)
+				}
+				if evt.ToolSuccess == nil || *evt.ToolSuccess != tc.wantSuccess {
+					got := false
+					if evt.ToolSuccess != nil {
+						got = *evt.ToolSuccess
+					}
+					t.Errorf("ToolSuccess = %v, want %v", got, tc.wantSuccess)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for EventToolResult — handleUser dropped the tool_result")
 			}
 		})
 	}

@@ -967,6 +967,91 @@ func TestSendWPSMessage_Success(t *testing.T) {
 	if req.Content.Text.Type != "markdown" {
 		t.Fatalf("expected markdown type, got %s", req.Content.Text.Type)
 	}
+	// Regression guard: WPS v7 messages API outer Type is a strict enum
+	// (text / rich_text / image / file / audio / video / card). Sending
+	// "markdown" makes the API reject with 400000002. The inner
+	// Content.Text.Type field is what opts into markdown rendering; outer
+	// must remain "text".
+	if req.Type != "text" {
+		t.Fatalf("expected outer message type=text (markdown opt-in is via inner Content.Text.Type), got %q", req.Type)
+	}
+}
+
+// TestSendWPSMessage_NewlinesConvertedToHardBreaks is the regression test for
+// the "/status output renders as a single line" bug. cc-connect engine emits
+// multi-line output separated by bare "\n", but WPS markdown (CommonMark)
+// collapses single "\n" into a space, producing unreadable output. This
+// confirms we transform the content to use markdown hard line breaks
+// ("two spaces + \n") before sending.
+func TestSendWPSMessage_NewlinesConvertedToHardBreaks(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth2/token" {
+			if err := json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 7200}); err != nil {
+				t.Errorf("encode token response: %v", err)
+			}
+			return
+		}
+		if r.URL.Path == "/v7/messages/create" {
+			gotBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	plat, _ := New(map[string]any{
+		"app_id":     "id",
+		"app_secret": "secret",
+		"base_url":   srv.URL,
+	})
+	p := plat.(*Platform)
+
+	// Simulated cc-connect engine /status output with bare "\n" separators.
+	in := "cc-connect Status\n\nProject: foo\nAgent: claudecode\nUptime: 2m"
+	if err := p.Reply(context.Background(), replyContext{ChatID: "c"}, in); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	var req sendMessageRequest
+	if err := json.Unmarshal(gotBody, &req); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := "cc-connect Status  \n  \nProject: foo  \nAgent: claudecode  \nUptime: 2m"
+	if req.Content.Text.Content != want {
+		t.Fatalf("expected newlines converted to '  \\n', got %q", req.Content.Text.Content)
+	}
+}
+
+// TestApplyWPSLineBreaks_Idempotent verifies the helper does not over-double
+// newlines that already use the "  \n" hard-break form (idempotency matters
+// because some upstream agents may emit markdown that already uses this).
+func TestApplyWPSLineBreaks_Idempotent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"no newline", "single line", "single line"},
+		{"bare newlines", "a\nb\nc", "a  \nb  \nc"},
+		{"already hard-broken", "a  \nb  \nc", "a  \nb  \nc"},
+		{"mixed", "a\nb  \nc\nd", "a  \nb  \nc  \nd"},
+		{"paragraph break (\\n\\n)", "para1\n\npara2", "para1  \n  \npara2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := applyWPSLineBreaks(tc.in)
+			if got != tc.want {
+				t.Fatalf("applyWPSLineBreaks(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			// Idempotency: applying twice must equal applying once.
+			if again := applyWPSLineBreaks(got); again != got {
+				t.Fatalf("not idempotent: %q -> %q -> %q", tc.in, got, again)
+			}
+		})
+	}
 }
 
 func TestSendWPSMessage_CleanReply(t *testing.T) {

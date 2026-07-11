@@ -227,7 +227,15 @@
     "manualSetup": "Manual setup",
     "manualHint": "For {{platform}}, please configure credentials in config.toml and restart the service.",
     "advancedOptions": "Advanced options",
-    "unsupportedPlatform": "Unsupported platform type: {{type}}"
+    "unsupportedPlatform": "Unsupported platform type: {{type}}",
+    "cloudWeb": {
+      "urlRequiredWebsocket": "WebSocket transport requires API base URL or WebSocket URL (at least one)",
+      "urlRequiredLongPoll": "Long poll transport requires API base URL",
+      "urlRequiredGateway": "Gateway transport requires API base URL or Register URL (at least one)",
+      "invalidHttpUrl": "{{field}} must be a valid http(s) URL or host[:port]",
+      "invalidWsUrl": "WebSocket URL must start with ws:// or wss://",
+      "publicUrlRequiredGateway": "Public webhook URL is required when Register URL is set"
+    }
   },
   "fields": {
     "botToken": "Bot Token",
@@ -257,7 +265,18 @@
     "appSecret": "App Secret",
     "sandboxMode": "Sandbox mode",
     "channelSecret": "Channel Secret",
-    "channelToken": "Channel Access Token"
+    "channelToken": "Channel Access Token",
+    "transport": "Transport mode",
+    "longPollTimeout": "Long poll timeout (ms)",
+    "listen": "Listen address",
+    "publicUrl": "Public webhook URL",
+    "publicUrlHint": "Public URL for gateway to reach cc-connect webhook",
+    "registerUrl": "Register URL",
+    "registerUrlHint": "Optional: gateway endpoint to register webhook callback",
+    "cloudWebWsHint": "Optional if base URL is set; defaults to /cloud-web/ws",
+    "cloudWebBaseUrlHint": "Required for long poll; for WebSocket, use this or WebSocket URL below",
+    "eventsPath": "Events path (long poll)",
+    "sendPath": "Send path (outbound API)"
   },
   "chat": {
     "noChats": "No projects yet",

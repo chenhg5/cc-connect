@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
 const ATTACHMENT_OPTS = ['', 'on', 'off'];
-const LANGUAGES = ['en', 'zh', 'zh-TW', 'ja', 'es'];
+const LANGUAGES = ['en', 'zh', 'zh-TW', 'ja', 'ko', 'es'];
 
 function Toggle({ value, onChange, label, hint }: { value: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
   return (

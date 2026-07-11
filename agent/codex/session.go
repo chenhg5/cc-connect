@@ -24,24 +24,25 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir       string
-	model         string
-	effort        string
-	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
-	cliBin        string   // CLI binary, default "codex"
-	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
-	extraEnv      []string
-	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	workDir        string
+	model          string
+	effort         string
+	mode           string
+	baseURL        string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider  string   // Codex model_provider name; passed as -c model_provider=<name>
+	cmd            string   // CLI binary, default "codex"
+	cliExtraArgs   []string // extra args from cmd, prepended before exec args
+	extraEnv       []string
+	promptPreamble string
+	events         chan core.Event
+	threadID       atomic.Value // stores string — Codex thread_id
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
+	closeOnce      sync.Once
+	cmdMu          sync.Mutex
+	cmds           map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -63,23 +64,47 @@ var codexRuntimeConfigTimeout = 1500 * time.Millisecond
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string) (*codexSession, error) {
+func buildCodexPromptPreamble(systemPrompt string, appendPrompt string) string {
+	var sections []string
+	if systemPrompt = strings.TrimSpace(systemPrompt); systemPrompt != "" {
+		sections = append(sections, "Project system prompt:\n"+systemPrompt)
+	}
+	if appendPrompt = strings.TrimSpace(appendPrompt); appendPrompt != "" {
+		sections = append(sections, "Additional project instructions:\n"+appendPrompt)
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func prependCodexPromptPreamble(prompt string, preamble string) string {
+	preamble = strings.TrimSpace(preamble)
+	if preamble == "" {
+		return prompt
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble
+	}
+	return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble + "\n\n---\n\nUser message:\n" + prompt
+}
+
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir:       workDir,
-		model:         model,
-		effort:        effort,
-		mode:          mode,
-		baseURL:       baseURL,
-		modelProvider: modelProvider,
-		cliBin:        cliBin,
-		cliExtraArgs:  cliExtraArgs,
-		extraEnv:      extraEnv,
-		events:        make(chan core.Event, 64),
-		ctx:           sessionCtx,
-		cancel:        cancel,
-		cmds:          make(map[*exec.Cmd]struct{}),
+		workDir:        workDir,
+		model:          model,
+		effort:         effort,
+		mode:           mode,
+		baseURL:        baseURL,
+		modelProvider:  modelProvider,
+		cmd:            cliBin,
+		cliExtraArgs:   cliExtraArgs,
+		extraEnv:       extraEnv,
+		promptPreamble: buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		events:         make(chan core.Event, 64),
+		ctx:            sessionCtx,
+		cancel:         cancel,
+		cmds:           make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -108,12 +133,15 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	}
 
 	isResume := cs.CurrentSessionID() != ""
+	if !isResume {
+		prompt = prependCodexPromptPreamble(prompt, cs.promptPreamble)
+	}
 	args := cs.buildExecArgs(prompt, imagePaths)
 	if len(cs.cliExtraArgs) > 0 {
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
 	}
 
-	bin := cs.cliBin
+	bin := cs.cmd
 	if bin == "" {
 		bin = "codex"
 	}
@@ -188,11 +216,41 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		args = []string{"exec", "--skip-git-repo-check"}
 	}
 
+	// Mode → sandbox + approval mapping.
+	//
+	// `codex exec` (this backend) has no approval IPC, so approval_policy must
+	// always be "never" — otherwise the CLI blocks waiting for a TTY response
+	// that never arrives. Sandbox tier is what actually enforces safety here.
+	//
+	// As of codex-cli 0.137 `--full-auto` is no longer accepted; use the
+	// canonical `--sandbox <mode>` form together with `-c approval_policy=...`.
+	//
+	// CAVEAT: `codex exec resume` does NOT accept the `--sandbox <mode>` flag
+	// (only `codex exec` does). Both subcommands accept `-c key=value` config
+	// overrides though, so on resume we express sandbox via `-c sandbox_mode=...`
+	// instead. Without this, every resume would fail with:
+	//   error: unexpected argument '--sandbox' found
+	// — and the user would silently lose their session on every cc-connect
+	// restart / idle reset.
+	//
+	// For real interactive approvals (suggest semantics), users must opt into
+	// the `app_server` backend, which handles execCommandApproval /
+	// applyPatchApproval / permissionsApproval over JSON-RPC.
 	switch cs.mode {
 	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
+		if isResume {
+			args = append(args, "-c", `sandbox_mode="workspace-write"`, "-c", `approval_policy="never"`)
+		} else {
+			args = append(args, "--sandbox", "workspace-write", "-c", `approval_policy="never"`)
+		}
 	case "yolo":
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	default: // "suggest"
+		if isResume {
+			args = append(args, "-c", `sandbox_mode="read-only"`, "-c", `approval_policy="never"`)
+		} else {
+			args = append(args, "--sandbox", "read-only", "-c", `approval_policy="never"`)
+		}
 	}
 
 	if cs.model != "" {

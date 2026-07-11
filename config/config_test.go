@@ -299,7 +299,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -412,7 +412,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
@@ -429,9 +429,102 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveHistoryMaxLen(t *testing.T) {
+	globalLen, projectLen, unlimited := 800, 1200, 0
+
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want int
+	}{
+		{
+			name: "default",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			want: 1000,
+		},
+		{
+			name: "global display",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &globalLen},
+			},
+			proj: ProjectConfig{},
+			want: 800,
+		},
+		{
+			name: "project display overrides global",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &globalLen},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{HistoryMaxLen: &projectLen},
+			},
+			want: 1200,
+		},
+		{
+			name: "zero disables truncation",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &unlimited},
+			},
+			proj: ProjectConfig{},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EffectiveHistoryMaxLen(&tt.cfg, &tt.proj); got != tt.want {
+				t.Fatalf("EffectiveHistoryMaxLen() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplayHideAgentFooter(t *testing.T) {
+	tru := true
+	fal := false
+
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want bool
+	}{
+		{
+			name: "default false",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			want: false,
+		},
+		{
+			name: "global true",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			proj: ProjectConfig{},
+			want: true,
+		},
+		{
+			name: "project overrides global",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			proj: ProjectConfig{Display: &DisplayConfig{HideAgentFooter: &fal}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, _, _, _, got := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if got != tt.want {
+				t.Fatalf("hideAgentFooter = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateProjectDisplayConfig(t *testing.T) {
 	mode := "verbose"
 	cardMode := "modern"
+	negativeHistoryMaxLen := -1
 
 	tests := []struct {
 		name    string
@@ -447,6 +540,11 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 			name:    "invalid project card mode",
 			display: &DisplayConfig{CardMode: &cardMode},
 			wantErr: `projects[0].display.card_mode must be "legacy" or "rich"`,
+		},
+		{
+			name:    "invalid project history max len",
+			display: &DisplayConfig{HistoryMaxLen: &negativeHistoryMaxLen},
+			wantErr: `projects[0].display.history_max_len must be >= 0`,
 		},
 	}
 
@@ -1626,6 +1724,33 @@ func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesAgentSessionIdleTimeoutMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithAgentSessionIdleTimeoutFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].AgentSessionIdleTimeoutMins == nil {
+		t.Fatal("expected agent_session_idle_timeout_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].AgentSessionIdleTimeoutMins; got != 45 {
+		t.Fatalf("agent_session_idle_timeout_mins = %d, want 45", got)
+	}
+}
+
+func TestLoad_RejectsNegativeAgentSessionIdleTimeoutMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeAgentSessionIdleTimeoutFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative agent_session_idle_timeout_mins")
+	}
+	if !strings.Contains(err.Error(), "agent_session_idle_timeout_mins") {
+		t.Fatalf("error = %q, want agent_session_idle_timeout_mins validation", err.Error())
+	}
+}
+
 func TestLoad_ParsesRunAsUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("run_as_user is only supported on Linux/macOS")
@@ -2041,6 +2166,42 @@ const projectWithNegativeResetOnIdleFixture = `
 [[projects]]
 name = "beta"
 reset_on_idle_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithAgentSessionIdleTimeoutFixture = `
+[[projects]]
+name = "beta"
+agent_session_idle_timeout_mins = 45
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeAgentSessionIdleTimeoutFixture = `
+[[projects]]
+name = "beta"
+agent_session_idle_timeout_mins = -1
 
 [projects.agent]
 type = "codex"

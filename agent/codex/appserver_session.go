@@ -141,15 +141,16 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	url           string
-	workDir       string
-	model         string
-	effort        string
-	mode          string
-	baseURL       string
-	modelProvider string
-	extraEnv      []string
-	codexHome     string
+	url            string
+	workDir        string
+	model          string
+	effort         string
+	mode           string
+	baseURL        string
+	modelProvider  string
+	extraEnv       []string
+	codexHome      string
+	promptPreamble string
 
 	events chan core.Event
 
@@ -175,9 +176,10 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	stateMu     sync.Mutex
-	pendingMsgs []string
-	currentTurn string
+	stateMu      sync.Mutex
+	pendingMsgs  []string
+	currentTurn  string
+	preambleSent bool
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -189,7 +191,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -201,11 +203,13 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		modelProvider:    modelProvider,
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
+		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
 		events:           make(chan core.Event, 128),
 		ctx:              sessionCtx,
 		cancel:           cancel,
 		pending:          make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals: make(map[string]chan core.PermissionResult),
+		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -451,6 +455,13 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if err != nil {
 		return err
 	}
+
+	s.stateMu.Lock()
+	if !s.preambleSent {
+		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
+		s.preambleSent = true
+	}
+	s.stateMu.Unlock()
 
 	threadID := s.CurrentSessionID()
 	if threadID == "" {
@@ -1584,13 +1595,24 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 		"params":  params,
 	}
 
-	if err := s.writeJSON(payload); err != nil {
+	deadline := time.Now().Add(timeout)
+	if err := s.writeJSONWithTimeout(method, payload, timeout); err != nil {
 		s.pendingMu.Lock()
 		delete(s.pending, id)
 		s.pendingMu.Unlock()
 		return err
 	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		s.pendingMu.Lock()
+		delete(s.pending, id)
+		s.pendingMu.Unlock()
+		return fmt.Errorf("%s timed out", method)
+	}
 
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	ctxDone := s.contextDone()
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
@@ -1602,14 +1624,71 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 			}
 		}
 		return nil
-	case <-s.ctx.Done():
-		return s.ctx.Err()
-	case <-time.After(timeout):
+	case <-ctxDone:
+		return s.contextErr()
+	case <-timer.C:
 		s.pendingMu.Lock()
 		delete(s.pending, id)
 		s.pendingMu.Unlock()
 		return fmt.Errorf("%s timed out", method)
 	}
+}
+
+func (s *appServerSession) writeJSONWithTimeout(method string, v any, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- s.writeJSON(v)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ctxDone := s.contextDone()
+	select {
+	case err := <-done:
+		return err
+	case <-ctxDone:
+		return s.contextErr()
+	case <-timer.C:
+		err := fmt.Errorf("%s write timed out", method)
+		slog.Warn("codex app-server write timed out, closing session", "method", method, "timeout", timeout)
+		s.abortTransport()
+		return err
+	}
+}
+
+func (s *appServerSession) contextDone() <-chan struct{} {
+	if s.ctx == nil {
+		return nil
+	}
+	return s.ctx.Done()
+}
+
+func (s *appServerSession) contextErr() error {
+	if s.ctx == nil {
+		return context.Canceled
+	}
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	return context.Canceled
+}
+
+func (s *appServerSession) abortTransport() {
+	s.alive.Store(false)
+	if s.cancel != nil {
+		s.cancel()
+	}
+
+	s.procMu.Lock()
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+		s.stdin = nil
+	}
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	}
+	s.procMu.Unlock()
 }
 
 func (s *appServerSession) notify(method string, params any) error {

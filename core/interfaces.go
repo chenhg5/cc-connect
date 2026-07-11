@@ -25,6 +25,22 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// RelayGroupVisibilityTarget is an optional interface for platforms that
+// want to customise the session key used when echoing relay request /
+// response messages into the group chat for visibility.  Platforms that
+// understand the concept of a thread, topic, or sub-conversation can
+// return a thread-scoped session key so the visibility echoes land in
+// the same conversation that triggered the relay; platforms without
+// such a concept simply don't implement this interface and core falls
+// back to the legacy "<platform>:<chatID>:relay" target.
+//
+// Returning (key, true) → core uses key verbatim as the group session
+// key for visibility echoes.
+// Returning ("", false) → core falls back to the legacy default.
+type RelayGroupVisibilityTarget interface {
+	RelayGroupVisibilityKey(callerSessionKey string) (groupSessionKey string, ok bool)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {
@@ -81,13 +97,38 @@ When you generate a local image or file that should be sent to the user, use:
 You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
 If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
 
-When the user explicitly asks you to send a voice/audio reply, synthesize and send it with:
+When sending an audio (mp3/wav/m4a/ogg/opus) or video (mp4/mov/webm) clip that should render inline as a native voice bubble or video player — instead of as a generic file download — use the dedicated flags:
+
+  cc-connect send --audio /absolute/path/to/clip.mp3
+  cc-connect send --video /absolute/path/to/demo.mp4
+
+These render as native media on platforms that support it (e.g. Feishu voice bubbles, Telegram voice messages). cc-connect transparently transcodes audio to the platform's preferred codec (e.g. opus for Feishu). On platforms without dedicated audio/video support cc-connect automatically falls back to the file-attachment path so delivery is preserved. Do NOT downgrade the user's request to --file when they explicitly asked for audio or video.
+
+When the user explicitly asks you to synthesize speech from text, use:
 
   cc-connect send --tts "text to speak"
 
-After this command succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
+After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
 
-### Scheduled tasks (cron)
+### Scheduled tasks: when to use /cron vs /timer
+
+cc-connect has TWO distinct scheduling commands. Picking the wrong one creates a confusing UX for the user.
+
+  ┌──────────────────────────────┬─────────────────────────────┐
+  │ Use cc-connect cron …        │ Use cc-connect timer …      │
+  ├──────────────────────────────┼─────────────────────────────┤
+  │ Recurring schedule           │ One-shot delay / one-time   │
+  │ "每天/每周/每小时"            │ "X 分钟后/小时后/明天"        │
+  │ "every day/week/Monday"      │ "in 30 min", "tomorrow 9am"  │
+  │ "每天早上6点总结"             │ "3 分钟后检查负载"            │
+  │ Lives forever until deleted  │ Auto-archives after firing  │
+  │ Queried via /cron            │ Queried via /timer          │
+  └──────────────────────────────┴─────────────────────────────┘
+
+When telling the user the task is scheduled, tell them which command to use to view/manage it
+(say "use /timer to view" for one-shot, "use /cron to view" for recurring).
+
+### Scheduled tasks (cron) — RECURRING
 When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
 
   cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
@@ -129,11 +170,16 @@ Examples:
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 prompt "Updated daily summary task"
 
-### One-shot timers (timer)
-When the user asks you to do something after a delay (e.g. "两小时后帮我检查PR"),
+### One-shot timers (timer) — ONE-TIME DELAY
+When the user asks you to do something AFTER A DELAY or AT A SPECIFIC FUTURE TIME
+(e.g. "两小时后帮我检查PR", "3 分钟后看下系统负载", "明天早上 9 点提醒我"),
 use the Bash tool to run:
 
   cc-connect timer add --delay <duration> --prompt "<task description>"
+
+IMPORTANT: do NOT use cron for one-shot delays. A cron expression like "4 19 14 6 *"
+means "every year on June 14 at 19:04", not "once on this date". Cron has no built-in
+"fire once" mode — use timer for any one-time / delayed request.
 
 Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
 Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
@@ -522,6 +568,14 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// AgentSessionCanceller is an optional interface for agent sessions that support
+// cancelling the current turn without terminating the session or its underlying
+// process. When implemented, the engine calls CancelTurn instead of Close() for
+// /stop, allowing the session to remain alive for the next user message.
+type AgentSessionCanceller interface {
+	CancelTurn() error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.
@@ -530,9 +584,14 @@ type CommandProvider interface {
 }
 
 // SkillProvider is an optional interface for agents that expose skills via
-// local directories (e.g. .claude/skills/<name>/SKILL.md). Each subdirectory
-// containing a SKILL.md is treated as a skill. Skills are project-level and
-// agent-specific — they are NOT shared across different agent types.
+// local directories (e.g. .claude/skills/<name>/SKILL.md). Only the depth-1
+// layout is recognised: each immediate subdirectory of the returned dirs
+// that contains a SKILL.md is registered as a skill. Nested SKILL.md files
+// (e.g. inside `<name>/references/...`) are treated as skill assets and
+// ignored — they match the Claude Code CLI convention (issue #1304) and
+// prevent phantom slash commands from leaking into platform command menus.
+// Skills are project-level and agent-specific — they are NOT shared across
+// different agent types.
 type SkillProvider interface {
 	SkillDirs() []string
 }

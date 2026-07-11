@@ -181,6 +181,7 @@ func buildWindowsTaskScript(cfg Config) string {
 	sb.WriteString("$ErrorActionPreference = 'Stop'\r\n")
 	writePowerShellEnv(&sb, "CC_LOG_FILE", cfg.LogFile)
 	writePowerShellEnv(&sb, "CC_LOG_MAX_SIZE", strconv.FormatInt(cfg.LogMaxSize, 10))
+	writePowerShellEnv(&sb, "CC_LOG_MAX_BACKUPS", strconv.Itoa(cfg.LogMaxBackups))
 	if cfg.EnvPATH != "" {
 		writePowerShellEnv(&sb, "PATH", cfg.EnvPATH)
 	}

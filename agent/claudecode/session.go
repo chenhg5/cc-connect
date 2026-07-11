@@ -64,6 +64,14 @@ type claudeSession struct {
 	// startupWarning holds a one-time message to surface to the IM user at
 	// session start (e.g. when a permission mode was silently downgraded).
 	startupWarning string
+
+	// promptFilePath is the per-spawn temp file holding the merged
+	// content for --append-system-prompt-file when this session needs
+	// platform- or user-specific append text that the shared
+	// cc-connect-system.md cannot represent. Removed on Close. Empty
+	// when the session reuses the shared file (the common 99% case)
+	// or when there is nothing to append.
+	promptFilePath string
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -71,11 +79,129 @@ type claudeSession struct {
 // know about (e.g. bypassPermissions downgraded to auto under root).
 func (cs *claudeSession) StartupWarning() string { return cs.startupWarning }
 
+// sharedSystemPromptRelPath is the location under ccDataDir where the
+// shared cc-connect system prompt file lives. Reused across every spawn
+// that doesn't need per-session customization (the 99% case).
+const sharedSystemPromptRelPath = "agent-prompts/cc-connect-system.md"
+
+// ensureSharedSystemPromptFile lazily writes <ccDataDir>/agent-prompts/
+// cc-connect-system.md with the cc-connect default AgentSystemPrompt
+// content, returning the path. The file is the workaround for the
+// Windows 8192-byte command-line limit (issue #1376): cc-connect's
+// built-in prompt is ~9KB on its own, so passing it inline via
+// --append-system-prompt blows past the cap regardless of whether the
+// user configured any customization.
+//
+// The file is only (re)written when missing or when its content differs
+// from the current AgentSystemPrompt() — this lets cc-connect upgrades
+// refresh the prompt automatically without per-spawn overhead. claude
+// only reads the file at startup and never writes it, so there is no
+// concurrent-write race even when multiple sessions spawn at once.
+//
+// If ccDataDir is empty (unlikely in production, but possible in tests),
+// the file lands in os.TempDir.
+func ensureSharedSystemPromptFile(ccDataDir, content string) (string, error) {
+	base := ccDataDir
+	if base == "" {
+		base = os.TempDir()
+	}
+	dir := filepath.Join(base, "agent-prompts")
+	path := filepath.Join(base, sharedSystemPromptRelPath)
+
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return path, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := writeFileAtomic(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// writeTempAppendPromptFile writes the merged prompt content to a
+// per-spawn temp file under ccDataDir/agent-prompts/, returning the
+// path. Used only when the prompt has session-specific bits (platform
+// FormattingInstructions or user-configured append_system_prompt) that
+// the shared file cannot represent. A unique name from CreateTemp
+// avoids two concurrent customised sessions overwriting each other.
+//
+// The caller is responsible for removing the file on session Close.
+func writeTempAppendPromptFile(ccDataDir, content string) (string, error) {
+	base := ccDataDir
+	if base == "" {
+		base = os.TempDir()
+	}
+	dir := filepath.Join(base, "agent-prompts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, "cc-connect-system-*.md")
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	// os.CreateTemp defaults to mode 0600 owned by the cc-connect process
+	// user (often root when launched by systemd). When the agent is spawned
+	// under run_as_user, the target user is different and gets EACCES on
+	// 0600 root-owned files (issue #1429). The shared prompt file already
+	// uses 0o644 (see ensureSharedSystemPromptFile → writeFileAtomic);
+	// the per-spawn temp file is just a superset of the shared content
+	// and is equally non-secret, so we mirror that mode here.
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("claudecode: chmod per-spawn prompt file 0o644: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// writeFileAtomic writes data to path via a temp file + rename, so a
+// crash mid-write does not leave a half-written prompt file that the
+// next spawn would mistake for valid content.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".cc-connect-system-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // buildAppendSystemPrompt concatenates the cc-connect functionality prompt,
 // platform formatting instructions, and the user's custom append prompt into
-// the single string passed to Claude's --append-system-prompt flag. That flag
-// only honors its last occurrence (a second flag overwrites the first), so all
-// appended content must be merged here. Returns "" when nothing is to append.
+// the single string passed to Claude's --append-system-prompt-file flag.
+// That flag only honors its last occurrence (a second flag overwrites the
+// first), so all appended content must be merged here. Returns "" when
+// nothing is to append.
 func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) string {
 	var parts []string
 	if agentPrompt != "" {
@@ -90,7 +216,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -103,7 +229,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
-	// cliArgsFlag these get bundled into a single passthrough string.
+	// cmdArgsFlag these get bundled into a single passthrough string.
 	// outerArgs are flags the wrapper itself understands (e.g. --model).
 	innerArgs := []string{
 		"--output-format", "stream-json",
@@ -133,17 +259,53 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 
+	// Load plugins from specified directories.
+	for _, dir := range pluginDirs {
+		innerArgs = append(innerArgs, "--plugin-dir", dir)
+	}
+
 	// Handle custom system prompt (replaces Claude's default system prompt).
 	if systemPrompt != "" {
 		innerArgs = append(innerArgs, "--system-prompt", systemPrompt)
 	}
 
 	// Append the cc-connect functionality prompt, platform formatting hints,
-	// and the user's custom append prompt — all as a single flag. Claude's
-	// --append-system-prompt only honors its last occurrence, so the pieces
-	// must be concatenated here rather than passed as repeated flags.
+	// and the user's custom append prompt — via Claude's
+	// --append-system-prompt-file flag (not --append-system-prompt). Writing
+	// to a file avoids the Windows 8192-byte command-line limit (#1376):
+	// AgentSystemPrompt is ~9KB on its own and grew past the cap in v1.3.3,
+	// so even users with no customization need this workaround.
+	//
+	// Two paths exist to keep the common case zero-overhead:
+	//   • 99% case (no platform formatting, no user append) — reuse the
+	//     shared cc-connect-system.md file written once at startup; no
+	//     per-spawn write, no cleanup needed.
+	//   • 1% edge case (Slack/Weixin/MAX platform formatting or user-set
+	//     append_system_prompt) — write a per-spawn temp file containing
+	//     the merged content, removed on Close.
+	//
+	// Claude only reads the file at startup and never writes it, so the
+	// shared file is safe under concurrent spawns.
+	var promptFilePath string
+	var promptFileIsShared bool
 	if appended := buildAppendSystemPrompt(core.AgentSystemPrompt(), platformPrompt, appendSystemPrompt); appended != "" {
-		innerArgs = append(innerArgs, "--append-system-prompt", appended)
+		if platformPrompt == "" && appendSystemPrompt == "" {
+			path, err := ensureSharedSystemPromptFile(ccDataDir, appended)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("claudeSession: ensure shared prompt file: %w", err)
+			}
+			promptFilePath = path
+			promptFileIsShared = true
+		} else {
+			path, err := writeTempAppendPromptFile(ccDataDir, appended)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("claudeSession: write per-spawn prompt file: %w", err)
+			}
+			promptFilePath = path
+		}
+		innerArgs = append(innerArgs, "--append-system-prompt-file", promptFilePath)
 	}
 
 	if effort != "" {
@@ -176,22 +338,27 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	// Build final argument list.
-	// When cliArgsFlag is set (e.g. "-a"), inner args are bundled into a
+	// When cmdArgsFlag is set (e.g. "-a"), inner args are bundled into a
 	// single passthrough string via that flag, while outer args (--model etc.)
 	// are appended directly so the wrapper can also interpret them.
 	// Args containing spaces/newlines are quoted so the wrapper's command-line
 	// parser (e.g. splitCommandLine) keeps them as single tokens.
 	// Result: my-cli code -t foo -a "--verbose --append-system-prompt 'long text'" --model x
 	var allArgs []string
-	if cliArgsFlag != "" {
+	if cmdArgsFlag != "" {
 		allArgs = append(allArgs, cliExtraArgs...)
-		allArgs = append(allArgs, cliArgsFlag, shellJoinArgs(innerArgs))
+		allArgs = append(allArgs, cmdArgsFlag, shellJoinArgs(innerArgs))
 		allArgs = append(allArgs, outerArgs...)
 	} else {
 		allArgs = append(allArgs, cliExtraArgs...)
 		allArgs = append(allArgs, innerArgs...)
 		allArgs = append(allArgs, outerArgs...)
 	}
+	// Under run_as_user isolation, sudo -i ignores cmd.Dir (it chdirs to the
+	// target user's HOME), so the workspace must be re-applied inside the
+	// spawn. WorkDir tells BuildSpawnCommand to wrap the command with a chdir;
+	// the path itself is passed through RunAsChdirEnv below.
+	spawnOpts.WorkDir = workDir
 	cmd := core.BuildSpawnCommand(sessionCtx, spawnOpts, cliBin, allArgs...)
 	cmd.Dir = workDir
 	// Put the child into its own process group so Close() can terminate the
@@ -213,6 +380,14 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// hook itself without this env var, so the real work happens only
 	// once.
 	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
+	// Carry the intended working directory across the sudo -i boundary so the
+	// re-chdir wrapper in BuildSpawnCommand can restore it (sudo -i would
+	// otherwise leave the agent in the target user's HOME). Only meaningful
+	// under isolation; FilterEnvForSpawn keeps it because mergedAllowlist
+	// includes RunAsChdirEnv whenever WorkDir is set.
+	if spawnOpts.IsolationMode() && workDir != "" {
+		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
+	}
 	// When run_as_user is set, strip the supervisor's environment down to
 	// the allowlist before passing it to sudo. sudo --preserve-env also
 	// enforces this, but filtering here makes the cc-connect spawn argv
@@ -251,8 +426,20 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		if promptFilePath != "" && !promptFileIsShared {
+			_ = os.Remove(promptFilePath)
+		}
 		cancel()
 		return nil, fmt.Errorf("claudeSession: start: %w", err)
+	}
+
+	// Only remember the prompt path for cleanup when it is the per-spawn
+	// temp variant. The shared cc-connect-system.md file is reused across
+	// all sessions and must never be deleted by an individual session's
+	// Close.
+	var cleanupPromptPath string
+	if !promptFileIsShared {
+		cleanupPromptPath = promptFilePath
 	}
 
 	cs := &claudeSession{
@@ -266,6 +453,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		gracefulStopTimeout: 120 * time.Second,
 		ccHooks:             newCCPermissionHookRunner(workDir),
 		startupWarning:      rootDowngradeWarning,
+		promptFilePath:      cleanupPromptPath,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -396,7 +584,32 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
+	default:
+		// Unknown event types are not silently dropped — they are logged
+		// at debug level with the full payload so future diagnosis of
+		// new Claude Code event shapes (e.g. compaction, hook events)
+		// is possible from the log stream. Compaction events are
+		// recognized in handleResult via their `result` subtype rather
+		// than the top-level event type.
+		slog.Debug("claudeSession: unrecognized event type", "type", eventType, "raw", raw)
 	}
+}
+
+// isCompactionResult reports whether a `type:"result"` event is actually
+// a mid-turn compaction notification. Claude Code uses the value
+// `compact` in newer CLI versions and `compaction` in older ones; we
+// accept both to be safe across CLI rollouts (issue #481).
+func isCompactionResult(raw map[string]any) bool {
+	return resultSubtype(raw) == "compact" || resultSubtype(raw) == "compaction"
+}
+
+// resultSubtype extracts the optional `subtype` field from a result
+// event payload. Empty string when missing.
+func resultSubtype(raw map[string]any) string {
+	if s, ok := raw["subtype"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
@@ -539,9 +752,39 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
+			var result string
+			switch c := item["content"].(type) {
+			case string:
+				result = c
+			case []any:
+				var parts []string
+				for _, elem := range c {
+					if m, ok := elem.(map[string]any); ok {
+						if t, _ := m["text"].(string); t != "" {
+							parts = append(parts, t)
+						}
+					}
+				}
+				result = strings.Join(parts, "\n")
+			}
 			if isError {
-				result, _ := item["content"].(string)
 				slog.Debug("claudeSession: tool error", "content", result)
+			}
+			success := !isError
+			code := 0
+			if isError {
+				code = 1
+			}
+			evt := core.Event{
+				Type:         core.EventToolResult,
+				ToolResult:   truncateStr(strings.TrimSpace(result), 500),
+				ToolExitCode: &code,
+				ToolSuccess:  &success,
+			}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 	}
@@ -554,6 +797,17 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
+	}
+
+	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
+	// or `subtype:"compaction"`. They are NOT turn completion — the CLI
+	// is mid-task and will continue streaming subsequent tool calls and
+	// assistant messages after the compaction step. Treating these as
+	// Done=true would make the engine's processInteractiveEvents return
+	// early and drop the rest of the turn (issue #481).
+	isCompaction := isCompactionResult(raw)
+	if isCompaction {
+		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
 	}
 
 	// Aggregated usage across all sub-calls in this turn — used for billing-
@@ -586,7 +840,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		Type:                     core.EventResult,
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
-		Done:                     true,
+		Done:                     !isCompaction,
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
@@ -915,6 +1169,15 @@ func (cs *claudeSession) Alive() bool {
 }
 
 func (cs *claudeSession) Close() error {
+	// Best-effort cleanup of the --append-system-prompt-file temp file on
+	// every exit path. The file is small (~9KB) and OS temp cleanup also
+	// eventually claims it, but explicit removal keeps workdirs tidy.
+	defer func() {
+		if cs.promptFilePath != "" {
+			_ = os.Remove(cs.promptFilePath)
+		}
+	}()
+
 	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
 	// stdin close, running Stop hooks (e.g. claude-mem session summary).
 	cs.stdinMu.Lock()
@@ -941,8 +1204,8 @@ func (cs *claudeSession) Close() error {
 	// descendants (e.g. MCP server bridges) a second chance to run cleanup
 	// handlers that respond to signals but not stdin EOF.
 	if err := signalProcessGroup(cs.cmd, syscall.SIGTERM); err != nil {
-			slog.Warn("claudeSession: signal SIGTERM", "error", err)
-		}
+		slog.Warn("claudeSession: signal SIGTERM", "error", err)
+	}
 
 	select {
 	case <-cs.done:

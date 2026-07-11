@@ -945,6 +945,43 @@ func TestSwitchToAgentSession_ReusesExisting(t *testing.T) {
 	}
 }
 
+// TestSwitchToAgentSession_PreservesHistory locks down the fix for the
+// `/switch` regression: when switching back to a previously-used
+// agent_session_id, the returned Session must retain its conversation history.
+// Before the fix, cmdSwitch called session.ClearHistory() unconditionally,
+// which made /history return empty after any switch round-trip.
+func TestSwitchToAgentSession_PreservesHistory(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:carol"
+
+	// Original session with some conversation history.
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "Session A")
+	s1.AddHistory("user", "hello from session A")
+	s1.AddHistory("assistant", "hi! this is session A")
+
+	// Switch away to a different agent session.
+	sm.SwitchToAgentSession(userKey, "agent-B", "claude", "Session B")
+
+	// Switch back to the original agent session.
+	s3 := sm.SwitchToAgentSession(userKey, "agent-A", "claude", "Session A")
+	if s3.ID != s1.ID {
+		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
+	}
+
+	got := s3.GetHistory(0)
+	if len(got) != 2 {
+		t.Fatalf("history after switch-back: got %d entries, want 2 — history was wiped (regression of cmdSwitch.ClearHistory bug)", len(got))
+	}
+	if got[0].Role != "user" || got[0].Content != "hello from session A" {
+		t.Fatalf("first history entry = (%q, %q), want (user, hello from session A)", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != "assistant" || got[1].Content != "hi! this is session A" {
+		t.Fatalf("second history entry = (%q, %q), want (assistant, hi! this is session A)", got[1].Role, got[1].Content)
+	}
+}
+
 func TestPastAgentSessionIDs_ClearPreservesHistory(t *testing.T) {
 	s := &Session{}
 	s.SetAgentSessionID("thread-1", "codex")

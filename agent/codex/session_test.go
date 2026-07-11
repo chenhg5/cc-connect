@@ -38,7 +38,7 @@ func TestAvailableReasoningEfforts_ExcludesMinimal(t *testing.T) {
 }
 
 func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -48,7 +48,10 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	want := []string{
 		"exec",
 		"--skip-git-repo-check",
-		"--full-auto",
+		"--sandbox",
+		"workspace-write",
+		"-c",
+		`approval_policy="never"`,
 		"--model",
 		"o3",
 		"-c",
@@ -69,7 +72,7 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 }
 
 func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -82,7 +85,7 @@ func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
 }
 
 func TestBuildExecArgs_IncludesModelProvider(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "openai/gpt-5.3-codex", "", "full-auto", "", "https://router.example.com/api/v1", nil, "shengsuanyun")
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "openai/gpt-5.3-codex", "", "full-auto", "", "https://router.example.com/api/v1", nil, "shengsuanyun", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -98,7 +101,7 @@ func TestBuildExecArgs_IncludesModelProvider(t *testing.T) {
 }
 
 func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "thread-abc", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "thread-abc", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -115,6 +118,163 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 	// --json and stdin marker must still be present.
 	if !containsSequence(args, []string{"--json", "-"}) {
 		t.Fatalf("resume args missing --json + stdin marker: %v", args)
+	}
+}
+
+// TestBuildExecArgs_ModeMapping verifies each permission mode maps to the
+// correct codex CLI flags. Critical: codex exec has no approval IPC, so
+// approval_policy must always be "never" to avoid hanging on a TTY prompt
+// that this backend cannot answer.
+func TestBuildExecArgs_ModeMapping(t *testing.T) {
+	tests := []struct {
+		mode           string
+		wantSandbox    string // "" means no --sandbox flag (only yolo)
+		wantApproval   bool   // true means -c approval_policy="never" must be present
+		wantBypass     bool   // true means --dangerously-bypass-approvals-and-sandbox
+		wantNoFullAuto bool   // always true: --full-auto is removed in codex 0.137+
+	}{
+		{mode: "suggest", wantSandbox: "read-only", wantApproval: true, wantNoFullAuto: true},
+		{mode: "auto-edit", wantSandbox: "workspace-write", wantApproval: true, wantNoFullAuto: true},
+		{mode: "full-auto", wantSandbox: "workspace-write", wantApproval: true, wantNoFullAuto: true},
+		{mode: "yolo", wantBypass: true, wantNoFullAuto: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.mode, func(t *testing.T) {
+			cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", tc.mode, "", "", nil, "", "", "")
+			if err != nil {
+				t.Fatalf("newCodexSession: %v", err)
+			}
+			args := cs.buildExecArgs("hi", nil)
+
+			if tc.wantSandbox != "" {
+				if !containsSequence(args, []string{"--sandbox", tc.wantSandbox}) {
+					t.Errorf("mode=%s missing --sandbox %s; args=%v", tc.mode, tc.wantSandbox, args)
+				}
+			}
+			if tc.wantApproval {
+				if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+					t.Errorf("mode=%s missing approval_policy=never; args=%v", tc.mode, args)
+				}
+			}
+			if tc.wantBypass {
+				found := false
+				for _, a := range args {
+					if a == "--dangerously-bypass-approvals-and-sandbox" {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("mode=%s missing --dangerously-bypass-approvals-and-sandbox; args=%v", tc.mode, args)
+				}
+			}
+			if tc.wantNoFullAuto {
+				for _, a := range args {
+					if a == "--full-auto" {
+						t.Errorf("mode=%s still emits deprecated --full-auto; args=%v", tc.mode, args)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestBuildExecArgs_ResumeUsesSandboxModeConfigOverride is the regression test
+// for the "codex exec resume" sandbox flag bug.
+//
+// codex CLI 0.137 limitation: `codex exec resume` does NOT accept the
+// `--sandbox <mode>` flag (only `codex exec` does). Both subcommands accept
+// `-c key=value` config overrides, so resume must express sandbox via
+// `-c sandbox_mode="..."` instead. Without this, every resume fails with:
+//
+//	error: unexpected argument '--sandbox' found
+//
+// silently destroying the user's session on cc-connect restart / idle reset.
+func TestBuildExecArgs_ResumeUsesSandboxModeConfigOverride(t *testing.T) {
+	tests := []struct {
+		mode            string
+		wantSandboxMode string // "" means no sandbox_mode override expected (yolo)
+		wantBypass      bool
+	}{
+		{mode: "suggest", wantSandboxMode: "read-only"},
+		{mode: "auto-edit", wantSandboxMode: "workspace-write"},
+		{mode: "full-auto", wantSandboxMode: "workspace-write"},
+		{mode: "yolo", wantBypass: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.mode, func(t *testing.T) {
+			cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", tc.mode, "thread-abc", "", nil, "", "", "")
+			if err != nil {
+				t.Fatalf("newCodexSession: %v", err)
+			}
+			args := cs.buildExecArgs("hi", nil)
+
+			// Sanity: this is a resume invocation.
+			if !containsSequence(args, []string{"exec", "resume", "--skip-git-repo-check"}) {
+				t.Fatalf("expected resume invocation, got: %v", args)
+			}
+
+			// Regression: --sandbox flag must NEVER appear in resume args.
+			// codex exec resume rejects it with: "unexpected argument '--sandbox' found".
+			for i, a := range args {
+				if a == "--sandbox" {
+					t.Errorf("mode=%s: resume args must not contain --sandbox (codex exec resume rejects it), but found at index %d: %v", tc.mode, i, args)
+				}
+			}
+
+			if tc.wantSandboxMode != "" {
+				want := `sandbox_mode="` + tc.wantSandboxMode + `"`
+				if !containsSequence(args, []string{"-c", want}) {
+					t.Errorf("mode=%s: resume args missing -c %s; args=%v", tc.mode, want, args)
+				}
+				// approval_policy must still be never for exec backend (no IPC).
+				if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+					t.Errorf("mode=%s: resume args missing approval_policy=never; args=%v", tc.mode, args)
+				}
+			}
+
+			if tc.wantBypass {
+				found := false
+				for _, a := range args {
+					if a == "--dangerously-bypass-approvals-and-sandbox" {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("mode=%s: resume args missing --dangerously-bypass-approvals-and-sandbox; args=%v", tc.mode, args)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexPromptPreamble_PrependsProjectPrompts(t *testing.T) {
+	preamble := buildCodexPromptPreamble(
+		"You are Linear Reporter.",
+		"Always invoke linear-bug-intake.",
+	)
+
+	got := prependCodexPromptPreamble("Create a Chat issue.", preamble)
+
+	for _, want := range []string{
+		"Before answering, follow these project-level instructions",
+		"Project system prompt:\nYou are Linear Reporter.",
+		"Additional project instructions:\nAlways invoke linear-bug-intake.",
+		"User message:\nCreate a Chat issue.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("prompt preamble missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestCodexPromptPreamble_EmptyIsNoop(t *testing.T) {
+	const prompt = "Hello"
+	if got := prependCodexPromptPreamble(prompt, ""); got != prompt {
+		t.Fatalf("empty preamble changed prompt: %q", got)
 	}
 }
 
@@ -151,7 +311,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -185,7 +345,7 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 		t.Fatalf("write rollout: %v", err)
 	}
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", sessionID, "", []string{"CODEX_HOME=" + codexHome}, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", sessionID, "", []string{"CODEX_HOME=" + codexHome}, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -236,7 +396,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -297,7 +457,7 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-123", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-123", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -350,7 +510,7 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	t.Setenv("CODEX_STDIN_FILE", stdinFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-stdin", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-stdin", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -369,6 +529,48 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	// cat > file creates the path before stdin is fully read; polling until
 	// content matches avoids racing an empty read (flaky under -cover / CI).
 	waitForFileEquals(t, stdinFile, prompt)
+}
+
+func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	stdinFile := filepath.Join(workDir, "stdin.txt")
+	script := "#!/bin/sh\n" +
+		"cat > \"$CODEX_STDIN_FILE\"\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-preamble\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	powershellScript := `
+[IO.File]::WriteAllText($env:CODEX_STDIN_FILE, [Console]::In.ReadToEnd())
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-preamble"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+
+	t.Setenv("CODEX_STDIN_FILE", stdinFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "You are Linear Reporter.", "Always invoke linear-bug-intake.")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	if err := cs.Send("Create a Chat issue.", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	wantParts := []string{
+		"Project system prompt:\nYou are Linear Reporter.",
+		"Additional project instructions:\nAlways invoke linear-bug-intake.",
+		"User message:\nCreate a Chat issue.",
+	}
+	for _, want := range wantParts {
+		waitForFileContains(t, stdinFile, want)
+	}
 }
 
 func TestSend_HandlesLargeJSONLines(t *testing.T) {
@@ -403,7 +605,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	t.Setenv("CODEX_PAYLOAD_FILE", payloadFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -571,6 +773,20 @@ func waitForFileEquals(t *testing.T, path, want string) {
 	t.Fatalf("stdin file %s: got %q, want %q", path, string(data), want)
 }
 
+func waitForFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(path)
+	t.Fatalf("file %s: got %q, want substring %q", path, string(data), want)
+}
+
 func containsSequence(args, want []string) bool {
 	if len(want) == 0 {
 		return true
@@ -609,7 +825,7 @@ func indexOf(args []string, target string) int {
 }
 
 func TestCodexSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newCodexSession(context.Background(), "codex", nil, "/tmp", "", "", "full-auto", core.ContinueSession, "", nil, "")
+	s, err := newCodexSession(context.Background(), "codex", nil, "/tmp", "", "", "full-auto", core.ContinueSession, "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -651,7 +867,7 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 		codexSessionForceKillWait = oldForceKillWait
 	})
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -718,7 +934,7 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 		codexSessionForceKillWait = oldForceKillWait
 	})
 
-	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "")
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
