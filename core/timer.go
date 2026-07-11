@@ -27,6 +27,7 @@ type TimerJob struct {
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result)
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override; "" = use project default
+	Model       string    `json:"model,omitempty"`        // model override for this job's turn; "" = agent's configured model
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
 	Fired       bool      `json:"fired"`

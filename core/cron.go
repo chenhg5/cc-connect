@@ -34,6 +34,7 @@ type CronJob struct {
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
+	Model       string    `json:"model,omitempty"`        // model override for this job's turns; "" = agent's configured model
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
@@ -363,6 +364,11 @@ func updateJobField(job *CronJob, field string, value any) error {
 	case "mode":
 		if v, ok := value.(string); ok {
 			job.Mode = v
+			return nil
+		}
+	case "model":
+		if v, ok := value.(string); ok {
+			job.Model = v
 			return nil
 		}
 	case "timeout_mins":

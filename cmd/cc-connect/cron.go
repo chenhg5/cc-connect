@@ -57,7 +57,7 @@ func closeCronResponseBody(body io.Closer) {
 }
 
 func runCronAdd(args []string) {
-	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
+	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode, model string
 	var timeoutMins *int
 	var silent bool
 
@@ -103,6 +103,11 @@ func runCronAdd(args []string) {
 			if i+1 < len(args) {
 				i++
 				sessionMode = args[i]
+			}
+		case "--model":
+			if i+1 < len(args) {
+				i++
+				model = args[i]
 			}
 		case "--timeout-mins":
 			if i+1 < len(args) {
@@ -171,6 +176,9 @@ func runCronAdd(args []string) {
 	}
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
+	}
+	if model != "" {
+		body["model"] = model
 	}
 	if timeoutMins != nil {
 		body["timeout_mins"] = *timeoutMins
@@ -627,6 +635,7 @@ Options:
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
       --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
+      --model <model>        model override for this job's turns (e.g. haiku, sonnet); default: agent's configured model
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --silent               Suppress cron start notification
       --data-dir <path>      Data directory (default: ~/.cc-connect)

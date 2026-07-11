@@ -325,6 +325,7 @@ type CronAddRequest struct {
 	Silent      *bool  `json:"silent,omitempty"`
 	SessionMode string `json:"session_mode,omitempty"`
 	Mode        string `json:"mode,omitempty"`
+	Model       string `json:"model,omitempty"`
 	TimeoutMins *int   `json:"timeout_mins,omitempty"`
 }
 
@@ -404,6 +405,7 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		Silent:      req.Silent,
 		SessionMode: NormalizeCronSessionMode(req.SessionMode),
 		Mode:        req.Mode,
+		Model:       req.Model,
 		TimeoutMins: req.TimeoutMins,
 	}
 	job.CreatedAt = time.Now()
@@ -581,6 +583,7 @@ type TimerAddRequest struct {
 	Mute        bool   `json:"mute,omitempty"`
 	SessionMode string `json:"session_mode,omitempty"`
 	Mode        string `json:"mode,omitempty"`
+	Model       string `json:"model,omitempty"`
 	TimeoutMins *int   `json:"timeout_mins,omitempty"`
 }
 
@@ -663,6 +666,7 @@ func (s *APIServer) handleTimerAdd(w http.ResponseWriter, r *http.Request) {
 		Mute:        req.Mute,
 		SessionMode: req.SessionMode,
 		Mode:        req.Mode,
+		Model:       req.Model,
 		TimeoutMins: req.TimeoutMins,
 		CreatedAt:   time.Now(),
 	}

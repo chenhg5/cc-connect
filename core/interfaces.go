@@ -480,6 +480,15 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ModelOverrideStarter is an optional interface for agents that can start a
+// session with a one-off model override. Unlike ModelSwitcher.SetModel, the
+// override applies only to the session being started and never mutates the
+// agent's configured model, so concurrent sessions of the same project are
+// unaffected (used by cron/timer jobs with a per-job model).
+type ModelOverrideStarter interface {
+	StartSessionWithModel(ctx context.Context, sessionID string, model string) (AgentSession, error)
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {

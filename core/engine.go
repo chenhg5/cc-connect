@@ -1499,13 +1499,14 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		SessionKey:    sessionKey,
+		Platform:      platformName,
+		UserID:        "cron",
+		UserName:      "cron",
+		Content:       content,
+		ReplyCtx:      replyCtx,
+		ModeOverride:  job.Mode,
+		ModelOverride: job.Model,
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -1702,13 +1703,14 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "timer",
-		UserName:     "timer",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		SessionKey:    sessionKey,
+		Platform:      platformName,
+		UserID:        "timer",
+		UserName:      "timer",
+		Content:       content,
+		ReplyCtx:      replyCtx,
+		ModeOverride:  job.Mode,
+		ModelOverride: job.Model,
 	}
 
 	agent := e.agent
@@ -3652,7 +3654,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.ModelOverride)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -3921,7 +3923,7 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, modelOverride string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -4037,8 +4039,23 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 	isResume := startSessionID != ""
+	// Per-message model override (cron/timer jobs with a model field): spawn
+	// this session with the override without touching the agent's configured
+	// model. Agents that don't implement ModelOverrideStarter fall back to
+	// their configured model.
+	startSession := agent.StartSession
+	if modelOverride != "" {
+		if mos, ok := agent.(ModelOverrideStarter); ok {
+			startSession = func(ctx context.Context, sid string) (AgentSession, error) {
+				return mos.StartSessionWithModel(ctx, sid, modelOverride)
+			}
+			slog.Info("spawning session with model override", "session_key", sessionKey, "model", modelOverride)
+		} else {
+			slog.Warn("model override requested but agent does not support it", "session_key", sessionKey, "agent", agent.Name(), "model", modelOverride)
+		}
+	}
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := startSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -4051,7 +4068,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = startSession(e.ctx, "")
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
