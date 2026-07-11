@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -2320,10 +2322,17 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 
+	var err error
 	if !p.shouldUseThreadOrReplyAPI(rc) {
-		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+		err = p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+	} else {
+		err = p.replyMessage(ctx, rc, msgType, msgBody)
 	}
-	return p.replyMessage(ctx, rc, msgType, msgBody)
+	if err != nil {
+		return err
+	}
+	p.maybeSendKBConfirmCard(ctx, rc, content)
+	return nil
 }
 
 // Send sends a message. When the original message ID is available, the message
@@ -2341,7 +2350,67 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
-	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+	if err := p.sendNewMessageToChat(ctx, rc, msgType, msgBody); err != nil {
+		return err
+	}
+	p.maybeSendKBConfirmCard(ctx, rc, content)
+	return nil
+}
+
+// kbConfirmCardTokenRe matches the KNOWLEDGE_CACHE_DIR (case-insensitive) printed
+// by jinkela-query's save-alert-conclusion.js, used to offer a one-click
+// "write to knowledge base" button. Tolerates `=`/`:` separators, surrounding
+// whitespace, and optional quoting (single/double/backtick) around the path.
+var kbConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:]\s*(\S+)`)
+
+// maybeSendKBConfirmCard emits an interactive confirmation card with a
+// "写入知识库" button when the outgoing message carries a KNOWLEDGE_CACHE_DIR
+// token. Clicking the button dispatches the token back to the session via the
+// existing `cmd:` card-action branch, so jinkela-query's write flow
+// (knowledge-write-intent.js --cache-dir) runs without re-investigating.
+// The session_key is auto-injected into the button value by renderCardMap,
+// ensuring correct routing in thread-isolated chats.
+func (p *Platform) maybeSendKBConfirmCard(ctx context.Context, rc replyContext, content string) {
+	m := kbConfirmCardTokenRe.FindStringSubmatch(content)
+	if m == nil {
+		return
+	}
+	// Trim optional surrounding quotes/backticks so the captured path is clean
+	// regardless of how the agent printed it (e.g. KNOWLEDGE_CACHE_DIR='/tmp/x').
+	cacheDir := strings.Trim(m[1], "\"`'")
+	if cacheDir == "" {
+		return
+	}
+	// Only offer the button when the path is absolute and the conclusion file
+	// actually exists. This guards against stale/garbage tokens (e.g. a cached
+	// KNOWLEDGE_CACHE_DIR printed earlier whose /tmp dir has since been cleaned),
+	// which would otherwise produce a button that fails on click.
+	if !filepath.IsAbs(cacheDir) {
+		slog.Debug(p.tag()+": skip kb confirm card, cache dir not absolute", "dir", cacheDir)
+		return
+	}
+	if info, err := os.Stat(cacheDir); err != nil || !info.IsDir() {
+		slog.Debug(p.tag()+": skip kb confirm card, cache dir missing", "dir", cacheDir)
+		return
+	}
+	card := core.NewCard().
+		Title("📚 知识库写入确认", "blue").
+		Markdown("结论已暂存，点【写入知识库】直接落库").
+		Buttons(
+			core.PrimaryBtn("写入知识库", "cmd:记录到知识库 KNOWLEDGE_CACHE_DIR="+cacheDir),
+			core.DefaultBtn("不用了", "cmd:不用了"),
+		).
+		Build()
+	cardJSON := renderCard(card, rc.sessionKey)
+	var err error
+	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
+		err = p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	} else {
+		err = p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send kb confirm card")
+	}
+	if err != nil {
+		slog.Warn(p.tag()+": send kb confirm card failed", "error", err)
+	}
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
