@@ -493,6 +493,26 @@ func TestReplyFallsBackToHTMLWhenRichMessageFails(t *testing.T) {
 	}
 }
 
+func TestSendFallsBackToHTMLWhenRichMessageFails(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.sendRichErr = errors.New("can't parse rich_message: bad block")
+	p := &Platform{bot: stubBot}
+	ctx := context.Background()
+	rctx := replyContext{chatID: 1, threadID: 0, messageID: 0}
+
+	content := "- item one\n- item two"
+	if err := p.Send(ctx, rctx, content); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if stubBot.sendRichMessageCalls != 1 {
+		t.Fatalf("sendRichMessageCalls = %d, want 1", stubBot.sendRichMessageCalls)
+	}
+	if stubBot.sendMessageCalls != 1 {
+		t.Fatalf("sendMessageCalls = %d, want 1 (fallback path)", stubBot.sendMessageCalls)
+	}
+}
+
 func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {
 	connectStarted := make(chan struct{})
 	releaseConnect := make(chan struct{})

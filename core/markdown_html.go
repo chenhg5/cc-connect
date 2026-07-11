@@ -282,6 +282,15 @@ var (
 	reOrderedList    = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
 	reTableSep       = regexp.MustCompile(`^\|[\s:|-]+\|$`)
 	reCallout        = regexp.MustCompile(`^\[!(\w+)\]\s*(.*)$`)
+
+	// reTableSepLoose matches a GFM delimiter row with or without the
+	// optional leading/trailing pipe (e.g. "| --- | --- |", "--- | ---", or
+	// "-|-"), used only by NeedsRichMessage. Unlike reTableSep it requires at
+	// least one internal "|" (i.e. 2+ columns) so a bare horizontal rule
+	// ("---", matched by reHorizontal) is never misread as a one-column
+	// table; reTableSep itself is left untouched since MarkdownToSimpleHTML's
+	// <pre> table renderer already depends on its stricter, pipe-bounded shape.
+	reTableSepLoose = regexp.MustCompile(`^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?$`)
 )
 
 // convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
@@ -413,7 +422,7 @@ func NeedsRichMessage(md string) bool {
 		if inCodeBlock {
 			continue
 		}
-		if reTableSep.MatchString(trimmed) {
+		if reTableSepLoose.MatchString(trimmed) {
 			hasTableSep = true
 			continue
 		}
