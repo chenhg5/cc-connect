@@ -2,6 +2,7 @@ package cloudweb
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,7 +33,11 @@ func TestGatewayWebhook(t *testing.T) {
 	if gt.listener == nil {
 		t.Fatal("gateway listener not started")
 	}
-	url := "http://" + gt.listener.Addr().String() + gt.webhookPath
+	_, port, err := net.SplitHostPort(gt.listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	url := "http://" + net.JoinHostPort("127.0.0.1", port) + gt.webhookPath
 	body, _ := json.Marshal(wireInboundMessage{
 		Type: "message", MsgID: "g1", SessionKey: "cloud_web:x:y",
 		UserID: "y", Content: "from gateway", ReplyCtx: "ctx",
