@@ -282,6 +282,15 @@ var (
 	reOrderedList    = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
 	reTableSep       = regexp.MustCompile(`^\|[\s:|-]+\|$`)
 	reCallout        = regexp.MustCompile(`^\[!(\w+)\]\s*(.*)$`)
+
+	// reTableSepLoose matches a GFM delimiter row with or without the
+	// optional leading/trailing pipe (e.g. "| --- | --- |", "--- | ---", or
+	// "-|-"), used only by NeedsRichMessage. Unlike reTableSep it requires at
+	// least one internal "|" (i.e. 2+ columns) so a bare horizontal rule
+	// ("---", matched by reHorizontal) is never misread as a one-column
+	// table; reTableSep itself is left untouched since MarkdownToSimpleHTML's
+	// <pre> table renderer already depends on its stricter, pipe-bounded shape.
+	reTableSepLoose = regexp.MustCompile(`^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?$`)
 )
 
 // convertInlineHTML converts inline Markdown formatting to Telegram-compatible HTML.
@@ -393,6 +402,38 @@ func convertInlineHTML(s string) string {
 	}
 
 	return s
+}
+
+// NeedsRichMessage reports whether md contains GFM structure (a table,
+// heading, or list) that MarkdownToSimpleHTML would otherwise flatten into
+// plain/<pre> text. Callers use this to decide between sendRichMessage
+// (Telegram Bot API 10.1, which renders these natively) and the legacy
+// sendMessage HTML path. Fenced code blocks are skipped so that "#" comments
+// or "- " bullets inside a code sample don't trigger a false positive.
+func NeedsRichMessage(md string) bool {
+	inCodeBlock := false
+	hasTableSep := false
+	for _, line := range strings.Split(md, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock {
+			continue
+		}
+		if reTableSepLoose.MatchString(trimmed) {
+			hasTableSep = true
+			continue
+		}
+		if reHeading.MatchString(line) {
+			return true
+		}
+		if reUnorderedList.MatchString(line) || reOrderedList.MatchString(line) {
+			return true
+		}
+	}
+	return hasTableSep
 }
 
 func escapeHTML(s string) string {

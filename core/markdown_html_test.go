@@ -6,6 +6,32 @@ import (
 	"testing"
 )
 
+func TestNeedsRichMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain text", "just a plain sentence", false},
+		{"table", "| A | B |\n| --- | --- |\n| 1 | 2 |", true},
+		{"table without outer pipes", "A | B\n--- | ---\n1 | 2", true},
+		{"heading", "# Title\n\nbody", true},
+		{"unordered list", "- one\n- two", true},
+		{"ordered list", "1. one\n2. two", true},
+		{"stray pipe is not a table", "a | b without a separator row", false},
+		{"horizontal rule is not a one-column table", "above\n\n---\n\nbelow", false},
+		{"heading-like text inside a code block is ignored", "```\n# not a heading\n- not a list\n```\nplain after", false},
+		{"table inside code block is ignored", "```\n| A | B |\n| --- | --- |\n```\nplain after", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NeedsRichMessage(tc.in); got != tc.want {
+				t.Errorf("NeedsRichMessage(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMarkdownToSimpleHTML_Bold(t *testing.T) {
 	out := MarkdownToSimpleHTML("hello **world**")
 	if !strings.Contains(out, "<b>world</b>") {
@@ -585,7 +611,7 @@ func TestMarkdownToSimpleHTML_Wikilink(t *testing.T) {
 	}{
 		{"simple wikilink", "see [[MyPage]]", "MyPage"},
 		{"wikilink with display text", "see [[MyPage|Display Text]]", "Display Text"},
-		{"wikilink escapes html", "see [[Page<script>]]", "Page&lt;script&gt;"},  // escapeHTML in step 3 handles this
+		{"wikilink escapes html", "see [[Page<script>]]", "Page&lt;script&gt;"}, // escapeHTML in step 3 handles this
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

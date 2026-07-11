@@ -71,6 +71,7 @@ func (t *stubTypingTicker) Stop() {}
 type stubTelegramBot struct {
 	mu                    sync.Mutex
 	sendMessageCalls      int
+	sendRichMessageCalls  int
 	sendPhotoCalls        int
 	sendDocumentCalls     int
 	sendVoiceCalls        int
@@ -85,14 +86,16 @@ type stubTelegramBot struct {
 	getFileCalls          int
 	setReactionCalls      int
 
-	sendErr             error
-	createForumTopicErr error
-	getFileErr          error
-	file                *models.File
-	createForumTopic    *models.ForumTopic
-	sendMessageParams   []*tgbot.SendMessageParams
-	createTopicParams   []*tgbot.CreateForumTopicParams
-	editTopicParams     []*tgbot.EditForumTopicParams
+	sendErr               error
+	sendRichErr           error
+	createForumTopicErr   error
+	getFileErr            error
+	file                  *models.File
+	createForumTopic      *models.ForumTopic
+	sendMessageParams     []*tgbot.SendMessageParams
+	sendRichMessageParams []*tgbot.SendRichMessageParams
+	createTopicParams     []*tgbot.CreateForumTopicParams
+	editTopicParams       []*tgbot.EditForumTopicParams
 }
 
 func newStubTelegramBot() *stubTelegramBot {
@@ -109,6 +112,17 @@ func (b *stubTelegramBot) SendMessage(_ context.Context, params *tgbot.SendMessa
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
+	}
+	return &models.Message{ID: 99}, nil
+}
+
+func (b *stubTelegramBot) SendRichMessage(_ context.Context, params *tgbot.SendRichMessageParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.sendRichMessageCalls++
+	b.sendRichMessageParams = append(b.sendRichMessageParams, params)
+	b.mu.Unlock()
+	if b.sendRichErr != nil {
+		return nil, b.sendRichErr
 	}
 	return &models.Message{ID: 99}, nil
 }
@@ -394,6 +408,109 @@ func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
 
 	stop := p.StartTyping(ctx, rctx)
 	stop()
+}
+
+func TestReplyUsesRichMessageForTable(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{bot: stubBot}
+	ctx := context.Background()
+	rctx := replyContext{chatID: 1, threadID: 5, messageID: 2}
+
+	content := "| A | B |\n| --- | --- |\n| 1 | 2 |"
+	if err := p.Reply(ctx, rctx, content); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	if stubBot.sendRichMessageCalls != 1 {
+		t.Fatalf("sendRichMessageCalls = %d, want 1", stubBot.sendRichMessageCalls)
+	}
+	if stubBot.sendMessageCalls != 0 {
+		t.Fatalf("sendMessageCalls = %d, want 0 (should not fall back on success)", stubBot.sendMessageCalls)
+	}
+	got := stubBot.sendRichMessageParams[0]
+	if got.RichMessage.Markdown != content {
+		t.Fatalf("RichMessage.Markdown = %q, want %q", got.RichMessage.Markdown, content)
+	}
+	if got.ChatID != rctx.chatID || got.MessageThreadID != rctx.threadID {
+		t.Fatalf("ChatID/MessageThreadID = %v/%v, want %v/%v", got.ChatID, got.MessageThreadID, rctx.chatID, rctx.threadID)
+	}
+}
+
+func TestSendUsesRichMessageForList(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{bot: stubBot}
+	ctx := context.Background()
+	rctx := replyContext{chatID: 1, threadID: 0, messageID: 0}
+
+	content := "- item one\n- item two"
+	if err := p.Send(ctx, rctx, content); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if stubBot.sendRichMessageCalls != 1 {
+		t.Fatalf("sendRichMessageCalls = %d, want 1", stubBot.sendRichMessageCalls)
+	}
+	if stubBot.sendMessageCalls != 0 {
+		t.Fatalf("sendMessageCalls = %d, want 0 (should not fall back on success)", stubBot.sendMessageCalls)
+	}
+}
+
+func TestReplyPlainTextSkipsRichMessage(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{bot: stubBot}
+	ctx := context.Background()
+	rctx := replyContext{chatID: 1, threadID: 0, messageID: 2}
+
+	if err := p.Reply(ctx, rctx, "just a plain sentence, no structure here"); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	if stubBot.sendRichMessageCalls != 0 {
+		t.Fatalf("sendRichMessageCalls = %d, want 0 for plain text", stubBot.sendRichMessageCalls)
+	}
+	if stubBot.sendMessageCalls != 1 {
+		t.Fatalf("sendMessageCalls = %d, want 1", stubBot.sendMessageCalls)
+	}
+}
+
+func TestReplyFallsBackToHTMLWhenRichMessageFails(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.sendRichErr = errors.New("can't parse rich_message: bad block")
+	p := &Platform{bot: stubBot}
+	ctx := context.Background()
+	rctx := replyContext{chatID: 1, threadID: 0, messageID: 2}
+
+	content := "# Heading\n\nbody text"
+	if err := p.Reply(ctx, rctx, content); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	if stubBot.sendRichMessageCalls != 1 {
+		t.Fatalf("sendRichMessageCalls = %d, want 1", stubBot.sendRichMessageCalls)
+	}
+	if stubBot.sendMessageCalls != 1 {
+		t.Fatalf("sendMessageCalls = %d, want 1 (fallback path)", stubBot.sendMessageCalls)
+	}
+}
+
+func TestSendFallsBackToHTMLWhenRichMessageFails(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.sendRichErr = errors.New("can't parse rich_message: bad block")
+	p := &Platform{bot: stubBot}
+	ctx := context.Background()
+	rctx := replyContext{chatID: 1, threadID: 0, messageID: 0}
+
+	content := "- item one\n- item two"
+	if err := p.Send(ctx, rctx, content); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if stubBot.sendRichMessageCalls != 1 {
+		t.Fatalf("sendRichMessageCalls = %d, want 1", stubBot.sendRichMessageCalls)
+	}
+	if stubBot.sendMessageCalls != 1 {
+		t.Fatalf("sendMessageCalls = %d, want 1 (fallback path)", stubBot.sendMessageCalls)
+	}
 }
 
 func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {

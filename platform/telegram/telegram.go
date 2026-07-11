@@ -39,6 +39,7 @@ type replyContext struct {
 // *tgbot.Bot satisfies this interface.
 type telegramBot interface {
 	SendMessage(ctx context.Context, params *tgbot.SendMessageParams) (*models.Message, error)
+	SendRichMessage(ctx context.Context, params *tgbot.SendRichMessageParams) (*models.Message, error)
 	SendPhoto(ctx context.Context, params *tgbot.SendPhotoParams) (*models.Message, error)
 	SendDocument(ctx context.Context, params *tgbot.SendDocumentParams) (*models.Message, error)
 	SendVoice(ctx context.Context, params *tgbot.SendVoiceParams) (*models.Message, error)
@@ -1340,6 +1341,19 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return err
 	}
 
+	if core.NeedsRichMessage(content) {
+		if _, err := bot.SendRichMessage(ctx, &tgbot.SendRichMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			RichMessage:     models.InputRichMessage{Markdown: content},
+			ReplyParameters: &models.ReplyParameters{MessageID: rc.messageID},
+		}); err == nil {
+			return nil
+		} else {
+			slog.Warn("telegram: rich message send failed, falling back to HTML", "method", "Reply", "error", err)
+		}
+	}
+
 	html := core.MarkdownToSimpleHTML(content)
 	params := &tgbot.SendMessageParams{
 		ChatID:          rc.chatID,
@@ -1386,6 +1400,18 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	bot, err := p.connectedBot("send")
 	if err != nil {
 		return err
+	}
+
+	if core.NeedsRichMessage(content) {
+		if _, err := bot.SendRichMessage(ctx, &tgbot.SendRichMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			RichMessage:     models.InputRichMessage{Markdown: content},
+		}); err == nil {
+			return nil
+		} else {
+			slog.Warn("telegram: rich message send failed, falling back to HTML", "method", "Send", "error", err)
+		}
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
