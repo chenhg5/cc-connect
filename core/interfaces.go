@@ -601,6 +601,14 @@ type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
 
+// SessionRenamer is an optional interface for agents whose CLI sessions carry a
+// user-visible title (e.g. Cursor /rename). cc-connect mirrors names to/from its
+// session_names map for cross-platform consistency.
+type SessionRenamer interface {
+	GetSessionDisplayName(ctx context.Context, sessionID string) (string, error)
+	SetSessionDisplayName(ctx context.Context, sessionID, name string) error
+}
+
 type SessionTitleProvider interface {
 	GetSessionTitle(sessionID string) string
 }
