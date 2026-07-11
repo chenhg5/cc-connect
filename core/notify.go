@@ -15,7 +15,10 @@ import (
 
 // NotifyConfig wires the INDEX watcher: any RESULT row appended to the
 // archive INDEX by any seat (dispatched or not) is pushed to the Secretary
-// session and/or the local desktop. The INDEX row itself is the push event —
+// session and/or the local desktop. Under the C' protocol, this INDEX-based
+// notification serves as a secondary/compatible fallback channel (e.g. for non-dispatched
+// manual letters). The primary delivery channel for dispatched letters is the
+// result.md file watcher (L-0382). The INDEX row itself is the push event —
 // no seat has to learn to send notifications (L-0311).
 type NotifyConfig struct {
 	Enabled         bool
@@ -116,6 +119,8 @@ func parseIndexResultRows(data string) []indexResultRow {
 
 // scanNewResults returns rows not yet notified, skipping letters covered by
 // the dispatch ledger (those get [RESULT_READY] from the dispatch watcher).
+// Under the C' protocol, this prevents duplicate notifications for dispatched
+// letters since they are already notified when result.md is created/updated.
 // Skipped-but-covered rows are still recorded so the ledger stays tidy.
 func scanNewResults(rows []indexResultRow, ledger *notifyLedger, dispatchCovered map[string]bool) []indexResultRow {
 	var fresh []indexResultRow

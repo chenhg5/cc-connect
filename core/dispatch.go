@@ -330,10 +330,12 @@ func indexHasResultRow(indexPath, letter, thread string) bool {
 }
 
 func dispatchResultReady(exp DispatchExpectation) bool {
+	// Under C' protocol, result.md file creation or update is the primary delivery channel
+	// and does not require the INDEX RESULT row.
 	if _, err := os.Stat(exp.ResultPath); err != nil {
 		return false
 	}
-	return indexHasResultRow(exp.IndexPath, exp.Letter, exp.Thread)
+	return true
 }
 
 func (e *Engine) configureDispatch(cfg DispatchConfig) {
@@ -516,7 +518,7 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 }
 
 func buildDispatchMessage(req dispatchRequest) string {
-	return fmt.Sprintf("Dispatch letter %s.\n\nThread: %s\nPath: %s\n\nRead the QUERY, execute the requested work, then write %s.result.md and append the RESULT row to INDEX.md.", req.Letter, req.Thread, req.Path, req.Letter)
+	return fmt.Sprintf("Dispatch letter %s.\n\nThread: %s\nPath: %s\n\nRead the QUERY, execute the requested work, then write %s.result.md (with Status field). Writing the INDEX RESULT row is optional as a delivery radar but is NOT task closure (CLOSED is handled only by Secretary after Boss approval).", req.Letter, req.Thread, req.Path, req.Letter)
 }
 
 func (e *Engine) dispatchSyntheticMessage(platformName, sessionKey, channelKey string, replyCtx any, content string) {
