@@ -177,6 +177,98 @@ func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) 
 	}
 }
 
+func TestAppServerSession_SendSteersActiveTurn(t *testing.T) {
+	s, stdin := newSendTestSession(t, "turn-1", "buffered answer")
+	request, err := sendAndRespond(t, s, stdin, "focus on the requested fix", map[string]any{"turnId": "turn-1"})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if request.Method != "turn/steer" {
+		t.Fatalf("method = %q, want turn/steer", request.Method)
+	}
+	if got := request.Params["threadId"]; got != "thread-1" {
+		t.Fatalf("threadId = %v, want thread-1", got)
+	}
+	if got := request.Params["expectedTurnId"]; got != "turn-1" {
+		t.Fatalf("expectedTurnId = %v, want turn-1", got)
+	}
+	if got := request.Params["input"]; got == nil {
+		t.Fatal("input = nil, want structured steering input")
+	}
+
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "turn-1" {
+		t.Fatalf("current turn = %q, want turn-1", currentTurn)
+	}
+	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
+		t.Fatalf("pending messages = %v, want buffered answer", pendingMsgs)
+	}
+
+	completedItem, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"item":     map[string]any{"type": "agentMessage", "text": "complete final answer"},
+	})
+	if err != nil {
+		t.Fatalf("marshal completed item: %v", err)
+	}
+	s.handleNotification("item/completed", completedItem)
+	completedTurn, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"turn":     map[string]any{"id": "turn-1", "status": "completed"},
+	})
+	if err != nil {
+		t.Fatalf("marshal completed turn: %v", err)
+	}
+	s.handleNotification("turn/completed", completedTurn)
+
+	firstText := waitForEvent(t, s.events)
+	finalText := waitForEvent(t, s.events)
+	resultEvent := waitForEvent(t, s.events)
+	if firstText.Type != core.EventText || firstText.Content != "buffered answer" {
+		t.Fatalf("first text event = %#v, want buffered answer", firstText)
+	}
+	if finalText.Type != core.EventText || finalText.Content != "complete final answer" {
+		t.Fatalf("final text event = %#v, want complete final answer", finalText)
+	}
+	if resultEvent.Type != core.EventResult || !resultEvent.Done {
+		t.Fatalf("result event = %#v, want one completed result", resultEvent)
+	}
+}
+
+func TestAppServerSession_SendStartsIdleTurn(t *testing.T) {
+	s, stdin := newSendTestSession(t, "", "stale message")
+	request, err := sendAndRespond(t, s, stdin, "start new work", map[string]any{"turn": map[string]any{"id": "turn-2"}})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if request.Method != "turn/start" {
+		t.Fatalf("method = %q, want turn/start", request.Method)
+	}
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "turn-2" {
+		t.Fatalf("current turn = %q, want turn-2", currentTurn)
+	}
+	if len(pendingMsgs) != 0 {
+		t.Fatalf("pending messages = %v, want none", pendingMsgs)
+	}
+}
+
+func TestAppServerSession_SendRejectsMismatchedSteeringTurn(t *testing.T) {
+	s, stdin := newSendTestSession(t, "turn-1", "buffered answer")
+	_, err := sendAndRespond(t, s, stdin, "steer current work", map[string]any{"turnId": "turn-other"})
+	if err == nil || !strings.Contains(err.Error(), "turn/steer") || !strings.Contains(err.Error(), "turn-other") {
+		t.Fatalf("Send() error = %v, want mismatched turn/steer error", err)
+	}
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "turn-1" {
+		t.Fatalf("current turn = %q, want turn-1", currentTurn)
+	}
+	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
+		t.Fatalf("pending messages = %v, want buffered answer", pendingMsgs)
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
@@ -430,6 +522,80 @@ func serverRequestProbe(t *testing.T, idJSON, method string, params any) map[str
 		"method": methodJSON,
 		"params": paramsJSON,
 	}
+}
+
+type clientRequestProbe struct {
+	ID     any            `json:"id"`
+	Method string         `json:"method"`
+	Params map[string]any `json:"params"`
+}
+
+func newSendTestSession(t *testing.T, currentTurn string, pendingMsgs ...string) (*appServerSession, *lockedWriteCloser) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx:          ctx,
+		cancel:       cancel,
+		events:       make(chan core.Event, 8),
+		stdin:        stdin,
+		pending:      make(map[int64]chan rpcResponseEnvelope),
+		preambleSent: true,
+		currentTurn:  currentTurn,
+		pendingMsgs:  append([]string(nil), pendingMsgs...),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+	return s, stdin
+}
+
+func sendAndRespond(t *testing.T, s *appServerSession, stdin *lockedWriteCloser, prompt string, result any) (clientRequestProbe, error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Send(prompt, nil, nil)
+	}()
+	request := waitForClientRequest(t, stdin)
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	s.handleResponse(rpcResponseEnvelope{ID: request.ID, Result: resultJSON})
+	select {
+	case err := <-done:
+		return request, err
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Send")
+		return clientRequestProbe{}, nil
+	}
+}
+
+func sendTestState(s *appServerSession) (string, []string) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.currentTurn, append([]string(nil), s.pendingMsgs...)
+}
+
+func waitForEvent(t *testing.T, events <-chan core.Event) core.Event {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for app-server event")
+		return core.Event{}
+	}
+}
+
+func waitForClientRequest(t *testing.T, w *lockedWriteCloser) clientRequestProbe {
+	t.Helper()
+	line := waitForWrittenJSONLine(t, w)
+	var request clientRequestProbe
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		t.Fatalf("decode JSON-RPC request %q: %v", line, err)
+	}
+	return request
 }
 
 func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
