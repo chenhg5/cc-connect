@@ -16,7 +16,7 @@ func TestMeaningfulCursorSessionName(t *testing.T) {
 		"":            false,
 		"New Agent":   false,
 		"new chat":    false,
-		"Hccepose":    true,
+		"Feature Work":  true,
 		"CC Visibility": true,
 	}
 	for name, want := range tests {
@@ -62,12 +62,38 @@ func TestWriteReadSessionDisplayName(t *testing.T) {
 		t.Fatalf("setup db: %v: %s", err, out)
 	}
 
+	oldSidecar := map[string]any{
+		"schemaVersion":   1,
+		"createdAtMs":     float64(1_700_000_000_000),
+		"hasConversation": true,
+		"title":           "Old Sidecar Title",
+		"updatedAtMs":     float64(1_700_000_000_000),
+	}
+	oldSidecarRaw, err := json.Marshal(oldSidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chatsDir, "meta.json"), oldSidecarRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := writeSessionDisplayName(dbPath, "Feishu Sync Name"); err != nil {
 		t.Fatalf("writeSessionDisplayName() error: %v", err)
 	}
 	got := readSessionMeta(dbPath)
 	if got.Name != "Feishu Sync Name" {
 		t.Fatalf("readSessionMeta().Name = %q, want %q", got.Name, "Feishu Sync Name")
+	}
+	sidecarRaw, err := os.ReadFile(filepath.Join(chatsDir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read meta.json: %v", err)
+	}
+	var sidecar map[string]any
+	if err := json.Unmarshal(sidecarRaw, &sidecar); err != nil {
+		t.Fatalf("decode meta.json: %v", err)
+	}
+	if sidecar["title"] != "Feishu Sync Name" {
+		t.Fatalf("meta.json title = %v, want %q", sidecar["title"], "Feishu Sync Name")
 	}
 
 	agent := &Agent{workDir: workDir}
