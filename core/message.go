@@ -242,6 +242,12 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+	// WorkDir, when set by the platform adapter, binds this session to a
+	// per-session working directory. The engine calls bindSendWorkDir so the
+	// agent spawned for this session_key uses an isolated workspace instead
+	// of the project-level work_dir. Platforms populate this from their
+	// inbound message payload (e.g. cloud-web "work_dir" JSON field).
+	WorkDir string
 }
 
 // EventType distinguishes different kinds of agent output.

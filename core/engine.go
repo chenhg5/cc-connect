@@ -2833,6 +2833,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	// Inbound work_dir: platform adapters (e.g. cloud-web) can set
+	// msg.WorkDir to bind this session to a per-message working directory,
+	// enabling the same project to serve concurrent sessions in different
+	// directories (e.g. CI reviewing multiple PR branches in parallel).
+	if msg.WorkDir != "" {
+		e.bindSendWorkDir(msg.SessionKey, msg.WorkDir)
+	}
+
 	// Multi-workspace resolution
 	var wsAgent Agent
 	var wsSessions *SessionManager
