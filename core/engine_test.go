@@ -634,19 +634,19 @@ func (a *stubDeleteAgent) DeleteSession(_ context.Context, sessionID string) err
 	return nil
 }
 
-// waitDeleteModePhase polls the delete-mode state for the given session key
-// until it reaches the target phase or the timeout expires.
-func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string) {
+// waitDeleteModeResult polls until the asynchronous delete operation updates
+// both its state and the user-visible card.
+func waitDeleteModeResult(t *testing.T, e *Engine, p *stubCardPlatform, sessionKey string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		dm := e.getDeleteModeState(sessionKey)
-		if dm != nil && dm.phase == targetPhase {
+		if dm != nil && dm.phase == "result" && len(p.getRefreshedCards()) > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
+	t.Fatal("timed out waiting for delete mode result card")
 }
 
 type stubProviderAgent struct {
@@ -4137,7 +4137,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	}
 	// Submit is now async; the returned card is a "deleting" indicator.
 	// Wait for the background goroutine to complete and push the result card.
-	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	waitDeleteModeResult(t, e, p, msg.SessionKey)
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
@@ -4175,7 +4175,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 		t.Fatal("expected deleting card after submit")
 	}
 	// Wait for async deletion to complete.
-	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	waitDeleteModeResult(t, e, p, msg.SessionKey)
 	refreshed := p.getRefreshedCards()
 	if len(refreshed) == 0 {
 		t.Fatal("expected refreshed result card via RefreshCard")
@@ -4277,7 +4277,7 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 		t.Fatal("expected deleting card")
 	}
 	// Wait for async deletion to complete.
-	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	waitDeleteModeResult(t, e, p, msg.SessionKey)
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
@@ -4353,7 +4353,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 		t.Fatal("expected deleting card after submit")
 	}
 	// Wait for async deletion to complete.
-	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	waitDeleteModeResult(t, e, p, msg.SessionKey)
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
