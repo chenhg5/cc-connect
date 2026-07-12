@@ -5070,44 +5070,22 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"response_len", len(fullResponse))
 
 			case EventPermissionRequest:
-				// If approveAll (/yolo) is set, grant the request. Otherwise
-				// deny — there is no active user turn to consult — and notify
-				// the user on the platform so a silently blocked background
-				// task is not invisible. RespondPermission may make a slow
-				// adapter call, so we run it in a detached goroutine to keep
-				// reader iterations fast (stopUnsolicitedReader relies on a
-				// bounded wait for the reader to exit).
+				// Background work may request a tool after the foreground turn
+				// completed. Preserve the normal pending-permission contract so
+				// Telegram can approve it instead of manufacturing a denial.
 				state.mu.Lock()
 				autoApprove := state.approveAll
+				if !autoApprove && state.pending == nil {
+					state.pending = &pendingPermission{RequestID: event.RequestID, ToolName: event.ToolName, ToolInput: event.ToolInputRaw, InputPreview: event.ToolInput, Resolved: make(chan struct{})}
+				}
+				pending := state.pending
 				state.mu.Unlock()
 
-				result := PermissionResult{Behavior: "deny", Message: "denied: no active user turn"}
 				if autoApprove {
-					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
-				}
-				reqID := event.RequestID
-				respondCtx := ctx // capture current unsolicited reader context
-				go func() {
-					// Run in a goroutine to keep reader iterations fast, but honour
-					// the reader's context so we don't call into a dead session after
-					// stopUnsolicitedReader cancels the context.
-					select {
-					case <-respondCtx.Done():
-						return
-					default:
-					}
-					if err := agentSession.RespondPermission(reqID, result); err != nil {
-						if respondCtx.Err() == nil {
-							slog.Error("unsolicited: failed to respond permission", "error", err)
-						}
-					}
-				}()
-				if !autoApprove {
-					toolName := event.ToolName
-					if toolName == "" {
-						toolName = "(unknown)"
-					}
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+					_ = agentSession.RespondPermission(event.RequestID, PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw})
+				} else if pending != nil && pending.RequestID == event.RequestID {
+					prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, e.display.ToolMaxLen))
+					e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, event.ToolInput)
 				}
 
 			case EventError:

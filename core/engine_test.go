@@ -13837,6 +13837,44 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	}
 }
 
+type permissionRecordingSession struct {
+	recordingAgentSession
+	events chan Event
+}
+
+func (s *permissionRecordingSession) Events() <-chan Event { return s.events }
+
+// TestUnsolicitedReader_QueuesPermissionForApproval locks down L-0404: an
+// asynchronous Claude permission must use the same pending/card path, rather
+// than being denied merely because the foreground turn has ended.
+func TestUnsolicitedReader_QueuesPermissionForApproval(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := &permissionRecordingSession{events: make(chan Event, 1)}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	key := "test:permission:u1"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	e.startUnsolicitedReader(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "")
+	defer e.stopUnsolicitedReader(state)
+
+	sess.events <- Event{Type: EventPermissionRequest, RequestID: "background-1", ToolName: "WebFetch", ToolInputRaw: map[string]any{"url": "https://example.test"}}
+	deadline := time.After(time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			if pending.RequestID != "background-1" { t.Fatalf("pending id = %q", pending.RequestID) }
+			break
+		}
+		select { case <-deadline: t.Fatal("background permission was not queued for approval"); case <-time.After(10 * time.Millisecond): }
+	}
+	if sess.calls != 0 { t.Fatalf("background permission was answered early: %d calls", sess.calls) }
+}
+
 // TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader
 // cleanly stops the reader goroutine and waits for it to exit.
 func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
