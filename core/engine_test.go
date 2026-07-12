@@ -13837,6 +13837,62 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	}
 }
 
+type permissionRecordingSession struct {
+	recordingAgentSession
+	events chan Event
+}
+
+func (s *permissionRecordingSession) Events() <-chan Event { return s.events }
+
+// TestUnsolicitedReader_QueuesPermissionForApproval locks down L-0404: an
+// asynchronous Claude permission must use the same pending/card path, rather
+// than being denied merely because the foreground turn has ended.
+func TestUnsolicitedReader_QueuesPermissionForApproval(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := &permissionRecordingSession{events: make(chan Event, 1)}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	key := "test:permission:u1"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	e.startUnsolicitedReader(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "")
+	defer e.stopUnsolicitedReader(state)
+
+	sess.events <- Event{Type: EventPermissionRequest, RequestID: "background-1", ToolName: "WebFetch", ToolInputRaw: map[string]any{"url": "https://example.test"}}
+	deadline := time.After(time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			if pending.RequestID != "background-1" { t.Fatalf("pending id = %q", pending.RequestID) }
+			break
+		}
+		select { case <-deadline: t.Fatal("background permission was not queued for approval"); case <-time.After(10 * time.Millisecond): }
+	}
+	if sess.calls != 0 { t.Fatalf("background permission was answered early: %d calls", sess.calls) }
+
+	// The pending/card contract is only useful if the user actually sees a
+	// prompt — assert the platform received one naming the tool, not just
+	// that internal state was set.
+	sent := waitForPlatformSend(p, 1, time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected a permission prompt to be sent to the platform")
+	}
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "Permission Request") && strings.Contains(s, "WebFetch") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected sent messages to contain a Permission Request for WebFetch, got %v", sent)
+	}
+}
+
 // TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader
 // cleanly stops the reader goroutine and waits for it to exit.
 func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
@@ -13979,12 +14035,19 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 	}
 }
 
-// TestUnsolicitedReader_PermissionDeny verifies that unsolicited permission
-// requests are denied when approveAll is false.
-func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
+// TestUnsolicitedReader_PermissionQueuedThenPromoted verifies that a second
+// unsolicited permission request arriving while one is already active is
+// queued FIFO rather than dropped or denied, and is promoted to active (its
+// prompt sent to the platform) once the first request resolves.
+//
+// L-0404 pursuit: an earlier fix denied the second request outright, which
+// starves whatever needed it — Claude asked for two things, and refusing the
+// second one mid-task is not a fix. Queueing is mandatory; only a queue that
+// is genuinely full (maxPendingPermissionQueue) may be denied.
+func TestUnsolicitedReader_PermissionQueuedThenPromoted(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sess := newControllableSession("unsol-perm")
 	permRecorder := &permRecordingSession{
@@ -14001,41 +14064,213 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 		eventsNeedResync: false,
 		approveAll:       false,
 	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:perm:u1"] = state
+	e.interactiveMu.Unlock()
 
 	e.startUnsolicitedReader(state, session, sessions, "test:perm:u1", "")
+	defer e.stopUnsolicitedReader(state)
 
-	// Send a permission request.
-	permRecorder.events <- Event{
-		Type:      EventPermissionRequest,
-		RequestID: "req-1",
-		ToolName:  "Bash",
+	waitFor := func(check func() bool, msg string) {
+		deadline := time.After(time.Second)
+		for {
+			if check() {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
 	}
 
-	// Wait for the response.
-	deadline := time.After(5 * time.Second)
-	for {
-		permRecorder.mu.Lock()
-		calls := permRecorder.permCalls
-		permRecorder.mu.Unlock()
-		if calls > 0 {
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Bash"}
+	waitFor(func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return state.pending != nil && state.pending.RequestID == "req-1"
+	}, "first permission request was not made active")
+
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-2", ToolName: "WebFetch"}
+	waitFor(func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return len(state.pendingQueue) == 1 && state.pendingQueue[0].RequestID == "req-2"
+	}, "second permission request was not queued")
+
+	// The queued request must not be answered while it waits behind the first.
+	permRecorder.mu.Lock()
+	calls := permRecorder.permCalls
+	permRecorder.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("queued request should not be answered yet, got %d RespondPermission calls", calls)
+	}
+	sentBefore := len(p.getSent())
+
+	// Resolve the first request the normal way (user replies "allow").
+	if !e.handlePendingPermission(p, &Message{SessionKey: "test:perm:u1", ReplyCtx: "ctx"}, "allow", "") {
+		t.Fatal("expected handlePendingPermission to resolve the active request")
+	}
+
+	// req-2 must now be promoted to active and its prompt sent to the platform.
+	waitFor(func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return state.pending != nil && state.pending.RequestID == "req-2"
+	}, "second permission request was not promoted to active")
+
+	permRecorder.mu.Lock()
+	calls = permRecorder.permCalls
+	permRecorder.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected exactly one RespondPermission call (for req-1's allow), got %d", calls)
+	}
+
+	sent := waitForPlatformSend(p, sentBefore+1, time.Second)
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "WebFetch") {
+			found = true
 			break
 		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for permission response")
-		case <-time.After(10 * time.Millisecond):
+	}
+	if !found {
+		t.Errorf("expected a permission prompt for the promoted WebFetch request, got %v", sent)
+	}
+}
+
+// TestUnsolicitedReader_PermissionQueueOverflowDenied verifies that once the
+// FIFO queue is genuinely full (maxPendingPermissionQueue requests already
+// queued behind the active one), a further request is denied as real
+// backpressure — distinct from the old, incorrect behavior of denying the
+// very first request to arrive while anything was pending.
+func TestUnsolicitedReader_PermissionQueueOverflowDenied(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	sess := newControllableSession("unsol-perm-overflow")
+	permRecorder := &permRecordingSession{
+		controllableAgentSession: *sess,
+	}
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:perm:overflow")
+
+	state := &interactiveState{
+		agentSession:     permRecorder,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+		approveAll:       false,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:perm:overflow"] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, "test:perm:overflow", "")
+	defer e.stopUnsolicitedReader(state)
+
+	waitFor := func(check func() bool, msg string) {
+		deadline := time.After(time.Second)
+		for {
+			if check() {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	}
+
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-0", ToolName: "Bash"}
+	waitFor(func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return state.pending != nil && state.pending.RequestID == "req-0"
+	}, "active request was not set")
+
+	for i := 0; i < maxPendingPermissionQueue; i++ {
+		permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: fmt.Sprintf("req-fill-%d", i), ToolName: "Bash"}
+	}
+	waitFor(func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return len(state.pendingQueue) == maxPendingPermissionQueue
+	}, "queue did not fill to capacity")
+
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-overflow", ToolName: "Bash"}
+	waitFor(func() bool {
+		permRecorder.mu.Lock()
+		defer permRecorder.mu.Unlock()
+		return permRecorder.permCalls > 0
+	}, "overflow request was never answered")
 
 	permRecorder.mu.Lock()
 	result := permRecorder.lastPermResult
 	permRecorder.mu.Unlock()
-
 	if result.Behavior != "deny" {
-		t.Errorf("expected deny, got %q", result.Behavior)
+		t.Errorf("expected overflow request to be denied, got %q", result.Behavior)
 	}
 
-	e.stopUnsolicitedReader(state)
+	state.mu.Lock()
+	queueLen := len(state.pendingQueue)
+	state.mu.Unlock()
+	if queueLen != maxPendingPermissionQueue {
+		t.Errorf("expected queue to remain at capacity %d, got %d", maxPendingPermissionQueue, queueLen)
+	}
+
+	// The user must be told the queue filled up (L-0404 pursuit: a silent
+	// deny with "no sign posted at the door" is not acceptable) — exactly
+	// once for this overflow episode, not once per overflowing request.
+	sentAfterFirstOverflow := waitForPlatformSend(p, 1, time.Second)
+	noticeCount := 0
+	for _, s := range sentAfterFirstOverflow {
+		if strings.Contains(s, "queue is full") {
+			noticeCount++
+		}
+	}
+	if noticeCount != 1 {
+		t.Fatalf("expected exactly 1 queue-full notice, got %d in %v", noticeCount, sentAfterFirstOverflow)
+	}
+
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-overflow-2", ToolName: "Bash"}
+	waitFor(func() bool {
+		permRecorder.mu.Lock()
+		defer permRecorder.mu.Unlock()
+		return permRecorder.permCalls > 1
+	}, "second overflow request was never answered")
+
+	sentAfterSecondOverflow := p.getSent()
+	noticeCount = 0
+	for _, s := range sentAfterSecondOverflow {
+		if strings.Contains(s, "queue is full") {
+			noticeCount++
+		}
+	}
+	if noticeCount != 1 {
+		t.Fatalf("expected the notice to still appear exactly once (not repeated per overflowing request), got %d in %v", noticeCount, sentAfterSecondOverflow)
+	}
+
+	// Freeing a slot (by resolving the active request, which promotes the
+	// next queued one) must reset the notified flag so a future overflow
+	// episode gets its own fresh notice.
+	if !e.handlePendingPermission(p, &Message{SessionKey: "test:perm:overflow", ReplyCtx: "ctx"}, "allow", "") {
+		t.Fatal("expected handlePendingPermission to resolve the active request and free a queue slot")
+	}
+	state.mu.Lock()
+	notified := state.pendingQueueOverflowNotified
+	queueLenAfter := len(state.pendingQueue)
+	state.mu.Unlock()
+	if notified {
+		t.Error("expected pendingQueueOverflowNotified to reset once a slot freed up")
+	}
+	if queueLenAfter != maxPendingPermissionQueue-1 {
+		t.Errorf("expected queue to shrink by one after promotion, got %d", queueLenAfter)
+	}
 }
 
 // permRecordingSession wraps controllableAgentSession and records permission responses.
@@ -15642,6 +15877,69 @@ func TestHandlePendingPermission_ApproveAllWithMention(t *testing.T) {
 	state.mu.Unlock()
 	if !approveAll {
 		t.Fatal("state.approveAll = false, want true (approve-all must persist for follow-up tools)")
+	}
+}
+
+// TestHandlePendingPermission_ApproveAllDrainsQueue verifies that replying
+// "allow all" to the active request also approves everything already queued
+// behind it (L-0404 pursuit): FIFO queueing must not turn into "quietly wait
+// forever" once the user has explicitly asked to skip all remaining prompts.
+func TestHandlePendingPermission_ApproveAllDrainsQueue(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	rec := &recordingAgentSession{}
+
+	iKey := "test:queue:u1"
+	active := &pendingPermission{RequestID: "req-active", ToolName: "Bash", Resolved: make(chan struct{})}
+	queued1 := &pendingPermission{RequestID: "req-queued-1", ToolName: "WebFetch", Resolved: make(chan struct{})}
+	queued2 := &pendingPermission{RequestID: "req-queued-2", ToolName: "WebSearch", Resolved: make(chan struct{})}
+	state := &interactiveState{
+		agentSession: rec,
+		platform:     p,
+		replyCtx:     "ctx",
+		pending:      active,
+		pendingQueue: []*pendingPermission{queued1, queued2},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: iKey, ReplyCtx: "ctx"}
+	if !e.handlePendingPermission(p, msg, "allow all", iKey) {
+		t.Fatal("handlePendingPermission returned false, want true")
+	}
+
+	select {
+	case <-queued1.Resolved:
+	default:
+		t.Error("expected first queued request to be resolved")
+	}
+	select {
+	case <-queued2.Resolved:
+	default:
+		t.Error("expected second queued request to be resolved")
+	}
+
+	state.mu.Lock()
+	remaining := len(state.pendingQueue)
+	stillPending := state.pending
+	approveAll := state.approveAll
+	state.mu.Unlock()
+
+	if remaining != 0 {
+		t.Errorf("expected queue to be fully drained, got %d remaining", remaining)
+	}
+	if stillPending != nil {
+		t.Errorf("expected no active pending after full drain, got %+v", stillPending)
+	}
+	if !approveAll {
+		t.Error("expected approveAll to be set")
+	}
+	if rec.calls != 3 {
+		t.Fatalf("RespondPermission calls = %d, want 3 (active + 2 queued)", rec.calls)
+	}
+	if rec.lastResult.Behavior != "allow" {
+		t.Fatalf("last RespondPermission behavior = %q, want allow", rec.lastResult.Behavior)
 	}
 }
 
