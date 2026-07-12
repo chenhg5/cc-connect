@@ -1,0 +1,37 @@
+{
+  "sessions": {
+    "s1": {
+      "id": "s1",
+      "name": "default",
+      "agent_session_id": "stub-session",
+      "agent_type": "topic-isolation-test-agent",
+      "history": [
+        {
+          "role": "user",
+          "content": "Dispatch letter L-0318.\n\nThread: advisory-seat-isolation\nPath: C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\TestExecuteDispatch_TopicIsolationWithoutWorkspacePattern1837240924\\001\\threads\\advisory-seat-isolation\\L-0318.query.md\n\nRead the QUERY, execute the requested work, then write L-0318.result.md (with Status field). Writing the INDEX RESULT row is optional as a delivery radar but is NOT task closure (CLOSED is handled only by Secretary after Boss approval).",
+          "timestamp": "2026-07-12T18:54:57.6691942+02:00"
+        }
+      ],
+      "created_at": "2026-07-12T18:54:57.6671965+02:00",
+      "updated_at": "2026-07-12T18:54:57.6671965+02:00",
+      "last_user_activity": "2026-07-12T18:54:57.6691942+02:00",
+      "last_output_at": "0001-01-01T00:00:00Z"
+    }
+  },
+  "active_session": {
+    "telegram:-1003917051393:3180:7664413698": "s1"
+  },
+  "user_sessions": {
+    "telegram:-1003917051393:3180:7664413698": [
+      "s1"
+    ]
+  },
+  "counter": 1,
+  "user_meta": {
+    "telegram:-1003917051393:3180:7664413698": {
+      "user_name": "cc-connect dispatch"
+    }
+  },
+  "past_id_tracking": true,
+  "version": 1
+}
