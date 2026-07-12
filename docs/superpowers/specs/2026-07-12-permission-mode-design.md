@@ -21,18 +21,22 @@ Existing `acceptEdits` behavior remains intact for all other tools.
 When a Claude control request arrives after a foreground turn has completed,
 cc-connect creates the same pending-permission state and Telegram card used by
 the foreground event loop.  A single pending request is active per session;
-additional background requests wait in FIFO order.  Each active card expires
-after a configurable, bounded TTL (default: 60 seconds).  Expiry sends one
-deny response to Claude and activates the next queued request.  Session close,
-reset, or stop denies and clears the active request and queue.
+additional background requests wait in FIFO order.  TTL begins only when a
+request becomes the displayed active card, never while it waits in the queue.
+Each active card expires after a configurable, bounded TTL (default: 60
+seconds).  Expiry sends one deny response to Claude and activates the next
+queued request.  Session close, reset, stop, and cancel deny each unresolved
+stdio request at most once and clear the active request and queue.
 
 ## /yolo alias
 
 Recognize `/yolo` only when an active permission request exists.  It delegates
-to the existing `allow all` path, setting the current live session's
-`approveAll` flag and approving the active request.  It never selects Claude
-Code's `bypassPermissions` mode.  New/reset/stopped sessions start without
-this state.
+to the existing `allow all` path, setting the current live session's shared
+`approveAll` flag and approving the active request.  The same flag
+automatically approves queued requests when they become active and every later
+unresolved request in that live session.  It never selects Claude Code's
+`bypassPermissions` mode.  New/reset/stopped/cancelled sessions start without
+this state.  Queue length is bounded.
 
 ## Tests
 
