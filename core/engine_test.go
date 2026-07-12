@@ -14222,6 +14222,55 @@ func TestUnsolicitedReader_PermissionQueueOverflowDenied(t *testing.T) {
 	if queueLen != maxPendingPermissionQueue {
 		t.Errorf("expected queue to remain at capacity %d, got %d", maxPendingPermissionQueue, queueLen)
 	}
+
+	// The user must be told the queue filled up (L-0404 pursuit: a silent
+	// deny with "no sign posted at the door" is not acceptable) — exactly
+	// once for this overflow episode, not once per overflowing request.
+	sentAfterFirstOverflow := waitForPlatformSend(p, 1, time.Second)
+	noticeCount := 0
+	for _, s := range sentAfterFirstOverflow {
+		if strings.Contains(s, "queue is full") {
+			noticeCount++
+		}
+	}
+	if noticeCount != 1 {
+		t.Fatalf("expected exactly 1 queue-full notice, got %d in %v", noticeCount, sentAfterFirstOverflow)
+	}
+
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-overflow-2", ToolName: "Bash"}
+	waitFor(func() bool {
+		permRecorder.mu.Lock()
+		defer permRecorder.mu.Unlock()
+		return permRecorder.permCalls > 1
+	}, "second overflow request was never answered")
+
+	sentAfterSecondOverflow := p.getSent()
+	noticeCount = 0
+	for _, s := range sentAfterSecondOverflow {
+		if strings.Contains(s, "queue is full") {
+			noticeCount++
+		}
+	}
+	if noticeCount != 1 {
+		t.Fatalf("expected the notice to still appear exactly once (not repeated per overflowing request), got %d in %v", noticeCount, sentAfterSecondOverflow)
+	}
+
+	// Freeing a slot (by resolving the active request, which promotes the
+	// next queued one) must reset the notified flag so a future overflow
+	// episode gets its own fresh notice.
+	if !e.handlePendingPermission(p, &Message{SessionKey: "test:perm:overflow", ReplyCtx: "ctx"}, "allow", "") {
+		t.Fatal("expected handlePendingPermission to resolve the active request and free a queue slot")
+	}
+	state.mu.Lock()
+	notified := state.pendingQueueOverflowNotified
+	queueLenAfter := len(state.pendingQueue)
+	state.mu.Unlock()
+	if notified {
+		t.Error("expected pendingQueueOverflowNotified to reset once a slot freed up")
+	}
+	if queueLenAfter != maxPendingPermissionQueue-1 {
+		t.Errorf("expected queue to shrink by one after promotion, got %d", queueLenAfter)
+	}
 }
 
 // permRecordingSession wraps controllableAgentSession and records permission responses.

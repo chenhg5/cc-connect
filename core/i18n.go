@@ -190,6 +190,7 @@ const (
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
 	MsgPermissionDenied          MsgKey = "permission_denied_msg"
 	MsgPermissionHint            MsgKey = "permission_hint"
+	MsgPermissionQueueFull       MsgKey = "permission_queue_full"
 	MsgQuietOn                   MsgKey = "quiet_on"
 	MsgQuietOff                  MsgKey = "quiet_off"
 	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
@@ -870,6 +871,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 等待權限回應。請回覆 **允許** / **拒絕** / **允許所有**。",
 		LangJapanese:           "⚠️ 権限の応答を待っています。**allow** / **deny** / **allow all** で返信してください。",
 		LangSpanish:            "⚠️ Esperando respuesta de permiso. Responda **allow** / **deny** / **allow all**.",
+	},
+	MsgPermissionQueueFull: {
+		LangEnglish:            "⚠️ Permission queue is full (%d/%d). Further background requests will be denied automatically until it drains. Reply **allow all** to clear it.",
+		LangChinese:            "⚠️ 权限队列已满（%d/%d）。在队列清空前，后续后台请求将被自动拒绝。回复 **允许所有** 以清空队列。",
+		LangTraditionalChinese: "⚠️ 權限佇列已滿（%d/%d）。在佇列清空前，後續後台請求將被自動拒絕。回覆 **允許所有** 以清空佇列。",
+		LangJapanese:           "⚠️ 権限キューが満杯です（%d/%d）。空くまで、以降のバックグラウンドリクエストは自動的に拒否されます。**allow all** と返信するとキューをクリアできます。",
+		LangSpanish:            "⚠️ La cola de permisos está llena (%d/%d). Las próximas solicitudes en segundo plano se denegarán automáticamente hasta que se vacíe. Responda **allow all** para vaciarla.",
 	},
 	MsgQuietOn: {
 		LangEnglish:            "🔇 Quiet mode ON — thinking and tool progress messages will be hidden.",

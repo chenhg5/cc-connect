@@ -535,9 +535,10 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
-	pending                  *pendingPermission
-	pendingQueue             []*pendingPermission // background permission requests waiting for state.pending to free up (FIFO)
-	pendingMessages          []queuedMessage       // messages queued while session was busy
+	pending                      *pendingPermission
+	pendingQueue                 []*pendingPermission // background permission requests waiting for state.pending to free up (FIFO)
+	pendingQueueOverflowNotified bool                 // true once the user has been told the queue is full, until it drains
+	pendingMessages              []queuedMessage      // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
 	sideText                 string
@@ -704,7 +705,13 @@ type pendingPermission struct {
 // may wait behind the active one before new arrivals are denied outright.
 // Requests within this bound are never dropped or auto-denied — they are
 // queued FIFO and promoted to active as the one ahead of them resolves.
-const maxPendingPermissionQueue = 16
+//
+// This is deliberately one below the round number (16 total budget, 15 of
+// which are real request slots): the 16th slot is never occupied by a queued
+// request — it is reserved for the one-time MsgPermissionQueueFull notice, so
+// the user always finds out the queue filled up instead of requests vanishing
+// into silent denials with no sign posted at the door.
+const maxPendingPermissionQueue = 15
 
 // promoteNextPending pops the next queued permission request (if any) into
 // state.pending, so it becomes the active request awaiting a user response.
@@ -723,6 +730,7 @@ func (e *Engine) promoteNextPending(state *interactiveState) *pendingPermission 
 	next := state.pendingQueue[0]
 	state.pendingQueue = state.pendingQueue[1:]
 	state.pending = next
+	state.pendingQueueOverflowNotified = false
 	return next
 }
 
@@ -3815,12 +3823,14 @@ func (e *Engine) drainPendingQueueApproved(state *interactiveState) {
 			}
 			state.pendingQueue = state.pendingQueue[1:]
 			state.pending = qp
+			state.pendingQueueOverflowNotified = false
 			state.mu.Unlock()
 			e.sendPendingPrompt(state, qp)
 			return
 		}
 
 		state.pendingQueue = state.pendingQueue[1:]
+		state.pendingQueueOverflowNotified = false
 		agentSession := state.agentSession
 		state.mu.Unlock()
 
@@ -5195,6 +5205,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				autoApprove := state.approveAll && !isAskQuestion
 				var newPending *pendingPermission
 				queueOverflow := false
+				notifyQueueFull := false
 				if !autoApprove {
 					candidate := &pendingPermission{
 						RequestID:    event.RequestID,
@@ -5212,9 +5223,22 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						state.pendingQueue = append(state.pendingQueue, candidate)
 					default:
 						queueOverflow = true
+						// Tell the user the queue filled up, once per overflow
+						// episode (promoteNextPending/drain reset this flag as
+						// soon as a slot frees up) — a full queue must never
+						// deny requests silently with no sign posted anywhere.
+						if !state.pendingQueueOverflowNotified {
+							state.pendingQueueOverflowNotified = true
+							notifyQueueFull = true
+						}
 					}
 				}
 				state.mu.Unlock()
+
+				if notifyQueueFull {
+					msg := fmt.Sprintf(e.i18n.T(MsgPermissionQueueFull), maxPendingPermissionQueue, maxPendingPermissionQueue)
+					e.send(p, replyCtx, msg)
+				}
 
 				// RespondPermission may make a slow adapter call, so it is offloaded
 				// to a detached goroutine that honours the reader's context, keeping
@@ -10752,6 +10776,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	pending := state.pending
 	state.pending = nil
 	state.pendingQueue = nil
+	state.pendingQueueOverflowNotified = false
 	agentSession := state.agentSession
 	state.mu.Unlock()
 
