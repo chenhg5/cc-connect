@@ -21,7 +21,7 @@
 ### Task 1: Configure native Claude allow rules
 
 **Files:**
-- Modify: `F:\nexus\worktrees\architect-L-0404-permission-mode\config.toml:248-256`
+- Modify: `config.example.toml` (seat's `allowed_tools` entry)
 - Test: `agent/claudecode/claudecode_test.go`
 
 **Interfaces:**

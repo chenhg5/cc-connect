@@ -5073,19 +5073,66 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// Background work may request a tool after the foreground turn
 				// completed. Preserve the normal pending-permission contract so
 				// Telegram can approve it instead of manufacturing a denial.
+				// AskUserQuestion must never be silently auto-approved, mirroring
+				// the foreground loop's isAskQuestion guard.
+				isAskQuestion := event.ToolName == "AskUserQuestion" && len(event.Questions) > 0
+
 				state.mu.Lock()
-				autoApprove := state.approveAll
-				if !autoApprove && state.pending == nil {
-					state.pending = &pendingPermission{RequestID: event.RequestID, ToolName: event.ToolName, ToolInput: event.ToolInputRaw, InputPreview: event.ToolInput, Resolved: make(chan struct{})}
+				autoApprove := state.approveAll && !isAskQuestion
+				var newPending *pendingPermission
+				overflow := false
+				if !autoApprove {
+					if state.pending == nil {
+						newPending = &pendingPermission{
+							RequestID:    event.RequestID,
+							ToolName:     event.ToolName,
+							ToolInput:    event.ToolInputRaw,
+							InputPreview: event.ToolInput,
+							Questions:    event.Questions,
+							Resolved:     make(chan struct{}),
+						}
+						state.pending = newPending
+					} else {
+						overflow = true
+					}
 				}
-				pending := state.pending
 				state.mu.Unlock()
 
-				if autoApprove {
-					_ = agentSession.RespondPermission(event.RequestID, PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw})
-				} else if pending != nil && pending.RequestID == event.RequestID {
-					prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, e.display.ToolMaxLen))
-					e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, event.ToolInput)
+				// RespondPermission may make a slow adapter call, so it is offloaded
+				// to a detached goroutine that honours the reader's context, keeping
+				// reader iterations fast (stopUnsolicitedReader relies on a bounded
+				// wait for this goroutine to exit).
+				respondCtx := ctx
+				respondAsync := func(result PermissionResult, label string) {
+					reqID := event.RequestID
+					go func() {
+						select {
+						case <-respondCtx.Done():
+							return
+						default:
+						}
+						if err := agentSession.RespondPermission(reqID, result); err != nil && respondCtx.Err() == nil {
+							slog.Error("unsolicited: failed to respond permission", "phase", label, "error", err)
+						}
+					}()
+				}
+
+				switch {
+				case autoApprove:
+					respondAsync(PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}, "auto-approve")
+				case overflow:
+					// A different permission is already awaiting approval and the
+					// single-slot pending model has no room to queue this one.
+					// Deny it explicitly rather than leaving the agent blocked
+					// forever on an unanswered RespondPermission.
+					respondAsync(PermissionResult{Behavior: "deny", Message: "denied: another permission request is already pending"}, "overflow")
+				case newPending != nil:
+					if isAskQuestion {
+						e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+					} else {
+						prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, e.display.ToolMaxLen))
+						e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, event.ToolInput)
+					}
 				}
 
 			case EventError:

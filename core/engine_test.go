@@ -13851,7 +13851,7 @@ func TestUnsolicitedReader_QueuesPermissionForApproval(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := &permissionRecordingSession{events: make(chan Event, 1)}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 	key := "test:permission:u1"
 	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
 	e.interactiveMu.Lock()
@@ -13873,6 +13873,24 @@ func TestUnsolicitedReader_QueuesPermissionForApproval(t *testing.T) {
 		select { case <-deadline: t.Fatal("background permission was not queued for approval"); case <-time.After(10 * time.Millisecond): }
 	}
 	if sess.calls != 0 { t.Fatalf("background permission was answered early: %d calls", sess.calls) }
+
+	// The pending/card contract is only useful if the user actually sees a
+	// prompt — assert the platform received one naming the tool, not just
+	// that internal state was set.
+	sent := waitForPlatformSend(p, 1, time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected a permission prompt to be sent to the platform")
+	}
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "Permission Request") && strings.Contains(s, "WebFetch") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected sent messages to contain a Permission Request for WebFetch, got %v", sent)
+	}
 }
 
 // TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader
@@ -14017,12 +14035,15 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 	}
 }
 
-// TestUnsolicitedReader_PermissionDeny verifies that unsolicited permission
-// requests are denied when approveAll is false.
-func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
+// TestUnsolicitedReader_PermissionOverflowDenied verifies that a second
+// unsolicited permission request arriving while one is already pending gets
+// an explicit deny response, rather than being silently dropped and leaving
+// the agent blocked forever waiting on RespondPermission (L-0404: the
+// single-slot pending model has no room to queue a second request).
+func TestUnsolicitedReader_PermissionOverflowDenied(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sess := newControllableSession("unsol-perm")
 	permRecorder := &permRecordingSession{
@@ -14041,39 +14062,55 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 	}
 
 	e.startUnsolicitedReader(state, session, sessions, "test:perm:u1", "")
+	defer e.stopUnsolicitedReader(state)
 
-	// Send a permission request.
-	permRecorder.events <- Event{
-		Type:      EventPermissionRequest,
-		RequestID: "req-1",
-		ToolName:  "Bash",
-	}
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Bash"}
 
-	// Wait for the response.
-	deadline := time.After(5 * time.Second)
+	// Wait for the first request to become pending.
+	deadline := time.After(time.Second)
 	for {
-		permRecorder.mu.Lock()
-		calls := permRecorder.permCalls
-		permRecorder.mu.Unlock()
-		if calls > 0 {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for permission response")
+			t.Fatal("first permission request was not queued")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 
-	permRecorder.mu.Lock()
-	result := permRecorder.lastPermResult
-	permRecorder.mu.Unlock()
+	permRecorder.events <- Event{Type: EventPermissionRequest, RequestID: "req-2", ToolName: "WebFetch"}
 
-	if result.Behavior != "deny" {
-		t.Errorf("expected deny, got %q", result.Behavior)
+	// The second request must be denied rather than silently dropped.
+	deadline = time.After(time.Second)
+	for {
+		permRecorder.mu.Lock()
+		calls := permRecorder.permCalls
+		result := permRecorder.lastPermResult
+		permRecorder.mu.Unlock()
+		if calls > 0 {
+			if result.Behavior != "deny" {
+				t.Errorf("expected overflow request to be denied, got %q", result.Behavior)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("overflow permission request was never answered")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 
-	e.stopUnsolicitedReader(state)
+	// The first request must remain untouched: still pending, unanswered.
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	if pending == nil || pending.RequestID != "req-1" {
+		t.Errorf("expected first request to remain pending, got %+v", pending)
+	}
 }
 
 // permRecordingSession wraps controllableAgentSession and records permission responses.
