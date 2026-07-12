@@ -72,6 +72,12 @@ type claudeSession struct {
 	// when the session reuses the shared file (the common 99% case)
 	// or when there is nothing to append.
 	promptFilePath string
+
+	// claudeConfigDir is the effective Claude config root (see
+	// claudeConfigDirFromEnv), resolved once at spawn time from this
+	// session's own extraEnv. Used by transcriptPath() so it resolves
+	// correctly for projects with a custom CLAUDE_CONFIG_DIR (L-0399).
+	claudeConfigDir string
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -490,6 +496,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		ccHooks:             newCCPermissionHookRunner(workDir),
 		startupWarning:      rootDowngradeWarning,
 		promptFilePath:      cleanupPromptPath,
+		claudeConfigDir:     claudeConfigDirFromEnv(extraEnv),
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -1193,21 +1200,20 @@ func (cs *claudeSession) permissionModeValue() string {
 }
 
 // transcriptPath returns the path to the Claude Code JSONL transcript
-// for the current session, or "" if it cannot be determined.
+// for the current session, or "" if it cannot be determined. Uses
+// cs.claudeConfigDir (resolved once at spawn time from this session's own
+// env via claudeConfigDirFromEnv) rather than the default ~/.claude, so it
+// resolves correctly for projects with a custom CLAUDE_CONFIG_DIR (L-0399).
 func (cs *claudeSession) transcriptPath() string {
 	sessionID := cs.CurrentSessionID()
-	if sessionID == "" || cs.workDir == "" {
-		return ""
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	if sessionID == "" || cs.workDir == "" || cs.claudeConfigDir == "" {
 		return ""
 	}
 	absWorkDir, err := filepath.Abs(cs.workDir)
 	if err != nil {
 		return ""
 	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(cs.claudeConfigDir, absWorkDir)
 	if projectDir == "" {
 		return ""
 	}

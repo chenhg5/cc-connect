@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -778,9 +779,10 @@ func TestExtractStringContent(t *testing.T) {
 // sessionID in the project's directory validates true.
 func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
 	homeDir := t.TempDir()
+	claudeConfigDir := filepath.Join(homeDir, ".claude")
 	workDir := filepath.Join(homeDir, "Documents", "myproject")
 	projectKey := encodeClaudeProjectKey(workDir)
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := filepath.Join(claudeConfigDir, "projects", projectKey)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("create project dir: %v", err)
 	}
@@ -788,7 +790,7 @@ func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write session file: %v", err)
 	}
-	if !validateSessionIDInProject(homeDir, workDir, sessionID) {
+	if !validateSessionIDInProject(claudeConfigDir, workDir, sessionID) {
 		t.Errorf("validateSessionIDInProject(%q, %q) = false, want true", workDir, sessionID)
 	}
 }
@@ -798,9 +800,10 @@ func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
 // then start fresh).
 func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
 	homeDir := t.TempDir()
+	claudeConfigDir := filepath.Join(homeDir, ".claude")
 	workDir := filepath.Join(homeDir, "Documents", "myproject")
 	projectKey := encodeClaudeProjectKey(workDir)
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := filepath.Join(claudeConfigDir, "projects", projectKey)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("create project dir: %v", err)
 	}
@@ -808,7 +811,7 @@ func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, "other-session.jsonl"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write other session file: %v", err)
 	}
-	if validateSessionIDInProject(homeDir, workDir, "abc123-def456") {
+	if validateSessionIDInProject(claudeConfigDir, workDir, "abc123-def456") {
 		t.Errorf("validateSessionIDInProject for missing session = true, want false")
 	}
 }
@@ -817,18 +820,18 @@ func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
 // rejected outright; the engine should never try to resume an empty ID
 // anyway, but the helper must still return false defensively.
 func TestValidateSessionIDInProject_EmptySessionID(t *testing.T) {
-	if validateSessionIDInProject(t.TempDir(), "/tmp", "") {
+	if validateSessionIDInProject(filepath.Join(t.TempDir(), ".claude"), "/tmp", "") {
 		t.Error("validateSessionIDInProject(empty) = true, want false")
 	}
 }
 
 // TestValidateSessionIDInProject_ProjectDirMissing ensures a workDir that
-// has no corresponding ~/.claude/projects/<key> directory returns false —
-// Claude Code has never been invoked in that workspace, so any stored
-// session ID could not possibly belong to it.
+// has no corresponding <claudeConfigDir>/projects/<key> directory returns
+// false — Claude Code has never been invoked in that workspace, so any
+// stored session ID could not possibly belong to it.
 func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
-	homeDir := t.TempDir()
-	if validateSessionIDInProject(homeDir, "/nonexistent/path", "some-session-id") {
+	claudeConfigDir := filepath.Join(t.TempDir(), ".claude")
+	if validateSessionIDInProject(claudeConfigDir, "/nonexistent/path", "some-session-id") {
 		t.Error("validateSessionIDInProject for missing project dir = true, want false")
 	}
 }
@@ -840,7 +843,8 @@ func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
 // conversation history.
 func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	claudeConfigDir := filepath.Join(homeDir, ".claude")
+	projectsBase := filepath.Join(claudeConfigDir, "projects")
 
 	projectA := filepath.Join(homeDir, "work", "projectA")
 	projectB := filepath.Join(homeDir, "work", "projectB")
@@ -858,12 +862,86 @@ func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 	}
 
 	// Project B should NOT see projectA's session.
-	if validateSessionIDInProject(homeDir, projectB, sessionID) {
+	if validateSessionIDInProject(claudeConfigDir, projectB, sessionID) {
 		t.Error("validateSessionIDInProject leaked project A's session into project B")
 	}
 	// Sanity: project A still sees its own.
-	if !validateSessionIDInProject(homeDir, projectA, sessionID) {
+	if !validateSessionIDInProject(claudeConfigDir, projectA, sessionID) {
 		t.Error("validateSessionIDInProject rejected project A's own session")
+	}
+}
+
+// TestClaudeConfigDirFromEnv_UsesProjectOverride is the regression for
+// L-0399: CLAUDE_CONFIG_DIR set via [projects.agent.options.env] only ever
+// reaches the spawned Claude Code child process's env, never cc-connect's
+// own os.Environ(). claudeConfigDirFromEnv must read it from the given env
+// slice, not fall through to the process-wide claudeConfigHomeDir().
+func TestClaudeConfigDirFromEnv_UsesProjectOverride(t *testing.T) {
+	got := claudeConfigDirFromEnv([]string{"OTHER=1", "CLAUDE_CONFIG_DIR=F:\\nexus\\.claude-secretary", "FOO=bar"})
+	want := "F:\\nexus\\.claude-secretary"
+	if got != want {
+		t.Errorf("claudeConfigDirFromEnv = %q, want %q", got, want)
+	}
+}
+
+// TestClaudeConfigDirFromEnv_LastOverrideWins matches the "later entries
+// win" convention used by (*Agent).runtimeEnvLocked when merging configEnv,
+// provider env, and session env.
+func TestClaudeConfigDirFromEnv_LastOverrideWins(t *testing.T) {
+	got := claudeConfigDirFromEnv([]string{"CLAUDE_CONFIG_DIR=/first", "CLAUDE_CONFIG_DIR=/second"})
+	if got != "/second" {
+		t.Errorf("claudeConfigDirFromEnv = %q, want /second", got)
+	}
+}
+
+// TestClaudeConfigDirFromEnv_NoOverrideFallsBackToDefault ensures a project
+// with no CLAUDE_CONFIG_DIR override still resolves against
+// claudeConfigHomeDir() (process env / ~/.claude), unchanged from before.
+func TestClaudeConfigDirFromEnv_NoOverrideFallsBackToDefault(t *testing.T) {
+	got := claudeConfigDirFromEnv([]string{"OTHER=1"})
+	want := claudeConfigHomeDir()
+	if got != want {
+		t.Errorf("claudeConfigDirFromEnv = %q, want %q (claudeConfigHomeDir fallback)", got, want)
+	}
+}
+
+// TestValidateSessionID_RespectsCustomClaudeConfigDir is the end-to-end
+// regression for L-0399: 5 seats in the Nexus fleet (secretary-seat,
+// architect-claude, product-manager, qa-engineer, project-manager-seat) set
+// a per-project CLAUDE_CONFIG_DIR. Before this fix, (*Agent).ValidateSessionID
+// always checked the default ~/.claude regardless, so a genuinely valid
+// session ID under the custom CLAUDE_CONFIG_DIR was rejected as "not
+// belonging to this project" on every respawn, silently discarding
+// conversation continuity every time — even though context_guard's real-usage
+// rotation (L-0397) was, by then, correctly deciding when to rotate.
+func TestValidateSessionID_RespectsCustomClaudeConfigDir(t *testing.T) {
+	root := t.TempDir()
+	customConfigDir := filepath.Join(root, "custom-claude-config")
+	workDir := filepath.Join(root, "work", "secretary-seat")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(customConfigDir, "projects", projectKey)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	sessionID := "real-secretary-session-id"
+	if err := os.WriteFile(filepath.Join(projectDir, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	a := &Agent{
+		workDir:   workDir,
+		configEnv: []string{"CLAUDE_CONFIG_DIR=" + customConfigDir},
+	}
+
+	if !a.ValidateSessionID(context.Background(), sessionID) {
+		t.Error("ValidateSessionID rejected a genuinely valid session under a custom CLAUDE_CONFIG_DIR")
+	}
+
+	// Sanity: a session ID that only exists under the DEFAULT ~/.claude
+	// (never under the custom dir) must still be rejected — proves this
+	// isn't silently falling back to the default and passing by accident.
+	if a.ValidateSessionID(context.Background(), "some-other-id-not-in-custom-dir") {
+		t.Error("ValidateSessionID accepted a session ID that doesn't exist under the custom CLAUDE_CONFIG_DIR")
 	}
 }
 
