@@ -9724,6 +9724,64 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	}
 }
 
+// TestAutoCompress_PrefersRealUsageOverHistoryEstimate covers the L-0399
+// finding that auto_compress ran its own independent, uncorrected
+// raw-character estimator over cc-connect's own (comparatively tiny)
+// session.History, never seeing the real provider/CLI-reported usage that
+// context_guard was fixed to use. Here the local text estimate would never
+// cross the configured threshold on its own, but the agent session reports
+// real usage far over it — auto_compress must still trigger.
+func TestAutoCompress_PrefersRealUsageOverHistoryEstimate(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("auto-compress-real-usage")
+	sess.contextUsage = &ContextUsage{UsedTokens: 2_000_000}
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// Threshold far above anything the tiny local History text could ever
+	// reach, so a trigger here can only be explained by real usage.
+	e.SetAutoCompressConfig(true, 1_000_000, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hello world")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, false)
+
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress to trigger off real usage")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	last := sess.sendCalls[len(sess.sendCalls)-1]
+	sess.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact triggered by real usage, got %q", last)
+	}
+}
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")

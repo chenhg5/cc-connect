@@ -270,5 +270,51 @@ func TestApplyContextGuardBeforeTurn_UsesRealUsage(t *testing.T) {
 	}
 }
 
+// TestApplyContextGuardBeforeTurn_RealUsageRotatesEvenWithShortHistory covers
+// the defect found in L-0399: with production config (keep_recent_turns=10,
+// so keepEntries=20), a session with real usage far over threshold but only
+// a handful of cc-connect-visible History entries (typical for tool-heavy
+// dev/architect turns, where most of the bloat is CLI-side transcript/tool
+// output that never lands in session.History) must still rotate the backend
+// session. Before the fix, oldCount = len(History) - keepEntries went
+// negative and the guard silently no-op'd — verified live against the
+// architect-claude/architect-codex production session files (13 and 12
+// History entries respectively, both under the 20-entry keep window).
+func TestApplyContextGuardBeforeTurn_RealUsageRotatesEvenWithShortHistory(t *testing.T) {
+	agent := &stubAgent{}
+	e := NewEngine("test", agent, nil, "", LangEnglish)
+	e.SetContextGuardConfig(ContextGuardConfig{
+		Enabled:                true,
+		ThresholdTokens:        800000,
+		KeepRecentTurns:        10, // matches config.toml keep_recent_turns
+		SummaryMaxTokens:       100000,
+		RotateSessionOnCompact: true,
+	})
+
+	sessions := NewSessionManager("")
+	session := sessions.GetOrCreateActive("telegram:chat:user")
+	session.SetAgentSessionID("real-backend-session", agent.Name())
+	// Only 1 History entry — far below keepEntries = KeepRecentTurns*2 = 20.
+	session.History = []HistoryEntry{
+		{Role: "user", Content: "short", Timestamp: time.Unix(1, 0)},
+	}
+
+	closer := &contextGuardUsageSession{
+		usage: ContextUsage{UsedTokens: 977000}, // matches the observed runaway magnitude
+	}
+	e.interactiveStates["telegram:chat:user"] = &interactiveState{agentSession: closer}
+
+	e.applyContextGuardBeforeTurn("telegram:chat:user", agent, session, sessions, "incoming")
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("expected agent session id cleared (rotation must fire even with short History), got %q", got)
+	}
+	e.interactiveMu.Lock()
+	_, stillPresent := e.interactiveStates["telegram:chat:user"]
+	e.interactiveMu.Unlock()
+	if stillPresent {
+		t.Fatal("interactive state still present after context guard rotation")
+	}
+}
+
 
 

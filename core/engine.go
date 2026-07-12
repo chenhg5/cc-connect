@@ -5972,6 +5972,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
+			// Prefer the same real, provider/CLI-reported ContextUsage that
+			// context_guard uses over the raw-character History heuristic —
+			// auto_compress previously ran its own independent, uncorrected
+			// estimator (L-0399), which meant it could under-trigger (or
+			// over-trigger) by the same margin context_guard used to before
+			// realUsage was wired in, and did so silently since the two
+			// mechanisms were never unified.
+			if realUsage := replyFooterSessionContextUsage(state.agentSession); realUsage != nil {
+				if used := realContextUsageTokens(realUsage); used > 0 {
+					contextEstimate = used
+				}
+			}
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).

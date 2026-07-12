@@ -11,6 +11,32 @@ import (
 
 const contextGuardSummaryPrefix = "[Context guard compressed memory]"
 
+// realContextUsageTokens extracts a usable token count from a real,
+// provider/CLI-reported ContextUsage snapshot, falling back through
+// TotalTokens and InputTokens+OutputTokens when UsedTokens is unset. Returns
+// 0 when no real usage is available (nil, or every field empty), signaling
+// callers to fall back to a local text-based estimate.
+//
+// Shared by context_guard (pre-turn rotation) and auto_compress (post-turn
+// native /compact trigger) so both mechanisms react to the same real number
+// instead of context_guard using real usage while auto_compress silently
+// kept running its own uncorrected raw-character heuristic (L-0399).
+func realContextUsageTokens(usage *ContextUsage) int {
+	if usage == nil {
+		return 0
+	}
+	if usage.UsedTokens > 0 {
+		return usage.UsedTokens
+	}
+	if usage.TotalTokens > 0 {
+		return usage.TotalTokens
+	}
+	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		return usage.InputTokens + usage.OutputTokens
+	}
+	return 0
+}
+
 // ContextGuardConfig controls pre-turn local history compaction and optional
 // backend session rotation for agents without native context compaction.
 type ContextGuardConfig struct {
@@ -86,18 +112,7 @@ func compactSessionHistoryForContextGuard(session *Session, cfg ContextGuardConf
 	defer session.mu.Unlock()
 
 	var tokenEstimate int
-	realUsed := 0
-	if realUsage != nil {
-		realUsed = realUsage.UsedTokens
-		if realUsed <= 0 {
-			switch {
-			case realUsage.TotalTokens > 0:
-				realUsed = realUsage.TotalTokens
-			case realUsage.InputTokens > 0 || realUsage.OutputTokens > 0:
-				realUsed = realUsage.InputTokens + realUsage.OutputTokens
-			}
-		}
-	}
+	realUsed := realContextUsageTokens(realUsage)
 
 	if realUsed > 0 {
 		incomingTokens := EstimateContextGuardTokens(nil, incoming)
@@ -112,23 +127,53 @@ func compactSessionHistoryForContextGuard(session *Session, cfg ContextGuardConf
 		return contextGuardResult{TokenEstimate: tokenEstimate}
 	}
 
-	keepEntries := cfg.KeepRecentTurns * 2
-	if keepEntries < 0 {
-		keepEntries = 0
+	// Once we're over threshold, the guard must fire — at minimum this
+	// means the caller rotates the backend session (fresh CLI thread),
+	// which is what actually relieves a real-usage overflow. Local
+	// History summarization is a bonus on top of that, not a
+	// precondition: whether there happens to be enough History to
+	// summarize (governed by KeepRecentTurns) must never gate rotation,
+	// or a short-but-token-heavy session (few cc-connect-visible turns,
+	// huge CLI-side tool output/transcript) can exceed threshold forever
+	// without ever rotating. L-0399 traced a live instance of this: two
+	// active seats had 12-13 History entries against a keep-window of 20,
+	// so realUsage crossing threshold silently did nothing.
+	result := contextGuardResult{
+		Compacted:     true,
+		TokenEstimate: tokenEstimate,
 	}
-	if keepEntries > len(session.History) {
-		keepEntries = len(session.History)
+
+	oldCount := len(session.History)
+	if realUsed <= 0 {
+		// Text-estimate path: History itself is the size driver, so only
+		// fold the portion beyond the configured keep-window into a
+		// summary and leave the recent turns intact verbatim.
+		keepEntries := cfg.KeepRecentTurns * 2
+		if keepEntries < 0 {
+			keepEntries = 0
+		}
+		if keepEntries > len(session.History) {
+			keepEntries = len(session.History)
+		}
+		oldCount = len(session.History) - keepEntries
 	}
-	oldCount := len(session.History) - keepEntries
+	// Real-usage path: the bloat lives in the CLI/provider-side session,
+	// not in cc-connect's own (comparatively tiny) History, and we're
+	// rotating to a fresh backend thread regardless — so fold whatever
+	// local History exists into one summary rather than applying a
+	// keep-window sized for the text-estimate case.
+
+	result.OldHistoryCount = oldCount
+	result.NewHistoryCount = len(session.History)
 	if oldCount <= 0 {
-		return contextGuardResult{TokenEstimate: tokenEstimate}
+		return result
 	}
 
 	oldHistory := append([]HistoryEntry(nil), session.History[:oldCount]...)
 	recent := append([]HistoryEntry(nil), session.History[oldCount:]...)
 	summary := buildContextGuardSummary(oldHistory, cfg.SummaryMaxTokens)
 	if strings.TrimSpace(summary) == "" {
-		return contextGuardResult{TokenEstimate: tokenEstimate}
+		return result
 	}
 
 	compacted := make([]HistoryEntry, 0, 1+len(recent))
@@ -140,13 +185,9 @@ func compactSessionHistoryForContextGuard(session *Session, cfg ContextGuardConf
 	compacted = append(compacted, recent...)
 	session.History = compacted
 
-	return contextGuardResult{
-		Compacted:       true,
-		Summary:         summary,
-		TokenEstimate:   tokenEstimate,
-		OldHistoryCount: oldCount,
-		NewHistoryCount: len(compacted),
-	}
+	result.Summary = summary
+	result.NewHistoryCount = len(compacted)
+	return result
 }
 
 func buildContextGuardSummary(history []HistoryEntry, maxTokens int) string {
