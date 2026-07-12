@@ -2331,7 +2331,6 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if err != nil {
 		return err
 	}
-	p.maybeSendKBConfirmCard(ctx, rc, content)
 	return nil
 }
 
@@ -2353,25 +2352,30 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if err := p.sendNewMessageToChat(ctx, rc, msgType, msgBody); err != nil {
 		return err
 	}
-	p.maybeSendKBConfirmCard(ctx, rc, content)
 	return nil
 }
 
-// kbConfirmCardTokenRe matches the KNOWLEDGE_CACHE_DIR (case-insensitive) printed
+// knowledgeConfirmCardTokenRe matches the KNOWLEDGE_CACHE_DIR (case-insensitive) printed
 // by jinkela-query's save-alert-conclusion.js, used to offer a one-click
 // "write to knowledge base" button. Tolerates `=`/`:` separators, surrounding
 // whitespace, and optional quoting (single/double/backtick) around the path.
-var kbConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:]\s*(\S+)`)
+var knowledgeConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:]\s*(\S+)`)
 
-// maybeSendKBConfirmCard emits an interactive confirmation card with a
+// maybeSendKnowledgeConfirmCard emits an interactive confirmation card with a
 // "写入知识库" button when the outgoing message carries a KNOWLEDGE_CACHE_DIR
 // token. Clicking the button dispatches the token back to the session via the
 // existing `cmd:` card-action branch, so jinkela-query's write flow
 // (knowledge-write-intent.js --cache-dir) runs without re-investigating.
 // The session_key is auto-injected into the button value by renderCardMap,
 // ensuring correct routing in thread-isolated chats.
-func (p *Platform) maybeSendKBConfirmCard(ctx context.Context, rc replyContext, content string) {
-	m := kbConfirmCardTokenRe.FindStringSubmatch(content)
+//
+// It is invoked solely from AfterReply (the core.PostReplyHook entry point),
+// which the engine calls exactly once after a reply is delivered on any path
+// (rich card UpdateMessage, streaming card Finalize, or plain send). It is no
+// longer called from Reply/Send directly, so the card fires once per reply
+// regardless of delivery path.
+func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyContext, content string) {
+	m := knowledgeConfirmCardTokenRe.FindStringSubmatch(content)
 	if m == nil {
 		return
 	}
@@ -2386,12 +2390,17 @@ func (p *Platform) maybeSendKBConfirmCard(ctx context.Context, rc replyContext, 
 	// KNOWLEDGE_CACHE_DIR printed earlier whose /tmp dir has since been cleaned),
 	// which would otherwise produce a button that fails on click.
 	if !filepath.IsAbs(cacheDir) {
-		slog.Debug(p.tag()+": skip kb confirm card, cache dir not absolute", "dir", cacheDir)
+		slog.Debug(p.tag()+": skip knowledge confirm card, cache dir not absolute", "dir", cacheDir)
 		return
 	}
 	if info, err := os.Stat(cacheDir); err != nil || !info.IsDir() {
-		slog.Debug(p.tag()+": skip kb confirm card, cache dir missing", "dir", cacheDir)
-		return
+		// NOTE: the cache dir lives on the agent host, which is not necessarily
+		// the cc-connect host. The actual write happens agent-side via
+		// knowledge-write-intent.js --cache-dir, which validates the path there.
+		// We therefore only warn here instead of silently dropping the card,
+		// so the confirmation button stays available even when cc-connect runs
+		// on a different machine than the agent.
+		slog.Warn(p.tag()+": knowledge confirm card cache dir not present on this host (expected if agent runs elsewhere)", "dir", cacheDir, "err", err)
 	}
 	card := core.NewCard().
 		Title("📚 知识库写入确认", "blue").
@@ -2406,12 +2415,31 @@ func (p *Platform) maybeSendKBConfirmCard(ctx context.Context, rc replyContext, 
 	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
 		err = p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 	} else {
-		err = p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send kb confirm card")
+		err = p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send knowledge confirm card")
 	}
 	if err != nil {
-		slog.Warn(p.tag()+": send kb confirm card failed", "error", err)
+		slog.Warn(p.tag()+": send knowledge confirm card failed", "error", err)
 	}
 }
+
+// AfterReply implements core.PostReplyHook. It is the single entry point for
+// the knowledge-base confirmation card: the engine calls it exactly once after
+// a reply is delivered on any path (rich card UpdateMessage, streaming card
+// Finalize, or plain send), so the card fires regardless of delivery path and
+// is never emitted twice.
+func (p *Platform) AfterReply(ctx context.Context, replyCtx any, content string) {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		slog.Debug(p.tag() + ": AfterReply: reply context is not a feishu replyContext, skipping", "type", fmt.Sprintf("%T", replyCtx))
+		return
+	}
+	p.maybeSendKnowledgeConfirmCard(ctx, rc, content)
+}
+
+// Compile-time check that *Platform satisfies the optional core.PostReplyHook
+// interface, so a signature drift fails the build instead of silently no-op'ing
+// at the runtime type assertion in engine finalize.
+var _ core.PostReplyHook = (*Platform)(nil)
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)

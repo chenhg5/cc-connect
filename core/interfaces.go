@@ -186,6 +186,18 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// PostReplyHook is an optional interface for platforms that want to run a
+// follow-up action once a reply has been delivered, regardless of which
+// delivery path was taken (rich card patch, streaming card finalize, or plain
+// send). It exists because some platform-specific side effects (e.g. an
+// interactive confirmation card) must fire for every reply, but the regular
+// Reply/Send hooks are bypassed when the engine delivers via UpdateMessage or
+// a streaming card. The engine calls AfterReply exactly once after the
+// delivery path completes (skipped for silent replies).
+type PostReplyHook interface {
+	AfterReply(ctx context.Context, replyCtx any, content string)
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".

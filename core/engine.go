@@ -4255,6 +4255,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+			// Post-reply hook: let platforms run a follow-up action once the
+			// reply is delivered, independent of which delivery path ran above
+			// (rich card patch, streaming card finalize, or plain send). Skipped
+			// for silent replies, which produce no user-visible message.
+			if !isSilent {
+				if hook, ok := p.(PostReplyHook); ok {
+					hook.AfterReply(e.ctx, replyCtx, fullResponse)
+				}
+			}
+
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
