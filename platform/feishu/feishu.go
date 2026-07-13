@@ -2498,8 +2498,11 @@ func (p *Platform) AfterReply(ctx context.Context, replyCtx any, content string)
 		slog.Debug(p.tag() + ": AfterReply: reply context is not a feishu replyContext, skipping", "type", fmt.Sprintf("%T", replyCtx))
 		return
 	}
-	p.maybeSendKnowledgeConfirmCard(ctx, rc, content)
+	// Deliver script-produced payloads (root-cause / alert-summary, SOP step 11)
+	// BEFORE the knowledge-base confirm card (SOP step 12), so the chat order
+	// matches the investigation SOP: analysis first, then the write-to-KB card.
 	p.maybeDeliverFileTokens(ctx, rc, content)
+	p.maybeSendKnowledgeConfirmCard(ctx, rc, content)
 }
 
 // Compile-time check that *Platform satisfies the optional core.PostReplyHook
