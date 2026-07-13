@@ -47,6 +47,8 @@ type opencodeSession struct {
 	httpPartMu        sync.Mutex
 	httpPartText      map[string]string
 	httpAssistantMsg  map[string]struct{}
+	agentErrMu        sync.Mutex
+	agentErr          error
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -427,12 +429,35 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+	err := fmt.Errorf("%s", errMsg)
+	s.rememberAgentError(err)
+	evt := core.Event{Type: core.EventError, Error: err}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 		return
 	}
+}
+
+func (s *opencodeSession) rememberAgentError(err error) {
+	if err == nil {
+		return
+	}
+	s.agentErrMu.Lock()
+	s.agentErr = err
+	s.agentErrMu.Unlock()
+}
+
+func (s *opencodeSession) clearAgentError() {
+	s.agentErrMu.Lock()
+	s.agentErr = nil
+	s.agentErrMu.Unlock()
+}
+
+func (s *opencodeSession) currentAgentError() error {
+	s.agentErrMu.Lock()
+	defer s.agentErrMu.Unlock()
+	return s.agentErr
 }
 
 // extractErrorMessage tries to pull a human-readable message from various

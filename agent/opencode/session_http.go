@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -83,6 +84,7 @@ func opencodeEnv(env []string, key string) string {
 }
 
 func (s *opencodeSession) sendHTTP(prompt string, imagePaths []string) error {
+	s.clearAgentError()
 	parts := make([]map[string]any, 0, len(imagePaths)+1)
 	for _, path := range imagePaths {
 		data, err := os.ReadFile(path)
@@ -109,7 +111,35 @@ func (s *opencodeSession) sendHTTP(prompt string, imagePaths []string) error {
 	if providerID, modelID, ok := strings.Cut(s.model, "/"); ok && providerID != "" && modelID != "" {
 		body["model"] = map[string]any{"providerID": providerID, "modelID": modelID}
 	}
-	return s.doHTTPJSON(http.MethodPost, "/session/"+url.PathEscape(s.CurrentSessionID())+"/message", body, nil)
+	if err := s.doHTTPJSON(http.MethodPost, "/session/"+url.PathEscape(s.CurrentSessionID())+"/message", body, nil); err != nil {
+		if agentErr := s.waitHTTPAgentError(750 * time.Millisecond); agentErr != nil {
+			return agentErr
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *opencodeSession) waitHTTPAgentError(timeout time.Duration) error {
+	if err := s.currentAgentError(); err != nil {
+		return err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return nil
+		case <-timer.C:
+			return s.currentAgentError()
+		case <-ticker.C:
+			if err := s.currentAgentError(); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (s *opencodeSession) startHTTPEventStream() error {
