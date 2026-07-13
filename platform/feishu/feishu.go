@@ -2361,7 +2361,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // whitespace, and optional quoting (single/double/backtick) around the path.
 var knowledgeConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:]\s*(\S+)`)
 
-// ccDeliverFileTokenRe matches the CC_DELIVER_FILE token printed by deliverable
+// ccDeliverFileTokenRe matches the CC_DELIVER_FILE line printed by deliverable
 // scripts (e.g. jinkela-md-builder.js). The script writes its user-facing
 // payload to a temp file and prints `CC_DELIVER_FILE=<path>` so the agent only
 // has to echo that single short line into its reply instead of copying a large
@@ -2433,14 +2433,14 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 	}
 }
 
-// deliverableFileContents scans the outgoing reply for CC_DELIVER_FILE tokens,
+// deliverableFileContents scans the outgoing reply for CC_DELIVER_FILE lines,
 // reads each referenced temp file, and returns their contents for delivery.
 // Only absolute paths under the platform temp dir or the fixed /tmp root are
-// accepted, so a malicious or buggy token cannot make cc-connect read arbitrary
+// accepted, so a malicious or buggy line cannot make cc-connect read arbitrary
 // files. This mirrors the knowledge-base write convention (save-alert-conclusion.js),
 // which stages files under /tmp. Files are removed after a successful read.
 // Failures (missing file, unsafe path) are logged and skipped, never aborting
-// delivery of the remaining tokens.
+// delivery of the remaining lines.
 func (p *Platform) deliverableFileContents(content string) []string {
 	var out []string
 	// Allowed roots: the platform temp dir (e.g. /var/folders/.../T) and the
@@ -2488,7 +2488,7 @@ func (p *Platform) deliverableFileContents(content string) []string {
 // appears as additional messages in the same chat/thread.
 //
 // A dedupe guard skips delivery when the agent pasted the block into the body
-// instead of only echoing the CC_DELIVER_FILE token: in that case the body
+// instead of only echoing the CC_DELIVER_FILE line: in that case the body
 // already shows the block, so re-delivering the file would duplicate it.
 func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, content string) {
 	for _, text := range p.deliverableFileContents(content) {
@@ -2509,7 +2509,7 @@ func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, 
 
 // alreadyInBody reports whether the deliverable's leading heading is already
 // present in the reply body — i.e. the agent pasted the whole block rather than
-// only echoing the CC_DELIVER_FILE token. Used to avoid delivering the same
+// only echoing the CC_DELIVER_FILE line. Used to avoid delivering the same
 // block twice (once in the body, once from the file).
 func alreadyInBody(body, text string) bool {
 	heading := firstLine(text)
