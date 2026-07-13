@@ -148,7 +148,7 @@ func (s *opencodeSession) startHTTPEventStream() error {
 		return fmt.Errorf("opencode: connect event stream: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return s.httpStatusError(resp)
 	}
 	s.wg.Add(1)
@@ -158,7 +158,7 @@ func (s *opencodeSession) startHTTPEventStream() error {
 
 func (s *opencodeSession) readHTTPEvents(body io.ReadCloser) {
 	defer s.wg.Done()
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -466,7 +466,7 @@ func (s *opencodeSession) doHTTPJSON(method, path string, body, output any) erro
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return s.httpStatusError(resp)
 	}

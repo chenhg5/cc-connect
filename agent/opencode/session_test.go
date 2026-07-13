@@ -402,7 +402,7 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	select {
 	case <-sseConnected:
@@ -550,7 +550,7 @@ func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	select {
 	case <-sseConnected:

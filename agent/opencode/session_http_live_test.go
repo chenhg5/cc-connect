@@ -29,7 +29,7 @@ func TestOpencodeHTTPModeLiveServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	if session.CurrentSessionID() == "" {
 		t.Fatal("expected live HTTP session ID")
