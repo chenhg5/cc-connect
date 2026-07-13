@@ -1745,10 +1745,10 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
+# Requires: OpenCode CLI — https://github.com/anomalyco/opencode
 # 需要安装：OpenCode CLI
-# Uses `opencode run --format json` under the hood.
-# 底层使用 `opencode run --format json` 命令。
+# By default, uses `opencode run --format json` under the hood.
+# 默认底层使用 `opencode run --format json` 命令。
 
 # [[projects]]
 # name = "my-opencode-project"
@@ -1759,6 +1759,14 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "default"  # "default" | "yolo"
+#
+# Optional: connect to `opencode serve` instead of starting short-lived CLI runs.
+# This keeps `/event` SSE connected before each prompt, so streaming steps,
+# background callbacks, and permission/question prompts continue to reach cc-connect.
+# 可选：连接到 `opencode serve`，保持 `/event` SSE 长连接，以支持后台回调和决策提示。
+# connection_url = "http://127.0.0.1:4096"
+# username = "opencode"
+# password = "your-opencode-server-password"
 #
 # Mode options / 模式说明:
 # - "default": Standard mode / 标准模式

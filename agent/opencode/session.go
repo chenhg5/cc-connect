@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,9 +21,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// opencodeSession manages multi-turn conversations with the OpenCode CLI.
-// Each Send() launches a new `opencode run --format json` process
-// with --session for conversation continuity.
+// opencodeSession manages multi-turn conversations with OpenCode.
 type opencodeSession struct {
 	cmd               string
 	extraArgs         []string // extra args from cmd, prepended before opencode args
@@ -39,6 +38,15 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	httpClient        *http.Client
+	connectionURL     string
+	username          string
+	password          string
+	pendingMu         sync.Mutex
+	pendingQuestions  map[string][]core.UserQuestion
+	httpPartMu        sync.Mutex
+	httpPartText      map[string]string
+	httpAssistantMsg  map[string]struct{}
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -80,6 +88,9 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	if s.httpClient != nil {
+		return s.sendHTTP(prompt, imagePaths)
+	}
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -487,7 +498,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
+	if reason == "stop" && s.httpClient == nil {
 		s.sendEventResult()
 	}
 }
@@ -506,8 +517,11 @@ func (s *opencodeSession) sendEventResult() {
 	}
 }
 
-// RespondPermission is a no-op — OpenCode handles permissions internally.
-func (s *opencodeSession) RespondPermission(_ string, _ core.PermissionResult) error {
+// RespondPermission is handled over HTTP in persistent-server mode.
+func (s *opencodeSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	if s.httpClient != nil {
+		return s.respondHTTPPermission(requestID, result)
+	}
 	return nil
 }
 
