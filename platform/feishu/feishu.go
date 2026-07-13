@@ -2361,6 +2361,17 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // whitespace, and optional quoting (single/double/backtick) around the path.
 var knowledgeConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:]\s*(\S+)`)
 
+// ccDeliverFileTokenRe matches the CC_DELIVER_FILE token printed by deliverable
+// scripts (e.g. jinkela-md-builder.js). The script writes its user-facing
+// payload to a temp file and prints `CC_DELIVER_FILE=<path>` so the agent only
+// has to echo that single short line into its reply instead of copying a large
+// markdown block — cc-connect then reads the file and delivers its content to
+// Feishu. This eliminates the recurring failure where the model drops the block
+// and the group sees only an empty "已生成" claim (tool results are never
+// delivered to Feishu by cc-connect). Tolerates `=`/`:` separators, optional
+// surrounding quotes, and is matched case-insensitively.
+var ccDeliverFileTokenRe = regexp.MustCompile(`(?i)CC_DELIVER_FILE[=:]\s*(\S+)`)
+
 // maybeSendKnowledgeConfirmCard emits an interactive confirmation card with a
 // "写入知识库" button when the outgoing message carries a KNOWLEDGE_CACHE_DIR
 // token. Clicking the button dispatches the token back to the session via the
@@ -2422,6 +2433,60 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 	}
 }
 
+// deliverableFileContents scans the outgoing reply for CC_DELIVER_FILE tokens,
+// reads each referenced temp file, and returns their contents for delivery.
+// Only absolute paths strictly under os.TempDir() are accepted, so a malicious
+// or buggy token cannot make cc-connect read arbitrary files. Files are removed
+// after a successful read. Failures (missing file, unsafe path) are logged and
+// skipped, never aborting delivery of the remaining tokens.
+func (p *Platform) deliverableFileContents(content string) []string {
+	var out []string
+	tmp := filepath.Clean(os.TempDir())
+	for _, m := range ccDeliverFileTokenRe.FindAllStringSubmatch(content, -1) {
+		raw := strings.Trim(m[1], "\"`'")
+		if raw == "" {
+			continue
+		}
+		if !filepath.IsAbs(raw) {
+			slog.Warn(p.tag() + ": CC_DELIVER_FILE skipped, not absolute", "path", raw)
+			continue
+		}
+		clean := filepath.Clean(raw)
+		if !strings.HasPrefix(clean, tmp+string(os.PathSeparator)) && clean != tmp {
+			slog.Warn(p.tag()+": CC_DELIVER_FILE skipped, outside temp dir", "path", raw)
+			continue
+		}
+		data, err := os.ReadFile(raw)
+		if err != nil {
+			slog.Warn(p.tag()+": CC_DELIVER_FILE read failed", "path", raw, "err", err)
+			continue
+		}
+		out = append(out, string(data))
+		if rmErr := os.Remove(raw); rmErr != nil {
+			slog.Debug(p.tag()+": CC_DELIVER_FILE temp cleanup failed", "path", raw, "err", rmErr)
+		}
+	}
+	return out
+}
+
+// maybeDeliverFileTokens reads CC_DELIVER_FILE payloads (see deliverableFileContents)
+// and posts each as one or more Feishu messages, split on code-fence-aware
+// boundaries like the engine does for the body. It is invoked solely from
+// AfterReply, after the body has already been delivered, so the file content
+// appears as additional messages in the same chat/thread.
+func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, content string) {
+	for _, text := range p.deliverableFileContents(content) {
+		for _, chunk := range core.SplitMessageCodeFenceAware(text, 4000) {
+			if strings.TrimSpace(chunk) == "" {
+				continue
+			}
+			if err := p.Send(ctx, rc, chunk); err != nil {
+				slog.Warn(p.tag()+": CC_DELIVER_FILE deliver failed", "err", err)
+			}
+		}
+	}
+}
+
 // AfterReply implements core.PostReplyHook. It is the single entry point for
 // the knowledge-base confirmation card: the engine calls it exactly once after
 // a reply is delivered on any path (rich card UpdateMessage, streaming card
@@ -2434,6 +2499,7 @@ func (p *Platform) AfterReply(ctx context.Context, replyCtx any, content string)
 		return
 	}
 	p.maybeSendKnowledgeConfirmCard(ctx, rc, content)
+	p.maybeDeliverFileTokens(ctx, rc, content)
 }
 
 // Compile-time check that *Platform satisfies the optional core.PostReplyHook
