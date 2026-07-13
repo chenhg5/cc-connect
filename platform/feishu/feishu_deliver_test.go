@@ -43,6 +43,22 @@ func TestDeliverableFileContents(t *testing.T) {
 		}
 	})
 
+	t.Run("accepts fixed /tmp root (knowledge-write convention)", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", "cc-deliver-")
+		if err != nil {
+			t.Fatalf("mkdir /tmp: %v", err)
+		}
+		defer os.RemoveAll(dir)
+		f := dir + "/content.md"
+		if err := os.WriteFile(f, []byte("hello"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		got := p.deliverableFileContents("CC_DELIVER_FILE=" + f)
+		if len(got) != 1 || got[0] != "hello" {
+			t.Fatalf("expected /tmp path accepted, got %d (%q)", len(got), got)
+		}
+	})
+
 	t.Run("rejects relative path", func(t *testing.T) {
 		got := p.deliverableFileContents("CC_DELIVER_FILE=foo.md")
 		if len(got) != 0 {

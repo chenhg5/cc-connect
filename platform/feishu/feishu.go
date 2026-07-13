@@ -2435,13 +2435,18 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 
 // deliverableFileContents scans the outgoing reply for CC_DELIVER_FILE tokens,
 // reads each referenced temp file, and returns their contents for delivery.
-// Only absolute paths strictly under os.TempDir() are accepted, so a malicious
-// or buggy token cannot make cc-connect read arbitrary files. Files are removed
-// after a successful read. Failures (missing file, unsafe path) are logged and
-// skipped, never aborting delivery of the remaining tokens.
+// Only absolute paths under the platform temp dir or the fixed /tmp root are
+// accepted, so a malicious or buggy token cannot make cc-connect read arbitrary
+// files. This mirrors the knowledge-base write convention (save-alert-conclusion.js),
+// which stages files under /tmp. Files are removed after a successful read.
+// Failures (missing file, unsafe path) are logged and skipped, never aborting
+// delivery of the remaining tokens.
 func (p *Platform) deliverableFileContents(content string) []string {
 	var out []string
-	tmp := filepath.Clean(os.TempDir())
+	// Allowed roots: the platform temp dir (e.g. /var/folders/.../T) and the
+	// fixed /tmp used by the deliverable scripts, so CC_DELIVER_FILE stays
+	// consistent with the knowledge-base write staging under /tmp.
+	allowedRoots := []string{filepath.Clean(os.TempDir()), "/tmp"}
 	for _, m := range ccDeliverFileTokenRe.FindAllStringSubmatch(content, -1) {
 		raw := strings.Trim(m[1], "\"`'")
 		if raw == "" {
@@ -2452,8 +2457,15 @@ func (p *Platform) deliverableFileContents(content string) []string {
 			continue
 		}
 		clean := filepath.Clean(raw)
-		if !strings.HasPrefix(clean, tmp+string(os.PathSeparator)) && clean != tmp {
-			slog.Warn(p.tag()+": CC_DELIVER_FILE skipped, outside temp dir", "path", raw)
+		underAllowed := false
+		for _, root := range allowedRoots {
+			if clean == root || strings.HasPrefix(clean, root+string(os.PathSeparator)) {
+				underAllowed = true
+				break
+			}
+		}
+		if !underAllowed {
+			slog.Warn(p.tag()+": CC_DELIVER_FILE skipped, outside allowed temp dirs", "path", raw)
 			continue
 		}
 		data, err := os.ReadFile(raw)
