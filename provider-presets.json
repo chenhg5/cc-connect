@@ -629,8 +629,8 @@
           "codex_config": { "wire_api": "responses" }
         }
       }
-    }
-    ,{
+    },
+    {
       "name": "atlascloud",
       "display_name": "Atlas Cloud",
       "description": "Atlas Cloud OpenAI-compatible LLM API with large-context text models for coding agents.",
