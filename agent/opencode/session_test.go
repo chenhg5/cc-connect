@@ -505,6 +505,68 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	}
 }
 
+func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing.T) {
+	events := make(chan string, 4)
+	sseConnected := make(chan struct{})
+	var connectedOnce sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /session", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ses_http"}`))
+	})
+	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		connectedOnce.Do(func() { close(sseConnected) })
+		for {
+			select {
+			case event := <-events:
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+	mux.HandleFunc("POST /session/ses_http/message", func(w http.ResponseWriter, _ *http.Request) {
+		events <- `{"type":"session.error","properties":{"sessionID":"ses_http","error":{"name":"PaymentRequiredError","data":{"message":"Insufficient balance. Please recharge your account."}}}}`
+		http.Error(w, `{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_quota"}}`, http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	agent, err := New(map[string]any{
+		"cmd":            "/bin/false",
+		"work_dir":       t.TempDir(),
+		"connection_url": server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	select {
+	case <-sseConnected:
+	case <-time.After(time.Second):
+		t.Fatal("SSE was not connected before Send")
+	}
+
+	err = session.Send("hello", nil, nil)
+	if err == nil {
+		t.Fatal("Send returned nil, want quota error")
+	}
+	if got := err.Error(); !strings.Contains(got, "PaymentRequiredError") || !strings.Contains(got, "Insufficient balance") {
+		t.Fatalf("Send error = %q, want SSE quota error", got)
+	}
+}
+
 func waitOpencodeEvent(t *testing.T, events <-chan core.Event) core.Event {
 	t.Helper()
 	select {
