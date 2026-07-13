@@ -8,25 +8,44 @@
       "invite_url": "https://www.kimi.com/code/?aff=cc-connect",
       "description": "Kimi K2.7 Code — coding-focused open-source agentic model from Moonshot AI. Reduces thinking-token usage by ~30% vs K2.6. cc-connect brings Kimi CLI to Feishu/DingTalk/Telegram/Slack/Discord/WeChat Work.",
       "description_zh": "Kimi K2.7 Code — Moonshot AI 推出的编程专用开源智能体模型,相比 K2.6 平均减少约 30% 的推理 Token 消耗。cc-connect 可将本地 Kimi CLI 接入飞书/钉钉/Telegram/Slack/Discord/企业微信。",
-      "features": ["K2.7 Code", "30% Less Tokens", "Sponsor", "cc-connect Native"],
+      "features": [
+        "K2.7 Code",
+        "30% Less Tokens",
+        "Sponsor",
+        "cc-connect Native"
+      ],
       "tier": 1,
       "website": "https://www.kimi.com/",
       "agents": {
         "claudecode": {
           "base_url": "https://api.moonshot.cn/v1",
           "model": "kimi-k2-7-code",
-          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"]
+          "models": [
+            "kimi-k2-7-code",
+            "kimi-k2-7",
+            "kimi-k2-6"
+          ]
         },
         "codex": {
           "base_url": "https://api.moonshot.cn/v1",
           "model": "kimi-k2-7-code",
-          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"],
-          "codex_config": {"wire_api": "responses"}
+          "models": [
+            "kimi-k2-7-code",
+            "kimi-k2-7",
+            "kimi-k2-6"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://api.moonshot.cn/v1",
           "model": "kimi-k2-7-code",
-          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"]
+          "models": [
+            "kimi-k2-7-code",
+            "kimi-k2-7",
+            "kimi-k2-6"
+          ]
         }
       }
     },
@@ -36,25 +55,42 @@
       "invite_url": "https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link",
       "description": "MiniMax M3 — frontier coding & agentic LLM with 1M context via MiniMax Sparse Attention, natively multimodal. Exclusive 12% off Token Plan for cc-connect users!",
       "description_zh": "MiniMax M3 — 前沿 Coding 与 Agentic 大模型，1M 上下文（MiniMax Sparse Attention），原生多模态。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "M3 Frontier", "Multimodal", "SWE-Bench Pro 59.0"],
+      "features": [
+        "1M Context",
+        "M3 Frontier",
+        "Multimodal",
+        "SWE-Bench Pro 59.0"
+      ],
       "tier": 1,
       "website": "https://platform.minimax.io",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
           "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "models": [
+            "MiniMax-M3",
+            "MiniMax-M3-highspeed",
+            "MiniMax-M2.7"
+          ]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
           "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "MiniMax-M3",
+            "MiniMax-M2.7"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
           "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "models": [
+            "MiniMax-M3",
+            "MiniMax-M2.7"
+          ]
         }
       }
     },
@@ -64,25 +100,42 @@
       "invite_url": "https://platform.minimaxi.com/subscribe/token-plan?code=lqYrKBvjke&source=link",
       "description": "MiniMax M3 China endpoint — frontier coding & agentic LLM, lower latency for users in mainland China.",
       "description_zh": "MiniMax M3 国内站 — 前沿 Coding 与 Agentic 大模型，大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "M3 Frontier", "Multimodal", "低延迟 (CN)"],
+      "features": [
+        "1M Context",
+        "M3 Frontier",
+        "Multimodal",
+        "低延迟 (CN)"
+      ],
       "tier": 1,
       "website": "https://platform.minimaxi.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
           "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "models": [
+            "MiniMax-M3",
+            "MiniMax-M3-highspeed",
+            "MiniMax-M2.7"
+          ]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
           "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "MiniMax-M3",
+            "MiniMax-M2.7"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
           "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "models": [
+            "MiniMax-M3",
+            "MiniMax-M2.7"
+          ]
         }
       }
     },
@@ -92,25 +145,46 @@
       "invite_url": "https://z.ai/subscribe",
       "description": "Zhipu GLM Coding Plan — flat-rate monthly subscription for GLM-4.7 / GLM-5.2 (1M context) via z.ai's Anthropic- and OpenAI-compatible endpoints. Works in Claude Code, Codex and OpenCode.",
       "description_zh": "智谱 GLM Coding Plan（z.ai 国际站）— 包月订阅，提供 GLM-4.7 / GLM-5.2（1M 上下文），兼容 Anthropic 与 OpenAI 接口，可用于 Claude Code、Codex、OpenCode。订阅 key 按套餐配额计费，非按量。",
-      "features": ["GLM-5.2", "1M Context", "订阅制 (非按量)", "高性价比"],
+      "features": [
+        "GLM-5.2",
+        "1M Context",
+        "订阅制 (非按量)",
+        "高性价比"
+      ],
       "tier": 1,
       "website": "https://z.ai",
       "agents": {
         "claudecode": {
           "base_url": "https://api.z.ai/api/anthropic",
           "model": "glm-4.7",
-          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]", "glm-4.6", "glm-4.5-air"]
+          "models": [
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.2[1m]",
+            "glm-4.6",
+            "glm-4.5-air"
+          ]
         },
         "codex": {
           "base_url": "https://api.z.ai/api/coding/paas/v4",
           "model": "glm-4.7",
-          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"],
-          "codex_config": { "wire_api": "chat" }
+          "models": [
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.2[1m]"
+          ],
+          "codex_config": {
+            "wire_api": "chat"
+          }
         },
         "opencode": {
           "base_url": "https://api.z.ai/api/coding/paas/v4",
           "model": "glm-4.7",
-          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"]
+          "models": [
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.2[1m]"
+          ]
         }
       }
     },
@@ -120,25 +194,46 @@
       "invite_url": "https://bigmodel.cn/claude-code",
       "description": "Zhipu GLM Coding Plan, China endpoint (open.bigmodel.cn) — lower latency for users in mainland China. GLM-4.7 / GLM-5.2 via Anthropic- and OpenAI-compatible APIs.",
       "description_zh": "智谱 GLM Coding Plan 国内站（open.bigmodel.cn）— 大陆用户延迟更低。GLM-4.7 / GLM-5.2，兼容 Anthropic 与 OpenAI 接口，可用于 Claude Code、Codex、OpenCode。",
-      "features": ["GLM-5.2", "1M Context", "订阅制 (非按量)", "低延迟 (CN)"],
+      "features": [
+        "GLM-5.2",
+        "1M Context",
+        "订阅制 (非按量)",
+        "低延迟 (CN)"
+      ],
       "tier": 1,
       "website": "https://bigmodel.cn",
       "agents": {
         "claudecode": {
           "base_url": "https://open.bigmodel.cn/api/anthropic",
           "model": "glm-4.7",
-          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]", "glm-4.6", "glm-4.5-air"]
+          "models": [
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.2[1m]",
+            "glm-4.6",
+            "glm-4.5-air"
+          ]
         },
         "codex": {
           "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
           "model": "glm-4.7",
-          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"],
-          "codex_config": { "wire_api": "chat" }
+          "models": [
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.2[1m]"
+          ],
+          "codex_config": {
+            "wire_api": "chat"
+          }
         },
         "opencode": {
           "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
           "model": "glm-4.7",
-          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"]
+          "models": [
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.2[1m]"
+          ]
         }
       }
     },
@@ -148,30 +243,48 @@
       "invite_url": "https://aigocode.com/invite/CYY3C85C",
       "description": "All-in-one platform: Claude Code, Codex & Gemini. Flexible plans, no VPN needed, fast response. 10% bonus credit on first top-up via link!",
       "description_zh": "集成 Claude Code、Codex、Gemini 的全能平台。灵活套餐，免翻墙，响应快速。通过链接注册首充额外赠送 10%！",
-      "features": ["Claude Code", "Codex", "Gemini", "No VPN"],
+      "features": [
+        "Claude Code",
+        "Codex",
+        "Gemini",
+        "No VPN"
+      ],
       "tier": 2,
       "website": "https://aigocode.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.aigocode.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.aigocode.com",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "gemini": {
           "base_url": "https://api.aigocode.com",
           "model": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro", "gemini-3.1-pro"]
+          "models": [
+            "gemini-2.5-pro",
+            "gemini-3.1-pro"
+          ]
         },
         "opencode": {
           "base_url": "https://api.aigocode.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -181,30 +294,51 @@
       "invite_url": "https://aihubmix.com/?aff=mGTx",
       "description": "500+ models in one API. Claude, GPT, Gemini, Qwen, DeepSeek all covered. Unlimited concurrency, Google Cloud infrastructure. Native OpenAI/Anthropic/Gemini format support, zero code migration.",
       "description_zh": "500+ 模型一站式覆盖，Claude/GPT/Gemini/Qwen/DeepSeek 全支持。无限并发，谷歌云集群稳定运行。支持 OpenAI/Anthropic/Gemini 三种原生格式，代码零改动迁移。",
-      "features": ["500+ Models", "Unlimited Concurrency", "Google Cloud", "All Formats"],
+      "features": [
+        "500+ Models",
+        "Unlimited Concurrency",
+        "Google Cloud",
+        "All Formats"
+      ],
       "tier": 2,
       "website": "https://aihubmix.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.aihubmix.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-6", "claude-sonnet-4-6"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6"
+          ]
         },
         "codex": {
           "base_url": "https://api.aihubmix.com/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4", "gpt-5.4-mini"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4",
+            "gpt-5.4-mini"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "gemini": {
           "base_url": "https://api.aihubmix.com",
           "model": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro", "gemini-3.1-pro"]
+          "models": [
+            "gemini-2.5-pro",
+            "gemini-3.1-pro"
+          ]
         },
         "opencode": {
           "base_url": "https://api.aihubmix.com/v1",
           "model": "claude-sonnet-4-6",
-          "models": ["claude-sonnet-4-6", "claude-opus-4-6"]
+          "models": [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6"
+          ]
         }
       }
     },
@@ -214,30 +348,52 @@
       "invite_url": "https://www.shengsuanyun.com/?from=CH_67XCLZGS",
       "description": "Industrial-grade AI platform with 99.7% SLA. Smart routing, BYOK hosting, pay-as-you-go. Free $2 credit for new users!",
       "description_zh": "工业级 AI 平台，99.7% SLA 保障。智能路由，BYOK 密钥托管，按量计费。新用户注册赠送 $2！",
-      "features": ["99.7% SLA", "Smart Routing", "BYOK", "Claude/Codex/Gemini"],
+      "features": [
+        "99.7% SLA",
+        "Smart Routing",
+        "BYOK",
+        "Claude/Codex/Gemini"
+      ],
       "tier": 2,
       "website": "https://www.shengsuanyun.com",
       "agents": {
         "claudecode": {
           "base_url": "https://router.shengsuanyun.com/api",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-sonnet-4-6", "claude-opus-4-6"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6"
+          ]
         },
         "codex": {
           "base_url": "https://router.shengsuanyun.com/api/v1",
           "model": "openai/gpt-5.3-codex",
-          "models": ["openai/gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "openai/gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.4-mini"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "gemini": {
           "base_url": "https://router.shengsuanyun.com/api",
           "model": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro", "gemini-3.1-pro"]
+          "models": [
+            "gemini-2.5-pro",
+            "gemini-3.1-pro"
+          ]
         },
         "opencode": {
           "base_url": "https://router.shengsuanyun.com/api/v1",
           "model": "claude-opus-4-6",
-          "models": ["claude-opus-4-6", "claude-sonnet-4-6"]
+          "models": [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6"
+          ]
         }
       }
     },
@@ -247,25 +403,39 @@
       "invite_url": "https://www.dmxapi.cn/register?aff=NDln",
       "description": "Global LLM API for 200+ enterprises. One key for all models. GPT/Claude/Gemini at 32% off, Claude Code models at 66% off!",
       "description_zh": "服务 200+ 企业的全球大模型 API。一个 Key 接入所有模型。GPT/Claude/Gemini 3.2 折，Claude Code 专属模型低至 6.6 折！",
-      "features": ["All Models", "Unlimited Concurrency", "24/7 Support"],
+      "features": [
+        "All Models",
+        "Unlimited Concurrency",
+        "24/7 Support"
+      ],
       "tier": 2,
       "website": "https://www.dmxapi.cn",
       "agents": {
         "claudecode": {
           "base_url": "https://www.dmxapi.cn",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://www.dmxapi.cn/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://www.dmxapi.cn/v1",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -275,20 +445,31 @@
       "invite_url": "https://camel.kr777.top/register?aff=V2z8",
       "description": "In-depth cooperation with major research institutes and supercomputing centers, self-developed high-stability high-efficiency cache scheduling solution. Exclusive cc-connect benefit: New users get $10 credit upon registration!",
       "description_zh": "携手各大科研院所、超算中心深度合作，自研高稳高效缓存调度方案。CC-Connect专享新人注册认证即送$10！",
-      "features": ["Research Institutes", "Cache Scheduling", "$10 New User Credit"],
+      "features": [
+        "Research Institutes",
+        "Cache Scheduling",
+        "$10 New User Credit"
+      ],
       "tier": 2,
       "website": "https://camel.kr777.top",
       "agents": {
         "claudecode": {
           "base_url": "https://api.camel.kr777.top",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.camel.kr777.top/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         }
       }
     },
@@ -298,20 +479,32 @@
       "invite_url": "https://apikey.fun/register?aff=cc_connect",
       "description": "Enterprise-grade AI relay service. Claude, OpenAI, Gemini models from 7% of official price. Exclusive 5% permanent discount for cc-connect users!",
       "description_zh": "企业级 AI 中转站，Claude/OpenAI/Gemini 模型低至官方 7% 折，cc-connect 用户专属 95 折永久优惠！",
-      "features": ["Enterprise", "Claude/OpenAI/Gemini", "7% Price", "95折"],
+      "features": [
+        "Enterprise",
+        "Claude/OpenAI/Gemini",
+        "7% Price",
+        "95折"
+      ],
       "tier": 2,
       "website": "https://apikey.fun",
       "agents": {
         "claudecode": {
           "base_url": "https://api.apikey.fun",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.apikey.fun/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         }
       }
     },
@@ -321,30 +514,48 @@
       "invite_url": "https://www.aicodemirror.com/register?invitecode=KDHMUP",
       "description": "Official high-stability relay for Claude Code / Codex / Gemini. Enterprise concurrency, 24/7 support. 20% off first top-up for cc-connect users!",
       "description_zh": "Claude Code / Codex / Gemini 官方高稳定中转。企业级并发，24/7 技术支持。cc-connect 用户首充 8 折，企业最高 75 折！",
-      "features": ["Claude Code", "Codex", "Gemini", "Enterprise"],
+      "features": [
+        "Claude Code",
+        "Codex",
+        "Gemini",
+        "Enterprise"
+      ],
       "tier": 2,
       "website": "https://www.aicodemirror.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.aicodemirror.com/api/claudecode",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.aicodemirror.com/api/codex/backend-api/codex",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "gemini": {
           "base_url": "https://api.aicodemirror.com/api/gemini",
           "model": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro", "gemini-3.1-pro"]
+          "models": [
+            "gemini-2.5-pro",
+            "gemini-3.1-pro"
+          ]
         },
         "opencode": {
           "base_url": "https://api.aicodemirror.com/api/claudecode",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -354,25 +565,38 @@
       "invite_url": "https://code0.ai/register?aff=5cGO",
       "description": "AI model aggregation relay for Chinese developers. OpenAI/Anthropic/Gemini compatible. ¥1.5 = $1, transparent pricing, domestic direct.",
       "description_zh": "面向国内开发者的 AI 模型聚合中转。兼容 OpenAI/Anthropic/Gemini 协议。¥1.5 = $1 固定汇率，透明定价，国内直连。",
-      "features": ["All Protocols", "¥1.5=$1", "Domestic Direct"],
+      "features": [
+        "All Protocols",
+        "¥1.5=$1",
+        "Domestic Direct"
+      ],
       "tier": 2,
       "website": "https://code0.ai",
       "agents": {
         "claudecode": {
           "base_url": "https://api.code0.ai",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.code0.ai/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "gemini": {
           "base_url": "https://api.code0.ai",
           "model": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro"]
+          "models": [
+            "gemini-2.5-pro"
+          ]
         }
       }
     },
@@ -382,25 +606,39 @@
       "invite_url": "https://dragoncode.codes/register?ref=23ZELCPX",
       "description": "AI model API relay service. Register via link to get started.",
       "description_zh": "AI 模型 API 中转服务。通过链接注册即可开始体验。",
-      "features": ["Claude Code", "Codex", "Gemini"],
+      "features": [
+        "Claude Code",
+        "Codex",
+        "Gemini"
+      ],
       "tier": 2,
       "website": "https://dragoncode.codes",
       "agents": {
         "claudecode": {
           "base_url": "https://api.dragoncode.codes",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.dragoncode.codes/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://api.dragoncode.codes/v1",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -410,25 +648,40 @@
       "invite_url": "https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect",
       "description": "UCloud AI Cloud Platform. One key for all domestic and international models. High-value Coding Plan packages, enterprise support. ¥5 free credit for new users!",
       "description_zh": "UCloud 旗下 AI 云平台，一个 key 调用国内外模型。高性价比 Coding Plan 套餐，企业级支持。新用户送 5 元体验金！",
-      "features": ["UCloud", "Coding Plan", "Enterprise Support", "¥5 Free"],
+      "features": [
+        "UCloud",
+        "Coding Plan",
+        "Enterprise Support",
+        "¥5 Free"
+      ],
       "tier": 2,
       "website": "https://passport.compshare.cn",
       "agents": {
         "claudecode": {
           "base_url": "https://api.compshare.cn",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.compshare.cn/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://api.compshare.cn/v1",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -438,19 +691,30 @@
       "invite_url": "https://console.claudeapi.com/register?aff=GDbA",
       "description": "Premium direct Claude connection — official 1st-party Keys & AWS Bedrock. No reverse engineering, full capabilities preserved.",
       "description_zh": "高品质 Claude 直连服务 — 官方一手 Key + AWS Bedrock 官方通道。无逆向无降智，完整保留官方能力。",
-      "features": ["Official Channel", "No Reverse Eng.", "Enterprise"],
+      "features": [
+        "Official Channel",
+        "No Reverse Eng.",
+        "Enterprise"
+      ],
       "tier": 2,
       "website": "https://console.claudeapi.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.claudeapi.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-3-5-20241022"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-haiku-3-5-20241022"
+          ]
         },
         "opencode": {
           "base_url": "https://api.claudeapi.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -460,25 +724,40 @@
       "invite_url": "https://nekocode.ai/?aff=CC-CONNECT",
       "description": "Reliable, stable API relay for Claude and CodeX. Transparent pricing. Exclusive 10% off for cc-connect users with code: CC-CONNECT.",
       "description_zh": "Claude 和 CodeX 可靠稳定高效的 API 中转站，价格透明。cc-connect 用户专属 9 折福利码：CC-CONNECT。",
-      "features": ["Claude Code", "CodeX", "Transparent Pricing", "10% Off"],
+      "features": [
+        "Claude Code",
+        "CodeX",
+        "Transparent Pricing",
+        "10% Off"
+      ],
       "tier": 2,
       "website": "https://nekocode.ai",
       "agents": {
         "claudecode": {
           "base_url": "https://api.nekocode.cc",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.nekocode.cc/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "opencode": {
           "base_url": "https://api.nekocode.cc/v1",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -488,30 +767,47 @@
       "invite_url": "https://coder.visioncoder.cn",
       "description": "Reliable API relay for Claude Code, Codex, Gemini. Limited-time Token Plan: buy 1 month, get 1 month free.",
       "description_zh": "可靠高效的 API 中继服务，支持 Claude Code、Codex、Gemini。Token Plan 限时活动：购买 1 个月，赠送 1 个月。",
-      "features": ["Claude Code", "Codex", "Gemini", "Buy 1 Get 1 Free"],
+      "features": [
+        "Claude Code",
+        "Codex",
+        "Gemini",
+        "Buy 1 Get 1 Free"
+      ],
       "tier": 2,
       "website": "https://coder.visioncoder.cn",
       "agents": {
         "claudecode": {
           "base_url": "https://coder.visioncoder.cn",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://coder.visioncoder.cn/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         },
         "gemini": {
           "base_url": "https://coder.visioncoder.cn",
           "model": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro"]
+          "models": [
+            "gemini-2.5-pro"
+          ]
         },
         "opencode": {
           "base_url": "https://coder.visioncoder.cn/v1",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         }
       }
     },
@@ -521,20 +817,32 @@
       "invite_url": "https://cc.anyroute.io/register?aff=CR455DSQSKEV",
       "description": "Reliable API relay platform integrating Claude Code and Codex models. Transparent pricing, rates as low as 0.7x official price, supports invoicing and enterprise-grade high-concurrency.",
       "description_zh": "可靠稳定高效的 API 中转平台，集成 Claude Code、Codex 最新模型。价格透明，最低低至官方 0.7 折，支持开票和企业高并发。",
-      "features": ["Claude Code", "Codex", "0.7x Price", "Enterprise"],
+      "features": [
+        "Claude Code",
+        "Codex",
+        "0.7x Price",
+        "Enterprise"
+      ],
       "tier": 2,
       "website": "https://cc.anyroute.io",
       "agents": {
         "claudecode": {
           "base_url": "https://api.anyroute.io",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.anyroute.io/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         }
       }
     },
@@ -544,20 +852,33 @@
       "invite_url": "https://aicanapi.com/register?aff=rIEy",
       "description": "High-performance API relay for enterprises and developers. Claude Code models up to 84% off, other models at 20% of official price. Doubao Seedance 2 with queue-free access.",
       "description_zh": "高性能 API 接口服务，支持 Claude、GPT、Gemini 等主流模型。Claude Code 最低 1.6 折，其余模型 2 折。豆包 Seedance 2 免排队调用。",
-      "features": ["Claude Code", "GPT", "Gemini", "Doubao", "16% Price"],
+      "features": [
+        "Claude Code",
+        "GPT",
+        "Gemini",
+        "Doubao",
+        "16% Price"
+      ],
       "tier": 2,
       "website": "https://aicanapi.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.aicanapi.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.aicanapi.com/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         }
       }
     },
@@ -567,20 +888,32 @@
       "invite_url": "https://pateway.ai/?ch=2qn568&aff=DRA4VUFS",
       "description": "Premium API relay for serious AI developers. 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. $3 free trial, up to 40% off.",
       "description_zh": "面向重度 AI 开发者的优质 API 中转。100% 官方源直供 Claude/Codex，不掺假不注水。注册送 $3 试用额度，充值低至 6 折。",
-      "features": ["Claude Code", "Codex", "Official Direct", "$3 Trial"],
+      "features": [
+        "Claude Code",
+        "Codex",
+        "Official Direct",
+        "$3 Trial"
+      ],
       "tier": 2,
       "website": "https://pateway.ai",
       "agents": {
         "claudecode": {
           "base_url": "https://api.pateway.ai",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.pateway.ai/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         }
       }
     },
@@ -590,20 +923,33 @@
       "invite_url": "https://cy.10dianai.com/register?aff=3FQn",
       "description": "AI API gateway for developers and enterprises. Aggregates GPT, Claude, Gemini, DeepSeek. Production-optimized with high concurrency, stable operation. Register for ¥5 free credit.",
       "description_zh": "面向开发者和企业的 AI API 中转平台，聚合 GPT、Claude、Gemini、DeepSeek 等主流模型。生产环境优化，高并发稳定运行。注册即送 ¥5。",
-      "features": ["GPT", "Claude", "Gemini", "DeepSeek", "¥5 Free"],
+      "features": [
+        "GPT",
+        "Claude",
+        "Gemini",
+        "DeepSeek",
+        "¥5 Free"
+      ],
       "tier": 2,
       "website": "https://cy.10dianai.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.10dianai.com",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.10dianai.com/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
         }
       }
     },
@@ -613,20 +959,66 @@
       "invite_url": "https://cloud.siliconflow.cn/i/650Yh2Z7",
       "description": "High-performance AI infrastructure and model API platform. Fast access to language, speech, image, and video models. Pay-as-you-go, multimodal support, enterprise-grade stability. ¥20 bonus for new users!",
       "description_zh": "高性能 AI 基础设施和模型 API 平台，提供语言、语音、图片、视频等多种模型快速访问。按量计费，多模态支持，企业级稳定性。新用户注册送 ¥20！",
-      "features": ["Multimodal", "Pay-as-you-go", "¥20 Bonus", "Fast Inference"],
+      "features": [
+        "Multimodal",
+        "Pay-as-you-go",
+        "¥20 Bonus",
+        "Fast Inference"
+      ],
       "tier": 2,
       "website": "https://siliconflow.cn",
       "agents": {
         "claudecode": {
           "base_url": "https://api.siliconflow.cn",
           "model": "claude-sonnet-4-20250514",
-          "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+          "models": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514"
+          ]
         },
         "codex": {
           "base_url": "https://api.siliconflow.cn/v1",
           "model": "gpt-5.4",
-          "models": ["gpt-5.4"],
-          "codex_config": { "wire_api": "responses" }
+          "models": [
+            "gpt-5.4"
+          ],
+          "codex_config": {
+            "wire_api": "responses"
+          }
+        }
+      }
+    },
+    {
+      "name": "atlascloud",
+      "display_name": "Atlas Cloud",
+      "description": "Atlas Cloud OpenAI-compatible LLM API with large-context text models for coding agents.",
+      "description_zh": "Atlas Cloud OpenAI 兼容 LLM API，提供适用于编码智能体的大上下文文本模型。",
+      "features": [
+        "OpenAI Compatible",
+        "1M Context",
+        "Text Models"
+      ],
+      "tier": 3,
+      "website": "https://atlascloud.ai",
+      "agents": {
+        "codex": {
+          "base_url": "https://api.atlascloud.ai/v1",
+          "model": "qwen/qwen3.5-flash",
+          "models": [
+            "qwen/qwen3.5-flash",
+            "deepseek-ai/deepseek-v4-pro"
+          ],
+          "codex_config": {
+            "wire_api": "chat"
+          }
+        },
+        "opencode": {
+          "base_url": "https://api.atlascloud.ai/v1",
+          "model": "qwen/qwen3.5-flash",
+          "models": [
+            "qwen/qwen3.5-flash",
+            "deepseek-ai/deepseek-v4-pro"
+          ]
         }
       }
     }
