@@ -2474,8 +2474,16 @@ func (p *Platform) deliverableFileContents(content string) []string {
 // boundaries like the engine does for the body. It is invoked solely from
 // AfterReply, after the body has already been delivered, so the file content
 // appears as additional messages in the same chat/thread.
+//
+// A dedupe guard skips delivery when the agent pasted the block into the body
+// instead of only echoing the CC_DELIVER_FILE token: in that case the body
+// already shows the block, so re-delivering the file would duplicate it.
 func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, content string) {
 	for _, text := range p.deliverableFileContents(content) {
+		if alreadyInBody(content, text) {
+			slog.Debug(p.tag() + ": CC_DELIVER_FILE skipped, body already contains the block", "heading", firstLine(text))
+			continue
+		}
 		for _, chunk := range core.SplitMessageCodeFenceAware(text, 4000) {
 			if strings.TrimSpace(chunk) == "" {
 				continue
@@ -2485,6 +2493,27 @@ func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, 
 			}
 		}
 	}
+}
+
+// alreadyInBody reports whether the deliverable's leading heading is already
+// present in the reply body — i.e. the agent pasted the whole block rather than
+// only echoing the CC_DELIVER_FILE token. Used to avoid delivering the same
+// block twice (once in the body, once from the file).
+func alreadyInBody(body, text string) bool {
+	heading := firstLine(text)
+	if !strings.HasPrefix(heading, "#") {
+		return false
+	}
+	return strings.Contains(body, heading)
+}
+
+// firstLine returns the first non-empty line of s (trimmed), or "" if empty.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 // AfterReply implements core.PostReplyHook. It is the single entry point for
