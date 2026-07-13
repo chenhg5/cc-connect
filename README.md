@@ -421,8 +421,10 @@ cc-connect update --pre     # Include pre-releases
                       IM thread (query: "latest" | index | uuid prefix).
                       Compared with /switch, /attach adds a 30-second
                       concurrent-write guard (refuses if the jsonl was
-                      touched recently — pass --force to override) and
-                      shows a 5-message history preview before binding.
+                      touched recently — pass --force or -f to override)
+                      and shows a 5-message history preview before
+                      binding (best-effort — requires the agent backend
+                      to expose history).
                       Note: numeric index counts newest-first across all
                       jsonl transcripts. When filter_external_sessions
                       is enabled the /list numbering may differ — prefer

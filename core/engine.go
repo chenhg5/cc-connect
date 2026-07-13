@@ -6977,6 +6977,11 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
 }
 
+// attachRecentWriteWindow is how recently a session transcript may have been
+// modified before /attach refuses to adopt it without --force. Two writers on
+// the same jsonl fork the parent-UUID chain and lose messages on next resume.
+const attachRecentWriteWindow = 30 * time.Second
+
 // cmdAttach adopts an external Claude Code session — one the user created by
 // running `claude` directly in a terminal — so subsequent messages continue
 // that conversation via `claude --resume <uuid>`. It bypasses
@@ -7037,11 +7042,10 @@ func (e *Engine) cmdAttach(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	// Concurrent-write guard: if the jsonl was modified in the last 30s, a
-	// terminal `claude` process may still be holding the session. Two writers
-	// on the same jsonl produce a forked parent-UUID chain and lose messages
-	// on next resume. Require --force to override.
-	if !force && time.Since(target.ModifiedAt) < 30*time.Second {
+	// Concurrent-write guard: if the jsonl was modified within
+	// attachRecentWriteWindow, a terminal `claude` process may still be
+	// holding the session. Require --force to override.
+	if !force && time.Since(target.ModifiedAt) < attachRecentWriteWindow {
 		short := target.ID
 		if len(short) > 8 {
 			short = short[:8]

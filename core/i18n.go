@@ -514,7 +514,6 @@ const (
 	MsgAttachSuccess          MsgKey = "attach_success"
 	MsgAttachRecentMessages   MsgKey = "attach_recent_messages"
 	MsgDetachNothingToRelease MsgKey = "detach_nothing_to_release"
-	MsgDetachStopFailed       MsgKey = "detach_stop_failed"
 	MsgDetachSuccess          MsgKey = "detach_success"
 
 	MsgCommandTimeout MsgKey = "command_timeout"
@@ -3249,13 +3248,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "ℹ️ 目前沒有活躍的 Claude session——無需釋放。\n可以直接在 terminal 裡執行 `claude --resume <id>`（或 `claude` 新開一個）。",
 		LangJapanese:           "ℹ️ アクティブな Claude セッションはありません — 解放する必要はありません。\nターミナルで `claude --resume <id>` を安全に実行できます（新しい場合は `claude`）。",
 		LangSpanish:            "ℹ️ No hay sesión activa de Claude — nada que liberar.\nPuedes ejecutar `claude --resume <id>` en tu terminal (o `claude` para una nueva).",
-	},
-	MsgDetachStopFailed: {
-		LangEnglish:            "Failed to stop subprocess: %v",
-		LangChinese:            "停止子进程失败：%v",
-		LangTraditionalChinese: "停止子程序失敗：%v",
-		LangJapanese:           "サブプロセスの停止に失敗: %v",
-		LangSpanish:            "Falló al detener subproceso: %v",
 	},
 	MsgDetachSuccess: {
 		LangEnglish:            "✅ Released session %s.\nTerminal can now safely run: claude --resume %s",

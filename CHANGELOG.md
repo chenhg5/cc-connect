@@ -6,6 +6,10 @@
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 - **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+- **Continue terminal Claude Code sessions from IM** (`/attach`, `/resume-latest`, `/detach`): privileged commands that explicitly bind an external Claude Code session (started from a local terminal) to the current IM thread, and release it again symmetrically. Beyond plain `/switch` (#666):
+  - 30-second concurrent-write guard — refuses to adopt a jsonl a terminal `claude` may still be writing; `--force` / `-f` overrides.
+  - 5-message history preview before binding (best-effort, when the agent backend exposes history).
+  - Symmetric `/detach` — stops the live subprocess, clears the agent binding, and prints the exact `claude --resume <uuid>` command for the terminal. Pair with `reset_on_idle_mins` as an automatic safety net. Full i18n coverage (en/zh/zh-TW/ja/es).
 
 ## Unreleased
 
@@ -145,7 +149,6 @@ update your `intents` to include bit 26. If you use the default intents, no acti
 
 ### New Features
 - **`max_turn_time_mins`**: new config option — absolute wall-clock cap per agent turn that does NOT reset on tool-call events. Prevents long-running bash commands from permanently locking the session (#1091). Uses a two-phase shutdown: soft stop (10s grace) then force-kill. Session is preserved and resumed via `--resume` on the next message.
-- **Continue terminal Claude Code sessions from IM** (`/attach`, `/resume-latest`, `/detach`): when you were chatting with `claude` in a local terminal and want to continue from Feishu/Telegram/etc, these privileged commands explicitly bind an external Claude Code session to the current IM thread. With v1.3.2's `filter_external_sessions` defaulting off, `/list`/`/switch` already surface external jsonls — what `/attach` adds beyond plain switching is (1) a 30-second concurrent-write guard that refuses to adopt a jsonl a terminal `claude` may still be writing (`--force` overrides), (2) a 5-message history preview before binding, and (3) a symmetric `/detach` that stops the live subprocess via `stopInteractiveSession`, clears the agent binding, and prints the exact `claude --resume <uuid>` command to paste in a terminal. Pair with `reset_on_idle_mins` as an automatic safety net. Full i18n coverage (en/zh/zh-TW/ja/es). (#666)
 
 ### Fixed
 - **Web console 404 regression**: `make release-all` did not depend on `make web`, so release binaries were built without frontend assets when `web/dist/` was empty (gitignored). All routes on the management port returned `404`. Fixed by adding `web` as a prerequisite of `release-all` (#1136)

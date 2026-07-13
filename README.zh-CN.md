@@ -419,7 +419,8 @@ cc-connect update --pre     # 含预发布版本
                        （query：latest | 序号 | uuid 前缀）。相比
                        /switch，/attach 额外提供 30 秒并发写门控（若
                        jsonl 最近仍在被 terminal claude 写会拒绝，加
-                       --force 强制）以及 5 条最近消息预览。
+                       --force 或 -f 强制）以及 5 条最近消息预览
+                       （best-effort，取决于 agent 后端是否提供历史）。
                        注意：数字序号按修改时间倒序数所有 jsonl。当
                        filter_external_sessions 开启时，/list 序号可能
                        与之不一致，精确匹配请用 "latest" 或 uuid 前缀。

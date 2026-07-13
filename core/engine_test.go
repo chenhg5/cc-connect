@@ -16110,3 +16110,59 @@ func TestCmdAttach_RequiresAdmin(t *testing.T) {
 		t.Errorf("expected no binding when admin gate blocked, got %q", id)
 	}
 }
+
+// TestCmdDetach_ThenAttach_StateConsistency covers the cleanup-responsibility
+// boundary between /detach and /attach: /detach must synchronously remove both
+// the agent binding and the interactive state (only the subprocess close is
+// async), so an immediate /attach starts from a clean slate.
+func TestCmdDetach_ThenAttach_StateConsistency(t *testing.T) {
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	agent := &attachableAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "uuid-second", Summary: "Second", MessageCount: 4, ModifiedAt: oneHourAgo},
+		},
+	}
+	e, p := newAttachEngine(t, agent)
+
+	key := "test:ch:u1"
+	iKey := e.interactiveKeyForSessionKey(key)
+
+	// Seed a bound session plus a live-looking interactive state, as if a
+	// previous /attach had been followed by at least one turn.
+	sess := e.sessions.GetOrCreateActive(key)
+	sess.SetAgentSessionID("uuid-first", "claudecode")
+	e.sessions.Save()
+	e.interactiveStates[iKey] = &interactiveState{platform: p, replyCtx: "ctx"}
+
+	msg := &Message{SessionKey: key, UserID: "u1", Content: "/detach", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "" {
+		t.Fatalf("expected binding cleared after /detach, got %q", id)
+	}
+	e.interactiveMu.Lock()
+	_, stale := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if stale {
+		t.Fatalf("expected interactive state removed synchronously by /detach")
+	}
+
+	// An immediate /attach must bind cleanly with no leftovers from the
+	// detached session.
+	msg2 := &Message{SessionKey: key, UserID: "u1", Content: "/attach uuid-second", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg2, msg2.Content)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "Attached") || !strings.Contains(sent, "uuid-second") {
+		t.Fatalf("expected immediate re-attach to succeed, got: %s", sent)
+	}
+	if id := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); id != "uuid-second" {
+		t.Errorf("expected AgentSessionID=uuid-second after re-attach, got %q", id)
+	}
+	e.interactiveMu.Lock()
+	_, leaked := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if leaked {
+		t.Errorf("expected no interactive state after re-attach before first message")
+	}
+}
