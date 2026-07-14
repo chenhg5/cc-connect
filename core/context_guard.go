@@ -13,14 +13,14 @@ const contextGuardSummaryPrefix = "[Context guard compressed memory]"
 
 // realContextUsageTokens extracts a usable token count from a real,
 // provider/CLI-reported ContextUsage snapshot, falling back through
-// TotalTokens and InputTokens+OutputTokens when UsedTokens is unset. Returns
-// 0 when no real usage is available (nil, or every field empty), signaling
-// callers to fall back to a local text-based estimate.
+// TotalTokens, prompt-side cache fields, and InputTokens+OutputTokens when
+// UsedTokens is unset. Returns 0 when no real usage is available (nil, or
+// every field empty), signaling callers to fall back to a local text-based
+// estimate.
 //
-// Shared by context_guard (pre-turn rotation) and auto_compress (post-turn
-// native /compact trigger) so both mechanisms react to the same real number
-// instead of context_guard using real usage while auto_compress silently
-// kept running its own uncorrected raw-character heuristic (L-0399).
+// Shared by context_guard (pre-turn rotation), auto_compress (post-turn
+// native /compact trigger), and reply footers so all mechanisms react to the
+// same real number instead of each running its own heuristic (L-0399).
 func realContextUsageTokens(usage *ContextUsage) int {
 	if usage == nil {
 		return 0
@@ -30,6 +30,9 @@ func realContextUsageTokens(usage *ContextUsage) int {
 	}
 	if usage.TotalTokens > 0 {
 		return usage.TotalTokens
+	}
+	if usage.CacheCreationInputTokens > 0 || usage.CachedInputTokens > 0 {
+		return usage.InputTokens + usage.CacheCreationInputTokens + usage.CachedInputTokens
 	}
 	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		return usage.InputTokens + usage.OutputTokens

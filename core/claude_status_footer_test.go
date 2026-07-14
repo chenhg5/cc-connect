@@ -89,8 +89,8 @@ func TestBuildClaudeStatusLineFooter_FullRender(t *testing.T) {
 		t.Fatalf("expected 2 lines (metrics + dir), got %d: %q", len(lines), got)
 	}
 	parts := strings.Split(lines[0], " · ")
-	if len(parts) != 4 {
-		t.Fatalf("expected 4 segments on line 1, got %d: %q", len(parts), lines[0])
+	if len(parts) != 5 {
+		t.Fatalf("expected 5 segments on line 1, got %d: %q", len(parts), lines[0])
 	}
 	if parts[0] != "claude-opus-4-7[1m]" {
 		t.Errorf("segment 0 = %q, want raw model id", parts[0])
@@ -102,10 +102,27 @@ func TestBuildClaudeStatusLineFooter_FullRender(t *testing.T) {
 		t.Errorf("in/cw/cr segment = %q, want %q", parts[2], "in 1 cw 971 cr 40.8k")
 	}
 	if parts[3] != "ctx 4%" {
-		t.Errorf("ctx segment = %q, want %q", parts[3], "ctx 4%")
+		t.Errorf("ctx pct segment = %q, want %q", parts[3], "ctx 4%")
+	}
+	if parts[4] != "41.8k/1.0M" {
+		t.Errorf("ctx size segment = %q, want %q", parts[4], "41.8k/1.0M")
 	}
 	if lines[1] == "" || !strings.Contains(lines[1], "ws") {
 		t.Errorf("line 2 = %q, want workspace path containing 'ws'", lines[1])
+	}
+}
+
+func TestFormatCtxUsageFooter_ConfiguredWindowOverridesAgentDefault(t *testing.T) {
+	usage := &ContextUsage{
+		InputTokens:       100,
+		CachedInputTokens: 87_708,
+		ContextWindow:     666_000,
+		UsedTokens:        87_808,
+	}
+	got := formatCtxUsageFooter(realContextUsageTokens(usage), effectiveFooterContextWindow(usage, 1_000_000))
+	want := "ctx 9% · 87.8k/1.0M"
+	if got != want {
+		t.Fatalf("formatCtxUsageFooter = %q, want %q", got, want)
 	}
 }
 

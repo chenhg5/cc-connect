@@ -6247,7 +6247,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !isSilent {
 				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
 				if e.showContextIndicator {
-					if sdkPlausible {
+					if usage := replyFooterSessionContextUsage(state.agentSession); usage != nil {
+						if text := formatCtxUsageFooter(realContextUsageTokens(usage), effectiveFooterContextWindow(usage, e.contextWindow)); text != "" {
+							footerContext = text
+						}
+					} else if sdkPlausible {
 						contextWindow := contextWindowFromEventOrSession(event, state.agentSession, e.contextWindow)
 						if text := contextIndicatorText(event.InputTokens, contextWindow); text != "" {
 							footerContext = text
@@ -7860,7 +7864,7 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	hasStatus := false
 	if e.showContextIndicator {
 		contextLeft = strings.TrimSpace(contextLeft)
-		contextFirst := strings.HasPrefix(contextLeft, "[ctx:")
+		contextFirst := strings.HasPrefix(contextLeft, "[ctx:") || strings.HasPrefix(contextLeft, "ctx ")
 		if contextFirst {
 			parts = append(parts, contextLeft)
 			hasStatus = true
@@ -7925,7 +7929,7 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 		usage := replyFooterSessionContextUsage(session)
 		model := replyFooterModel(session, agent)
 		effort := replyFooterReasoningEffort(session, agent)
-		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
+		if line := buildClaudeStatusLineFooter(model, effort, usage, e.contextWindow); line != "" {
 			lines = append(lines, line)
 		} else if fallback := e.replyFooterUsageText(session, agent); fallback != "" {
 			// fallback for non-claudecode agents that still expose UsageReporter
@@ -7951,18 +7955,46 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 	return strings.Join(lines, "\n")
 }
 
+// effectiveFooterContextWindow prefers the engine/config context window so
+// footer ctx % matches auto_compress thresholds (e.g. 800k @ 1M). Agent-side
+// claudeContextWindow defaults (666k for non-[1m] models) understates DeepSeek
+// and other routed models.
+func effectiveFooterContextWindow(usage *ContextUsage, configuredWindow int) int {
+	if configuredWindow > 0 {
+		return configuredWindow
+	}
+	if usage != nil && usage.ContextWindow > 0 {
+		return usage.ContextWindow
+	}
+	return modelContextWindow
+}
+
+func formatCtxUsageFooter(used, window int) string {
+	if used <= 0 || window <= 0 {
+		return ""
+	}
+	pct := int(math.Round(float64(used) * 100 / float64(window)))
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return fmt.Sprintf("ctx %d%% · %s/%s", pct, formatStatusTokenCount(used), formatStatusTokenCount(window))
+}
+
 // buildClaudeStatusLineFooter renders the rich-card line-2 token-usage detail:
 //
-//	claude-opus-4-7[1m] · xhigh · out 168 · in 1 cw 971 cr 40.8k · ctx 4%
+//	claude-opus-4-7[1m] · xhigh · out 168 · in 1 cw 971 cr 40.8k · ctx 4% · 41.8k/1.0M
 //
 // Sections (each skipped when its data is missing):
 //   - model: from session GetModel() / agent.Name()
 //   - effort: reasoning_effort (Codex / Claude high/medium/low/xhigh)
 //   - token counts: out (output) · in (new input) · cw (cache create) · cr (cache read)
-//   - ctx %: UsedTokens / ContextWindow, capped at 100%
+//   - ctx: UsedTokens / configured ContextWindow, capped at 100%, with absolute counts
 //
 // Returns "" when usage is nil and no model is known.
-func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) string {
+func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage, configuredWindow int) string {
 	var parts []string
 	if model != "" {
 		parts = append(parts, model)
@@ -7987,18 +8019,8 @@ func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) stri
 		if len(counts) > 0 {
 			parts = append(parts, strings.Join(counts, " "))
 		}
-		if usage.ContextWindow > 0 {
-			used := usage.UsedTokens
-			if used <= 0 && usage.TotalTokens > 0 {
-				used = usage.TotalTokens
-			}
-			if used > 0 {
-				pct := used * 100 / usage.ContextWindow
-				if pct > 100 {
-					pct = 100
-				}
-				parts = append(parts, fmt.Sprintf("ctx %d%%", pct))
-			}
+		if ctxPart := formatCtxUsageFooter(realContextUsageTokens(usage), effectiveFooterContextWindow(usage, configuredWindow)); ctxPart != "" {
+			parts = append(parts, ctxPart)
 		}
 	}
 	return strings.Join(parts, " · ")
@@ -8299,7 +8321,7 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 		return ""
 	}
 	usage := replyFooterSessionContextUsage(session)
-	if usage == nil || usage.ContextWindow <= 0 {
+	if usage == nil {
 		return ""
 	}
 	// Only emit the CCD-style footer when we have the cache-token signals
@@ -8311,20 +8333,10 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 
 	var line1 string
 	if e.showContextIndicator {
-		used := usage.UsedTokens
-		if used <= 0 {
-			used = usage.InputTokens + usage.CachedInputTokens + usage.CacheCreationInputTokens
-		}
-		pct := int(math.Round(float64(used) * 100 / float64(usage.ContextWindow)))
-		if pct < 0 {
-			pct = 0
-		}
-		if pct > 100 {
-			pct = 100
-		}
+		window := effectiveFooterContextWindow(usage, e.contextWindow)
 
 		// Compose:
-		//   <model id> · [effort:X ·] out N · in N cw N cr N · ctx N%
+		//   <model id> · [effort:X ·] out N · in N cw N cr N · ctx N% · used/window
 		// `·` separates major segments; tokens-in tier (in/cw/cr) groups under
 		// one segment because cw/cr are just cache-tiered variants of input.
 		// Raw model id is preserved (e.g. "claude-opus-4-7[1m]") for diagnostic
@@ -8341,7 +8353,9 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 			formatStatusTokenCount(usage.InputTokens),
 			formatStatusTokenCount(usage.CacheCreationInputTokens),
 			formatStatusTokenCount(usage.CachedInputTokens)))
-		line1Parts = append(line1Parts, fmt.Sprintf("ctx %d%%", pct))
+		if ctxPart := formatCtxUsageFooter(realContextUsageTokens(usage), window); ctxPart != "" {
+			line1Parts = append(line1Parts, ctxPart)
+		}
 		line1 = strings.Join(line1Parts, " · ")
 	}
 
