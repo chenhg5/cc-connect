@@ -232,11 +232,53 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	}
 }
 
-var openaiChatModels = map[string]bool{
-	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	"gpt-4o": true, "gpt-4o-mini": true,
-	"codex-mini-latest": true,
+// nonChatSubstrings identifies non chat/completion modalities returned by
+// GET /v1/models that must not appear in the codex /model chooser.
+var nonChatSubstrings = []string{
+	"embedding", "whisper", "tts", "moderation", "dall-e",
+	"realtime", "transcribe", "search-preview", "image",
+	"audio-preview",
+}
+
+// isCodexChatModel reports whether an OpenAI-compatible model ID names a
+// chat/completion model that Codex CLI can drive. Used to filter the
+// /v1/models response into the /model command suggestion list.
+//
+// Rules (case-insensitive):
+//   - Reject any ID containing a non-chat modality substring (embedding,
+//     whisper, tts, dall-e, audio-preview, realtime, transcribe, moderation,
+//     image, search-preview).
+//   - Accept known chat family prefixes: gpt-*, chatgpt-*, codex-*, o1-*,
+//     o3-*, o4-*, o5-*.
+//   - Accept bare reasoning family IDs: o1 / o3 / o4 / o5.
+//
+// Uses pattern matching rather than a static allowlist so new frontier models
+// (gpt-5.x, gpt-6, o5-*, codex-*, etc.) are picked up automatically.
+func isCodexChatModel(id string) bool {
+	if id == "" {
+		return false
+	}
+	lower := strings.ToLower(id)
+	for _, s := range nonChatSubstrings {
+		if strings.Contains(lower, s) {
+			return false
+		}
+	}
+	switch {
+	case strings.HasPrefix(lower, "gpt-"),
+		strings.HasPrefix(lower, "chatgpt-"),
+		strings.HasPrefix(lower, "codex-"),
+		strings.HasPrefix(lower, "o1-"),
+		strings.HasPrefix(lower, "o3-"),
+		strings.HasPrefix(lower, "o4-"),
+		strings.HasPrefix(lower, "o5-"):
+		return true
+	}
+	switch lower {
+	case "o1", "o3", "o4", "o5":
+		return true
+	}
+	return false
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -290,7 +332,7 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	var models []core.ModelOption
 	for _, m := range result.Data {
-		if openaiChatModels[m.ID] {
+		if isCodexChatModel(m.ID) {
 			models = append(models, core.ModelOption{Name: m.ID})
 		}
 	}
