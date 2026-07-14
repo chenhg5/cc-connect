@@ -482,8 +482,14 @@ type Engine struct {
 	// can invoke `cc-connect relay send --config <path>` without hardcoding paths.
 	configPath string
 
-	handoffFile       string // path to inject into cold-start sessions; empty = disabled
-	onMentionContextN int    // N seat messages to prepend on @-mention; 0 = disabled
+	handoffFile string // path to inject into cold-start sessions; empty = disabled
+
+	// chatHistorySync enables file-based Topic transcript sync: inbound Topic
+	// messages and the seat's own outbound answers are appended to
+	// <workspace>/chat_history.md (L-0423). Replaces the removed prompt-injecting
+	// on_mention_context mechanism.
+	chatHistorySync bool
+	chatHistory     *ChatHistoryWriter
 
 	dispatchConfig         DispatchConfig
 	dispatchStore          *dispatchStore
@@ -811,6 +817,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		ctx:                     ctx,
 		cancel:                  cancel,
 		i18n:                    NewI18n(lang),
+		chatHistory:             NewChatHistoryWriter(),
 		attachmentSendEnabled:   true,
 		display:                 DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
 		commands:                NewCommandRegistry(),
@@ -1533,8 +1540,39 @@ func (e *Engine) SetHandoffFile(path string) {
 	e.handoffFile = path
 }
 
-func (e *Engine) SetOnMentionContextN(n int) {
-	e.onMentionContextN = n
+// SetChatHistorySync enables file-based Topic transcript sync (L-0423).
+func (e *Engine) SetChatHistorySync(enabled bool) {
+	e.chatHistorySync = enabled
+}
+
+// observeChatMessage appends one transcript line to the Topic's
+// chat_history.md. When workspaceDir is empty it is resolved from the message's
+// Topic via resolveWorkspacePattern — the SAME per-Topic isolation used for the
+// agent workspace. If the Topic does not map to an isolated workspace the write
+// is skipped: there is deliberately no fallback to a shared/default directory,
+// which is what guarantees no cross-Topic leakage.
+func (e *Engine) observeChatMessage(msg *Message, workspaceDir, speaker, body string) {
+	if !e.chatHistorySync || e.chatHistory == nil {
+		return
+	}
+	if strings.TrimSpace(body) == "" || speaker == "" {
+		return
+	}
+	if workspaceDir == "" {
+		if e.workspacePattern == "" && !e.dispatchTopicIsolation {
+			return
+		}
+		threadID := extractThreadID(effectiveChannelID(msg))
+		workspaceDir = e.resolveWorkspacePattern(threadID, body)
+	}
+	if workspaceDir == "" {
+		return
+	}
+	ts := time.Now()
+	if msg.UserMessageTimeMs > 0 {
+		ts = time.UnixMilli(msg.UserMessageTimeMs)
+	}
+	e.chatHistory.Append(workspaceDir, speaker, ts, body)
 }
 
 // RemoveCommand removes a custom command by name. Returns false if not found.
@@ -2995,6 +3033,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	// Observe-only Topic chatter: record to chat_history.md and stop. These
+	// messages did not @-mention the bot, so they must never start a session or
+	// reach the agent — the seat reads them later from the transcript file.
+	if msg.ObserveOnly {
+		e.observeChatMessage(msg, "", msg.UserName, msg.Content)
+		return
+	}
+
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -3162,6 +3208,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
+	// Chat-history sync (inbound): record the directed user message to the
+	// Topic transcript before any prompt injection mutates msg.Content. Commands
+	// and shell escapes are not conversational, so they are skipped.
+	if e.chatHistorySync && resolvedWorkspace != "" {
+		if body := strings.TrimSpace(msg.Content); body != "" && !strings.HasPrefix(body, "/") && !strings.HasPrefix(body, "!") {
+			e.observeChatMessage(msg, resolvedWorkspace, msg.UserName, msg.Content)
+		}
+	}
+
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -3253,21 +3308,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				slog.Info("handoff injected", "file", e.handoffFile, "session", msg.SessionKey)
 			} else if readErr != nil {
 				slog.Warn("handoff file not readable", "file", e.handoffFile, "error", readErr)
-			}
-		}
-	}
-
-	// On-mention context injection: aggregate recent seat history when bot was @-mentioned.
-	if e.onMentionContextN > 0 && e.dataDir != "" && msg.WasMentioned {
-		sessionsDir := filepath.Join(e.dataDir, "sessions")
-		chatID := extractSessionChatID(msg.SessionKey)
-		if entries := aggregateSeatMessages(sessionsDir, e.onMentionContextN, chatID, e.ProjectName()); len(entries) > 0 {
-			if groupCtx := formatGroupContext(entries, e.onMentionContextN); groupCtx != "" {
-				if msg.Content != "" {
-					msg.Content = groupCtx + "\n---\n" + msg.Content
-				} else {
-					msg.Content = groupCtx
-				}
 			}
 		}
 	}
@@ -6390,6 +6430,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+
+			// Chat-history sync (outbound): record the seat's own answer to the
+			// Topic transcript so the file reads as a full conversation. Skipped
+			// for silent/NO_REPLY turns (isSilent already folds in dropReply).
+			if e.chatHistorySync && !isSilent && workspaceDir != "" {
+				answer := strings.TrimSpace(silentReplyTrailingRe.ReplaceAllString(baseResponse, ""))
+				if answer != "" {
+					e.chatHistory.Append(workspaceDir, e.name, time.Now(), answer)
+				}
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
