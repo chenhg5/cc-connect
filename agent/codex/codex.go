@@ -233,15 +233,6 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	return defaultCodexModels()
 }
 
-var openaiChatModels = map[string]bool{
-	"gpt-5.6": true, "gpt-5.6-sol": true, "gpt-5.6-terra": true, "gpt-5.6-luna": true,
-	"gpt-5.5": true, "gpt-5.4": true, "gpt-5.4-mini": true, "gpt-5.3-codex-spark": true,
-	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	"gpt-4o": true, "gpt-4o-mini": true,
-	"codex-mini-latest": true,
-}
-
 func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
 		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
