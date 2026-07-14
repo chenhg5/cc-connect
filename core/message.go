@@ -297,6 +297,13 @@ type Message struct {
 	// Used by silent heartbeats: the agent still runs its check internally but
 	// nothing is posted to chat.
 	DropReply bool
+	// ObserveOnly marks a message that must be recorded to the topic's
+	// chat_history.md transcript but NEVER forwarded to the agent. Platforms set
+	// this for non-directed group/topic chatter (messages that did not @-mention
+	// the bot) so seats can later read the full Topic conversation from a file
+	// instead of having it force-injected into the prompt. The engine tees such
+	// a message to history and returns immediately — no session, no agent turn.
+	ObserveOnly bool
 }
 
 // EventType distinguishes different kinds of agent output.

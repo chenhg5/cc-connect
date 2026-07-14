@@ -524,15 +524,8 @@ func main() {
 			slog.Error("failed to apply skill_dirs", "project", proj.Name, "error", err)
 			os.Exit(1)
 		}
-		switch nv := proj.Agent.Options["on_mention_context"].(type) {
-		case int64:
-			if nv > 0 {
-				engine.SetOnMentionContextN(int(nv))
-			}
-		case int:
-			if nv > 0 {
-				engine.SetOnMentionContextN(nv)
-			}
+		if enabled, _ := proj.Agent.Options["chat_history_sync"].(bool); enabled {
+			engine.SetChatHistorySync(true)
 		}
 		if cfg, ok := parseContextGuardConfig(proj.Agent.Options["context_guard"]); ok {
 			engine.SetContextGuardConfig(cfg)

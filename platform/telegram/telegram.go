@@ -115,6 +115,7 @@ type Platform struct {
 	shareSessionInChannel bool
 	enableReactions       bool
 	generalTopicIntake    bool
+	chatHistorySync       bool   // tee non-directed Topic messages to chat_history.md (L-0423)
 	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
 
@@ -171,6 +172,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
 	generalTopicIntake, _ := opts["general_topic_intake"].(bool)
+	chatHistorySync, _ := opts["chat_history_sync"].(bool)
 
 	// Default to "compact" so streaming edits work out of the box. Telegram has
 	// no rich card UI, so "card" is normalized to "compact". Users can opt out
@@ -199,6 +201,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChannel: shareSessionInChannel,
 		enableReactions:       enableReactions,
 		generalTopicIntake:    generalTopicIntake,
+		chatHistorySync:       chatHistorySync,
 		progressStyle:         progressStyle,
 		httpClient:            httpClient,
 		topicIntakeSeen:       make(map[string]struct{}),
@@ -527,6 +530,21 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	if isGroup && !p.groupReplyAll {
 		slog.Debug("telegram: checking group message", "text", msg.Text, "is_command", isCommand(msg))
 		if !p.isDirectedAtBot(msg) {
+			// Non-directed forum-Topic chatter is teed to the Topic's
+			// chat_history.md (observe-only) so seats can read the full
+			// conversation later. Only real text in a Topic (threadID != 0) is
+			// recorded; commands and General-topic noise are dropped as before.
+			if p.chatHistorySync && threadID != 0 && !isCommand(msg) && strings.TrimSpace(msg.Text) != "" {
+				p.dispatchMessage(&core.Message{
+					SessionKey: sessionKey, Platform: "telegram",
+					UserID: userID, UserName: userName, ChatName: chatName,
+					Content:     msg.Text,
+					MessageID:   strconv.Itoa(msg.ID),
+					ChannelKey:  channelKey,
+					ReplyCtx:    replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID},
+					ObserveOnly: true,
+				}, msg)
+			}
 			return
 		}
 	}
