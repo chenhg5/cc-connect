@@ -216,6 +216,8 @@ func (s *opencodeSession) handleHTTPEvent(data []byte) {
 			s.resultSent.Store(false)
 		case "idle":
 			s.sendEventResult()
+		case "retry":
+			s.handleHTTPRetryStatus(status)
 		}
 	case "session.idle":
 		s.sendEventResult()
@@ -226,6 +228,37 @@ func (s *opencodeSession) handleHTTPEvent(data []byte) {
 	case "question.asked", "question.v2.asked":
 		s.handleHTTPQuestion(props)
 	}
+}
+
+func (s *opencodeSession) handleHTTPRetryStatus(status map[string]any) {
+	message := strings.TrimSpace(stringValue(status["message"]))
+	if message == "" || !isHTTPRetryFatal(message) {
+		return
+	}
+	err := fmt.Errorf("%s", message)
+	s.rememberAgentError(err)
+	s.emitHTTPEvent(core.Event{Type: core.EventError, Error: err})
+}
+
+func isHTTPRetryFatal(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"usage limit",
+		"rate limit",
+		"quota",
+		"insufficient balance",
+		"payment required",
+		"429",
+		"使用上限",
+		"限额",
+		"余额不足",
+		"额度",
+	} {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *opencodeSession) handleHTTPPart(props map[string]any) {
