@@ -45,6 +45,11 @@ type DispatchExpectation struct {
 	TopicID             string    `json:"topic_id,omitempty"`
 	TopicName           string    `json:"topic_name,omitempty"`
 	TopicSessionKey     string    `json:"topic_session_key,omitempty"`
+	// BaseRepo is the git base repository the target seat's dynamic worktree is
+	// created from, resolved by the Secretary from ROUTING.md and carried in the
+	// letter front-matter (Base-Repo:). Empty means fall back to the seat's
+	// static work_dir. Enables one seat to serve multiple products/repos (L-0422).
+	BaseRepo            string    `json:"base_repo,omitempty"`
 	SourceProject       string    `json:"source_project"`
 	SourcePlatform      string    `json:"source_platform"`
 	SourceSessionKey    string    `json:"source_session_key"`
@@ -278,6 +283,49 @@ func parseArchiveFrontMatter(text string) map[string]string {
 	return headers
 }
 
+// resolveBaseRepoFromLetter reads a QUERY letter's front-matter and returns the
+// Base-Repo path if present and pointing at a git working tree. The Secretary
+// resolves ROUTING.md's "Base repo" column into this header, keeping cc-connect
+// dumb: it consumes an already-resolved concrete path, never parsing ROUTING.md.
+// Returns "" when the header is absent or does not name a git repo, so callers
+// fall back to the seat's static work_dir (L-0422).
+func resolveBaseRepoFromLetter(letterPath string) string {
+	data, err := os.ReadFile(letterPath)
+	if err != nil {
+		return ""
+	}
+	baseRepo := strings.TrimSpace(parseArchiveFrontMatter(string(data))["Base-Repo"])
+	if baseRepo == "" {
+		return ""
+	}
+	if info, err := os.Stat(filepath.Join(baseRepo, ".git")); err != nil || (!info.IsDir() && info.Size() == 0) {
+		slog.Warn("dispatch: Base-Repo header does not name a git repo, ignoring", "letter_path", letterPath, "base_repo", baseRepo)
+		return ""
+	}
+	return baseRepo
+}
+
+// baseRepoForLetter returns the resolved BaseRepo recorded for a dispatched
+// letter, or "" if no expectation carries one. The target seat's worktree
+// creation calls this to pick its base repo per-letter (L-0422).
+func (s *dispatchStore) baseRepoForLetter(letter string) string {
+	if s == nil || strings.TrimSpace(letter) == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.loadLocked()
+	if err != nil {
+		return ""
+	}
+	for _, exp := range ledger.Expectations {
+		if exp.Letter == letter && strings.TrimSpace(exp.BaseRepo) != "" {
+			return exp.BaseRepo
+		}
+	}
+	return ""
+}
+
 func archiveRootFromLetterPath(path string) string {
 	clean := filepath.Clean(path)
 	dir := filepath.Dir(clean)
@@ -458,6 +506,7 @@ func (e *Engine) executeDispatch(p Platform, sourceSessionKey string, req dispat
 		TopicID:             topicID,
 		TopicName:           topicName,
 		TopicSessionKey:     sessionKey,
+		BaseRepo:            resolveBaseRepoFromLetter(req.Path),
 		SourceProject:       e.name,
 		SourcePlatform:      platformName,
 		SourceSessionKey:    sourceSessionKey,

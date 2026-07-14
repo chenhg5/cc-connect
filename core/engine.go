@@ -4273,8 +4273,21 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	if e.workspacePattern != "" {
 		if _, err := os.Stat(workspace); os.IsNotExist(err) {
 			var baseRepo string
-			if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-				baseRepo = wd.GetWorkDir()
+			// Per-letter base repo (L-0422): if this workspace belongs to a
+			// dispatched letter whose front-matter named a Base-Repo, branch the
+			// worktree off that repo instead of the seat's static work_dir. This
+			// lets one seat serve multiple products/repos. Falls back to work_dir
+			// for non-dispatched work or letters without a Base-Repo header.
+			if letterID := extractLetterIDFromPath(e.workspacePattern, workspace); letterID != "" {
+				if br := e.ensureDispatchStore().baseRepoForLetter(letterID); br != "" {
+					baseRepo = br
+					slog.Info("worktree base repo resolved from dispatched letter", "letter", letterID, "base_repo", baseRepo, "workspace", workspace)
+				}
+			}
+			if baseRepo == "" {
+				if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+					baseRepo = wd.GetWorkDir()
+				}
 			}
 			if baseRepo != "" {
 				branchName := e.branchNameForWorkspace(workspace)
