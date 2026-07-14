@@ -567,6 +567,27 @@ func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing
 	}
 }
 
+func TestOpencodeHTTPMode_RetryStatusWithUsageLimitEmitsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{
+		events:        make(chan core.Event, 4),
+		ctx:           ctx,
+		connectionURL: "http://localhost:4096",
+	}
+	s.chatID.Store("ses_http")
+
+	s.handleHTTPEvent([]byte(`{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"retry","attempt":1,"message":"已达到 5 小时的使用上限。您的限额将在 2026-07-14 20:40:01 重置。"}}}`))
+
+	event := waitOpencodeEvent(t, s.Events())
+	if event.Type != core.EventError {
+		t.Fatalf("event type = %q, want EventError", event.Type)
+	}
+	if event.Error == nil || !strings.Contains(event.Error.Error(), "使用上限") {
+		t.Fatalf("event error = %v, want usage limit message", event.Error)
+	}
+}
+
 func waitOpencodeEvent(t *testing.T, events <-chan core.Event) core.Event {
 	t.Helper()
 	select {
