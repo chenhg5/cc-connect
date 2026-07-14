@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## v1.5.0-beta.2 (2026-07-14)
+
+Rolling beta with 1 commit on top of beta.1: codex `/model` gpt-5.x visibility fix. Owner requested beta.2 (not direct stable) after E2E validation.
+
+See `changelogs/v1.5.0-beta.2.md` for details.
+
+### Fixed
+- **codex `/model` gpt-5.x visibility** — replace stale 11-entry `openaiChatModels` static allowlist (unchanged since 2026-03) with prefix pattern matching (`gpt-*`, `chatgpt-*`, `codex-*`, `o1-*`, `o3-*`, `o4-*`, `o5-*`) plus non-chat modality exclusions. Users on codex-cli ≥ 0.143 fetching models via API could not select `gpt-5.6-sol/terra/luna` etc. Users with explicit `model_catalog_json` or provider `models = [...]` config unaffected (#1546 fixing user report, cherry-pick #1547, @chenhg5).
+
 ## v1.5.0-beta.1 (2026-07-06)
 
 First beta of the v1.5.0 series since v1.4.1 stable. **Three new integration surfaces** join the family: Tencent Yuanbao Bot API, self-hosted `cloud_web` IM gateway (CWIP v1), and the Reasonix agent adapter — plus Pi RPC mode, Russian i18n, per-session agent idle timeout, and a batch of platform/core fixes.
@@ -26,7 +35,6 @@ See `changelogs/v1.5.0-beta.1.md` for the full themed summary with credits.
 - **core**: always emit absolute paths from `SaveFilesToDisk` / `AppendFileRefs` — fixes relative `work_dir` attachments silently dropped by agent (#1462 fixing #1459, @chenhg5).
 - **core**: create queue placeholder before session lock — prevents concurrent message queue miss (#1389, @xxb).
 - **codex**: time out blocked app-server writes (#1448, @AaronZ345).
-- **codex**: `/model` chooser now surfaces `gpt-5.x` (and any future frontier chat model) when the model list is populated by fetching `GET /v1/models` from the provider. The previous hard-coded 11-entry allowlist (last updated 2026-03) silently filtered out every `gpt-5*` variant (including `gpt-5.6-sol/terra/luna`) returned by the API, so users on `codex-cli >= 0.143` could not pick GPT-5.6 in cc-connect. Replaced with pattern rules that accept `gpt-*` / `chatgpt-*` / `codex-*` / `o1-*` / `o3-*` / `o4-*` / `o5-*` families and reject non-chat modalities (embedding / whisper / tts / dall-e / audio-preview / realtime / transcribe / moderation / image / search-preview). Only affects the API-fetch fallback path; users with an explicit `model_catalog_json` or provider `models = [...]` config were unaffected (#1546, @qa-cursor).
 - **slack**: suppress `NO_REPLY` marker on streaming-card silent replies (#1397, @spinsirr).
 
 ## v1.4.1 (2026-06-28)
