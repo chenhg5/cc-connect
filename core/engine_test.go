@@ -3358,6 +3358,53 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_PreflightBlockSkipsHookAndAgent(t *testing.T) {
+	hookCalls := atomic.Int32{}
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hookCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hookSrv.Close()
+
+	preflightSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"decision":"block","code":"missing_scope","message":"请先完成飞书授权"}`))
+	}))
+	defer preflightSrv.Close()
+
+	p := &stubPlatformEngine{n: "feishu"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: string(HookEventMessageReceived), Type: "http", URL: hookSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+	e.SetPreflight(NewPreflightManager("test", []PreflightCheckConfig{
+		{Type: "http", URL: preflightSrv.URL, Timeout: 1},
+	}))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "feishu:oc_group",
+		Platform:   "feishu",
+		MessageID:  "om_1",
+		UserID:     "ou_user",
+		UserName:   "张三",
+		ChatName:   "售后群",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "请先完成飞书授权" {
+		t.Fatalf("sent = %v, want exactly the preflight block message", sent)
+	}
+	if hookCalls.Load() != 0 {
+		t.Fatalf("message.received hook calls = %d, want 0", hookCalls.Load())
+	}
+	if len(agentSession.sentPrompts) != 0 {
+		t.Fatalf("agent prompts = %v, want none", agentSession.sentPrompts)
+	}
+}
 
 func TestHandleMessage_ReceivedHookIncludesMessageContext(t *testing.T) {
 	eventCh := make(chan HookEvent, 1)

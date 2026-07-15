@@ -601,6 +601,21 @@ func main() {
 			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, shellProfile))
 		}
 
+		if len(cfg.PreflightChecks) > 0 {
+			corePreflight := make([]core.PreflightCheckConfig, len(cfg.PreflightChecks))
+			for i, check := range cfg.PreflightChecks {
+				corePreflight[i] = core.PreflightCheckConfig{
+					Event:          check.Event,
+					Type:           check.Type,
+					URL:            check.URL,
+					Timeout:        check.Timeout,
+					OnError:        check.OnError,
+					IncludeContent: check.IncludeContent,
+				}
+			}
+			engine.SetPreflight(core.NewPreflightManager(proj.Name, corePreflight))
+		}
+
 		// Wire local reference normalization / rendering
 		engine.SetReferenceConfig(core.ReferenceRenderCfg{
 			NormalizeAgents: proj.References.NormalizeAgents,

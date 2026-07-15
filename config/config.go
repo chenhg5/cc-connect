@@ -111,6 +111,7 @@ type Config struct {
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
+	PreflightChecks    []PreflightCheckConfig  `toml:"preflight_checks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
@@ -173,6 +174,16 @@ type HookConfig struct {
 	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
 	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
 	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
+}
+
+// PreflightCheckConfig is a decision-capable inbound message gate.
+type PreflightCheckConfig struct {
+	Event          string `toml:"event,omitempty"`           // default: message.preflight
+	Type           string `toml:"type"`                      // "http"
+	URL            string `toml:"url,omitempty"`             // HTTP endpoint (type=http)
+	Timeout        int    `toml:"timeout,omitempty"`         // seconds; 0 = default
+	OnError        string `toml:"on_error,omitempty"`        // block, continue, or ignore; default block
+	IncludeContent bool   `toml:"include_content,omitempty"` // default false
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
@@ -1020,6 +1031,11 @@ func (c *Config) validateInternal(permissive bool) error {
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
+	for i, check := range c.PreflightChecks {
+		if err := validatePreflightCheckConfig(fmt.Sprintf("preflight_checks[%d]", i), check); err != nil {
+			return err
+		}
+	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
@@ -1070,6 +1086,30 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 	}
 	return nil
+}
+
+func validatePreflightCheckConfig(prefix string, check PreflightCheckConfig) error {
+	if strings.TrimSpace(check.Event) != "" && !strings.EqualFold(strings.TrimSpace(check.Event), "message.preflight") && strings.TrimSpace(check.Event) != "*" {
+		return fmt.Errorf("config: %s.event must be \"message.preflight\" or \"*\"", prefix)
+	}
+	if strings.TrimSpace(check.Type) != "http" {
+		return fmt.Errorf("config: %s.type must be \"http\"", prefix)
+	}
+	if strings.TrimSpace(check.URL) == "" {
+		return fmt.Errorf("config: %s.url is required", prefix)
+	}
+	if !strings.HasPrefix(check.URL, "http://") && !strings.HasPrefix(check.URL, "https://") {
+		return fmt.Errorf("config: %s.url must start with http:// or https://", prefix)
+	}
+	if check.Timeout < 0 {
+		return fmt.Errorf("config: %s.timeout must be >= 0", prefix)
+	}
+	switch strings.ToLower(strings.TrimSpace(check.OnError)) {
+	case "", "block", "continue", "ignore":
+		return nil
+	default:
+		return fmt.Errorf("config: %s.on_error must be \"block\", \"continue\", or \"ignore\"", prefix)
+	}
 }
 
 func validateDisplayConfig(prefix string, display *DisplayConfig) error {

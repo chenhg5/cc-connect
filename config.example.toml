@@ -443,6 +443,28 @@ level = "info" # debug, info, warn, error
 # type = "http"
 # url = "https://my-server.com/cc-connect/on-error"
 #
+# =============================================================================
+# Preflight Checks (Decision Gates / 前置检查)
+# =============================================================================
+# Preflight checks run before normal message hooks and before the agent receives
+# an inbound message. They are intended for deployment-specific gates such as
+# entitlement checks, required user authorization, quota, or service readiness.
+# 前置检查会在普通消息 hook 和 Agent 收到消息之前执行，适合做可用范围、
+# 用户授权、额度或服务状态等部署侧校验。
+#
+# Response JSON / 返回 JSON:
+#   {"decision":"continue"}                         # allow normal processing / 放行
+#   {"decision":"block","message":"Please authorize"} # reply and stop / 回复并阻断
+#   {"decision":"ignore"}                           # silently stop / 静默丢弃
+#
+# [[preflight_checks]]
+# event = "message.preflight"                 # default message.preflight
+# type = "http"
+# url = "http://127.0.0.1:17860/api/cc-connect/preflight"
+# timeout = 3
+# on_error = "block"                          # block, continue, or ignore; default block
+# include_content = false                     # default false; avoid sending user text unless required
+#
 # [[hooks]]
 # event = "*"
 # type = "http"

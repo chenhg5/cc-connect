@@ -430,6 +430,7 @@ type Engine struct {
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
+	preflight          *PreflightManager
 	cronScheduler      *CronScheduler
 	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
@@ -908,6 +909,11 @@ func (e *Engine) reapIdleWorkspaces() {
 // SetHooks configures the lifecycle event hook manager.
 func (e *Engine) SetHooks(hm *HookManager) {
 	e.hooks = hm
+}
+
+// SetPreflight configures decision-capable preflight checks.
+func (e *Engine) SetPreflight(pm *PreflightManager) {
+	e.preflight = pm
 }
 
 // SetShell configures the shell binary, flag, and shell profile used for exec.
@@ -2806,6 +2812,38 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 	return cancel
 }
 
+func (e *Engine) evaluateMessagePreflight(msg *Message) PreflightDecision {
+	if e.preflight == nil {
+		return PreflightDecision{Decision: PreflightContinue}
+	}
+	extra := map[string]any{
+		"has_images":           len(msg.Images) > 0,
+		"has_files":            len(msg.Files) > 0,
+		"has_audio":            msg.Audio != nil,
+		"has_location":         msg.Location != nil,
+		"from_voice":           msg.FromVoice,
+		"user_message_time_ms": msg.UserMessageTimeMs,
+	}
+	if msg.ExtraContent != "" {
+		extra["has_extra_content"] = true
+	}
+	if msg.ChannelKey != "" {
+		extra["channel_key"] = msg.ChannelKey
+	}
+	return e.preflight.Evaluate(PreflightEvent{
+		Event:      PreflightEventMessage,
+		SessionKey: msg.SessionKey,
+		Platform:   msg.Platform,
+		MessageID:  msg.MessageID,
+		ChannelID:  effectiveChannelID(msg),
+		UserID:     msg.UserID,
+		UserName:   msg.UserName,
+		ChatName:   msg.ChatName,
+		Content:    msg.Content,
+		Extra:      extra,
+	})
+}
+
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
@@ -2826,6 +2864,26 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			"session", msg.SessionKey, "user", msg.UserName,
 			"content", previewText(msg.Content, 500),
 		)
+	}
+
+	if decision := e.evaluateMessagePreflight(msg); decision.Decision != PreflightContinue {
+		slog.Info("message stopped by preflight",
+			"platform", msg.Platform,
+			"msg_id", msg.MessageID,
+			"session", msg.SessionKey,
+			"user", msg.UserName,
+			"decision", decision.Decision,
+			"code", decision.Code,
+			"reason", decision.Reason,
+		)
+		if decision.Decision == PreflightBlock {
+			reply := strings.TrimSpace(decision.Message)
+			if reply == "" {
+				reply = e.i18n.T(MsgPreflightBlocked)
+			}
+			e.reply(p, msg.ReplyCtx, reply)
+		}
+		return
 	}
 
 	_, hookSessions := e.sessionContextForKey(msg.SessionKey)
