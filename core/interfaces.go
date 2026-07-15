@@ -251,8 +251,12 @@ type SystemPromptSupporter interface {
 //   - the agent cannot determine the current project directory
 //
 // The engine treats a false return as "clear the stored ID and start fresh".
+//
+// cwd is the working directory previously reported for this session (empty when
+// none was captured, e.g. a record predating cwd capture). Validators use it to
+// locate the transcript, falling back to their configured work_dir when empty.
 type SessionIDValidator interface {
-	ValidateSessionID(ctx context.Context, sessionID string) bool
+	ValidateSessionID(ctx context.Context, sessionID, cwd string) bool
 }
 
 // TypingIndicator is an optional interface for platforms that can show a

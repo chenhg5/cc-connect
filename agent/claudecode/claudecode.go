@@ -450,7 +450,7 @@ func (a *Agent) SetPlatformPrompt(prompt string) {
 // resume a session whose stored ID was inherited from another project, the
 // engine calls this and — on a false return — clears the ID and starts a
 // fresh session instead of reloading the wrong conversation.
-func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
+func (a *Agent) ValidateSessionID(_ context.Context, sessionID, cwd string) bool {
 	if sessionID == "" {
 		return false
 	}
@@ -461,7 +461,40 @@ func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
 	a.mu.RLock()
 	workDir := a.workDir
 	a.mu.RUnlock()
-	return validateSessionIDInProject(homeDir, workDir, sessionID)
+	// Locate the transcript under the session's real reported cwd, but only trust
+	// that cwd when it is within this project's work_dir. The CLI names its
+	// transcript directory after the process cwd, which a custom agent command may
+	// set to a subdirectory of work_dir — trusting an in-tree cwd is what makes
+	// resume survive a restart. A cwd OUTSIDE work_dir, however, cannot be told
+	// apart from another project's cwd leaked onto a shared Session row (issue
+	// #599), so we do not trust it and fall back to work_dir. Empty cwd (records
+	// predating cwd capture) also falls back — the original behavior.
+	dir := workDir
+	if cwd != "" && dirWithin(workDir, cwd) {
+		dir = cwd
+	}
+	return validateSessionIDInProject(homeDir, dir, sessionID)
+}
+
+// dirWithin reports whether target is base or a descendant of base, comparing
+// real path components (not encoded-key prefixes, which would conflate siblings
+// like /workspace and /workspace-other). Used to decide whether a session's
+// reported cwd is trustworthy for locating its transcript (issue #599).
+func dirWithin(base, target string) bool {
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return false
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return false
+	}
+	// Within base iff rel does not escape upward.
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // validateSessionIDInProject checks whether sessionID has a .jsonl file
