@@ -90,28 +90,3 @@ func TestDeliverableFileContents(t *testing.T) {
 		}
 	})
 }
-
-// TestAlreadyInBody covers the dedup guard: when the agent pasted the block
-// (whose leading heading is in the body) instead of only echoing the token,
-// file delivery must be skipped to avoid a duplicate.
-func TestAlreadyInBody(t *testing.T) {
-	block := "## 根因分析\n\n一些内容\n更多内容"
-
-	t.Run("body has the heading -> true (skip delivery)", func(t *testing.T) {
-		if !alreadyInBody("前面文字\n## 根因分析\n一些内容", block) {
-			t.Fatalf("expected alreadyInBody=true when heading present in body")
-		}
-	})
-
-	t.Run("body lacks the heading -> false (deliver)", func(t *testing.T) {
-		if alreadyInBody("CC_DELIVER_FILE=/tmp/x.md 仅 token", block) {
-			t.Fatalf("expected alreadyInBody=false when only token in body")
-		}
-	})
-
-	t.Run("non-heading first line -> false", func(t *testing.T) {
-		if alreadyInBody("## 根因分析", "普通文字开头\n不是标题") {
-			t.Fatalf("expected alreadyInBody=false when deliverable has no heading")
-		}
-	})
-}

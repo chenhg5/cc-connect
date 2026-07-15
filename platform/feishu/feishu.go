@@ -2385,6 +2385,12 @@ var ccDeliverFileTokenRe = regexp.MustCompile(`(?i)CC_DELIVER_FILE[=:]\s*(\S+)`)
 // (rich card UpdateMessage, streaming card Finalize, or plain send). It is no
 // longer called from Reply/Send directly, so the card fires once per reply
 // regardless of delivery path.
+//
+// To avoid the card re-popping after the user clicks "写入知识库" and the
+// agent's write follow-up echoes the same KNOWLEDGE_CACHE_DIR path, a marker
+// file (.knowledge_card) is written into the directory at send time; as long
+// as that marker exists, the card is suppressed on the next reply echoing the
+// same path.
 func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyContext, content string) {
 	m := knowledgeConfirmCardTokenRe.FindStringSubmatch(content)
 	if m == nil {
@@ -2394,6 +2400,13 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 	// regardless of how the agent printed it (e.g. KNOWLEDGE_CACHE_DIR='/tmp/x').
 	cacheDir := strings.Trim(m[1], "\"`'")
 	if cacheDir == "" {
+		return
+	}
+	// Skip if a confirm card for this path was already emitted (tracked by the
+	// marker file in the directory), so the card does not re-pop when the
+	// write follow-up echoes the same KNOWLEDGE_CACHE_DIR path.
+	if p.knowledgeCardMarkerExists(cacheDir) {
+		slog.Debug(p.tag()+": skip knowledge confirm card, marker already present", "dir", cacheDir)
 		return
 	}
 	// Only offer the button when the path is absolute and the conclusion file
@@ -2422,6 +2435,7 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 		).
 		Build()
 	cardJSON := renderCard(card, rc.sessionKey)
+	p.writeKnowledgeCardMarker(cacheDir)
 	var err error
 	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
 		err = p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
@@ -2430,6 +2444,50 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 	}
 	if err != nil {
 		slog.Warn(p.tag()+": send knowledge confirm card failed", "error", err)
+	}
+}
+
+// knowledgeCardMarkerFile is the marker written into a KNOWLEDGE_CACHE_DIR
+// directory when a "写入知识库" confirm card is emitted. Its mere existence
+// (not its content) suppresses the card on subsequent replies that echo the
+// same path (e.g. the agent's write follow-up).
+const knowledgeCardMarkerFile = ".knowledge_card"
+
+// knowledgeCardMarkerExists reports whether a confirm card has already been
+// emitted for cacheDir, by checking for the marker file in the directory. As
+// long as the marker exists, the card is suppressed on the next reply that
+// echoes the same path.
+//
+// Every abnormal case is treated as "no marker" (the card may be shown), which
+// is the safe failure mode: a missed suppression only re-pops a card, whereas
+// a wrongful suppression would silently drop a legitimately needed card.
+// Specifically:
+//   - cacheDir not absolute        → no marker (refuse to touch cwd)
+//   - marker missing (any error)   → no marker
+//   - marker is a directory        → no marker (not our file)
+func (p *Platform) knowledgeCardMarkerExists(cacheDir string) bool {
+	if !filepath.IsAbs(cacheDir) {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(cacheDir, knowledgeCardMarkerFile))
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
+// writeKnowledgeCardMarker records that a confirm card was emitted for cacheDir
+// by creating the marker file in the directory. Failures are non-fatal: if the
+// directory is missing or unwritable (e.g. it lives on a different host than
+// cc-connect), the marker simply cannot be written and the card may re-pop on
+// the next echo — but the card is never blocked because of it.
+func (p *Platform) writeKnowledgeCardMarker(cacheDir string) {
+	if !filepath.IsAbs(cacheDir) {
+		return
+	}
+	path := filepath.Join(cacheDir, knowledgeCardMarkerFile)
+	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+		slog.Warn(p.tag()+": knowledge confirm card marker write failed (card may re-pop)", "path", path, "err", err)
 	}
 }
 
@@ -2487,15 +2545,11 @@ func (p *Platform) deliverableFileContents(content string) []string {
 // AfterReply, after the body has already been delivered, so the file content
 // appears as additional messages in the same chat/thread.
 //
-// A dedupe guard skips delivery when the agent pasted the block into the body
-// instead of only echoing the CC_DELIVER_FILE line: in that case the body
-// already shows the block, so re-delivering the file would duplicate it.
+// Delivery is unconditional: every CC_DELIVER_FILE payload is always posted,
+// even if the agent also pasted the block into the body. We prefer a possible
+// duplicate over a missed delivery (e.g. alert summaries / root-cause blocks).
 func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, content string) {
 	for _, text := range p.deliverableFileContents(content) {
-		if alreadyInBody(content, text) {
-			slog.Debug(p.tag() + ": CC_DELIVER_FILE skipped, body already contains the block", "heading", firstLine(text))
-			continue
-		}
 		for _, chunk := range core.SplitMessageCodeFenceAware(text, 4000) {
 			if strings.TrimSpace(chunk) == "" {
 				continue
@@ -2505,27 +2559,6 @@ func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, 
 			}
 		}
 	}
-}
-
-// alreadyInBody reports whether the deliverable's leading heading is already
-// present in the reply body — i.e. the agent pasted the whole block rather than
-// only echoing the CC_DELIVER_FILE line. Used to avoid delivering the same
-// block twice (once in the body, once from the file).
-func alreadyInBody(body, text string) bool {
-	heading := firstLine(text)
-	if !strings.HasPrefix(heading, "#") {
-		return false
-	}
-	return strings.Contains(body, heading)
-}
-
-// firstLine returns the first non-empty line of s (trimmed), or "" if empty.
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
 }
 
 // AfterReply implements core.PostReplyHook. It is the single entry point for
