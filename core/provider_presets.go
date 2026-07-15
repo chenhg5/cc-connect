@@ -21,8 +21,12 @@ const (
 	presetsFallbackHTTPTimeout = 10 * time.Second
 )
 
-// ErrPresetsDisabled is returned when no provider presets URL is configured.
-var ErrPresetsDisabled = fmt.Errorf("remote provider presets are disabled in this build; declare providers in config.toml")
+// emptyPresets is served when no presets URL is configured. An empty list is the truthful
+// answer — this build has no remote presets — and it keeps the management endpoint working
+// instead of surfacing a 502 to callers that treat a fetch error as fatal.
+func emptyPresets() *ProviderPresetsResponse {
+	return &ProviderPresetsResponse{Version: 1, Providers: []ProviderPreset{}}
+}
 
 // ProviderPreset describes a recommended provider available from the remote presets list.
 type ProviderPreset struct {
@@ -120,7 +124,7 @@ func (c *presetsCache) fetch() (*ProviderPresetsResponse, error) {
 		primaryURL = defaultPresetsURL
 	}
 	if primaryURL == "" {
-		return nil, ErrPresetsDisabled
+		return emptyPresets(), nil
 	}
 
 	result, err := fetchPresetsFromURL(primaryURL, presetsHTTPTimeout)

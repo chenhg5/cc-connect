@@ -1790,7 +1790,7 @@ func printUsage() {
   Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
   GitHub:  https://github.com/JayGarland/cc-connect
-  Docs:    https://github.com/JayGarland/cc-connect/blob/main/INSTALL.md
+  Docs:    https://github.com/JayGarland/cc-connect/blob/main/README.md
 
 Usage:
   cc-connect [flags]

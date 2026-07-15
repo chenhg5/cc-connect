@@ -69,9 +69,12 @@ level = "info" # debug, info, warn, error
 # This avoids duplicating API keys across projects.
 # 避免在多个项目中重复配置 API Key。
 #
-# Remote presets URL (fetches recommended providers list from GitHub/Gitee)
-# 远程预设列表 URL（从 GitHub/Gitee 拉取推荐服务商）
-# provider_presets_url = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+# Remote presets URL. Disabled by default in this build: it fetches nothing unless you set
+# this, and it must not be pointed at the upstream project this was forked from.
+# Declare providers under [[providers]] below instead.
+# 远程预设列表 URL。本构建默认禁用，不设置就不会拉取；请勿指向上游仓库。
+# 推荐直接在下方 [[providers]] 中声明服务商。
+# provider_presets_url = "https://example.com/provider-presets.json"
 
 # [[providers]]
 # name = "anthropic"

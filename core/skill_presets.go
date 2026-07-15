@@ -21,8 +21,12 @@ const (
 	skillPresetsFallbackHTTPTimeout = 10 * time.Second
 )
 
-// ErrSkillPresetsDisabled is returned when no skill presets URL is configured.
-var ErrSkillPresetsDisabled = fmt.Errorf("remote skill presets are disabled in this build; use skill_dirs in config.toml")
+// emptySkillPresets is served when no presets URL is configured. An empty list is the truthful
+// answer — this build has no remote skill presets — and it keeps the management endpoint
+// working instead of surfacing a 502 to callers that treat a fetch error as fatal.
+func emptySkillPresets() *SkillPresetsResponse {
+	return &SkillPresetsResponse{Version: 1, Skills: []SkillPreset{}}
+}
 
 // SkillPreset describes a recommended skill available from the remote presets list.
 type SkillPreset struct {
@@ -103,7 +107,7 @@ func (c *skillPresetsCache) fetch() (*SkillPresetsResponse, error) {
 		primaryURL = defaultSkillPresetsURL
 	}
 	if primaryURL == "" {
-		return nil, ErrSkillPresetsDisabled
+		return emptySkillPresets(), nil
 	}
 
 	result, err := fetchSkillPresetsFromURL(primaryURL, skillPresetsHTTPTimeout)

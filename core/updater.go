@@ -31,7 +31,8 @@ const (
 	giteeDownload     = ""
 )
 
-// ErrSelfUpdateDisabled is returned by CheckForUpdate and SelfUpdate.
+// ErrSelfUpdateDisabled is returned by SelfUpdate. CheckForUpdate reports "no update"
+// instead, so a disabled feature does not surface as a fault in the upgrade UI.
 var ErrSelfUpdateDisabled = fmt.Errorf("self-update is disabled in this build; deploy binaries built from this repository")
 
 type ReleaseInfo struct {
@@ -45,8 +46,12 @@ type ReleaseInfo struct {
 // CheckForUpdate queries GitHub/Gitee for newer releases.
 // If preferGitee is true, tries Gitee first (faster in China); otherwise GitHub first.
 func CheckForUpdate(currentVersion string, preferGitee bool) (*ReleaseInfo, error) {
+	// No endpoints means no release can ever be newer, which is the same answer as "up to
+	// date" — report that rather than an error. Callers render a check failure straight to
+	// the user, so erroring here would turn a disabled feature into a visible fault.
+	// SelfUpdate still hard-fails, so nothing can install an upstream binary.
 	if githubReleasesAPI == "" && giteeReleasesAPI == "" {
-		return nil, ErrSelfUpdateDisabled
+		return nil, nil
 	}
 
 	releases, err := fetchReleases(preferGitee)
