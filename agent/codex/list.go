@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -85,13 +86,17 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		return nil
 	}
 
+	return parseCodexSession(f, stat.ModTime(), filterCwd)
+}
+
+func parseCodexSession(r io.Reader, modifiedAt time.Time, filterCwd string) *core.AgentSessionInfo {
 	var sessionID string
 	var sessionCwd string
 	var summary string
 	var msgCount int
 	userMsgSeen := 0
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
 	for scanner.Scan() {
@@ -115,6 +120,12 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				Cwd string `json:"cwd"`
 			}
 			if json.Unmarshal(entry.Payload, &meta) == nil {
+				// A non-empty metadata cwd conclusively identifies the transcript's
+				// workspace. Avoid decoding the rest of a large response history
+				// when it belongs to another workspace.
+				if filterCwd != "" && meta.Cwd != "" && meta.Cwd != filterCwd {
+					return nil
+				}
 				sessionID = meta.ID
 				sessionCwd = meta.Cwd
 			}
@@ -163,7 +174,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		ID:           sessionID,
 		Summary:      summary,
 		MessageCount: msgCount,
-		ModifiedAt:   stat.ModTime(),
+		ModifiedAt:   modifiedAt,
 	}
 }
 
