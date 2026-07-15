@@ -147,6 +147,7 @@ type Platform struct {
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
+	chatTypeCache    sync.Map          // accepted chatID -> p2p or group
 	recalledMu       sync.Mutex
 	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
@@ -662,11 +663,16 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return nil, nil
 	}
 
-	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
-	if event.Event.Context != nil && event.Event.Context.OpenChatID != "" {
-		if !core.AllowList(p.allowChat, event.Event.Context.OpenChatID) {
-			return nil, nil
-		}
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+	chatID := ""
+	if event.Event.Context != nil {
+		chatID = event.Event.Context.OpenChatID
+	}
+	if !p.cardActionAllowed(chatID, userID) {
+		return nil, nil
 	}
 
 	actionVal, _ := event.Event.Action.Value["action"].(string)
@@ -690,14 +696,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 	}
 
-	userID := ""
-	if event.Event.Operator != nil {
-		userID = event.Event.Operator.OpenID
-	}
-	chatID := ""
 	messageID := ""
 	if event.Event.Context != nil {
-		chatID = event.Event.Context.OpenChatID
 		messageID = event.Event.Context.OpenMessageID
 	}
 	if chatID == "" {
@@ -890,6 +890,37 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	return nil, nil
+}
+
+func (p *Platform) rememberAcceptedChatType(chatID, chatType string) {
+	if chatID == "" {
+		return
+	}
+	switch chatType {
+	case "p2p", "group":
+		p.chatTypeCache.Store(chatID, chatType)
+	}
+}
+
+func (p *Platform) cardActionAllowed(chatID, userID string) bool {
+	if !core.AllowList(p.allowFrom, userID) {
+		return false
+	}
+	if chatID == "" {
+		return !p.groupOnly
+	}
+	if cachedType, ok := p.chatTypeCache.Load(chatID); ok {
+		switch cachedType {
+		case "p2p":
+			return !p.groupOnly
+		case "group":
+			return core.AllowList(p.allowChat, chatID)
+		}
+	}
+	if p.groupOnly {
+		return false
+	}
+	return core.AllowList(p.allowChat, chatID)
 }
 
 func (p *Platform) addReaction(messageID string) string {
@@ -1364,6 +1395,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
 		return nil
 	}
+	p.rememberAcceptedChatType(chatID, chatType)
 
 	if msg.Content == nil && msgType != "merge_forward" {
 		slog.Debug(p.tag()+": message content is nil", "message_id", messageID, "type", msgType)
