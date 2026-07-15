@@ -890,6 +890,7 @@ func (sm *SessionManager) saveLocked() {
 			Name:                         s.Name,
 			AgentSessionID:               agentSID,
 			AgentType:                    s.AgentType,
+			AgentCwd:                     s.AgentCwd,
 			PastAgentSessionIDs:          append([]string(nil), s.PastAgentSessionIDs...),
 			HistoryBootstrappedAgentType: s.HistoryBootstrappedAgentType,
 			HistoryBootstrapPending:      s.HistoryBootstrapPending,
