@@ -133,6 +133,33 @@ Switch at runtime:
 /mode default  # switch back
 ```
 
+### Codex managed workspace dependencies (experimental)
+
+The Codex `app_server` backend can expose an installed managed workspace
+runtime through the app-server dynamic-tool protocol. Enable this for managed
+artifact skills that require `load_workspace_dependencies`, including
+`@oai/artifact-tool` spreadsheet, document, and presentation workflows:
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+app_server_url = "stdio://"
+workspace_dependencies = true
+# Optional; defaults to ~/.cache/codex-runtimes/codex-primary-runtime
+workspace_dependencies_runtime = "/absolute/path/to/codex-primary-runtime"
+```
+
+The runtime must already be installed by the Codex/ChatGPT desktop app.
+cc-connect validates `runtime.json`, the bundled Node.js and Python
+executables, `node_modules`, and `@oai/artifact-tool`; it does not install or
+modify the runtime. The option is disabled by default and only affects new
+app-server threads. Unknown dynamic tools continue to be rejected.
+
+Security: enabling this option returns absolute host runtime paths to the
+Codex session. Only enable it for trusted projects and users, and avoid pointing
+`workspace_dependencies_runtime` at a directory that contains unrelated or
+sensitive files.
+
 ---
 
 ## API Provider Management

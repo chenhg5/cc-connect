@@ -141,16 +141,17 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	url            string
-	workDir        string
-	model          string
-	effort         string
-	mode           string
-	baseURL        string
-	modelProvider  string
-	extraEnv       []string
-	codexHome      string
-	promptPreamble string
+	url                   string
+	workDir               string
+	model                 string
+	effort                string
+	mode                  string
+	baseURL               string
+	modelProvider         string
+	extraEnv              []string
+	codexHome             string
+	promptPreamble        string
+	workspaceDependencies workspaceDependenciesConfig
 
 	events chan core.Event
 
@@ -191,25 +192,26 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, workspaceDependencies workspaceDependenciesConfig) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		url:              url,
-		workDir:          workDir,
-		model:            model,
-		effort:           effort,
-		mode:             mode,
-		baseURL:          baseURL,
-		modelProvider:    modelProvider,
-		extraEnv:         append([]string(nil), extraEnv...),
-		codexHome:        strings.TrimSpace(codexHome),
-		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:           make(chan core.Event, 128),
-		ctx:              sessionCtx,
-		cancel:           cancel,
-		pending:          make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+		url:                   url,
+		workDir:               workDir,
+		model:                 model,
+		effort:                effort,
+		mode:                  mode,
+		baseURL:               baseURL,
+		modelProvider:         modelProvider,
+		extraEnv:              append([]string(nil), extraEnv...),
+		codexHome:             strings.TrimSpace(codexHome),
+		promptPreamble:        buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		workspaceDependencies: workspaceDependencies,
+		events:                make(chan core.Event, 128),
+		ctx:                   sessionCtx,
+		cancel:                cancel,
+		pending:               make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:      make(map[string]chan core.PermissionResult),
+		preambleSent:          resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -323,7 +325,7 @@ func (s *appServerSession) initialize() error {
 
 func (s *appServerSession) ensureThread(resumeID string) error {
 	if resumeID != "" && resumeID != core.ContinueSession {
-		params := s.threadRequestParams()
+		params := s.threadRequestParams(false)
 		params["threadId"] = resumeID
 		params["persistExtendedHistory"] = true
 
@@ -341,7 +343,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	}
 
 	var resp threadStartResponse
-	if err := s.request("thread/start", s.threadRequestParams(), &resp); err != nil {
+	if err := s.request("thread/start", s.threadRequestParams(true), &resp); err != nil {
 		return err
 	}
 	if resp.Thread.ID == "" {
@@ -353,7 +355,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	return nil
 }
 
-func (s *appServerSession) threadRequestParams() map[string]any {
+func (s *appServerSession) threadRequestParams(includeDynamicTools bool) map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
@@ -366,6 +368,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		if sandbox != "" {
 			params["sandbox"] = sandbox
 		}
+	}
+	if includeDynamicTools && s.workspaceDependencies.Enabled {
+		params["dynamicTools"] = workspaceDependenciesDynamicTools()
 	}
 	return params
 }
@@ -756,6 +761,30 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 }
 
 func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRaw json.RawMessage) {
+	var params appServerDynamicToolCallParams
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"error": map[string]any{"code": -32602, "message": "invalid params"},
+		})
+		return
+	}
+
+	if s.workspaceDependencies.Enabled && isWorkspaceDependenciesTool(params.Namespace, params.Tool) {
+		text, err := loadWorkspaceDependencies(s.workspaceDependencies.RuntimeRoot)
+		if err != nil {
+			text = "workspace dependency runtime unavailable: " + err.Error()
+		}
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"result": map[string]any{
+				"success":      err == nil,
+				"contentItems": []map[string]any{{"type": "inputText", "text": text}},
+			},
+		})
+		return
+	}
+
 	_ = s.writeJSON(map[string]any{
 		"jsonrpc": "2.0", "id": rawID,
 		"result": map[string]any{
