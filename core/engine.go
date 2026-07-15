@@ -4438,7 +4438,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// can detect the mismatch and we should clear the ID rather than
 	// resume a conversation that has nothing to do with this project.
 	if startSessionID != "" {
-		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID) {
+		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID, session.GetAgentCwd()) {
 			slog.Warn("session ID does not belong to this project, clearing it",
 				"session_key", sessionKey, "invalid_session_id", startSessionID)
 			session.SetAgentSessionID("", agent.Name())
@@ -4516,6 +4516,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		wasEmpty := session.GetAgentSessionID() == ""
 		if session.GetAgentSessionID() != newID {
 			session.SetAgentSessionID(newID, agent.Name())
+			if c, ok := agentSession.(interface{ CurrentCwd() string }); ok {
+				session.SetAgentCwd(c.CurrentCwd())
+			}
 			if wasEmpty {
 				pendingName := session.GetName()
 				if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -6176,6 +6179,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					wasEmpty := session.GetAgentSessionID() == ""
 					if session.GetAgentSessionID() != currentID {
 						session.SetAgentSessionID(currentID, e.agent.Name())
+						if c, ok := state.agentSession.(interface{ CurrentCwd() string }); ok {
+							session.SetAgentCwd(c.CurrentCwd())
+						}
 						if wasEmpty {
 							pendingName := session.GetName()
 							if pendingName != "" && pendingName != "session" && pendingName != "default" {
