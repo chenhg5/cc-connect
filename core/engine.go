@@ -4104,9 +4104,6 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		wasEmpty := session.GetAgentSessionID() == ""
 		if session.GetAgentSessionID() != newID {
 			session.SetAgentSessionID(newID, agent.Name())
-			if c, ok := agentSession.(interface{ CurrentCwd() string }); ok {
-				session.SetAgentCwd(c.CurrentCwd())
-			}
 			if wasEmpty {
 				pendingName := session.GetName()
 				if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -5451,15 +5448,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					wasEmpty := session.GetAgentSessionID() == ""
 					if session.GetAgentSessionID() != currentID {
 						session.SetAgentSessionID(currentID, e.agent.Name())
-						if c, ok := state.agentSession.(interface{ CurrentCwd() string }); ok {
-							session.SetAgentCwd(c.CurrentCwd())
-						}
 						if wasEmpty {
 							pendingName := session.GetName()
 							if pendingName != "" && pendingName != "session" && pendingName != "default" {
 								sessions.SetSessionName(currentID, pendingName)
 							}
 						}
+					}
+					// Persist the agent's real cwd every turn, not only when the session
+					// id changes: the id is often set earlier (event path / initial
+					// create) while the cwd is known only after the CLI init event, so
+					// gating cwd capture on an id change would miss it. SetAgentCwd
+					// ignores empty and is idempotent, so running it each turn is safe.
+					// Resume validation reads it back (issue #599 + restart resume).
+					if c, ok := state.agentSession.(interface{ CurrentCwd() string }); ok {
+						session.SetAgentCwd(c.CurrentCwd())
 					}
 					sessions.Save()
 				}
