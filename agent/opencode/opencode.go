@@ -32,13 +32,17 @@ type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
-	cmd                  string // CLI binary name, default "opencode"
+	cmd                  string   // CLI binary name, default "opencode"
+	cliExtraArgs         []string // extra args from cmd after the binary name
+	configEnv            []string // env vars from [projects.agent.options.env]
+	agentName            string // passed as --agent to opencode (for plugin-defined agents)
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
 	modelCachePath       string
 	persistentModelCache *opencodePersistentModelCache
 	refreshingModelCache bool
+	refreshWg            sync.WaitGroup // tracks in-flight background model-cache refresh goroutines
 	mu                   sync.RWMutex
 }
 
@@ -65,10 +69,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "opencode"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
+	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
 	ccProject, _ := opts["cc_project"].(string)
 	modelCachePath := opencodeProjectModelCachePath(ccDataDir, ccProject)
@@ -86,6 +88,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:                model,
 		mode:                 mode,
 		cmd:                  cmd,
+		cliExtraArgs:         extraArgs,
+		configEnv:            core.ParseConfigEnv(opts),
+		agentName:            agentName,
 		activeIdx:            -1,
 		modelCachePath:       modelCachePath,
 		persistentModelCache: persistentModelCache,
@@ -341,9 +346,11 @@ func (a *Agent) startPersistentModelRefresh(snapshot opencodeModelDiscoverySnaps
 		return
 	}
 	a.refreshingModelCache = true
+	a.refreshWg.Add(1)
 	a.mu.Unlock()
 
 	go func() {
+		defer a.refreshWg.Done()
 		defer func() {
 			a.mu.Lock()
 			a.refreshingModelCache = false
@@ -458,8 +465,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
-	extraEnv := a.providerEnvLocked()
+	agentName := a.agentName
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -468,7 +478,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newOpencodeSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.

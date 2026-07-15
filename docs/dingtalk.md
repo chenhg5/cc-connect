@@ -74,7 +74,18 @@ type = "dingtalk"
 [projects.platforms.options]
 client_id = "dingxxxxxxxxxxxxxxx"
 client_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+reaction_emoji = "🤔Thinking"  # 可选：收到消息时贴的表情；设为 "none" 禁用
+done_emoji = "none"            # 可选：完成回复后贴的表情，例如 "🥳Done"；设为 "none" 禁用
 ```
+
+### 2.4 处理状态表情
+
+钉钉平台支持在用户消息上贴表情，让用户知道消息已经进入处理流程：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `reaction_emoji` | `🤔Thinking` | 收到用户消息并开始处理时添加，处理结束后会撤回；设为 `none` 可禁用 |
+| `done_emoji` | `none` | Agent 完成回复后添加，例如 `🥳Done`；设为 `none` 或不配置则禁用 |
 
 ---
 

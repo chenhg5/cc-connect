@@ -1,4 +1,146 @@
-# Changelog
+﻿# Changelog
+
+## Unreleased
+
+### Added
+- **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
+- **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
+- **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+
+## Unreleased
+
+### Added
+- **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
+
+### Fixed
+- **codex**: `/model` chooser now surfaces `gpt-5.x` (and any future frontier chat model) when the model list is populated by fetching `GET /v1/models` from the provider. The previous hard-coded 11-entry allowlist (`o1/o3/o4/gpt-4o/gpt-4.1/codex-mini-latest`) had not been updated since 2026-03 and silently filtered out every `gpt-5*` variant (including `gpt-5.6-sol/terra/luna`) returned by the API, so users on `codex-cli >= 0.143` could not pick GPT-5.6 in cc-connect even after upgrading the CLI. The allowlist is replaced with pattern rules: accept the `gpt-*` / `chatgpt-*` / `codex-*` / `o1-*` / `o3-*` / `o4-*` / `o5-*` families plus the bare `o1/o3/o4/o5` IDs, and reject non-chat modalities (`embedding`, `whisper`, `tts`, `dall-e`, `audio-preview`, `realtime`, `transcribe`, `moderation`, `image`, `search-preview`). New frontier chat models are picked up automatically without a code change. Note: this only affects the API-fetch fallback path; users with an explicit `model_catalog_json` in `~/.codex/config.toml` or a `models = [...]` list in cc-connect's provider config were unaffected.
+- **Feishu recall fallback probes**: throttle repeated active-message recall checks so long-running turns do not continuously call platform message APIs.
+- **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).
+- **Feishu: tighter `@` mention detection in `SendWithStatusFooter` / `buildReplyContent`** — a bare `@` inside an email address, URL, or escaped character no longer false-positives as a mention. Mention detection now checks for the resolved `<at user_id="...">` tag instead of a substring match, so card rendering (and the notation-style status footer) is preserved for content that merely contains `@`. Real `@mentions` still force `MsgTypeText` so Feishu fires the mention event (#1322).
+- **feishu**: coalesce consecutive image messages from the same session into a single multi-image dispatch to fix first-image drop on batch sends (#1395). When the Feishu mobile client sends N images in quick succession, each image arrives as a separate `image` event with very close `create_time` values. Dispatching each immediately caused core/engine's `create_time` watermark (PR #1168) to drop the oldest image, so the agent only saw N-1 images. A per-session image buffer with a 150ms quiet window now merges the burst into one `core.Message` carrying all images, in send order. Single-image sends and quoted-image replies are unaffected.
+- **claudecode**: fix per-spawn system-prompt temp file EACCES under `run_as_user` (#1429). The per-spawn temp file written by `writeTempAppendPromptFile` (the 1% edge-case path used when the prompt has session-specific platform formatting or user `append_system_prompt`) inherited `os.CreateTemp`'s 0600 mode and was owned by the cc-connect process user (often root under systemd). When the agent was spawned under a different `run_as_user`, it could not read the file and exited before any prompt was loaded. The file is now `chmod 0o644` immediately after write, matching the shared `ensureSharedSystemPromptFile` path. Prompt content is non-secret (a superset of the already-shared base prompt), so 0644 is consistent with the shared file. Does not affect the shared-file path (already 0644 since #1376) or the daemon-mode path resolution (#1419).
+- **core**: queue post-restart notification and dispatch on platform ready (#1383). Previously `/restart` sent the success notification immediately after engine startup, racing the platform's async connect window (Telegram: ~2.6s). On a not-yet-ready platform the send was silently dropped at debug log level. The notify is now queued on the engine and dispatched when the target platform reaches `OnPlatformReady`, with bounded retry (3 attempts, 0/500/1500 ms backoff) on transient send failure. Failed sends log at warn level. A 10s safety timeout drops the notify with a warning if the target platform never reaches ready, so startup is never blocked indefinitely. Also covers Discord / Weixin / Matrix (other AsyncRecoverablePlatform implementations) for free.
+- **core**: `SaveFilesToDisk` / `AppendFileRefs` always emit absolute paths (#1459). When a user configured a relative `work_dir` (e.g. `~/project` or `.cc-connect`), `SaveFilesToDisk` joined relative paths into the attachments directory and the resulting paths were passed verbatim into the agent's prompt. The spawned agent process — typically run from a different cwd by the platform adapter — could not resolve them and silently dropped every attachment. `SaveFilesToDisk` now calls `filepath.Abs(workDir)` up front and falls back to the raw value on error, and `AppendFileRefs` defensively absolutizes each entry. Both behaviors are covered by new tests for relative, absolute, and empty workDir; the empty-workDir case falls back to the process cwd so misconfigured deploys still get a writable attachments directory.
+
+## v1.3.3 (2026-06-15)
+
+First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5
+line (≈ 235 PRs since v1.3.2) plus 7 post-beta.5 fixes. See `changelogs/v1.3.3.md` for
+the full themed summary; per-beta details remain in the beta sections below.
+
+### Highlights
+- **New agents**: Devin CLI, Google Antigravity (`agy`), GitHub Copilot — all first
+  class. Hardened coverage for Cursor, OpenCode, Qoder, Kimi, Pi.
+- **Platform expansion**: QQ Bot inline keyboards + file send/receive (OneBot), WeCom
+  `SendFile` (WebSocket), Feishu audio + video native media, Slack Assistant API, MAX
+  webhook delivery, DingTalk @mentions / richText / image / file inbound, WPS Xiezuo
+  (金山协作), broader Weibo DM.
+- **Long-running turn hardening**: new `max_turn_time_mins` wall-clock cap with
+  soft-stop + force-kill + auto-resume — long bash / test commands can no longer lock
+  a session indefinitely.
+- **Core commands**: `/timer`, `/cancel`, `/ps` (replaces `/btw`), `cron add --silent`,
+  agent-driven TTS.
+- **Multi-user / permissions**: reply-to-unauthorized-IM-senders, @mention-tolerant
+  permission keywords (`@Bot/permit` ≡ `/permit`), Bridge requires token when enabled.
+- **Observability**: blackbox testing framework (P0/P1/P2 + config-switch matrix), CUJ
+  test framework, agent-resume regression suite, Pi context-usage reporter.
+- **Provider ecosystem**: NekoCode, VisionCoder, AIHubMix, MiniMax M3 presets; Claude
+  Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks; Codex
+  `request_user_input` app-server events; configurable shell + shell profile.
+
+### Post-beta.5 fixes (delta from beta.5)
+- **qoder**: emit streaming text without dropping final result (#1290)
+- **weixin**: use `ilink_user_id` in `getConfigReq` for typing ticket (#1308)
+- **daemon**: remove redundant `linger_other.go` that breaks non-linux builds (#1314)
+- **wps-xiezuo**: preserve newlines in outbound messages — fixes unreadable `/status`
+  (#1361)
+- **core**: `/switch` no longer loses history; persist user msgs immediately; add CUJ
+  test framework (#1348)
+- **core**: queued FIFO drains no longer drop earlier queued messages as stale just
+  because a later queued message has a higher `create_time` (#1286)
+- **core**: make `/history` entry truncation configurable via
+  `[display].history_max_len`, defaulting to 1000; `0` disables truncation (#1291)
+- **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
+- **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
+
+### ⚠️ Behavior Changes (carried forward from the beta cycle)
+All behavior changes from beta.1 → beta.5 remain in effect for v1.3.3. **Most likely
+to affect existing configs:**
+- `progress_style` default for Telegram & Discord is now `compact` (was `legacy`). Set
+  `progress_style = "legacy"` to revert. (#1354)
+- QQ Bot default `intents` now include `INTERACTION_CREATE` (bit 26). Custom `intents`
+  must include `1<<26` for inline keyboard buttons.
+- DingTalk `msgtype=file` inbound now reaches the agent (#1357).
+- Engine permission keyword matching is @mention-tolerant: `@Bot/permit` ≡ `/permit`
+  (#1358).
+- `reset_on_idle_mins` default is now 30 minutes (#494). Set to `0` to disable.
+- Bridge with no `[bridge].token` configured will refuse to start (#408).
+
+### Breaking Changes
+**None.** Fully additive release.
+
+### Upgrade
+```bash
+npm i -g cc-connect@1.3.3
+# or
+go install github.com/chenhg5/cc-connect/cmd/cc-connect@v1.3.3
+```
+
+Coming from a `v1.3.3-beta.*`: this is a small fix-only upgrade. No config change
+required.
+
+Coming from `v1.3.2`: review the Behavior Changes above before upgrading.
+
+---
+
+## v1.3.3-beta.5 (2026-06-15)
+
+Large beta with 74 PRs from 28 contributors. New agents (Google Antigravity `agy`, GitHub Copilot), QQ
+file send/receive via OneBot, WeCom `SendFile` (WebSocket), Feishu audio/video media, agent-driven TTS,
+`/timer` and `/cancel` commands, and broad platform fixes across Telegram, Discord, DingTalk, Feishu,
+WeCom, WeiXin, Cursor, OpenCode, Pi, and Codex. See `changelogs/v1.3.3-beta.5.md` for the full list.
+
+### New Features
+- **Google Antigravity (`agy`)** agent as a first-class integration (#1123)
+- **GitHub Copilot** agent as a first-class integration (#865)
+- **`/timer`** — one-shot delayed task system (#1012)
+- **`/cancel`** — interrupt and reset the current session (#957)
+- **Session prune** command to remove duplicate sessions (#603)
+- **Agent-driven TTS** send (#1230)
+- **Reply to unauthorized IM senders** option (#1190)
+- **QQ Bot inline keyboard buttons** and INTERACTION_CREATE events. Permission requests now render as clickable buttons (#1131)
+- **QQ (OneBot) file send/receive** via HTTP API (#323)
+- **WeCom `SendFile`** in WebSocket mode (#1199)
+- **Feishu audio + video attachments** as native media (#1202)
+- **Feishu rich card rendering + panel handling** refresh (#1204)
+- **DingTalk reaction emoji** support (#1213)
+- **DingTalk @mention via `send --at-users` / `--at-all`** (#1188)
+- **Slack + tmux** per-thread session scope with per-session tmux windows (#1179)
+- **`cron add --silent`** CLI flag (#1285, closes #858)
+- **Codex `request_user_input`** app-server events + relay group visibility (#1200, #1209)
+- **Claude Code** custom `append_system_prompt` + PermissionRequest hooks (#1175, #850)
+- **Pi** `ContextUsageReporter` for reply footer token stats (#1235)
+- **Daemon** hardened service-file env capture + EnvDiscoverer plugin hook (#1034)
+- **Configurable shell + shell profile** for `exec` (#870)
+
+### Fixed
+- Many fixes across the engine, agents, and platforms. Highlights: Telegram/Discord progress style,
+  DingTalk file inbound, Feishu link/card URLs, WeCom long-message split, Cursor session titles,
+  OpenCode tool rejection, Codex resume + sandbox_mode, Pi `/dir` and `/model`, Windows instance
+  lock, and Claude Code provider preservation. See `changelogs/v1.3.3-beta.5.md`.
+
+### ⚠️ Behavior Notes
+- **`progress_style` default** for Telegram and Discord is now `compact` (was `legacy`). Set
+  `progress_style = "legacy"` in the platform config to restore previous behavior (#1354).
+- **DingTalk `msgtype=file`** inbound messages now reach the agent. Previously silently dropped (#1357).
+- **Engine permission keyword matching** is now @mention-tolerant: `@Bot/permit` matches the same as
+  `/permit` (#1358).
+
+### ⚠️ QQ Bot Intent Configuration
+The default intents for QQ Bot now include `INTERACTION_CREATE` (bit 26, value `1<<26`). If you
+previously set a custom `intents` value without this bit, inline keyboard buttons will not work —
+update your `intents` to include bit 26. If you use the default intents, no action is needed. See
+`config.example.toml` for the new `intents` option.
 
 ## v1.3.3-beta.4 (2026-05-28)
 

@@ -114,6 +114,8 @@
     "lastRun": "上次运行",
     "lastError": "上次错误",
     "add": "添加任务",
+    "trigger": "立即执行",
+    "triggerPending": "已触发，结果稍后更新。",
     "delete": "删除",
     "noJobs": "暂无定时任务",
     "workDir": "工作目录",
@@ -225,7 +227,15 @@
     "manualSetup": "手动配置",
     "manualHint": "{{platform}} 需要在 config.toml 中手动配置凭证，然后重启服务。",
     "advancedOptions": "高级选项",
-    "unsupportedPlatform": "不支持的平台类型：{{type}}"
+    "unsupportedPlatform": "不支持的平台类型：{{type}}",
+    "cloudWeb": {
+      "urlRequiredWebsocket": "WebSocket 模式需填写 API 基础地址或 WebSocket 地址（至少一项）",
+      "urlRequiredLongPoll": "Long poll 模式需填写 API 基础地址",
+      "urlRequiredGateway": "Gateway 模式需填写 API 基础地址或注册 URL（至少一项）",
+      "invalidHttpUrl": "{{field}} 必须是有效的 http(s) URL 或 host[:port]",
+      "invalidWsUrl": "WebSocket 地址必须以 ws:// 或 wss:// 开头",
+      "publicUrlRequiredGateway": "设置注册 URL 时必须提供公开 Webhook 地址"
+    }
   },
   "fields": {
     "botToken": "机器人 Token",
@@ -255,7 +265,18 @@
     "appSecret": "App Secret",
     "sandboxMode": "沙箱模式",
     "channelSecret": "Channel Secret",
-    "channelToken": "Channel Access Token"
+    "channelToken": "Channel Access Token",
+    "transport": "传输模式",
+    "longPollTimeout": "长轮询超时（毫秒）",
+    "listen": "监听地址",
+    "publicUrl": "公网 Webhook URL",
+    "publicUrlHint": "供 Gateway 回调 cc-connect 的公网地址",
+    "registerUrl": "注册 URL",
+    "registerUrlHint": "可选：向 Gateway 注册 Webhook 的接口地址",
+    "cloudWebWsHint": "若已填写 base URL 可留空，默认 /cloud-web/ws",
+    "cloudWebBaseUrlHint": "long poll 必填；WebSocket 可填此项或下方 WebSocket 地址",
+    "eventsPath": "事件拉取路径（长轮询）",
+    "sendPath": "消息发送路径（出站 API）"
   },
   "chat": {
     "noChats": "暂无项目",

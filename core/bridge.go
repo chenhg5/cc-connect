@@ -311,6 +311,7 @@ var (
 	_ PreviewCleaner            = (*BridgePlatform)(nil)
 	_ TypingIndicator           = (*BridgePlatform)(nil)
 	_ AudioSender               = (*BridgePlatform)(nil)
+	_ VideoSender               = (*BridgePlatform)(nil)
 	_ ImageSender               = (*BridgePlatform)(nil)
 	_ FileSender                = (*BridgePlatform)(nil)
 	_ CardNavigable             = (*BridgePlatform)(nil)
@@ -621,6 +622,25 @@ func (bp *BridgePlatform) SendAudio(ctx context.Context, replyCtx any, audio []b
 		"reply_ctx":   rc.ReplyCtx,
 		"data":        base64.StdEncoding.EncodeToString(audio),
 		"format":      format,
+	})
+}
+
+func (bp *BridgePlatform) SendVideo(ctx context.Context, replyCtx any, video []byte, format string, fileName string) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["video"] {
+		return ErrNotSupported
+	}
+	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+		"type":        "video",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"data":        base64.StdEncoding.EncodeToString(video),
+		"format":      format,
+		"file_name":   fileName,
 	})
 }
 
@@ -949,7 +969,7 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 		default:
 			return
 		}
-		a.dispatchAsMessage(ref, ca.SessionKey, ca.ReplyCtx, responseText)
+		a.dispatchAsPermissionResponse(ref, ca.SessionKey, ca.ReplyCtx, responseText)
 		return
 	}
 
@@ -1002,6 +1022,28 @@ func (a *bridgeAdapter) dispatchAsMessage(ref *bridgeEngineRef, sessionKey, repl
 		UserName:   "Web Admin",
 		Content:    content,
 		ReplyCtx:   newBridgeReplyCtx(a, sessionKey, replyCtx),
+	}
+	go ref.platform.handler(ref.platform, msg)
+}
+
+// dispatchAsPermissionResponse is the permission-callback sibling of
+// dispatchAsMessage. It sets IsPermissionResponse on the synthesized
+// Message so the engine's handlePendingPermission can drop stale clicks
+// (e.g. user tapped an old "Allow" card after the session was reset) —
+// preventing the literal "allow"/"deny" string from reaching the agent's
+// prompt stream (issue #826).
+func (a *bridgeAdapter) dispatchAsPermissionResponse(ref *bridgeEngineRef, sessionKey, replyCtx, content string) {
+	if ref.platform.handler == nil {
+		return
+	}
+	msg := &Message{
+		SessionKey:           sessionKey,
+		Platform:             a.platform,
+		UserID:               "web-admin",
+		UserName:             "Web Admin",
+		Content:              content,
+		ReplyCtx:             newBridgeReplyCtx(a, sessionKey, replyCtx),
+		IsPermissionResponse: true,
 	}
 	go ref.platform.handler(ref.platform, msg)
 }

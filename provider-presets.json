@@ -1,32 +1,60 @@
 {
   "version": 2,
-  "updated_at": "2026-05-23",
+  "updated_at": "2026-07-03",
   "providers": [
+    {
+      "name": "kimi",
+      "display_name": "Kimi",
+      "invite_url": "https://www.kimi.com/code/?aff=cc-connect",
+      "description": "Kimi K2.7 Code — coding-focused open-source agentic model from Moonshot AI. Reduces thinking-token usage by ~30% vs K2.6. cc-connect brings Kimi CLI to Feishu/DingTalk/Telegram/Slack/Discord/WeChat Work.",
+      "description_zh": "Kimi K2.7 Code — Moonshot AI 推出的编程专用开源智能体模型,相比 K2.6 平均减少约 30% 的推理 Token 消耗。cc-connect 可将本地 Kimi CLI 接入飞书/钉钉/Telegram/Slack/Discord/企业微信。",
+      "features": ["K2.7 Code", "30% Less Tokens", "Sponsor", "cc-connect Native"],
+      "tier": 1,
+      "website": "https://www.kimi.com/",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.moonshot.cn/v1",
+          "model": "kimi-k2-7-code",
+          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"]
+        },
+        "codex": {
+          "base_url": "https://api.moonshot.cn/v1",
+          "model": "kimi-k2-7-code",
+          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"],
+          "codex_config": {"wire_api": "responses"}
+        },
+        "opencode": {
+          "base_url": "https://api.moonshot.cn/v1",
+          "model": "kimi-k2-7-code",
+          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"]
+        }
+      }
+    },
     {
       "name": "minimax",
       "display_name": "MiniMax",
       "invite_url": "https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link",
-      "description": "Next-gen LLM with 1M context window, strong SWE performance (56.2% SWE-Pro). Exclusive 12% off Token Plan for cc-connect users!",
-      "description_zh": "新一代大模型，支持 1M 超长上下文，软件工程能力突出（SWE-Pro 56.2%）。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "Extended Thinking", "SWE-Pro 56.2%"],
+      "description": "MiniMax M3 — frontier coding & agentic LLM with 1M context via MiniMax Sparse Attention, natively multimodal. Exclusive 12% off Token Plan for cc-connect users!",
+      "description_zh": "MiniMax M3 — 前沿 Coding 与 Agentic 大模型，1M 上下文（MiniMax Sparse Attention），原生多模态。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "M3 Frontier", "Multimodal", "SWE-Bench Pro 59.0"],
       "tier": 1,
       "website": "https://platform.minimax.io",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
         }
       }
     },
@@ -34,27 +62,83 @@
       "name": "minimax-cn",
       "display_name": "MiniMax (中国站)",
       "invite_url": "https://platform.minimaxi.com/subscribe/token-plan?code=lqYrKBvjke&source=link",
-      "description": "MiniMax China endpoint — lower latency for users in mainland China.",
-      "description_zh": "MiniMax 国内站 — 大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
-      "features": ["1M Context", "低延迟 (CN)", "Extended Thinking"],
+      "description": "MiniMax M3 China endpoint — frontier coding & agentic LLM, lower latency for users in mainland China.",
+      "description_zh": "MiniMax M3 国内站 — 前沿 Coding 与 Agentic 大模型，大陆用户延迟更低。cc-connect 用户专享 Token 套餐 88 折！",
+      "features": ["1M Context", "M3 Frontier", "Multimodal", "低延迟 (CN)"],
       "tier": 1,
       "website": "https://platform.minimaxi.com",
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M2.7",
-          "models": ["MiniMax-M2.7", "MiniMax-M2.5"]
+          "model": "MiniMax-M3",
+          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+        }
+      }
+    },
+    {
+      "name": "zhipu-glm",
+      "display_name": "Zhipu GLM (z.ai)",
+      "invite_url": "https://z.ai/subscribe",
+      "description": "Zhipu GLM Coding Plan — flat-rate monthly subscription for GLM-4.7 / GLM-5.2 (1M context) via z.ai's Anthropic- and OpenAI-compatible endpoints. Works in Claude Code, Codex and OpenCode.",
+      "description_zh": "智谱 GLM Coding Plan（z.ai 国际站）— 包月订阅，提供 GLM-4.7 / GLM-5.2（1M 上下文），兼容 Anthropic 与 OpenAI 接口，可用于 Claude Code、Codex、OpenCode。订阅 key 按套餐配额计费，非按量。",
+      "features": ["GLM-5.2", "1M Context", "订阅制 (非按量)", "高性价比"],
+      "tier": 1,
+      "website": "https://z.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.z.ai/api/anthropic",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]", "glm-4.6", "glm-4.5-air"]
+        },
+        "codex": {
+          "base_url": "https://api.z.ai/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://api.z.ai/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"]
+        }
+      }
+    },
+    {
+      "name": "zhipu-glm-cn",
+      "display_name": "智谱 GLM (中国站)",
+      "invite_url": "https://bigmodel.cn/claude-code",
+      "description": "Zhipu GLM Coding Plan, China endpoint (open.bigmodel.cn) — lower latency for users in mainland China. GLM-4.7 / GLM-5.2 via Anthropic- and OpenAI-compatible APIs.",
+      "description_zh": "智谱 GLM Coding Plan 国内站（open.bigmodel.cn）— 大陆用户延迟更低。GLM-4.7 / GLM-5.2，兼容 Anthropic 与 OpenAI 接口，可用于 Claude Code、Codex、OpenCode。",
+      "features": ["GLM-5.2", "1M Context", "订阅制 (非按量)", "低延迟 (CN)"],
+      "tier": 1,
+      "website": "https://bigmodel.cn",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://open.bigmodel.cn/api/anthropic",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]", "glm-4.6", "glm-4.5-air"]
+        },
+        "codex": {
+          "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+          "model": "glm-4.7",
+          "models": ["glm-4.7", "glm-5.2", "glm-5.2[1m]"]
         }
       }
     },

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,6 +91,113 @@ func TestSplitByBytes_ReassemblesLargeContent(t *testing.T) {
 	}
 	if reassembled != s {
 		t.Fatalf("reassembled content does not match original (len %d vs %d)", len(reassembled), len(s))
+	}
+}
+
+func TestSplitByBytes_UsesNearestParagraphBoundaryAfterSeventyPercent(t *testing.T) {
+	early := strings.Repeat("甲", 15) + "\n\n"
+	near := strings.Repeat("乙", 10) + "\n\n"
+	tail := strings.Repeat("丙", 20)
+	parts := splitByBytes(early+near+tail, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != early+near {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_IgnoresParagraphBoundaryBeforeSeventyPercent(t *testing.T) {
+	early := strings.Repeat("甲", 12) + "\n\n"
+	tail := strings.Repeat("乙", 24)
+	parts := splitByBytes(early+tail, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == early {
+		t.Fatalf("should not split at an early paragraph boundary: %q", parts[0])
+	}
+	if strings.Join(parts, "") != early+tail {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_UsesLineBoundaryAfterEightyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 27) + "\n"
+	second := strings.Repeat("乙", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_UsesSentenceBoundaryAfterEightyFivePercent(t *testing.T) {
+	first := strings.Repeat("前", 28) + "。"
+	second := strings.Repeat("后", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_DoesNotSplitAtEnumerationComma(t *testing.T) {
+	first := strings.Repeat("甲", 15) + "、"
+	second := strings.Repeat("乙", 10)
+	parts := splitByBytes(first+second, 70)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == first {
+		t.Fatalf("should not split at enumeration comma: %q", parts[0])
+	}
+	if strings.Join(parts, "") != first+second {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_UsesSoftBoundaryOnlyAfterNinetyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 30) + "，"
+	second := strings.Repeat("乙", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_IgnoresSoftBoundaryBeforeNinetyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 20) + "，"
+	second := strings.Repeat("乙", 20)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == first {
+		t.Fatalf("should not split at an early soft boundary: %q", parts[0])
+	}
+	if strings.Join(parts, "") != first+second {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_FallsBackToHardCut(t *testing.T) {
+	input := strings.Repeat("甲", 10)
+	parts := splitByBytes(input, 10)
+	for _, part := range parts {
+		if len(part) > 10 {
+			t.Fatalf("chunk exceeds limit: %d > 10", len(part))
+		}
+	}
+	if strings.Join(parts, "") != input {
+		t.Fatalf("reassembled content does not match original: %v", parts)
 	}
 }
 
@@ -175,6 +283,83 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("handler not called")
+	}
+}
+
+func TestHandleMsgCallback_RepliesToUnauthorizedSender(t *testing.T) {
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+		var frame wsFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			serverDone <- err
+			return
+		}
+		var body struct {
+			Stream struct {
+				Content string `json:"content"`
+			} `json:"stream"`
+		}
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			serverDone <- err
+			return
+		}
+		if frame.Cmd != "aibot_respond_msg" {
+			serverDone <- fmt.Errorf("cmd = %q, want aibot_respond_msg", frame.Cmd)
+			return
+		}
+		if got := body.Stream.Content; got != core.UnauthorizedAccessMessage {
+			serverDone <- fmt.Errorf("content = %q, want %q", got, core.UnauthorizedAccessMessage)
+			return
+		}
+		serverDone <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	p := &WSPlatform{
+		allowFrom: "allowed-user",
+		conn:      conn,
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	body := wsMsgCallbackBody{
+		MsgID:    "msg_unauthorized",
+		ChatID:   "chat_group",
+		ChatType: "group",
+		MsgType:  "text",
+	}
+	body.From.UserID = "blocked-user"
+	body.Text.Content = "@bot hello"
+	body.CreateTime = time.Now().Unix()
+	p.handleMsgCallback(wsCallbackFrame(t, "req_unauthorized", body))
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized reply frame")
 	}
 }
 
@@ -598,6 +783,174 @@ func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error 
 		sendFrame.Body.ChatID != "chat1" ||
 		sendFrame.Body.MsgType != "image" ||
 		sendFrame.Body.Image.MediaID != "media-1" {
+		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": sendFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write send ack: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// SendFile
+// ---------------------------------------------------------------------------
+
+func TestWSPlatformSendFile_UploadsAndSendsMedia(t *testing.T) {
+	fileData := []byte("<html><body>hello</body></html>")
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		serverDone <- assertWeComWSSendFileFrames(conn, fileData)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	p := &WSPlatform{conn: conn}
+	go func() {
+		for {
+			var frame wsFrame
+			if err := conn.ReadJSON(&frame); err != nil {
+				return
+			}
+			p.handleFrame(frame)
+		}
+	}()
+
+	err = p.SendFile(context.Background(), wsReplyContext{chatID: "chat1", userID: "u1"}, core.FileAttachment{
+		MimeType: "text/html",
+		Data:     fileData,
+		FileName: "hello.html",
+	})
+	if err != nil {
+		t.Fatalf("SendFile returned error: %v", err)
+	}
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe all expected frames")
+	}
+}
+
+func assertWeComWSSendFileFrames(conn *websocket.Conn, fileData []byte) error {
+	var initFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			Type        string `json:"type"`
+			Filename    string `json:"filename"`
+			TotalSize   int    `json:"total_size"`
+			TotalChunks int    `json:"total_chunks"`
+			MD5         string `json:"md5"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&initFrame); err != nil {
+		return fmt.Errorf("read init frame: %w", err)
+	}
+	sum := md5.Sum(fileData)
+	if initFrame.Cmd != "aibot_upload_media_init" ||
+		initFrame.Body.Type != "file" ||
+		initFrame.Body.Filename != "hello.html" ||
+		initFrame.Body.TotalSize != len(fileData) ||
+		initFrame.Body.TotalChunks != 1 ||
+		initFrame.Body.MD5 != hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("unexpected init frame: %#v", initFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": initFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"upload_id": "upload-f1"},
+	}); err != nil {
+		return fmt.Errorf("write init ack: %w", err)
+	}
+
+	var chunkFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID   string `json:"upload_id"`
+			ChunkIndex int    `json:"chunk_index"`
+			Base64Data string `json:"base64_data"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&chunkFrame); err != nil {
+		return fmt.Errorf("read chunk frame: %w", err)
+	}
+	if chunkFrame.Cmd != "aibot_upload_media_chunk" ||
+		chunkFrame.Body.UploadID != "upload-f1" ||
+		chunkFrame.Body.ChunkIndex != 0 ||
+		chunkFrame.Body.Base64Data != base64.StdEncoding.EncodeToString(fileData) {
+		return fmt.Errorf("unexpected chunk frame: %#v", chunkFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": chunkFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write chunk ack: %w", err)
+	}
+
+	var finishFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID string `json:"upload_id"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&finishFrame); err != nil {
+		return fmt.Errorf("read finish frame: %w", err)
+	}
+	if finishFrame.Cmd != "aibot_upload_media_finish" || finishFrame.Body.UploadID != "upload-f1" {
+		return fmt.Errorf("unexpected finish frame: %#v", finishFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": finishFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"media_id": "media-f1"},
+	}); err != nil {
+		return fmt.Errorf("write finish ack: %w", err)
+	}
+
+	var sendFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			ChatID  string `json:"chatid"`
+			MsgType string `json:"msgtype"`
+			File    struct {
+				MediaID string `json:"media_id"`
+			} `json:"file"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&sendFrame); err != nil {
+		return fmt.Errorf("read send frame: %w", err)
+	}
+	if sendFrame.Cmd != "aibot_send_msg" ||
+		sendFrame.Body.ChatID != "chat1" ||
+		sendFrame.Body.MsgType != "file" ||
+		sendFrame.Body.File.MediaID != "media-f1" {
 		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
 	}
 	if err := conn.WriteJSON(map[string]any{

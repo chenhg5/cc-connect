@@ -657,6 +657,7 @@ func (p *Platform) handleChatMessage(plain []byte) {
 		UserID:     msgData.Sender.ID,
 		UserName:   msgData.Sender.ID, // WPS doesn't include name in event data
 		Content:    text,
+		ChannelKey: msgData.Chat.ID, // needed for per-group session isolation (#1217)
 		ReplyCtx:   rctx,
 	})
 }
@@ -800,6 +801,25 @@ func (p *Platform) sendWPSMessage(ctx context.Context, rctx any, content string)
 	if p.cleanReply {
 		content = cleanReplyContent(content)
 	}
+
+	// WPS Open Platform v7 messages API: outer message `type` MUST be one of
+	// the API-defined message-type enums (text / rich_text / image / file /
+	// audio / video / card) — passing "markdown" makes the API reject the
+	// request with `400000002 invalid open_v7_message_type: "markdown"`.
+	//
+	// Markdown rendering is opted into via the INNER `Content.Text.Type =
+	// "markdown"` field (the only other inner enum is "plain"). When the
+	// inner field is "markdown" WPS renders the content with a CommonMark
+	// subset, and CommonMark collapses a single "\n" between non-empty
+	// lines into a space. To force a real line break we must emit either
+	// "  \n" (two trailing spaces) or "\n\n" — see the official docs at
+	// https://open.wps.cn/documents/app-integration-dev/guide/robot/webhook
+	//
+	// We use the trailing-spaces form so we preserve paragraph structure
+	// (no spurious blank lines) and stay safe inside fenced code blocks
+	// (the two extra trailing whitespace characters inside ``` blocks are
+	// preserved verbatim but visually invisible).
+	content = applyWPSLineBreaks(content)
 
 	token, err := p.getToken(ctx)
 	if err != nil {
@@ -1050,6 +1070,39 @@ func cleanReplyContent(content string) string {
 		return content // Return original if everything was filtered
 	}
 	return result
+}
+
+// applyWPSLineBreaks converts engine-emitted "\n" into the form that WPS
+// Open Platform markdown actually renders as a line break.
+//
+// Per WPS docs (https://open.wps.cn/documents/app-integration-dev/guide/robot/webhook
+// markdown section), a single "\n" between two non-empty lines is collapsed
+// into a space (standard CommonMark behaviour); to force a hard line break
+// you must use either "two trailing spaces + \n" or a blank line ("\n\n").
+//
+// We pick the trailing-spaces form because:
+//   - It preserves the original paragraph structure (no spurious blank lines).
+//   - It is idempotent if the content already uses "\n\n" — replacing the
+//     bare "\n" inside an empty line with "  \n" still renders correctly.
+//   - It is safe inside fenced code blocks (the two trailing spaces are
+//     whitespace inside a block where the markdown renderer preserves
+//     content verbatim, so visually nothing changes).
+//
+// We deliberately do not normalize "\r\n" → "\n" first; cc-connect engine
+// emits Unix newlines, and forcing the transform on already-converted
+// "  \n" would over-indent (which is also visually benign but pointless).
+func applyWPSLineBreaks(content string) string {
+	if content == "" || !strings.Contains(content, "\n") {
+		return content
+	}
+	// Replace bare "\n" not already preceded by "  " (two spaces).
+	// Cheap two-pass implementation: temporarily mark already-broken
+	// newlines, then convert the rest, then restore the markers.
+	const marker = "\x00WPS_HARD_BREAK\x00"
+	content = strings.ReplaceAll(content, "  \n", marker)
+	content = strings.ReplaceAll(content, "\n", "  \n")
+	content = strings.ReplaceAll(content, marker, "  \n")
+	return content
 }
 
 // --- Compile-time interface assertions ---

@@ -14,6 +14,12 @@ import (
 
 const relayTimeout = 120 * time.Second
 
+const (
+	RelayVisibilityFull    = "full"
+	RelayVisibilitySummary = "summary"
+	RelayVisibilityNone    = "none"
+)
+
 // RelayBinding represents a bot-to-bot relay binding in a group chat.
 type RelayBinding struct {
 	Platform string            `json:"platform"`
@@ -23,18 +29,20 @@ type RelayBinding struct {
 
 // RelayManager coordinates bot-to-bot message relay across engines.
 type RelayManager struct {
-	mu        sync.RWMutex
-	engines   map[string]*Engine       // project name → engine (runtime only)
-	bindings  map[string]*RelayBinding // chatID → binding
-	storePath string                   // empty = no persistence
-	timeout   time.Duration
+	mu         sync.RWMutex
+	engines    map[string]*Engine       // project name → engine (runtime only)
+	bindings   map[string]*RelayBinding // chatID → binding
+	storePath  string                   // empty = no persistence
+	timeout    time.Duration
+	visibility string
 }
 
 func NewRelayManager(dataDir string) *RelayManager {
 	rm := &RelayManager{
-		engines:  make(map[string]*Engine),
-		bindings: make(map[string]*RelayBinding),
-		timeout:  relayTimeout,
+		engines:    make(map[string]*Engine),
+		bindings:   make(map[string]*RelayBinding),
+		timeout:    relayTimeout,
+		visibility: RelayVisibilityFull,
 	}
 	if dataDir != "" {
 		rm.storePath = filepath.Join(dataDir, "relay_bindings.json")
@@ -57,6 +65,15 @@ func (rm *RelayManager) SetTimeout(d time.Duration) {
 		d = 0
 	}
 	rm.timeout = d
+}
+
+// SetVisibility controls whether relay request/response visibility messages are
+// echoed into the source group chat. The relay transport still returns the
+// target response to the caller regardless of this setting.
+func (rm *RelayManager) SetVisibility(mode string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.visibility = normalizeRelayVisibility(mode)
 }
 
 // Bind establishes a relay binding between bots in a group chat.
@@ -195,6 +212,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	binding := rm.bindings[chatID]
 	targetEngine := rm.engines[req.To]
 	sourceEngine := rm.engines[req.From]
+	visibility := rm.visibility
 	rm.mu.RUnlock()
 
 	if binding == nil {
@@ -222,10 +240,13 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		toName = binding.Bots[req.To]
 	}
 
-	// Post the forwarded message to the group chat for visibility
-	groupSessionKey := platform + ":" + chatID + ":relay"
-	if sourceEngine != nil {
-		label := fmt.Sprintf("[%s → %s] %s", fromName, toName, req.Message)
+	// Post the forwarded message to the group chat for visibility.  The
+	// default target is "<platform>:<chatID>:relay"; platforms that
+	// understand thread / topic semantics can override this by
+	// implementing core.RelayGroupVisibilityTarget on their Platform impl.
+	groupSessionKey := rm.resolveGroupVisibilityKey(platform, chatID, req.SessionKey, sourceEngine)
+	if sourceEngine != nil && visibility != RelayVisibilityNone {
+		label := relayVisibilityRequestLabel(visibility, fromName, toName, req.Message)
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
 	}
 
@@ -233,14 +254,14 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	relayCtx, cancel := rm.relayContext(ctx)
 	defer cancel()
 
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, chatID, req.Message)
+	response, err := targetEngine.HandleRelay(relayCtx, req.From, req.SessionKey, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
 
-	// Post the response to the group chat for visibility
-	if targetEngine != nil {
-		label := fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
+	// Post the response to the group chat for visibility.
+	if targetEngine != nil && visibility != RelayVisibilityNone {
+		label := relayVisibilityResponseLabel(visibility, toName, response)
 		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
 	}
 
@@ -277,6 +298,35 @@ func truncateRelay(s string, maxLen int) string {
 	return string(runes[:maxLen]) + "…"
 }
 
+func normalizeRelayVisibility(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case RelayVisibilityNone:
+		return RelayVisibilityNone
+	case RelayVisibilitySummary:
+		return RelayVisibilitySummary
+	case "", RelayVisibilityFull:
+		return RelayVisibilityFull
+	default:
+		slog.Warn("relay: unknown visibility mode, falling back to full", "mode", mode,
+			"valid_values", []string{RelayVisibilityNone, RelayVisibilitySummary, RelayVisibilityFull})
+		return RelayVisibilityFull
+	}
+}
+
+func relayVisibilityRequestLabel(mode, fromName, toName, message string) string {
+	if normalizeRelayVisibility(mode) == RelayVisibilitySummary {
+		return fmt.Sprintf("[%s → %s] relay request sent", fromName, toName)
+	}
+	return fmt.Sprintf("[%s → %s] %s", fromName, toName, message)
+}
+
+func relayVisibilityResponseLabel(mode, toName, response string) string {
+	if normalizeRelayVisibility(mode) == RelayVisibilitySummary {
+		return fmt.Sprintf("[%s] relay response ready (%d chars)", toName, len([]rune(response)))
+	}
+	return fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
+}
+
 func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	rm.mu.RLock()
 	timeout := rm.timeout
@@ -299,6 +349,36 @@ func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error
 		return parts[0], parts[2], nil
 	}
 	return parts[0], parts[1], nil
+}
+
+// resolveGroupVisibilityKey computes the session key used for relay
+// visibility echoes.  It defaults to "<platform>:<chatID>:relay" and
+// gives the caller's platform a chance to override via the optional
+// core.RelayGroupVisibilityTarget interface.
+//
+// Looking the platform up via sourceEngine.platforms (not targetEngine)
+// matches the existing sendToGroup() resolution path — the visibility
+// echo is dispatched as the source bot, so the source engine's
+// platform impl is authoritative for the key format.
+func (rm *RelayManager) resolveGroupVisibilityKey(platform, chatID, callerSessionKey string, sourceEngine *Engine) string {
+	defaultKey := platform + ":" + chatID + ":relay"
+	if sourceEngine == nil {
+		return defaultKey
+	}
+	for _, p := range sourceEngine.platforms {
+		if p.Name() != platform {
+			continue
+		}
+		d, ok := p.(RelayGroupVisibilityTarget)
+		if !ok {
+			return defaultKey
+		}
+		if k, ok := d.RelayGroupVisibilityKey(callerSessionKey); ok && k != "" {
+			return k
+		}
+		return defaultKey
+	}
+	return defaultKey
 }
 
 // ── Persistence ─────────────────────────────────────────────

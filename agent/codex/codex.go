@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -24,10 +26,13 @@ func init() {
 
 // Agent drives OpenAI Codex CLI using `codex exec --json`.
 //
-// Modes (maps to codex exec flags):
-//   - "suggest":   default, no special flags (safe commands only)
-//   - "auto-edit": --full-auto (sandbox-protected auto execution)
-//   - "full-auto": --full-auto (sandbox-protected auto execution)
+// `codex exec` has no approval IPC, so approvals are not interactive on the
+// exec backend. To get interactive approvals, switch to backend="app_server".
+//
+// Modes on the exec backend (maps to codex exec flags):
+//   - "suggest":   --sandbox read-only       + approval_policy=never (no prompts)
+//   - "auto-edit": --sandbox workspace-write + approval_policy=never (alias of full-auto)
+//   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
 	workDir         string
@@ -37,8 +42,10 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
-	cliBin          string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cli_path after the binary
+	systemPrompt    string
+	appendPrompt    string
+	cmd             string   // CLI binary name, default "codex"
+	cliExtraArgs    []string // extra args parsed from cmd after the binary
 	providers       []core.ProviderConfig
 	activeIdx       int      // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
@@ -57,23 +64,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	systemPrompt, _ := opts["system_prompt"].(string)
+	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
-	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
-	cliBin := "codex"
-	var cliExtraArgs []string
-	if cliPath, _ := opts["cli_path"].(string); strings.TrimSpace(cliPath) != "" {
-		parts := strings.Fields(cliPath)
-		cliBin = parts[0]
-		if len(parts) > 1 {
-			cliExtraArgs = parts[1:]
-		}
-	}
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
 
-	if _, err := exec.LookPath(cliBin); err != nil {
-		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cliBin)
+	if _, err := exec.LookPath(cmd); err != nil {
+		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cmd)
 	}
 
 	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
@@ -101,7 +101,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
-		cliBin:          cliBin,
+		systemPrompt:    strings.TrimSpace(systemPrompt),
+		appendPrompt:    strings.TrimSpace(appendPrompt),
+		cmd:             cmd,
 		cliExtraArgs:    cliExtraArgs,
 		configEnv:       configEnv,
 		activeIdx:       -1,
@@ -213,6 +215,9 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
+	if models := readCodexModelCatalog(); len(models) > 0 {
+		return models
+	}
 	if models := a.fetchModelsFromAppServer(ctx); len(models) > 0 {
 		return models
 	}
@@ -236,7 +241,7 @@ func (a *Agent) fetchModelsFromAppServer(ctx context.Context) []core.ModelOption
 	a.mu.RLock()
 	workDir := a.workDir
 	codexHome := a.codexHome
-	cliBin := a.cliBin
+	cliBin := a.cmd
 	cliExtraArgs := append([]string(nil), a.cliExtraArgs...)
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
@@ -373,11 +378,53 @@ func codexAppServerEntriesToModelOptions(entries []codexAppServerModelEntry) []c
 	return models
 }
 
-var openaiChatModels = map[string]bool{
-	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	"gpt-4o": true, "gpt-4o-mini": true,
-	"codex-mini-latest": true,
+// nonChatSubstrings identifies non chat/completion modalities returned by
+// GET /v1/models that must not appear in the codex /model chooser.
+var nonChatSubstrings = []string{
+	"embedding", "whisper", "tts", "moderation", "dall-e",
+	"realtime", "transcribe", "search-preview", "image",
+	"audio-preview",
+}
+
+// isCodexChatModel reports whether an OpenAI-compatible model ID names a
+// chat/completion model that Codex CLI can drive. Used to filter the
+// /v1/models response into the /model command suggestion list.
+//
+// Rules (case-insensitive):
+//   - Reject any ID containing a non-chat modality substring (embedding,
+//     whisper, tts, dall-e, audio-preview, realtime, transcribe, moderation,
+//     image, search-preview).
+//   - Accept known chat family prefixes: gpt-*, chatgpt-*, codex-*, o1-*,
+//     o3-*, o4-*, o5-*.
+//   - Accept bare reasoning family IDs: o1 / o3 / o4 / o5.
+//
+// Uses pattern matching rather than a static allowlist so new frontier models
+// (gpt-5.x, gpt-6, o5-*, codex-*, etc.) are picked up automatically.
+func isCodexChatModel(id string) bool {
+	if id == "" {
+		return false
+	}
+	lower := strings.ToLower(id)
+	for _, s := range nonChatSubstrings {
+		if strings.Contains(lower, s) {
+			return false
+		}
+	}
+	switch {
+	case strings.HasPrefix(lower, "gpt-"),
+		strings.HasPrefix(lower, "chatgpt-"),
+		strings.HasPrefix(lower, "codex-"),
+		strings.HasPrefix(lower, "o1-"),
+		strings.HasPrefix(lower, "o3-"),
+		strings.HasPrefix(lower, "o4-"),
+		strings.HasPrefix(lower, "o5-"):
+		return true
+	}
+	switch lower {
+	case "o1", "o3", "o4", "o5":
+		return true
+	}
+	return false
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -431,7 +478,7 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	var models []core.ModelOption
 	for _, m := range result.Data {
-		if openaiChatModels[m.ID] {
+		if isCodexChatModel(m.ID) {
 			models = append(models, core.ModelOption{Name: m.ID})
 		}
 	}
@@ -440,19 +487,22 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 }
 
 func readCodexCachedModels() []core.ModelOption {
-	codexHome := os.Getenv("CODEX_HOME")
+	codexHome, _ := resolveCodexHome(nil)
 	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		codexHome = filepath.Join(home, ".codex")
+		return nil
 	}
 	path := filepath.Join(codexHome, "models_cache.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
+	return parseCodexModelsJSON(b)
+}
+
+// parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
+// or models_cache.json) into a deduplicated, filtered slice of ModelOption.
+// It is shared by readCodexCachedModels and readCodexModelCatalog.
+func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	var payload struct {
 		Models []struct {
 			Slug           string `json:"slug"`
@@ -462,7 +512,7 @@ func readCodexCachedModels() []core.ModelOption {
 			SupportedInAPI bool   `json:"supported_in_api"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(b, &payload); err != nil {
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil
 	}
 
@@ -494,6 +544,61 @@ func readCodexCachedModels() []core.ModelOption {
 	return models
 }
 
+// readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
+// model_catalog_json setting, then reads and parses that JSON file.
+// This is the authoritative source of model metadata for Codex CLI,
+// maintained by the Codex distribution itself.
+func readCodexModelCatalog() []core.ModelOption {
+	codexHome, _ := resolveCodexHome(nil)
+	if codexHome == "" {
+		return nil
+	}
+
+	// Parse CODEX_HOME/config.toml to find model_catalog_json path
+	cfgPath := filepath.Join(codexHome, "config.toml")
+	var cfg struct {
+		ModelCatalogJSON string `toml:"model_catalog_json"`
+	}
+	if _, err := toml.DecodeFile(cfgPath, &cfg); err != nil {
+		slog.Debug("codex: failed to read config.toml for model_catalog_json", "error", err)
+		return nil
+	}
+	if cfg.ModelCatalogJSON == "" {
+		return nil
+	}
+
+	// Expand ~ and resolve relative paths against CODEX_HOME
+	catalogPath := cfg.ModelCatalogJSON
+	switch {
+	case strings.HasPrefix(catalogPath, "~/"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			slog.Debug("codex: cannot resolve home dir for model_catalog_json", "error", err)
+			return nil
+		}
+		catalogPath = filepath.Join(home, catalogPath[2:])
+	case catalogPath == "~":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		catalogPath = home
+	case !filepath.IsAbs(catalogPath):
+		catalogPath = filepath.Join(codexHome, catalogPath)
+	}
+
+	b, err := os.ReadFile(catalogPath)
+	if err != nil {
+		slog.Debug("codex: failed to read model_catalog_json", "path", catalogPath, "error", err)
+		return nil
+	}
+
+	models := parseCodexModelsJSON(b)
+	if models == nil {
+		slog.Debug("codex: failed to parse model_catalog_json", "path", catalogPath)
+	}
+	return models
+}
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -508,7 +613,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
-	cliBin := a.cliBin
+	systemPrompt := a.systemPrompt
+	appendPrompt := a.appendPrompt
+	cliBin := a.cmd
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
 	// Order matters for MergeEnv override semantics (later wins):
@@ -538,13 +645,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, cliBin, cliExtraArgs, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, cliBin, cliExtraArgs, extraEnv, codexHome, systemPrompt, appendPrompt)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -820,11 +927,32 @@ func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI
 	return p.Name, p.APIKey, p.CodexWireAPI, p.CodexHTTPHeaders
 }
 
+// PermissionModes returns the supported codex permission modes.
+//
+// Behavior depends on backend:
+//   - exec backend (default): codex exec has no approval IPC, so all modes run
+//     with approval_policy=never. Sandbox tier is what controls access. The
+//     "suggest" label refers to the *intent* (read-only safety) — the CLI does
+//     not pop interactive approval prompts on this backend.
+//   - app_server backend: "suggest" enables real interactive approval requests
+//     (execCommandApproval / applyPatchApproval / permissionsApproval).
+//
+// Note: auto-edit and full-auto produce the same flags on the exec backend
+// (codex CLI has no separate "ask for shell only" mode); auto-edit is kept as
+// an alias for backward compatibility with existing user configs.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "suggest", Name: "Suggest", NameZh: "建议", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
-		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑", Desc: "Auto-approve file edits, ask for shell commands", DescZh: "自动允许文件编辑，Shell 命令需确认"},
-		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动", Desc: "Auto-approve with workspace sandbox", DescZh: "自动通过（工作区沙箱）"},
-		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
+		{Key: "suggest", Name: "Suggest", NameZh: "建议",
+			Desc:   "Read-only sandbox; on exec backend no prompts, on app_server backend asks for every tool call",
+			DescZh: "只读沙箱；exec 后端不弹审批，app_server 后端每次工具调用都会询问"},
+		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑",
+			Desc:   "Workspace-write sandbox, no approval prompts (alias of Full Auto)",
+			DescZh: "工作区可写沙箱，不弹审批（等同于全自动）"},
+		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动",
+			Desc:   "Workspace-write sandbox, no approval prompts",
+			DescZh: "工作区可写沙箱，不弹审批"},
+		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式",
+			Desc:   "Bypass all approvals and sandbox (DANGEROUS)",
+			DescZh: "跳过所有审批和沙箱（危险）"},
 	}
 }

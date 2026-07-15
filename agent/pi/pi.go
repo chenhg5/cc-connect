@@ -20,15 +20,18 @@ func init() {
 	core.RegisterAgent("pi", New)
 }
 
-// Agent drives the pi coding agent CLI (`pi --mode json --no-input`).
+// Agent drives the pi coding agent CLI.
 type Agent struct {
-	cmd        string // path to pi binary
-	workDir    string
-	model      string
-	mode       string // "default" | "yolo"
-	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
-	sessionEnv []string
-	mu         sync.Mutex
+	cmd          string   // path to pi binary
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	workDir      string
+	model        string
+	mode         string // "default" | "yolo"
+	thinking     string // reasoning effort: off, minimal, low, medium, high, xhigh
+	rpc          bool   // true = --mode rpc (persistent, extension_ui); false = --mode json (one-shot, default)
+	sessionEnv   []string
+	mu           sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -39,21 +42,31 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	thinking, _ := opts["thinking"].(string)
+	rpc, _ := opts["rpc"].(bool)
 
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "pi"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "pi")
 
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("pi: '%s' not found in PATH, install with: npm install -g @mariozechner/pi-coding-agent", cmd)
 	}
 
+	// If model not specified in opts, try defaultModel from settings.json
+	if model == "" {
+		if def, err := readDefaultModel(); err == nil && def != "" {
+			model = def
+		}
+	}
+
 	return &Agent{
-		cmd:     cmd,
-		workDir: workDir,
-		model:   model,
-		mode:    mode,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		thinking:     thinking,
+		rpc:          rpc,
 	}, nil
 }
 
@@ -67,8 +80,30 @@ func normalizeMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "pi" }
-func (a *Agent) CLIBinaryName() string  { return "pi" }
+func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Pi" }
+
+// WorkspaceAgentOptions implements core.WorkspaceAgentOptionSnapshotter.
+// It returns the user-configured options that must propagate to per-workspace
+// agents reconstructed by the engine in multi-workspace mode. work_dir is
+// intentionally omitted — the engine sets the target workspace. sessionEnv is
+// also omitted (runtime-only). model and mode are copied by the engine via
+// GetModel/GetMode, so we don't repeat them here.
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	opts := map[string]any{}
+	if a.cmd != "" && a.cmd != "pi" {
+		opts["cmd"] = a.cmd
+	}
+	if a.rpc {
+		opts["rpc"] = true
+	}
+	if a.thinking != "" {
+		opts["thinking"] = a.thinking
+	}
+	return opts
+}
 
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
@@ -84,7 +119,12 @@ func (a *Agent) GetModel() string {
 }
 
 func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return nil // Pi uses its own model registry; no static list here.
+	models, err := readSettingsModels()
+	if err != nil {
+		slog.Debug("pi: AvailableModels: read settings", "error", err)
+		return nil
+	}
+	return models
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -98,9 +138,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	thinking := a.thinking
-	extraEnv := append([]string{}, a.sessionEnv...)
+	extraArgs := append([]string{}, a.cliExtraArgs...)
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.sessionEnv...)
+	rpc := a.rpc
 	a.mu.Unlock()
-	return newPiSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
+	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, rpc, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -197,11 +240,16 @@ func (a *Agent) ProjectMemoryFile() string {
 }
 
 func (a *Agent) GlobalMemoryFile() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	// Use PI_CODING_AGENT_DIR if set, otherwise default to ~/.pi/agent/.
+	agentDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if agentDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		agentDir = filepath.Join(homeDir, ".pi", "agent")
 	}
-	return filepath.Join(homeDir, ".pi", "AGENTS.md")
+	return filepath.Join(agentDir, "AGENTS.md")
 }
 
 // ── ReasoningEffortSwitcher ──────────────────────────────────
@@ -223,7 +271,14 @@ func (a *Agent) AvailableReasoningEfforts() []string {
 	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
 }
 
-// ── GetWorkDir (for /status display) ─────────────────────────
+// ── WorkDirSwitcher ───────────────────────────────────────────
+
+func (a *Agent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	slog.Info("pi: work_dir changed", "work_dir", dir)
+}
 
 func (a *Agent) GetWorkDir() string { return a.workDir }
 
@@ -250,11 +305,155 @@ func (a *Agent) SkillDirs() []string {
 	if err != nil {
 		absDir = a.workDir
 	}
-	dirs := []string{filepath.Join(absDir, ".pi", "skills")}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".pi", "skills"))
+	dirs := []string{filepath.Join(absDir, ".pi", "agent", "skills")}
+
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		// Default pi agent skill directory.
+		dirs = append(dirs, filepath.Join(homeDir, ".pi", "agent", "skills"))
+		// Common shared skill directory used by lark-cli and other agent tools.
+		dirs = append(dirs, filepath.Join(homeDir, ".agents", "skills"))
+
+		// If PI_CODING_AGENT_DIR is set, also scan skills under that directory.
+		if agentDir := os.Getenv("PI_CODING_AGENT_DIR"); agentDir != "" {
+			if filepath.IsAbs(agentDir) {
+				dirs = append(dirs, filepath.Join(agentDir, "skills"))
+			} else {
+				dirs = append(dirs, filepath.Join(homeDir, agentDir, "skills"))
+			}
+		}
 	}
 	return dirs
+}
+
+// ── Models JSON helpers ─────────────────────────────────────
+
+// modelsJSON represents the structure of ~/.pi/agent/models.json.
+type modelsJSON struct {
+	Providers map[string]struct {
+		Models []struct {
+			ID            string `json:"id"`
+			ContextWindow int    `json:"contextWindow"`
+		} `json:"models"`
+	} `json:"providers"`
+}
+
+// loadModelsContextWindows reads ~/.pi/agent/models.json and returns
+// a map of model ID → contextWindow. Keys include both the short ID
+// (e.g. "deepseek/deepseek-v4-pro") and the fully-qualified
+// provider/ID (e.g. "my-provider/my-model").
+// Returns nil on any error (caller falls back to 200K).
+func loadModelsContextWindows() map[string]int {
+	dir := piSettingsDir()
+	if dir == "" {
+		slog.Warn("pi: cannot determine pi settings dir for models.json")
+		return nil
+	}
+	path := filepath.Join(dir, "models.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Info("pi: models.json not found, using 200K fallback", "path", path)
+		} else {
+			slog.Warn("pi: read models.json", "path", path, "error", err)
+		}
+		return nil
+	}
+	var cfg modelsJSON
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		slog.Warn("pi: parse models.json", "path", path, "error", err)
+		return nil
+	}
+	m := make(map[string]int)
+	for provider, p := range cfg.Providers {
+		for _, mdl := range p.Models {
+			m[mdl.ID] = mdl.ContextWindow
+			m[provider+"/"+mdl.ID] = mdl.ContextWindow
+		}
+	}
+	return m
+}
+
+// ── Settings helpers ─────────────────────────────────────────
+
+// piSettingsDir returns the pi agent config directory.
+// Respects PI_CODING_AGENT_DIR env var; defaults to ~/.pi/agent.
+func piSettingsDir() string {
+	if d := os.Getenv("PI_CODING_AGENT_DIR"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pi", "agent")
+}
+
+// settingsPath returns the path to settings.json.
+func settingsPath() string {
+	dir := piSettingsDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "settings.json")
+}
+
+// piSettings represents the structure of pi's settings.json relevant fields.
+type piSettings struct {
+	EnabledModels  []string `json:"enabledModels"`
+	DefaultModel   string   `json:"defaultModel"`
+	DefaultProvider string  `json:"defaultProvider"`
+}
+
+// readSettings reads and parses pi's settings.json.
+func readSettings() (*piSettings, error) {
+	path := settingsPath()
+	if path == "" {
+		return nil, fmt.Errorf("pi: cannot determine settings path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("pi: read settings: %w", err)
+	}
+	var s piSettings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("pi: parse settings: %w", err)
+	}
+	return &s, nil
+}
+
+// readSettingsModels returns the enabledModels from settings.json as ModelOptions.
+func readSettingsModels() ([]core.ModelOption, error) {
+	s, err := readSettings()
+	if err != nil {
+		return nil, err
+	}
+	if len(s.EnabledModels) == 0 {
+		return nil, nil
+	}
+	models := make([]core.ModelOption, 0, len(s.EnabledModels))
+	for _, m := range s.EnabledModels {
+		option := core.ModelOption{Name: m}
+		// Derive a short alias from the last segment after the final "/".
+		if idx := strings.LastIndex(m, "/"); idx >= 0 && idx+1 < len(m) {
+			option.Alias = m[idx+1:]
+		}
+		models = append(models, option)
+	}
+	return models, nil
+}
+
+// readDefaultModel returns the defaultModel from settings.json.
+func readDefaultModel() (string, error) {
+	s, err := readSettings()
+	if err != nil {
+		return "", err
+	}
+	// If defaultProvider is set, qualify the defaultModel with it.
+	if s.DefaultProvider != "" && s.DefaultModel != "" && !strings.Contains(s.DefaultModel, "/") {
+		return s.DefaultProvider + "/" + s.DefaultModel, nil
+	}
+	return s.DefaultModel, nil
 }
 
 // ── Session helpers ──────────────────────────────────────────

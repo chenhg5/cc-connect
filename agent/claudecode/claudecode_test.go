@@ -262,12 +262,12 @@ func TestAgent_Name(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{cliBin: "claude"}
+	a := &Agent{cmd: "claude"}
 	if got := a.CLIBinaryName(); got != "claude" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "claude")
 	}
 
-	a2 := &Agent{cliBin: "my-cli"}
+	a2 := &Agent{cmd: "my-cli"}
 	if got := a2.CLIBinaryName(); got != "my-cli" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "my-cli")
 	}
@@ -408,6 +408,21 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
 		},
 		{
+			name:     "path with dots (hidden dirs and version numbers)",
+			input:    "/home/user/.nvm/versions/node/v22.22.2/lib",
+			expected: "-home-user--nvm-versions-node-v22-22-2-lib",
+		},
+		{
+			name:     "path with @ (scoped npm packages)",
+			input:    "/home/user/node_modules/@anthropic-ai/claude-code",
+			expected: "-home-user-node-modules--anthropic-ai-claude-code",
+		},
+		{
+			name:     "path with both dots and @",
+			input:    "/home/user/.local/share/@org/my.project",
+			expected: "-home-user--local-share--org-my-project",
+		},
+		{
 			name:     "empty path",
 			input:    "",
 			expected: "",
@@ -503,7 +518,7 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 func TestSnapshotCLIPath(t *testing.T) {
 	cases := []struct {
 		name      string
-		cliBin    string
+		cmd       string
 		extraArgs []string
 		want      string
 	}{
@@ -515,9 +530,9 @@ func TestSnapshotCLIPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := snapshotCLIPath(tc.cliBin, tc.extraArgs)
+			got := snapshotCmdPath(tc.cmd, tc.extraArgs)
 			if got != tc.want {
-				t.Errorf("snapshotCLIPath(%q, %v) = %q, want %q", tc.cliBin, tc.extraArgs, got, tc.want)
+				t.Errorf("snapshotCmdPath(%q, %v) = %q, want %q", tc.cmd, tc.extraArgs, got, tc.want)
 			}
 		})
 	}
@@ -528,9 +543,9 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 	// PATH. WorkspaceAgentOptions only reads fields that the production
 	// New() also writes; this just verifies the snapshot shape.
 	a := &Agent{
-		cliBin:           "my-cli",
+		cmd:           "my-cli",
 		cliExtraArgs:     []string{"--add-dir", "/parent"},
-		cliArgsFlag:      "-a",
+		cmdArgsFlag:      "-a",
 		model:            "claude-opus-4-7",
 		reasoningEffort:  "high",
 		mode:             "acceptEdits",
@@ -544,8 +559,8 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 
 	want := map[string]any{
 		"mode":               "acceptEdits",
-		"cli_path":           "my-cli --add-dir /parent",
-		"cli_args_flag":      "-a",
+		"cmd":           "my-cli --add-dir /parent",
+		"cmd_args_flag":      "-a",
 		"model":              "claude-opus-4-7",
 		"reasoning_effort":   "high",
 		"allowed_tools":      []any{"Edit", "Read"},
@@ -570,9 +585,9 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 }
 
 func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
-	// Default agent (only mode is always emitted, plus default cliBin
-	// "claude" should be skipped by snapshotCLIPath).
-	a := &Agent{cliBin: "claude", mode: "default"}
+	// Default agent (only mode is always emitted, plus default cmd
+	// "claude" should be skipped by snapshotCmdPath).
+	a := &Agent{cmd: "claude", mode: "default"}
 	got := a.WorkspaceAgentOptions()
 
 	if len(got) != 1 {
@@ -582,7 +597,7 @@ func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
 		t.Errorf("snapshot[mode] = %v, want %q", got["mode"], "default")
 	}
 	for _, k := range []string{
-		"cli_path", "cli_args_flag", "model", "reasoning_effort",
+		"cmd", "cmd_args_flag", "model", "reasoning_effort",
 		"allowed_tools", "disallowed_tools", "max_context_tokens",
 		"router_url", "router_api_key",
 	} {
@@ -606,9 +621,9 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 		t.Skip("run_as_user-based LookPath bypass is Unix-only")
 	}
 	parent := &Agent{
-		cliBin:           "my-cli",
+		cmd:           "my-cli",
 		cliExtraArgs:     []string{"code", "--add-dir", "/parent"},
-		cliArgsFlag:      "-a",
+		cmdArgsFlag:      "-a",
 		model:            "claude-opus-4-7",
 		reasoningEffort:  "high",
 		mode:             "acceptEdits",
@@ -628,14 +643,14 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 	}
 	child := a.(*Agent)
 
-	if child.cliBin != "my-cli" {
-		t.Errorf("cliBin = %q, want %q", child.cliBin, "my-cli")
+	if child.cmd != "my-cli" {
+		t.Errorf("cmd = %q, want %q", child.cmd, "my-cli")
 	}
 	if !reflect.DeepEqual(child.cliExtraArgs, []string{"code", "--add-dir", "/parent"}) {
 		t.Errorf("cliExtraArgs = %v, want [code --add-dir /parent]", child.cliExtraArgs)
 	}
-	if child.cliArgsFlag != "-a" {
-		t.Errorf("cliArgsFlag = %q, want -a", child.cliArgsFlag)
+	if child.cmdArgsFlag != "-a" {
+		t.Errorf("cmdArgsFlag = %q, want -a", child.cmdArgsFlag)
 	}
 	if child.model != "claude-opus-4-7" {
 		t.Errorf("model = %q, want claude-opus-4-7", child.model)
@@ -749,4 +764,113 @@ func TestExtractStringContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── Issue #599 — cross-project session context leakage ────────
+//
+// The original PR (#604) regressed when the engine loaded a stored
+// AgentSessionID that actually belonged to a different project's
+// workspace. The fix is to ask the agent, via core.SessionIDValidator,
+// whether the ID has a session file under THIS project's per-project
+// directory. These tests pin the helper directly.
+
+// TestValidateSessionIDInProject_ValidSession ensures a known-good
+// sessionID in the project's directory validates true.
+func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
+	homeDir := t.TempDir()
+	workDir := filepath.Join(homeDir, "Documents", "myproject")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	sessionID := "abc123-def456"
+	if err := os.WriteFile(filepath.Join(projectDir, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	if !validateSessionIDInProject(homeDir, workDir, sessionID) {
+		t.Errorf("validateSessionIDInProject(%q, %q) = false, want true", workDir, sessionID)
+	}
+}
+
+// TestValidateSessionIDInProject_InvalidSession ensures a sessionID that
+// has no file in the project's directory returns false (the engine should
+// then start fresh).
+func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
+	homeDir := t.TempDir()
+	workDir := filepath.Join(homeDir, "Documents", "myproject")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	// A different session file is present, but not the one we ask about.
+	if err := os.WriteFile(filepath.Join(projectDir, "other-session.jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write other session file: %v", err)
+	}
+	if validateSessionIDInProject(homeDir, workDir, "abc123-def456") {
+		t.Errorf("validateSessionIDInProject for missing session = true, want false")
+	}
+}
+
+// TestValidateSessionIDInProject_EmptySessionID ensures the empty ID is
+// rejected outright; the engine should never try to resume an empty ID
+// anyway, but the helper must still return false defensively.
+func TestValidateSessionIDInProject_EmptySessionID(t *testing.T) {
+	if validateSessionIDInProject(t.TempDir(), "/tmp", "") {
+		t.Error("validateSessionIDInProject(empty) = true, want false")
+	}
+}
+
+// TestValidateSessionIDInProject_ProjectDirMissing ensures a workDir that
+// has no corresponding ~/.claude/projects/<key> directory returns false —
+// Claude Code has never been invoked in that workspace, so any stored
+// session ID could not possibly belong to it.
+func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
+	homeDir := t.TempDir()
+	if validateSessionIDInProject(homeDir, "/nonexistent/path", "some-session-id") {
+		t.Error("validateSessionIDInProject for missing project dir = true, want false")
+	}
+}
+
+// TestValidateSessionIDInProject_CrossProjectLeak is the regression for
+// issue #599: a session ID created under project A's directory must NOT
+// validate as belonging to project B, even when B is also configured. The
+// original bug let one project silently resume another project's
+// conversation history.
+func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+
+	projectA := filepath.Join(homeDir, "work", "projectA")
+	projectB := filepath.Join(homeDir, "work", "projectB")
+	dirA := filepath.Join(projectsBase, encodeClaudeProjectKey(projectA))
+	dirB := filepath.Join(projectsBase, encodeClaudeProjectKey(projectB))
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("create %s: %v", d, err)
+		}
+	}
+
+	sessionID := "shared-session-id"
+	if err := os.WriteFile(filepath.Join(dirA, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session in projectA: %v", err)
+	}
+
+	// Project B should NOT see projectA's session.
+	if validateSessionIDInProject(homeDir, projectB, sessionID) {
+		t.Error("validateSessionIDInProject leaked project A's session into project B")
+	}
+	// Sanity: project A still sees its own.
+	if !validateSessionIDInProject(homeDir, projectA, sessionID) {
+		t.Error("validateSessionIDInProject rejected project A's own session")
+	}
+}
+
+// TestAgent_ImplementsSessionIDValidator is a compile-time check that the
+// production *Agent satisfies core.SessionIDValidator. If the interface
+// or its method signature drifts, this test stops compiling before the
+// regression can ship.
+func TestAgent_ImplementsSessionIDValidator(t *testing.T) {
+	var _ core.SessionIDValidator = (*Agent)(nil)
 }

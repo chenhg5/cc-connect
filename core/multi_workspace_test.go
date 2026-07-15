@@ -704,3 +704,78 @@ func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
 		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
 	}
 }
+
+// newTestEngineWithMultiWorkspaceRunAsAgent builds a multi-workspace engine
+// whose agent reports a run_as_user, exercising the OS-isolation code paths.
+func newTestEngineWithMultiWorkspaceRunAsAgent(t *testing.T, baseDir, runAsUser string) *Engine {
+	t.Helper()
+	tmpDir := t.TempDir()
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	agent := &runAsTestAgent{namedTestAgent: &namedTestAgent{name: "runas-lookup-agent"}, runAsUser: runAsUser}
+	e := NewEngine("test", agent, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	return e
+}
+
+// TestLookupEffectiveBinding_RunAsUserKeepsInaccessibleWorkspace is a
+// regression guard for the bug where a bound workspace was silently dropped
+// under run_as_user. The supervisor process runs as a different user than the
+// agent, so os.Stat on the target user's private workspace returns EACCES (or,
+// here, the directory simply isn't visible to the supervisor). The old code
+// treated any stat error as "directory missing" and called Unbind(),
+// permanently losing the user's /ws binding even though the agent — running as
+// the target user — could access the workspace fine.
+//
+// With isolation active, lookupEffectiveWorkspaceBinding must skip the
+// supervisor-side existence check entirely: the binding stays usable and is
+// never unbound.
+func TestLookupEffectiveBinding_RunAsUserKeepsInaccessibleWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	// Deliberately point at a path the supervisor can't stat as existing.
+	// Under real run_as_user this is the target user's private home; here a
+	// non-existent path stands in for "stat fails from the supervisor".
+	workspace := normalizeWorkspacePath(filepath.Join(baseDir, "private", "loader"))
+
+	e := newTestEngineWithMultiWorkspaceRunAsAgent(t, baseDir, "deploybot")
+	channelID := "C-isolated"
+	channelKey := workspaceChannelKey("test", channelID)
+	e.workspaceBindings.Bind("project:test", channelKey, "loader", workspace)
+
+	b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey)
+	if b == nil {
+		t.Fatal("binding was dropped under run_as_user; expected it to survive")
+	}
+	if !usable {
+		t.Errorf("expected binding to be usable under run_as_user despite supervisor-side stat failure")
+	}
+	if b.Workspace != workspace {
+		t.Errorf("workspace = %q, want %q", b.Workspace, workspace)
+	}
+
+	// The binding must still be persisted — not Unbind()'d.
+	if got := e.workspaceBindings.Lookup("project:test", channelKey); got == nil {
+		t.Fatal("binding was unbound under run_as_user; it must be preserved")
+	}
+}
+
+// TestLookupEffectiveBinding_NoIsolationUnbindsMissing preserves the original
+// behavior when isolation is NOT active: a genuinely missing workspace
+// directory is unbound so stale bindings don't linger.
+func TestLookupEffectiveBinding_NoIsolationUnbindsMissing(t *testing.T) {
+	baseDir := t.TempDir()
+	missing := normalizeWorkspacePath(filepath.Join(baseDir, "gone"))
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir) // namedTestAgent: no run_as_user
+	channelID := "C-missing"
+	channelKey := workspaceChannelKey("test", channelID)
+	e.workspaceBindings.Bind("project:test", channelKey, "gone", missing)
+
+	_, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey)
+	if usable {
+		t.Errorf("expected missing workspace to be unusable without isolation")
+	}
+	if got := e.workspaceBindings.Lookup("project:test", channelKey); got != nil {
+		t.Errorf("expected missing workspace binding to be unbound without isolation, got %+v", got)
+	}
+}

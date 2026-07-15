@@ -5,7 +5,7 @@
     "providers": "Proveedores",
     "sessions": "Sesiones",
     "chat": "Chat",
-    "cron": "Cron",
+    "cron": "Tareas programadas",
     "bridge": "Puente",
     "skills": "Habilidades",
     "system": "Sistema"
@@ -114,6 +114,8 @@
     "lastRun": "Última ejecución",
     "lastError": "Último error",
     "add": "Añadir tarea",
+    "trigger": "Ejecutar ahora",
+    "triggerPending": "Se activó. Los resultados se actualizarán en breve.",
     "delete": "Eliminar",
     "noJobs": "No hay tareas programadas",
     "workDir": "Directorio de trabajo",
@@ -225,7 +227,15 @@
     "manualSetup": "Configuración manual",
     "manualHint": "Para {{platform}}, configure las credenciales en config.toml y reinicie el servicio.",
     "advancedOptions": "Opciones avanzadas",
-    "unsupportedPlatform": "Tipo de plataforma no soportado: {{type}}"
+    "unsupportedPlatform": "Tipo de plataforma no soportado: {{type}}",
+    "cloudWeb": {
+      "urlRequiredWebsocket": "WebSocket requiere URL base de API o URL de WebSocket (al menos una)",
+      "urlRequiredLongPoll": "Long poll requiere URL base de API",
+      "urlRequiredGateway": "Gateway requiere URL base de API o URL de registro (al menos una)",
+      "invalidHttpUrl": "{{field}} debe ser una URL http(s) válida o host[:puerto]",
+      "invalidWsUrl": "La URL de WebSocket debe comenzar con ws:// o wss://",
+      "publicUrlRequiredGateway": "La URL pública del webhook es obligatoria cuando se establece la URL de registro"
+    }
   },
   "fields": {
     "botToken": "Token del bot",
@@ -255,7 +265,18 @@
     "appSecret": "App Secret",
     "sandboxMode": "Modo sandbox",
     "channelSecret": "Channel Secret",
-    "channelToken": "Channel Access Token"
+    "channelToken": "Channel Access Token",
+    "transport": "Modo de transporte",
+    "longPollTimeout": "Timeout de long polling (ms)",
+    "listen": "Dirección de escucha",
+    "publicUrl": "URL pública del webhook",
+    "publicUrlHint": "URL pública para que el Gateway llame al webhook de cc-connect",
+    "registerUrl": "URL de registro",
+    "registerUrlHint": "Opcional: endpoint para registrar el webhook en el Gateway",
+    "cloudWebWsHint": "Opcional si hay base URL; predeterminado /cloud-web/ws",
+    "cloudWebBaseUrlHint": "Obligatorio para long poll; para WebSocket, use esto o la URL de WebSocket abajo",
+    "eventsPath": "Ruta de eventos (long poll)",
+    "sendPath": "Ruta de envío (API saliente)"
   },
   "chat": {
     "noChats": "No hay proyectos",

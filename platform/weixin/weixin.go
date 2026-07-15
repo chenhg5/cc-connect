@@ -79,6 +79,12 @@ type Platform struct {
 	cancel   context.CancelFunc
 	stopping bool
 
+	// lifecycleHandler receives readiness callbacks once the ilink long-poll
+	// actually confirms a working session (first successful getUpdates).
+	// This is what distinguishes ready-for-poll from a Start()-time
+	// ready-for-publish signal that does not yet mean "messages can flow".
+	lifecycleHandler core.PlatformLifecycleHandler
+
 	syncBufMu   sync.Mutex
 	syncBuf     string
 	syncBufPath string
@@ -479,6 +485,17 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	return nil
 }
 
+// SetLifecycleHandler registers a handler that will be notified once the ilink
+// long-poll has confirmed a working session. Implements
+// core.AsyncRecoverablePlatform so the engine waits for the actual
+// ready-for-poll signal before logging "platform ready" and initialising
+// platform-level capabilities.
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
+
 func (p *Platform) Stop() error {
 	p.mu.Lock()
 	if p.cancel != nil {
@@ -494,6 +511,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	nextTimeoutMS := p.longPollMS
+	readyNotified := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -537,6 +555,22 @@ func (p *Platform) pollLoop(ctx context.Context) {
 		}
 		if resp.Ret != 0 && resp.Errmsg != "" {
 			slog.Warn("weixin: getUpdates ret", "ret", resp.Ret, "errcode", resp.Errcode, "errmsg", resp.Errmsg)
+		}
+
+		// First successful getUpdates round-trip: ilink has accepted our token
+		// and the long-poll plumbing is alive. Treat this as the authoritative
+		// ready-for-poll signal; surface it to the engine so it can finish
+		// initialising platform-level capabilities and stop gating the
+		// "platform ready" log on a Start()-time promise.
+		if !readyNotified {
+			readyNotified = true
+			p.mu.RLock()
+			handler := p.lifecycleHandler
+			p.mu.RUnlock()
+			if handler != nil {
+				slog.Info("weixin: ilink ready-for-poll")
+				handler.OnPlatformReady(p)
+			}
 		}
 
 		p.mu.RLock()
@@ -1218,4 +1252,5 @@ var (
 	_ core.TypingIndicator               = (*Platform)(nil)
 	_ core.EarlyInstantReplyRequester    = (*Platform)(nil)
 	_ core.FinalOnlyTextRequester        = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
 )

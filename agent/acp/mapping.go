@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -14,6 +15,7 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 		Update    json.RawMessage `json:"update"`
 	}
 	if err := json.Unmarshal(params, &wrap); err != nil || len(wrap.Update) == 0 {
+		slog.Debug("acp: mapSessionUpdate: failed to parse wrap", "error", err, "params", string(params))
 		return nil
 	}
 	sid := wrap.SessionID
@@ -25,6 +27,7 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 		SessionUpdate string `json:"sessionUpdate"`
 	}
 	if err := json.Unmarshal(wrap.Update, &head); err != nil {
+		slog.Debug("acp: mapSessionUpdate: failed to parse head", "error", err, "update", string(wrap.Update))
 		return nil
 	}
 
@@ -46,24 +49,69 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 	}
 }
 
+// mapAgentMessageChunk handles agent_message_chunk and user_message_chunk updates.
+// It supports multiple JSON formats for broader vendor compatibility:
+// - Standard ACP: {"content": {"type": "text", "text": "..."}}
+// - Alternative: {"content": {"text": "..."}} (type omitted)
+// - Alternative: {"text": "..."} (top-level text field)
+// - Alternative: {"content": "..."} (content as string)
 func mapAgentMessageChunk(sessionID string, update json.RawMessage) []core.Event {
+	// Try standard ACP format first
 	var u struct {
 		Content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if err := json.Unmarshal(update, &u); err != nil {
-		return nil
+	if err := json.Unmarshal(update, &u); err == nil && u.Content.Text != "" {
+		return []core.Event{{
+			Type:      core.EventText,
+			Content:   u.Content.Text,
+			SessionID: sessionID,
+		}}
 	}
-	if u.Content.Text == "" {
-		return nil
+
+	// Try alternative format: content.text without type field
+	var alt1 struct {
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
 	}
-	return []core.Event{{
-		Type:      core.EventText,
-		Content:   u.Content.Text,
-		SessionID: sessionID,
-	}}
+	if err := json.Unmarshal(update, &alt1); err == nil && alt1.Content.Text != "" {
+		return []core.Event{{
+			Type:      core.EventText,
+			Content:   alt1.Content.Text,
+			SessionID: sessionID,
+		}}
+	}
+
+	// Try alternative format: top-level text field
+	var alt2 struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(update, &alt2); err == nil && alt2.Text != "" {
+		return []core.Event{{
+			Type:      core.EventText,
+			Content:   alt2.Text,
+			SessionID: sessionID,
+		}}
+	}
+
+	// Try alternative format: content as string
+	var alt3 struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(update, &alt3); err == nil && alt3.Content != "" {
+		return []core.Event{{
+			Type:      core.EventText,
+			Content:   alt3.Content,
+			SessionID: sessionID,
+		}}
+	}
+
+	// Log unknown format for debugging
+	slog.Debug("acp: mapAgentMessageChunk: unknown format", "update", string(update))
+	return nil
 }
 
 func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
@@ -207,7 +255,62 @@ func mapSessionUpdateFallback(sessionID string, kind string, update json.RawMess
 			Content:   t,
 			SessionID: sessionID,
 		}}
+	case "message", "message_chunk", "text", "response":
+		// Common vendor extensions for text output
+		var u struct {
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			Text    string `json:"text"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(update, &u) != nil {
+			return nil
+		}
+		t := u.Content.Text
+		if t == "" {
+			t = u.Text
+		}
+		if t == "" {
+			t = u.Message
+		}
+		if t == "" {
+			return nil
+		}
+		return []core.Event{{
+			Type:      core.EventText,
+			Content:   t,
+			SessionID: sessionID,
+		}}
+	default:
+		// Last resort: try to extract any text-like field from the JSON
+		var generic struct {
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			Text    string `json:"text"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(update, &generic); err != nil {
+			return nil
+		}
+		t := generic.Content.Text
+		if t == "" {
+			t = generic.Text
+		}
+		if t == "" {
+			t = generic.Message
+		}
+		if t != "" {
+			slog.Debug("acp: mapSessionUpdateFallback: extracted text from unknown format", "kind", kind, "text_len", len(t))
+			return []core.Event{{
+				Type:      core.EventText,
+				Content:   t,
+				SessionID: sessionID,
+			}}
+		}
 	}
+	slog.Debug("acp: mapSessionUpdateFallback: unrecognized format", "kind", kind, "update", string(update))
 	return nil
 }
 

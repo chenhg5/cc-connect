@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestOpencodeSessionEntry_Unmarshal(t *testing.T) {
 // the ContinueSession sentinel (__continue__) is not passed as a literal
 // session ID to the CLI. This was fixed in PR #249.
 func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "echo", "/tmp", "", "default", core.ContinueSession, nil)
+	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -366,6 +367,97 @@ func TestSendEventResultRecoversLatestAssistantTextFromDB(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected EventResult")
+	}
+}
+
+// TestHandleToolUsePermissionDeniedEmitsEventText verifies that when opencode
+// rejects a tool call (status="error"), the error message is emitted as an
+// EventText so the engine has something meaningful to deliver instead of
+// the generic "(空响应)" / "(empty response)" placeholder.
+// Reproduces the scenario in issue #178 where running bash commands in
+// default mode silently produced an empty response.
+func TestHandleToolUsePermissionDeniedEmitsEventText(t *testing.T) {
+	jsonData := `{"type":"tool_use","part":{"tool":"bash","state":{"status":"error","error":"The user rejected permission to use this specific tool call.","input":{"command":"ls","description":"List files in current directory"}}}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.handleToolUse(raw)
+
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events (EventToolUse + EventText), got %d: %v", len(events), events)
+	}
+	if events[0].Type != core.EventToolUse {
+		t.Errorf("events[0].Type = %v, want EventToolUse", events[0].Type)
+	}
+	if events[1].Type != core.EventText {
+		t.Errorf("events[1].Type = %v, want EventText (error text so engine has content)", events[1].Type)
+	}
+	if !strings.Contains(events[1].Content, "rejected permission") {
+		t.Errorf("EventText.Content = %q, want it to contain the rejection reason", events[1].Content)
+	}
+}
+
+// TestHandleToolUseCompletedDoesNotEmitExtraText verifies that a successfully
+// completed tool call does NOT emit an EventText (regression guard).
+func TestHandleToolUseCompletedDoesNotEmitExtraText(t *testing.T) {
+	jsonData := `{"type":"tool_use","part":{"tool":"bash","state":{"status":"completed","output":"file1.txt file2.txt","input":{"command":"ls"}}}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.handleToolUse(raw)
+
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+
+	for _, evt := range events {
+		if evt.Type == core.EventText {
+			t.Errorf("unexpected EventText for completed tool: %q", evt.Content)
+		}
+	}
+	if len(events) < 2 {
+		t.Errorf("expected EventToolUse + EventToolResult for completed tool, got %d events", len(events))
+	}
+}
+
+// TestHandleToolUseErrorNoMessageNoText verifies that a tool error with empty
+// error message does NOT emit a spurious empty EventText.
+func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
+	jsonData := `{"type":"tool_use","part":{"tool":"bash","state":{"status":"error"}}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.handleToolUse(raw)
+
+	for len(s.events) > 0 {
+		evt := <-s.events
+		if evt.Type == core.EventText {
+			t.Errorf("unexpected EventText for error with no message: %q", evt.Content)
+		}
 	}
 }
 

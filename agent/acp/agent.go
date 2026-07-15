@@ -19,14 +19,15 @@ func init() {
 
 // Agent runs an ACP (Agent Client Protocol) agent subprocess over stdio JSON-RPC.
 type Agent struct {
-	workDir     string
-	command     string
-	args        []string
-	staticEnv   map[string]string
-	extraEnv    []string
-	sessionEnv  []string
-	authMethod  string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
-	displayName string // optional, for doctor (default "ACP")
+	workDir      string
+	cmd          string
+	cliExtraArgs []string // extra args from cmd, prepended before args
+	args         []string
+	staticEnv    map[string]string
+	extraEnv     []string
+	sessionEnv   []string
+	authMethod   string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
+	displayName  string // optional, for doctor (default "ACP")
 
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
@@ -72,10 +73,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
-	cmdStr, _ := opts["command"].(string)
-	cmdStr = strings.TrimSpace(cmdStr)
+	cmdStr, cliExtraArgs := core.ParseCmdOpts(opts, "")
 	if cmdStr == "" {
-		return nil, fmt.Errorf("acp: agent option \"command\" is required (path or name of the ACP agent binary)")
+		return nil, fmt.Errorf("acp: agent option \"cmd\" or \"command\" is required (path or name of the ACP agent binary)")
 	}
 	if _, err := exec.LookPath(cmdStr); err != nil {
 		return nil, fmt.Errorf("acp: command %q not found in PATH: %w", cmdStr, err)
@@ -96,7 +96,8 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	return &Agent{
 		workDir:     workDir,
-		command:     cmdStr,
+		cmd:          cmdStr,
+		cliExtraArgs: cliExtraArgs,
 		args:        args,
 		staticEnv:   staticEnv,
 		extraEnv:    extra,
@@ -194,7 +195,7 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"command": a.command,
+		"cmd": a.cmd,
 	}
 	if len(a.args) > 0 {
 		opts["args"] = append([]string(nil), a.args...)
@@ -223,8 +224,8 @@ func (a *Agent) SetSessionEnv(env []string) {
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.RLock()
-	command := a.command
-	args := a.args
+	command := a.cmd
+	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
 	workDir := a.workDir
 	authMethod := a.authMethod
 	pendingMode := a.mode
@@ -234,7 +235,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 
 	return newACPSession(ctx, acpSessionConfig{
 		command:         command,
-		args:            args,
+		args:            allArgs,
 		extraEnv:        extra,
 		workDir:         workDir,
 		resumeSessionID: sessionID,
@@ -250,9 +251,8 @@ func (a *Agent) Stop() error { return nil }
 
 func (a *Agent) CLIBinaryName() string {
 	a.mu.RLock()
-	cmd := a.command
-	a.mu.RUnlock()
-	return filepath.Base(cmd)
+	defer a.mu.RUnlock()
+	return filepath.Base(a.cmd)
 }
 
 func (a *Agent) CLIDisplayName() string {

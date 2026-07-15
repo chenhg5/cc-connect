@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// UnauthorizedAccessMessage is safe to show to an inbound sender when the
+// platform boundary rejects their identity. Keep it user-facing: do not mention
+// allow_from, user IDs, or chat IDs.
+const UnauthorizedAccessMessage = "角色未授权，请联系管理员添加权限。"
+
 // MergeEnv returns base env with entries from extra overriding same-key entries.
 // This prevents duplicate keys (e.g. two PATH entries) which cause the override
 // to be silently ignored on Linux (getenv returns the first match).
@@ -82,6 +87,14 @@ type FileAttachment struct {
 // and returns the list of absolute file paths. Agents can reference these paths
 // in their prompts so the CLI can read them with built-in tools.
 //
+// workDir may be absolute or relative; the returned paths are always absolute.
+// When workDir is relative, filepath.Abs resolves it against the cc-connect
+// process's current working directory, so callers running from different cwd
+// contexts (especially those where the agent's "workDir" is itself relative
+// to the user's home, like "~/project") still get paths the agent can
+// actually open. An empty workDir falls back to the process cwd, which is
+// a reasonable last-resort default for misconfigured deploys.
+//
 // The attachment FileName is treated as untrusted user input (it comes from
 // the IM/HTTP upload metadata) and is sanitized to a basename before being
 // joined into attachDir. Without this, FileName="../../escape.txt" was
@@ -91,7 +104,21 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
 	}
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	// Absolutize workDir so the returned paths are usable no matter where the
+	// process is invoked from. See issue #1459: when workDir is relative
+	// (e.g. ".cc-connect" or "project/sub"), the agent's prompt referenced
+	// ".cc-connect/attachments/<file>" while the file actually landed at
+	// workDir/.cc-connect/attachments/<file> — a path mismatch that lost
+	// every attachment.
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		// Fall back to the original input. filepath.Join on a relative
+		// workDir is still better than failing the whole save, and
+		// AppendFileRefs below defensively absolutizes anyway.
+		absWorkDir = workDir
+		slog.Warn("SaveFilesToDisk: filepath.Abs failed, using raw workDir", "workDir", workDir, "error", err)
+	}
+	attachDir := filepath.Join(absWorkDir, ".cc-connect", "attachments")
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
 	}
@@ -132,6 +159,14 @@ func sanitizeAttachmentFileName(name string) string {
 }
 
 // AppendFileRefs appends file path references to a prompt string.
+//
+// File paths are defensively absolutized so the prompt handed to the agent
+// always points at a real on-disk location, even when a caller passed a
+// relative path by mistake. This guards against the issue #1459 class of
+// bugs where the prompt referenced ".cc-connect/attachments/<file>" while
+// the file actually landed at the absolute version of workDir. Absolute
+// inputs are passed through unchanged. An unresolvable relative path falls
+// back to the raw input rather than dropping the reference.
 func AppendFileRefs(prompt string, filePaths []string) string {
 	if len(filePaths) == 0 {
 		return prompt
@@ -139,7 +174,19 @@ func AppendFileRefs(prompt string, filePaths []string) string {
 	if prompt == "" {
 		prompt = "Please analyze the attached file(s)."
 	}
-	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+	abs := make([]string, len(filePaths))
+	for i, p := range filePaths {
+		if filepath.IsAbs(p) {
+			abs[i] = p
+			continue
+		}
+		if a, err := filepath.Abs(p); err == nil {
+			abs[i] = a
+		} else {
+			abs[i] = p
+		}
+	}
+	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(abs, ", ") + ")"
 }
 
 // AudioAttachment represents a voice/audio message sent by the user.
@@ -185,6 +232,21 @@ type Message struct {
 	FromVoice        bool                // true if message originated from voice transcription
 	ModeOverride     string              // if set, temporarily override agent permission mode for this message
 	InstantReplySent bool                // internal: configured instant reply was already sent before processing
+	// IsPermissionResponse is set by inline-button / card-action paths in
+	// platforms when a synthesized message is forwarded as a permission
+	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,
+	// Feishu onCardAction, QQBot interaction button, bridge card_action).
+	// The engine uses this flag to drop STALE callbacks silently when no
+	// matching pending request exists, instead of letting the literal
+	// "allow"/"deny" string reach the agent prompt stream. Plain text
+	// "allow"/"deny" typed by a real user must NOT set this flag — they
+	// continue to flow through the regular message handler.
+	IsPermissionResponse bool
+	// UserMessageTimeMs is the platform message creation time in Unix milliseconds
+	// when known (e.g. Feishu im.message.message_received create_time). Used to
+	// drop late redeliveries that reuse a new message_id but an older create_time
+	// than a message already processed. Zero means unset (no ordering hint).
+	UserMessageTimeMs int64
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -216,24 +278,26 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
-	Type         EventType
-	Content      string
-	ToolName     string         // populated for EventToolUse, EventPermissionRequest
-	ToolInput    string         // human-readable summary of tool input
-	ToolInputRaw map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
-	ToolResult   string         // populated for EventToolResult
-	ToolStatus   string         // optional status for EventToolResult (e.g. completed/failed)
-	ToolExitCode *int           // optional exit code for EventToolResult
-	ToolSuccess  *bool          // optional success flag for EventToolResult
-	SessionID    string         // agent-managed session ID for conversation continuity
-	RequestID    string         // unique request ID for EventPermissionRequest
-	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
-	Done         bool
-	Error        error
-	InputTokens  int // token usage from agent result events
-	OutputTokens int
-	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
-	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
+	Type                     EventType
+	Content                  string
+	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
+	ToolInput                string         // human-readable summary of tool input
+	ToolInputRaw             map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
+	ToolResult               string         // populated for EventToolResult
+	ToolStatus               string         // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode             *int           // optional exit code for EventToolResult
+	ToolSuccess              *bool          // optional success flag for EventToolResult
+	SessionID                string         // agent-managed session ID for conversation continuity
+	RequestID                string         // unique request ID for EventPermissionRequest
+	Questions                []UserQuestion // populated when ToolName == "AskUserQuestion"
+	Done                     bool
+	Error                    error
+	InputTokens              int // token usage from agent result events
+	OutputTokens             int
+	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
+	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
+	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
+	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
 
 // HistoryEntry is one turn in a conversation.

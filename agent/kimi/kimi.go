@@ -22,23 +22,33 @@ func init() {
 	core.RegisterAgent("kimi", New)
 }
 
-// Agent drives Kimi Code CLI using --print --output-format stream-json.
+// Agent drives Kimi Code CLI in non-interactive mode via `--prompt` (and,
+// when supported by the installed binary, `--print --output-format stream-json`).
+//
+// The legacy kimi-cli requires the `--print` flag for `--output-format` to
+// take effect, while the newer Kimi Code CLI removed `--print` entirely and
+// uses `--prompt` alone to enter non-interactive mode (see #1456). We probe
+// `kimi --help` once at construction to detect which surface is installed and
+// adapt the args we pass at Send() time.
 //
 // Modes:
-//   - "default": standard mode (note: --print implicitly enables --yolo)
+//   - "default": standard mode (non-interactive `--prompt` auto-approves tools)
 //   - "yolo":    auto-approve all tool calls
 //   - "plan":    read-only plan mode
 //   - "quiet":   alias for --quiet (print + text + final-message-only)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "kimi"
-	timeout    time.Duration
-	providers  []core.ProviderConfig
-	activeIdx  int // -1 = no provider set
-	sessionEnv []string
-	mu         sync.RWMutex
+	workDir      string
+	model        string
+	mode         string
+	cmd          string   // CLI binary name, default "kimi"
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	timeout      time.Duration
+	providers    []core.ProviderConfig
+	activeIdx    int // -1 = no provider set
+	sessionEnv   []string
+	flagSupport  kimiFlagSupport // detected once at New() via `kimi --help`
+	mu           sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -49,10 +59,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "kimi"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "kimi")
 
 	var timeoutMins int64
 	switch v := opts["timeout_mins"].(type) {
@@ -76,13 +83,21 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("kimi: %q CLI not found in PATH, install with: pip install kimi-cli", cmd)
 	}
 
+	// Probe once so Send() can build args that match the installed CLI
+	// surface (see #1456). The probe has its own timeout; failures fall
+	// back to assuming the modern CLI (no --print).
+	flagSupport := probeKimiFlags(context.Background(), cmd, 5*time.Second)
+
 	return &Agent{
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		cmd:       cmd,
-		timeout:   timeout,
-		activeIdx: -1,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		timeout:      timeout,
+		activeIdx:    -1,
+		flagSupport:  flagSupport,
 	}, nil
 }
 
@@ -100,7 +115,7 @@ func normalizeMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "kimi" }
-func (a *Agent) CLIBinaryName() string  { return "kimi" }
+func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Kimi" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -158,10 +173,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	timeout := a.timeout
-	extraEnv := a.providerEnvLocked()
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	flagSupport := a.flagSupport
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
@@ -169,7 +187,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newKimiSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv, timeout)
+	return newKimiSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout, flagSupport)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

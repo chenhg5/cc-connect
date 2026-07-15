@@ -162,7 +162,7 @@ func TestStreamPreview_FinishInPlace(t *testing.T) {
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
-	ok := sp.finish("Hello World Final")
+	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Error("finish should return true when preview was active")
 	}
@@ -214,7 +214,7 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	// With degraded recovery, finish attempts UpdateMessage on the degraded
 	// preview. Since mockCleanerPlatform embeds mockUpdaterPlatform,
 	// UpdateMessage succeeds and finish returns true (recovered).
-	ok := sp.finish("Hello World Final")
+	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Error("finish should return true when degraded recovery via UpdateMessage succeeds")
 	}
@@ -271,7 +271,7 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	sp.appendText("Hello World")
 	time.Sleep(100 * time.Millisecond)
 
-	ok := sp.finish("Hello World Final")
+	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Fatal("finish should return true when platform prefers in-place finalize")
 	}
@@ -286,6 +286,69 @@ func TestStreamPreview_FinishKeepsPreviewWhenPlatformPrefersInPlaceFinalize(t *t
 	}
 	if len(msgs) < 2 || msgs[len(msgs)-1] != "update:Hello World Final" {
 		t.Fatalf("messages = %#v, want final update in place", msgs)
+	}
+}
+
+// mockStatusFooterUpdater is a keep-preview platform that also implements
+// StatusFooterUpdater so we can verify the footer-applying call path.
+type mockStatusFooterUpdater struct {
+	mockKeepPreviewPlatform
+	footerCalls []string // captured "<content>|FOOTER|<footer>" tuples
+}
+
+func (m *mockStatusFooterUpdater) UpdateMessageWithStatusFooter(_ context.Context, _ any, content, footer string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.footerCalls = append(m.footerCalls, content+"|FOOTER|"+footer)
+	m.messages = append(m.messages, "footer:"+content+"|"+footer)
+	m.lastMsg = content
+	return nil
+}
+
+// TestStreamPreview_FinishAppliesFooterEvenWhenBodyUnchanged is the regression
+// test for the bug where a streamPreview finalize with a non-empty
+// statusFooter was short-circuited because finalText matched lastSentText
+// from the prior streaming UpdateMessage. The previous behavior dropped the
+// footer entirely; the fix makes the early-return only kick in when there
+// is no footer to render.
+func TestStreamPreview_FinishAppliesFooterEvenWhenBodyUnchanged(t *testing.T) {
+	mp := &mockStatusFooterUpdater{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("Hello World")
+	time.Sleep(100 * time.Millisecond)
+	// Send another chunk so lastSentViaUpdate becomes true (a real
+	// UpdateMessage has been issued).
+	sp.appendText(" more")
+	time.Sleep(100 * time.Millisecond)
+
+	// Now finish with the SAME body that was last streamed but with a
+	// non-empty footer. The old short-circuit would skip the API call and
+	// silently drop the footer.
+	finalBody := "Hello World more"
+	ok := sp.finish(finalBody, "model · ctx 5%\n~/path")
+	if !ok {
+		t.Fatal("finish should return true when footer was applied")
+	}
+
+	mp.mu.Lock()
+	footerCalls := append([]string(nil), mp.footerCalls...)
+	mp.mu.Unlock()
+
+	if len(footerCalls) != 1 {
+		t.Fatalf("expected exactly 1 UpdateMessageWithStatusFooter call, got %d: %#v", len(footerCalls), footerCalls)
+	}
+	if !strings.Contains(footerCalls[0], "model · ctx 5%") || !strings.Contains(footerCalls[0], "~/path") {
+		t.Fatalf("footer call missing expected segments: %q", footerCalls[0])
+	}
+	if !strings.Contains(footerCalls[0], finalBody) {
+		t.Fatalf("footer call missing body: %q", footerCalls[0])
 	}
 }
 
@@ -381,7 +444,7 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 	sp.appendText("See /root/code/demo/src/app.ts:42")
 	time.Sleep(100 * time.Millisecond)
 
-	ok := sp.finish("Final /root/code/demo/src/app.ts:42")
+	ok := sp.finish("Final /root/code/demo/src/app.ts:42", "")
 	if !ok {
 		t.Fatal("finish should succeed when preview is active")
 	}
@@ -395,5 +458,154 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 	}
 	if got := msgs[len(msgs)-1]; got != "update:Final 📄 `src/app.ts:42`" {
 		t.Fatalf("final message = %q, want transformed final preview", got)
+	}
+}
+
+// TestStreamPreview_UnfreezeResumesStreaming is the unit-level regression
+// test for the bug where sp.freeze()+detachPreview() (emitted by the
+// EventPermissionRequest handler in core/engine.go) permanently degraded
+// the stream preview. After a permission prompt or AskUserQuestion was
+// resolved, all subsequent text in the same turn was buffered until
+// EventResult and sent as a single bulk message, instead of opening a new
+// streaming card.
+//
+// The fix is sp.unfreeze() in core/streaming.go, called by the engine
+// after <-pending.Resolved returns. This test exercises the unfreeze
+// contract in isolation: after freeze+detach, the preview is inactive;
+// after unfreeze, canPreview() returns true and the next appendText opens
+// a NEW preview card containing only the post-unfreeze text.
+func TestStreamPreview_UnfreezeResumesStreaming(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 5,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	// 1. Stream the pre-interruption segment so a preview handle is live.
+	sp.appendText("pre-interruption text")
+	time.Sleep(100 * time.Millisecond)
+	preMsgs := mp.getMessages()
+	if len(preMsgs) == 0 || !strings.HasPrefix(preMsgs[len(preMsgs)-1], "start:") {
+		t.Fatalf("expected an initial preview start, got %#v", preMsgs)
+	}
+
+	// 2. Simulate the engine's EventPermissionRequest path: freeze the
+	// preview (committing the pre-interruption text in place) and detach
+	// the handle so the next flush opens a new card.
+	sp.freeze()
+	sp.detachPreview()
+
+	// 3. While frozen, canPreview() must report false. Otherwise the
+	// engine's text-throttling branch would attempt updates on a degraded
+	// preview and silently drop them.
+	if sp.canPreview() {
+		t.Fatal("canPreview() = true while frozen, want false (regression: degraded not set)")
+	}
+
+	// 4. Simulate the user resolving the permission/question and the
+	// engine calling sp.unfreeze() to restore the preview.
+	sp.unfreeze()
+
+	if !sp.canPreview() {
+		t.Fatal("canPreview() = false after unfreeze, want true (unfreeze did not clear degraded)")
+	}
+
+	// 5. Stream the post-interruption text. We must observe a NEW preview
+	// start (proving the post-resolution text gets its own card, not
+	// overwriting the frozen pre-interruption card) and the text must be
+	// the post-unfreeze content only.
+	sp.appendText("post-resolution chunk one two three")
+	time.Sleep(100 * time.Millisecond)
+
+	postMsgs := mp.getMessages()
+	if len(postMsgs) <= len(preMsgs) {
+		t.Fatalf("expected new messages after unfreeze, preMsgs=%d postMsgs=%d (%#v)",
+			len(preMsgs), len(postMsgs), postMsgs)
+	}
+
+	// Find the post-unfreeze start: the first message that contains
+	// "post-resolution" and was issued after the pre-interruption messages.
+	var postStart string
+	for _, m := range postMsgs[len(preMsgs):] {
+		if strings.Contains(m, "post-resolution") {
+			postStart = m
+			break
+		}
+	}
+	if postStart == "" {
+		t.Fatalf("no post-unfreeze message contains 'post-resolution'; messages = %#v", postMsgs)
+	}
+	if !strings.HasPrefix(postStart, "start:") {
+		t.Fatalf("post-unfreeze first message = %q, want a new 'start:' (regression: post text was buffered, not streamed into a fresh card)", postStart)
+	}
+	if strings.Contains(postStart, "pre-interruption") {
+		t.Fatalf("post-unfreeze card contains pre-interruption text: %q (regression: new card is not a clean slate)", postStart)
+	}
+}
+
+// TestStreamPreview_UnfreezeBypassesThrottleOnFirstChunk locks down the
+// behavior that the first chunk emitted after unfreeze is NOT throttled by
+// the MinDeltaChars / IntervalMs gates. Without resetting lastSentAt, a
+// user who answers an AskUserQuestion would see a 1.5s blank interval
+// before the agent's next text appeared — defeating the point of resuming
+// streaming. The reset is the entire reason lastSentAt is zeroed in
+// unfreeze().
+func TestStreamPreview_UnfreezeBypassesThrottleOnFirstChunk(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    5000, // huge interval so any non-zero lastSentAt would suppress the first chunk
+		MinDeltaChars: 100,  // huge delta so any non-zero lastSentAt would suppress the first chunk
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.appendText("pre text")
+	time.Sleep(100 * time.Millisecond)
+
+	sp.freeze()
+	sp.detachPreview()
+	sp.unfreeze()
+
+	// Tiny chunk that would NEVER pass the throttle on a non-zero
+	// lastSentAt. The fact that it gets through proves lastSentAt was
+	// reset to zero by unfreeze().
+	sp.appendText("hi")
+	time.Sleep(50 * time.Millisecond)
+
+	msgs := mp.getMessages()
+	// Find the most recent message and assert it contains "hi".
+	found := false
+	for _, m := range msgs {
+		if strings.Contains(m, "hi") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("first post-unfreeze chunk 'hi' was throttled and never sent; messages = %#v", msgs)
+	}
+}
+
+// TestStreamPreview_UnfreezeIdempotent verifies that calling unfreeze() on
+// an already-active (non-degraded) preview does not crash. The engine may
+// in principle never call unfreeze() in that state, but the test guards
+// against future callers that might.
+func TestStreamPreview_UnfreezeIdempotent(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := DefaultStreamPreviewCfg()
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.unfreeze() // no-op on a never-frozen preview; must not panic
+
+	if sp.degraded {
+		t.Fatal("unfreeze on a non-degraded preview marked it degraded")
+	}
+	if !sp.canPreview() {
+		t.Fatal("canPreview() = false after no-op unfreeze, want true")
 	}
 }

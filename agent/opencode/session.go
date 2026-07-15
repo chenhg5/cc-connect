@@ -27,9 +27,11 @@ import (
 // with --session for conversation continuity.
 type opencodeSession struct {
 	cmd               string
+	extraArgs         []string // extra args from cmd, prepended before opencode args
 	workDir           string
 	model             string
 	mode              string
+	agentName         string
 	extraEnv          []string
 	events            chan core.Event
 	chatID            atomic.Value // stores string — OpenCode session ID
@@ -43,18 +45,20 @@ type opencodeSession struct {
 	turnStartedMs     atomic.Int64
 }
 
-func newOpencodeSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		agentName: agentName,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
 	}
 	s.alive.Store(true)
 
@@ -159,10 +163,13 @@ func opencodeImageExt(mimeType string) string {
 }
 
 func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatID string) []string {
-	args := []string{"run", "--format", "json"}
+	args := append(append([]string{}, s.extraArgs...), "run", "--format", "json")
 
 	if chatID != "" {
 		args = append(args, "--session", chatID)
+	}
+	if s.agentName != "" {
+		args = append(args, "--agent", s.agentName)
 	}
 	if s.model != "" {
 		args = append(args, "--model", s.model)
@@ -351,6 +358,24 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 		case s.events <- evt:
 		case <-s.ctx.Done():
 			return
+		}
+
+		// When a tool call is rejected (e.g. permission denied in default mode),
+		// opencode exits without generating any follow-up text. Surface the rejection
+		// reason so the engine has something meaningful to send rather than "(空响应)".
+		// This covers the common case where the user has not configured tool permissions
+		// and needs guidance to use mode="yolo" or update opencode settings.
+		if status == "error" && state != nil {
+			errMsg, _ := state["error"].(string)
+			if errMsg != "" {
+				slog.Info("opencodeSession: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
+				errEvt := core.Event{Type: core.EventText, Content: errMsg}
+				select {
+				case s.events <- errEvt:
+				case <-s.ctx.Done():
+					return
+				}
+			}
 		}
 	}
 }

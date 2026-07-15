@@ -964,3 +964,74 @@ func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *ht
 		httpClient: server.Client(),
 	}
 }
+
+func TestNewProgressStyleDefault(t *testing.T) {
+	p, err := New(map[string]any{"token": "test-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tg, ok := p.(*Platform)
+	if !ok {
+		t.Fatalf("expected *Platform, got %T", p)
+	}
+	if got := tg.ProgressStyle(); got != "compact" {
+		t.Fatalf("default ProgressStyle() = %q, want %q", got, "compact")
+	}
+}
+
+func TestNewProgressStyleOptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    any
+		wantErr  bool
+		wantMode string
+	}{
+		{name: "explicit compact", input: "compact", wantMode: "compact"},
+		{name: "explicit legacy", input: "legacy", wantMode: "legacy"},
+		{name: "card normalized to compact", input: "card", wantMode: "compact"},
+		{name: "uppercase tolerated", input: "COMPACT", wantMode: "compact"},
+		{name: "whitespace tolerated", input: "  legacy  ", wantMode: "legacy"},
+		{name: "empty string keeps default", input: "", wantMode: "compact"},
+		{name: "invalid value rejected", input: "fancy", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(map[string]any{
+				"token":          "test-token",
+				"progress_style": tc.input,
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for input %v, got nil", tc.input)
+				}
+				if !strings.Contains(err.Error(), "invalid progress_style") {
+					t.Fatalf("error = %q, want substring 'invalid progress_style'", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			tg := p.(*Platform)
+			if got := tg.ProgressStyle(); got != tc.wantMode {
+				t.Fatalf("ProgressStyle() = %q, want %q", got, tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestProgressStyleProviderInterface verifies *Platform satisfies the
+// core.ProgressStyleProvider interface so the engine's
+// progressStyleForPlatform() picks up our implementation rather than
+// falling back to legacy.
+func TestProgressStyleProviderInterface(t *testing.T) {
+	var p core.Platform = &Platform{progressStyle: "compact"}
+	provider, ok := p.(interface{ ProgressStyle() string })
+	if !ok {
+		t.Fatalf("*Platform does not satisfy ProgressStyle() interface")
+	}
+	if got := provider.ProgressStyle(); got != "compact" {
+		t.Fatalf("ProgressStyle() = %q, want compact", got)
+	}
+}

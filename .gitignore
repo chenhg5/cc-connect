@@ -65,6 +65,8 @@ release/
 # Keep web/dist directory (for embedded admin UI) but ignore build artifacts
 web/dist/*
 !web/dist/.keep
+# TypeScript incremental build cache — generated locally, should not be committed
+web/tsconfig.tsbuildinfo
 
 # ============================================================================
 # Testing & temporary files
@@ -130,6 +132,15 @@ Desktop.ini
 .planning/
 
 # ============================================================================
+# Local git worktrees
+# ============================================================================
+# Convention: ad-hoc worktrees created with
+#   git worktree add .worktrees/<task-name> origin/<branch>
+# are local-only scratch directories used by multiple agents (qa, dev, release)
+# for parallel branch work. They must never be committed.
+.worktrees/
+
+# ============================================================================
 # Security
 # ============================================================================
 # Never commit secrets or credentials
@@ -141,3 +152,4 @@ secrets/
 credentials/
 
 .codex
+cc-connect-new

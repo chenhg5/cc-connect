@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -75,6 +77,149 @@ func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
 	}
 }
 
+func TestParseSendArgs_WorkDirOption(t *testing.T) {
+	workDir := t.TempDir()
+
+	req, _, err := parseSendArgs([]string{"--cwd", workDir, "--message", "please check"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if got := req.WorkDir; got != workDir {
+		t.Fatalf("WorkDir = %q, want %q", got, workDir)
+	}
+
+	req, _, err = parseSendArgs([]string{"--work-dir", workDir, "please check"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error for --work-dir: %v", err)
+	}
+	if got := req.WorkDir; got != workDir {
+		t.Fatalf("WorkDir from --work-dir = %q, want %q", got, workDir)
+	}
+}
+
+// TestParseSendArgs_AudioPopulatesAudios is the regression for
+// t-20260615-cqjbk1: --audio and --video must NOT land in req.Files
+// (which would route them through SendFile and skip
+// AudioSender / VideoSender). They each get their own slice.
+func TestParseSendArgs_AudioPopulatesAudios(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "voice.opus")
+	if err := os.WriteFile(audioPath, []byte("opus"), 0o644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+
+	req, _, err := parseSendArgs([]string{"--audio", audioPath})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if len(req.Files) != 0 {
+		t.Fatalf("req.Files len = %d, want 0 (audio must NOT be appended into Files)", len(req.Files))
+	}
+	if len(req.Audios) != 1 {
+		t.Fatalf("req.Audios len = %d, want 1", len(req.Audios))
+	}
+	if req.Audios[0].FileName != "voice.opus" {
+		t.Fatalf("audio filename = %q, want voice.opus", req.Audios[0].FileName)
+	}
+	if string(req.Audios[0].Data) != "opus" {
+		t.Fatalf("audio data = %q, want %q", req.Audios[0].Data, "opus")
+	}
+}
+
+func TestParseSendArgs_VideoPopulatesVideos(t *testing.T) {
+	dir := t.TempDir()
+	videoPath := filepath.Join(dir, "demo.mp4")
+	if err := os.WriteFile(videoPath, []byte("mp4"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+
+	req, _, err := parseSendArgs([]string{"--video", videoPath})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if len(req.Files) != 0 {
+		t.Fatalf("req.Files len = %d, want 0 (video must NOT be appended into Files)", len(req.Files))
+	}
+	if len(req.Videos) != 1 {
+		t.Fatalf("req.Videos len = %d, want 1", len(req.Videos))
+	}
+	if req.Videos[0].FileName != "demo.mp4" {
+		t.Fatalf("video filename = %q, want demo.mp4", req.Videos[0].FileName)
+	}
+}
+
+func TestParseSendArgs_AudioVideoFileMixed_StaySeparate(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "voice.opus")
+	videoPath := filepath.Join(dir, "demo.mp4")
+	docPath := filepath.Join(dir, "notes.md")
+	for _, f := range [][2]string{
+		{audioPath, "opus"},
+		{videoPath, "mp4"},
+		{docPath, "hello"},
+	} {
+		if err := os.WriteFile(f[0], []byte(f[1]), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f[0], err)
+		}
+	}
+
+	req, _, err := parseSendArgs([]string{
+		"--audio", audioPath,
+		"--video", videoPath,
+		"--file", docPath,
+	})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if len(req.Audios) != 1 || req.Audios[0].FileName != "voice.opus" {
+		t.Fatalf("req.Audios = %#v", req.Audios)
+	}
+	if len(req.Videos) != 1 || req.Videos[0].FileName != "demo.mp4" {
+		t.Fatalf("req.Videos = %#v", req.Videos)
+	}
+	if len(req.Files) != 1 || req.Files[0].FileName != "notes.md" {
+		t.Fatalf("req.Files = %#v (only the --file should land here)", req.Files)
+	}
+}
+
+func TestParseSendArgs_TTSOnly(t *testing.T) {
+	t.Setenv("CC_PROJECT", "demo")
+	t.Setenv("CC_SESSION_KEY", "telegram:123:456")
+
+	req, _, err := parseSendArgs([]string{"--tts", "hello voice"})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if req.Project != "demo" {
+		t.Fatalf("project = %q, want demo", req.Project)
+	}
+	if req.SessionKey != "telegram:123:456" {
+		t.Fatalf("session = %q, want telegram:123:456", req.SessionKey)
+	}
+	if req.TTSText != "hello voice" {
+		t.Fatalf("tts text = %q", req.TTSText)
+	}
+	if req.Message != "" {
+		t.Fatalf("message = %q, want empty", req.Message)
+	}
+}
+
+func TestParseSendArgs_AudioRejectsNonAudio(t *testing.T) {
+	dir := t.TempDir()
+	docPath := filepath.Join(dir, "report.txt")
+	if err := os.WriteFile(docPath, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write doc: %v", err)
+	}
+
+	_, _, err := parseSendArgs([]string{"--audio", docPath})
+	if err == nil {
+		t.Fatal("expected non-audio attachment to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not audio media") {
+		t.Fatalf("error = %q, want not audio media", err.Error())
+	}
+}
+
 func TestDetectAttachmentMimeType_UsesExtensionFallback(t *testing.T) {
 	mimeType := detectAttachmentMimeType("note.md", []byte("plain"))
 	if mimeType != "text/markdown; charset=utf-8" && mimeType != "text/markdown" {
@@ -83,12 +228,13 @@ func TestDetectAttachmentMimeType_UsesExtensionFallback(t *testing.T) {
 }
 
 func TestReadAttachment_SizeLimit(t *testing.T) {
+	const limit int64 = 100 // tiny limit keeps the test fast and deterministic
 	dir := t.TempDir()
 	small := filepath.Join(dir, "small.txt")
 	if err := os.WriteFile(small, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := readAttachment(small); err != nil {
+	if _, _, _, err := readAttachment(small, limit); err != nil {
 		t.Fatalf("small file should succeed: %v", err)
 	}
 
@@ -97,12 +243,12 @@ func TestReadAttachment_SizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(maxAttachmentSize + 1); err != nil {
+	if err := f.Truncate(limit + 1); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
 	f.Close()
-	if _, _, _, err := readAttachment(big); err == nil {
+	if _, _, _, err := readAttachment(big, limit); err == nil {
 		t.Fatal("oversized file should be rejected")
 	}
 }
@@ -120,7 +266,7 @@ func TestReadAttachment_CleanPath(t *testing.T) {
 
 	// Path with ../ should still work after cleaning
 	dirty := filepath.Join(sub, "..", "sub", "test.txt")
-	data, name, _, err := readAttachment(dirty)
+	data, name, _, err := readAttachment(dirty, core.DefaultMaxAttachmentSize)
 	if err != nil {
 		t.Fatalf("readAttachment with dirty path: %v", err)
 	}
@@ -132,11 +278,45 @@ func TestReadAttachment_CleanPath(t *testing.T) {
 	}
 }
 
+func TestResolveMaxAttachmentSize(t *testing.T) {
+	// Default when neither env nor config sets it.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "")
+	if got := resolveMaxAttachmentSize(nil); got != core.DefaultMaxAttachmentSize {
+		t.Fatalf("default = %d, want %d", got, core.DefaultMaxAttachmentSize)
+	}
+
+	cfg := &config.Config{MaxAttachmentSizeMB: 100}
+
+	// Config value (MiB → bytes) honoured when env is unset.
+	if got, want := resolveMaxAttachmentSize(cfg), int64(100)<<20; got != want {
+		t.Fatalf("from config = %d, want %d", got, want)
+	}
+
+	// Env var is MiB (same unit as the config field) and takes precedence.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "1024") // 1024 MiB = 1 GiB
+	if got, want := resolveMaxAttachmentSize(cfg), int64(1<<30); got != want {
+		t.Fatalf("env override = %d, want %d", got, want)
+	}
+
+	// Malformed env falls through to config rather than being fatal.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "not-a-number")
+	if got, want := resolveMaxAttachmentSize(cfg), int64(100)<<20; got != want {
+		t.Fatalf("malformed env should fall through to config = %d, want %d", got, want)
+	}
+
+	// Non-positive env also falls through.
+	t.Setenv("CC_MAX_ATTACHMENT_SIZE_MB", "0")
+	if got, want := resolveMaxAttachmentSize(cfg), int64(100)<<20; got != want {
+		t.Fatalf("zero env should fall through to config = %d, want %d", got, want)
+	}
+}
+
 func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 	req := core.SendRequest{
 		Project:    "demo",
 		SessionKey: "telegram:1:2",
 		Message:    "done",
+		TTSText:    "voice done",
 		Images: []core.ImageAttachment{{
 			MimeType: "image/png",
 			Data:     []byte("img"),
@@ -160,6 +340,9 @@ func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 	}
 	if len(decoded.Images) != 1 || string(decoded.Images[0].Data) != "img" {
 		t.Fatalf("decoded images = %#v", decoded.Images)
+	}
+	if decoded.TTSText != "voice done" {
+		t.Fatalf("decoded tts_text = %q", decoded.TTSText)
 	}
 	if len(decoded.Files) != 1 || string(decoded.Files[0].Data) != "doc" {
 		t.Fatalf("decoded files = %#v", decoded.Files)

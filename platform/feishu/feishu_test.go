@@ -2,6 +2,8 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -81,6 +83,7 @@ func TestDispatchMessageDropsRecalledMessageBeforeHandler(t *testing.T) {
 		"",
 		"",
 		"",
+		0,
 	)
 
 	if called {
@@ -188,6 +191,7 @@ func TestDispatchMessageIncludesQuotedImage(t *testing.T) {
 				parentMessageID,
 				"",
 				"",
+				0,
 			)
 
 			select {
@@ -290,6 +294,7 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 		parentMessageID,
 		"",
 		"",
+		0,
 	)
 
 	select {
@@ -302,6 +307,99 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for mention-only quoted text message")
+	}
+}
+
+func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
+	const appID = "cli_unauthorized"
+	const appSecret = "secret-unauthorized"
+	const botOpenID = "ou_bot"
+	const userOpenID = "ou_blocked"
+
+	replyBodies := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read reply body: %v", err)
+			}
+			replyBodies <- string(body)
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_reply_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		allowFrom:    "ou_allowed",
+		botOpenID:    botOpenID,
+		dedup:        &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	chatType := "group"
+	msgType := "text"
+	senderType := "user"
+	content := `{"text":"@_user_1 hello"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_unauthorized"),
+				ChatId:      stringPtr("oc_group"),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+				Mentions: []*larkim.MentionEvent{
+					{
+						Key:  stringPtr("@_user_1"),
+						Id:   &larkim.UserId{OpenId: stringPtr(botOpenID)},
+						Name: stringPtr("bot"),
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case got := <-replyBodies:
+		if !strings.Contains(got, core.UnauthorizedAccessMessage) {
+			t.Fatalf("reply body = %q, want unauthorized message", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized reply")
 	}
 }
 
@@ -467,7 +565,7 @@ func TestExtractPostParts_WithLink(t *testing.T) {
 	if len(texts) != 2 {
 		t.Fatalf("expected 2 text parts, got %d", len(texts))
 	}
-	if texts[0] != "点击 " || texts[1] != "这里" {
+	if texts[0] != "点击 " || texts[1] != "[这里](https://example.com)" {
 		t.Errorf("unexpected texts: %v", texts)
 	}
 }
@@ -755,8 +853,8 @@ func TestExtractPostPlainText_Empty(t *testing.T) {
 func TestExtractPostPlainText_LinkText(t *testing.T) {
 	content := `{"content":[[{"tag":"text","text":"hello "},{"tag":"a","text":"link","href":"http://x.com"}]]}`
 	got := extractPostPlainText(content)
-	if got != "hello link" {
-		t.Errorf("expected 'hello link', got %q", got)
+	if got != "hello [link](http://x.com)" {
+		t.Errorf("expected 'hello [link](http://x.com)', got %q", got)
 	}
 }
 
@@ -1205,4 +1303,665 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 	if fp.groupReplyAll {
 		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
 	}
+}
+
+func newTestPlatform(mentionMap map[string]string, resolveMentions bool, members map[string]string) *Platform {
+	p := &Platform{
+		resolveMentions: resolveMentions,
+		mentionMap:      mentionMap,
+	}
+	if members != nil {
+		p.chatMemberCache.Store("oc_test_group", &chatMemberEntry{
+			members:   members,
+			fetchedAt: time.Now(),
+		})
+	}
+	return p
+}
+
+func TestResolveMentions_MentionMapPriority(t *testing.T) {
+	p := newTestPlatform(
+		map[string]string{"BotA": "ou_bot_openid"},
+		true,
+		map[string]string{"BotA": "ou_human_openid"},
+	)
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "Hey @BotA check this")
+	if !strings.Contains(result, `user_id="ou_bot_openid"`) {
+		t.Errorf("expected mentionMap to override group member, got: %s", result)
+	}
+	if strings.Contains(result, "ou_human_openid") {
+		t.Error("should NOT use group member open_id when mentionMap has same key")
+	}
+}
+
+func TestResolveMentions_LongestMatch(t *testing.T) {
+	p := newTestPlatform(
+		map[string]string{"Collector-B": "ou_collectorb"},
+		true,
+		map[string]string{"Collector": "ou_human_collector"},
+	)
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "@Collector-B and @Collector please help")
+	if !strings.Contains(result, `user_id="ou_collectorb"`) {
+		t.Error("Collector-B should resolve via mentionMap")
+	}
+	if !strings.Contains(result, `user_id="ou_human_collector"`) {
+		t.Error("Collector should resolve via group members")
+	}
+}
+
+func TestResolveMentions_MultipleOccurrences(t *testing.T) {
+	p := newTestPlatform(
+		map[string]string{"BotA": "ou_bot"},
+		true,
+		map[string]string{},
+	)
+	ctx := context.Background()
+	result := p.resolveMentionsInContent(ctx, "oc_test_group", "@BotA please help, @BotA is needed")
+	count := strings.Count(result, `user_id="ou_bot"`)
+	if count != 2 {
+		t.Errorf("expected 2 substitutions, got %d. result: %s", count, result)
+	}
+}
+
+// TestBuildReplyContent_NoFalsePositiveOnEmail: a bare "@"
+// inside an email (or URL) must not be mistaken for a mention and must not
+// force MsgTypeText, so markdown content still renders as an interactive card.
+func TestBuildReplyContent_NoFalsePositiveOnEmail(t *testing.T) {
+	msgType, _ := buildReplyContent("**bold** report sent to a@b.com")
+	if msgType != larkim.MsgTypeInteractive {
+		t.Errorf("email '@' should not force MsgTypeText; got %s", msgType)
+	}
+}
+
+// TestBuildReplyContent_RealMentionForcesText confirms a resolved mention
+// (<at user_id="...">) still forces MsgTypeText even when markdown is present.
+func TestBuildReplyContent_RealMentionForcesText(t *testing.T) {
+	msgType, _ := buildReplyContent("**bold** <at user_id=\"ou_bot\">Collector-B</at> please review")
+	if msgType != larkim.MsgTypeText {
+		t.Errorf("resolved mention should force MsgTypeText; got %s", msgType)
+	}
+}
+
+func TestBuildReplyContent_CardFormatMentionForcesText(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"text_format", "**bold** <at user_id=\"ou_bot\">Collector-B</at> please review"},
+		{"card_format", "# report\n\n<at id=ou_bot></at> please review\n\n```\nok\n```"},
+	}
+	for _, tc := range cases {
+		msgType, _ := buildReplyContent(tc.content)
+		if msgType != larkim.MsgTypeText {
+			t.Errorf("%s: mention should force MsgTypeText; got %s", tc.name, msgType)
+		}
+	}
+}
+
+func TestResolveMentions_MarkdownForcesTextFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu", resolveMentions: true}
+	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"Collector-B": "ou_bot_b"},
+		fetchedAt: time.Now(),
+	})
+	input := "# Report\n\n@Collector-B please review\n\n**done**"
+	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
+	if !strings.Contains(result, `<at user_id="ou_bot_b">Collector-B</at>`) {
+		t.Fatalf("markdown content must still resolve to text format; got %q", result)
+	}
+	// Verify the full pipeline forces MsgTypeText
+	msgType, _ := buildReplyContent(result)
+	if msgType != larkim.MsgTypeText {
+		t.Fatalf("markdown + mention must force MsgTypeText so Feishu fires the mention event; got %s", msgType)
+	}
+}
+
+// TestSendWithStatusFooter_NoFallbackOnNonMentionAt: a bare
+// "@" that is NOT a mention (email, URL) must not degrade SendWithStatusFooter
+// to plain Send — the interactive card must be preserved.
+func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
+	const appID = "cli_footer_at"
+	const appSecret = "secret"
+	const chatID = "oc_test_group"
+
+	var gotMsgType string
+	var gotContent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "t"})
+		case r.URL.Path == "/open-apis/im/v1/messages" && r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				MsgType string `json:"msg_type"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatalf("unmarshal request body: %v", err)
+			}
+			gotMsgType = req.MsgType
+			gotContent = req.Content
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_ok"}})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		resolveMentions: true,
+		mentionMap:      map[string]string{"BotA": "ou_bot_openid"},
+		client:          lark.NewClient(appID, appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient:    lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+	p.chatMemberCache.Store(chatID, &chatMemberEntry{members: map[string]string{"BotA": "ou_bot_openid"}, fetchedAt: time.Now()})
+
+	ctx := context.Background()
+	rc := replyContext{chatID: chatID}
+	for _, tc := range []struct {
+		name        string
+		content     string
+		wantMsgType string
+	}{
+		{"email", "**bold** report sent to a@b.com", larkim.MsgTypeInteractive},
+		{"url", "see [docs](http://x@y.com/z)", larkim.MsgTypeInteractive},
+		{"mention", "hey @BotA review please", larkim.MsgTypeText},
+	} {
+		if err := p.SendWithStatusFooter(ctx, rc, tc.content, "done"); err != nil {
+			t.Fatalf("%s: SendWithStatusFooter error = %v", tc.name, err)
+		}
+		if gotMsgType != tc.wantMsgType {
+			t.Errorf("%s: msg_type = %q, want %q", tc.name, gotMsgType, tc.wantMsgType)
+		}
+		if tc.name == "mention" {
+			if !strings.Contains(gotContent, "ou_bot_openid") || !strings.Contains(gotContent, "done") {
+				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
+			}
+		}
+	}
+}
+
+func TestNewPlatform_ImageBatchWindow(t *testing.T) {
+	// Default: 500ms when option omitted.
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":     "cli_test",
+		"app_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil {
+		t.Fatal("expected *Platform or *interactivePlatform")
+	}
+	if fp.imageBatchWindow != defaultImageBatchWindow {
+		t.Errorf("default imageBatchWindow = %v, want %v", fp.imageBatchWindow, defaultImageBatchWindow)
+	}
+
+	// Custom value (int64, mirrors how TOML decodes integers).
+	p, err = newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": int64(1200),
+	})
+	if err != nil {
+		t.Fatalf("newPlatform with custom window error: %v", err)
+	}
+	fp = extractBasePlatform(p)
+	if want := 1200 * time.Millisecond; fp.imageBatchWindow != want {
+		t.Errorf("custom imageBatchWindow = %v, want %v", fp.imageBatchWindow, want)
+	}
+
+	// Zero is allowed (effectively disables coalescing) but still passes
+	// validation; batchWindow() will substitute the default at call time so
+	// timers never fire instantly.
+	p, err = newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": 0,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform with zero window error: %v", err)
+	}
+	fp = extractBasePlatform(p)
+	if fp.imageBatchWindow != 0 {
+		t.Errorf("imageBatchWindow = %v, want 0", fp.imageBatchWindow)
+	}
+	if fp.batchWindow() != defaultImageBatchWindow {
+		t.Errorf("batchWindow() with zero field = %v, want %v (fallback)", fp.batchWindow(), defaultImageBatchWindow)
+	}
+
+	// Negative is rejected.
+	if _, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": -1,
+	}); err == nil {
+		t.Error("expected error for negative image_batch_window_ms, got nil")
+	}
+
+	// Non-numeric is rejected.
+	if _, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"image_batch_window_ms": "200",
+	}); err == nil {
+		t.Error("expected error for string image_batch_window_ms, got nil")
+	}
+}
+
+// TestDispatchMessageCoalescesImageBatch covers issue #1395: when the Feishu
+// mobile client sends N images in quick succession, each image arrives as a
+// separate message event with very close create_time values. Dispatching each
+// immediately caused core/engine's create_time watermark (PR #1168) to drop
+// the oldest image, so the agent only saw N-1 images. After the fix, all N
+// images within the image batch window should be coalesced into ONE dispatched
+// core.Message with N image attachments.
+func TestDispatchMessageCoalescesImageBatch(t *testing.T) {
+	const appID = "cli_batch_img"
+	const appSecret = "secret-batch-img"
+	const chatID = "oc_batch"
+	const userID = "ou_user"
+
+	tests := []struct {
+		name      string
+		imageKeys []string
+		wantCount int
+		wantMsgs  int
+	}{
+		{name: "2 images", imageKeys: []string{"img_1", "img_2"}, wantCount: 2, wantMsgs: 1},
+		{name: "3 images", imageKeys: []string{"img_a", "img_b", "img_c"}, wantCount: 3, wantMsgs: 1},
+		{name: "4 images", imageKeys: []string{"i1", "i2", "i3", "i4"}, wantCount: 4, wantMsgs: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Per-image payload bytes so we can verify order preservation.
+			imageBytes := map[string][]byte{}
+			for i, k := range tc.imageKeys {
+				imageBytes[k] = []byte{0x89, 'P', 'N', 'G', byte(i + 1), '\r', '\n', 0x1a, '\n'}
+			}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+				case strings.Contains(r.URL.Path, "/resources/"):
+					key := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+					data, ok := imageBytes[key]
+					if !ok {
+						t.Fatalf("unexpected image key %q", key)
+					}
+					w.Header().Set("Content-Type", "image/png")
+					if _, err := w.Write(data); err != nil {
+						t.Fatalf("write image: %v", err)
+					}
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+				}
+			}))
+			defer srv.Close()
+
+			received := make(chan *core.Message, tc.wantCount+1)
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				dedup:        &core.MessageDedup{},
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(_ core.Platform, msg *core.Message) {
+					received <- msg
+				},
+				imageBatch: make(map[string]*imageBatchEntry),
+			}
+
+			sessionKey := "feishu:" + chatID + ":" + userID
+			for i, key := range tc.imageKeys {
+				msgID := "om_img_" + strconv.Itoa(i)
+				content := `{"image_key":"` + key + `"}`
+				p.dispatchMessage(
+					context.Background(),
+					"image",
+					content,
+					nil,
+					msgID,
+					sessionKey,
+					userID,
+					chatID,
+					"",
+					"", // no parentID so we exercise the batch path
+					"",
+					"",
+					int64(1710000000000+i),
+				)
+			}
+
+			// Collect dispatched messages with a generous timeout that comfortably
+			// exceeds the configured image-batch window but still finishes quickly.
+			var dispatched []*core.Message
+			deadline := time.After(2 * time.Second)
+			for len(dispatched) < tc.wantMsgs {
+				select {
+				case msg := <-received:
+					dispatched = append(dispatched, msg)
+				case <-deadline:
+					t.Fatalf("got %d messages, want %d (timeout)", len(dispatched), tc.wantMsgs)
+				}
+			}
+
+			// Allow late stragglers to surface so we can fail loudly if batching
+			// leaked more than one dispatch.
+			select {
+			case extra := <-received:
+				t.Fatalf("unexpected extra dispatched message %q with %d images", extra.MessageID, len(extra.Images))
+			case <-time.After(p.batchWindow() + 100*time.Millisecond):
+			}
+
+			if len(dispatched) != 1 {
+				t.Fatalf("dispatched %d messages, want exactly 1 (batch should coalesce)", len(dispatched))
+			}
+			msg := dispatched[0]
+			if len(msg.Images) != tc.wantCount {
+				t.Fatalf("merged message has %d images, want %d", len(msg.Images), tc.wantCount)
+			}
+			for i, img := range msg.Images {
+				want := imageBytes[tc.imageKeys[i]]
+				if string(img.Data) != string(want) {
+					t.Errorf("image[%d] data = %x, want %x (order must match send order)", i, img.Data, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDispatchMessageSingleImageRegression ensures the single-image path still
+// works after introducing the image-batch buffer (issue #1395). A single image
+// must still produce one dispatched core.Message.
+func TestDispatchMessageSingleImageRegression(t *testing.T) {
+	const appID = "cli_single_img"
+	const appSecret = "secret-single-img"
+	const imageKey = "img_single"
+
+	imageBytes := []byte{0x89, 'P', 'N', 'G', 'S', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageBytes); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		dedup:        &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"image",
+		`{"image_key":"`+imageKey+`"}`,
+		nil,
+		"om_single",
+		"feishu:oc_single:ou_user",
+		"ou_user",
+		"oc_single",
+		"",
+		"", "", "", 0,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.MessageID != "om_single" {
+			t.Errorf("MessageID = %q, want om_single", msg.MessageID)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("len(Images) = %d, want 1", len(msg.Images))
+		}
+		if string(msg.Images[0].Data) != string(imageBytes) {
+			t.Fatal("image data did not match downloaded resource")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for single image to dispatch")
+	}
+}
+
+// TestDispatchMessageQuotedImageNotBatched ensures that quoted (parentID != "")
+// images still follow the legacy synchronous path: one dispatched message per
+// image, with quoted context attached. Batching must not affect this code path.
+func TestDispatchMessageQuotedImageNotBatched(t *testing.T) {
+	const appID = "cli_quoted_img"
+	const appSecret = "secret-quoted-img"
+	const parentMessageID = "om_parent_quoted"
+	const imageKey = "img_quoted"
+
+	imageData := []byte{0x89, 'P', 'N', 'G', 'Q', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"msg_type":  "text",
+							"parent_id": "",
+							"sender":    map[string]any{"id": "", "sender_type": "user"},
+							"body":      map[string]any{"content": `{"text":"请看图"}`},
+						},
+					},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageData); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"image",
+		`{"image_key":"`+imageKey+`"}`,
+		nil,
+		"om_quoted_child",
+		"feishu:oc_chat:ou_user",
+		"ou_user",
+		"oc_chat",
+		"",
+		parentMessageID, "", "", 0,
+	)
+
+	select {
+	case msg := <-got:
+		if len(msg.Images) != 1 {
+			t.Fatalf("quoted image path: len(Images) = %d, want 1 (no batching)", len(msg.Images))
+		}
+		if !strings.Contains(msg.ExtraContent, "请看图") {
+			t.Fatalf("ExtraContent = %q, want quoted text context", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for quoted image to dispatch")
+	}
+}
+
+// TestFlushImageBatchesStopsPendingTimers ensures Stop()-style flush
+// synchronously dispatches all buffered images without losing any.
+func TestFlushImageBatchesStopsPendingTimers(t *testing.T) {
+	const appID = "cli_flush"
+	const appSecret = "secret-flush"
+	const imageKey = "img_flush"
+
+	imageBytes := []byte{0x89, 'P', 'N', 'G', 'F', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageBytes); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 2)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		dedup:        &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	// Buffer a single image but DON'T wait for the timer — instead flush manually.
+	p.bufferImage("feishu:oc_flush:ou_user", &imageBatchEntry{
+		sessionKey:   "feishu:oc_flush:ou_user",
+		userID:       "ou_user",
+		chatName:     "oc_flush",
+		rctx:         replyContext{messageID: "om_flush", chatID: "oc_flush", sessionKey: "feishu:oc_flush:ou_user"},
+		images:       []core.ImageAttachment{{MimeType: "image/png", Data: imageBytes}},
+		messageIDs:   []string{"om_flush"},
+		createTimeMs: 1710000000000,
+	})
+
+	// Confirm the buffer is populated and the timer is pending.
+	p.imageBatchMu.Lock()
+	if len(p.imageBatch) != 1 {
+		p.imageBatchMu.Unlock()
+		t.Fatalf("imageBatch size = %d, want 1 before flush", len(p.imageBatch))
+	}
+	p.imageBatchMu.Unlock()
+
+	p.flushImageBatches()
+
+	// After flush, the map must be empty AND no timer should be left pending.
+	p.imageBatchMu.Lock()
+	batchSize := len(p.imageBatch)
+	p.imageBatchMu.Unlock()
+	if batchSize != 0 {
+		t.Fatalf("imageBatch size = %d after flushImageBatches, want 0", batchSize)
+	}
+
+	select {
+	case msg := <-received:
+		if len(msg.Images) != 1 {
+			t.Fatalf("flushed message has %d images, want 1", len(msg.Images))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for flushed batch to dispatch")
+	}
+
+	// No additional dispatches after flush.
+	select {
+	case extra := <-received:
+		t.Fatalf("unexpected extra message after flush: %+v", extra)
+	case <-time.After(p.batchWindow() + 100*time.Millisecond):
+	}
+}
+
+// TestFlushImageBatchesEmptySafe ensures flushImageBatches is a safe no-op
+// when nothing is buffered (e.g. Stop() called on an idle platform).
+func TestFlushImageBatchesEmptySafe(t *testing.T) {
+	p := &Platform{
+		platformName: "feishu",
+		imageBatch:   make(map[string]*imageBatchEntry),
+	}
+	// Should not panic, should not block.
+	p.flushImageBatches()
 }
