@@ -408,6 +408,27 @@ func (p *stubCompactProgressPlatform) getPreviewEdits() []string {
 	return out
 }
 
+// finalAssistantTextDelivered reports whether want appears as a final assistant
+// reply via either p.Send or stream-preview start/edit (post-L-0154 path).
+func finalAssistantTextDelivered(sent, starts, edits []string, want string) bool {
+	for _, s := range sent {
+		if s == want {
+			return true
+		}
+	}
+	for _, s := range starts {
+		if s == want {
+			return true
+		}
+	}
+	for _, s := range edits {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 type stubDoneReactionPlatform struct {
 	stubPlatformEngine
 	doneMu    sync.Mutex
@@ -1714,25 +1735,33 @@ func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, false)
-	sent := p.getSent()
-	if len(sent) != 1 || sent[0] != "done" {
-		t.Fatalf("sent = %#v, want only final assistant reply", sent)
-	}
 
+	// Compact progress coalesces thinking+tool into one preview message.
+	// Since 65e7d98d (L-0154), freeze()+detachPreview() on thinking/tool resets
+	// streamPreview, so EventText/Result finalize via stream preview UpdateMessage
+	// rather than p.Send — sent stays empty and a second preview start carries "done".
 	starts := p.getPreviewStarts()
-	if len(starts) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(starts))
+	if len(starts) < 1 {
+		t.Fatalf("preview starts = %d, want at least 1 (compact progress)", len(starts))
 	}
 	if !strings.Contains(starts[0], "Thinking") {
-		t.Fatalf("start preview should contain thinking text, got %q", starts[0])
+		t.Fatalf("progress start should contain thinking text, got %q", starts[0])
 	}
 
 	edits := p.getPreviewEdits()
-	if len(edits) != 1 {
-		t.Fatalf("preview edits = %d, want 1", len(edits))
+	progressEdit := ""
+	for _, edit := range edits {
+		if strings.Contains(edit, "pwd") {
+			progressEdit = edit
+			break
+		}
 	}
-	if !strings.Contains(edits[0], "pwd") {
-		t.Fatalf("updated preview should contain tool input, got %q", edits[0])
+	if progressEdit == "" {
+		t.Fatalf("expected a progress edit containing tool input, edits=%#v", edits)
+	}
+
+	if !finalAssistantTextDelivered(p.getSent(), starts, edits, "done") {
+		t.Fatalf("final assistant reply not delivered via Send or stream preview; sent=%#v starts=%#v edits=%#v", p.getSent(), starts, edits)
 	}
 }
 
@@ -1758,31 +1787,34 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m2", time.Now(), nil, nil, state.replyCtx, false)
-	sent := p.getSent()
-	if len(sent) != 1 || sent[0] != "done" {
-		t.Fatalf("sent = %#v, want only final assistant reply", sent)
-	}
 
+	// Same L-0154 stream-preview reset as CompactProgress: final "done" is not
+	// via p.Send; assert card progress coalescing + final delivery separately.
 	starts := p.getPreviewStarts()
-	if len(starts) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(starts))
+	if len(starts) < 1 {
+		t.Fatalf("preview starts = %d, want at least 1 (card progress)", len(starts))
 	}
 	if !strings.Contains(starts[0], "**Progress**") {
-		t.Fatalf("start preview should contain fallback progress title, got %q", starts[0])
+		t.Fatalf("progress start should contain fallback progress title, got %q", starts[0])
 	}
 	if !strings.Contains(starts[0], "1.") {
-		t.Fatalf("start preview should contain first item index, got %q", starts[0])
+		t.Fatalf("progress start should contain first item index, got %q", starts[0])
 	}
 
 	edits := p.getPreviewEdits()
-	if len(edits) != 1 {
-		t.Fatalf("preview edits = %d, want 1", len(edits))
+	progressEdit := ""
+	for _, edit := range edits {
+		if strings.Contains(edit, "2.") && strings.Contains(edit, "echo hi") {
+			progressEdit = edit
+			break
+		}
 	}
-	if !strings.Contains(edits[0], "2.") {
-		t.Fatalf("updated preview should contain second item index, got %q", edits[0])
+	if progressEdit == "" {
+		t.Fatalf("expected a card progress edit with second item + tool command, edits=%#v", edits)
 	}
-	if !strings.Contains(edits[0], "echo hi") {
-		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
+
+	if !finalAssistantTextDelivered(p.getSent(), starts, edits, "done") {
+		t.Fatalf("final assistant reply not delivered via Send or stream preview; sent=%#v starts=%#v edits=%#v", p.getSent(), starts, edits)
 	}
 }
 
@@ -1892,11 +1924,12 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil, nil, state.replyCtx, false)
 	starts := p.getPreviewStarts()
-	if len(starts) != 1 {
-		t.Fatalf("preview starts = %d, want 1", len(starts))
+	// Progress card start + post-L-0154 stream-preview start for EventText "done".
+	if len(starts) < 1 {
+		t.Fatalf("preview starts = %d, want at least 1", len(starts))
 	}
 	if !strings.HasPrefix(starts[0], ProgressCardPayloadPrefix) {
-		t.Fatalf("start preview should be structured payload, got %q", starts[0])
+		t.Fatalf("first start should be structured progress payload, got %q", starts[0])
 	}
 	startPayload, ok := ParseProgressCardPayload(starts[0])
 	if !ok {
@@ -1913,26 +1946,31 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 
 	edits := p.getPreviewEdits()
-	if len(edits) != 2 {
-		t.Fatalf("preview edits = %d, want 2", len(edits))
+	var updatePayload, completedPayload *ProgressCardPayload
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if len(payload.Items) == 2 && payload.State == ProgressCardStateRunning {
+			updatePayload = payload
+		}
+		if payload.State == ProgressCardStateCompleted {
+			completedPayload = payload
+		}
 	}
-	updatePayload, ok := ParseProgressCardPayload(edits[0])
-	if !ok {
-		t.Fatalf("update preview should parse as structured payload, got %q", edits[0])
-	}
-	if len(updatePayload.Items) != 2 {
-		t.Fatalf("update payload items = %d, want 2", len(updatePayload.Items))
+	if updatePayload == nil {
+		t.Fatalf("missing running payload with 2 items, edits=%#v", edits)
 	}
 	if !strings.Contains(updatePayload.Items[1].Text, "echo hi") {
 		t.Fatalf("second payload item should contain tool command, got %q", updatePayload.Items[1].Text)
 	}
-
-	finalPayload, ok := ParseProgressCardPayload(edits[1])
-	if !ok {
-		t.Fatalf("final preview should parse as structured payload, got %q", edits[1])
+	if completedPayload == nil {
+		t.Fatalf("missing completed progress payload, edits=%#v", edits)
 	}
-	if finalPayload.State != ProgressCardStateCompleted {
-		t.Fatalf("final payload state = %q, want %q", finalPayload.State, ProgressCardStateCompleted)
+
+	if !finalAssistantTextDelivered(p.getSent(), starts, edits, "done") {
+		t.Fatalf("final assistant reply not delivered via Send or stream preview; sent=%#v starts=%#v edits=%#v", p.getSent(), starts, edits)
 	}
 }
 
