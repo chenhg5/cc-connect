@@ -467,7 +467,7 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacyWorkspaceBindings_MovesProjectAndSharedBindings(t *testing.T) {
+func TestMigrateLegacyWorkspaceBindings_CopiesProjectAndSharedDefaults(t *testing.T) {
 	baseDir := t.TempDir()
 	e := newTestEngineWithMultiWorkspace(t, baseDir)
 	oldKey := workspaceChannelKey("feishu", "oc_chat")
@@ -482,11 +482,11 @@ func TestMigrateLegacyWorkspaceBindings_MovesProjectAndSharedBindings(t *testing
 	})
 
 	for _, projectKey := range []string{"project:test", sharedWorkspaceBindingsKey} {
-		if b := e.workspaceBindings.Lookup(projectKey, oldKey); b != nil {
-			t.Fatalf("%s legacy binding was not removed: %+v", projectKey, b)
+		if b := e.workspaceBindings.Lookup(projectKey, oldKey); b == nil {
+			t.Fatalf("%s chat default binding was not preserved", projectKey)
 		}
 		if b := e.workspaceBindings.Lookup(projectKey, newKey); b == nil {
-			t.Fatalf("%s topic binding was not created", projectKey)
+			t.Fatalf("%s topic binding did not inherit the default", projectKey)
 		}
 	}
 }

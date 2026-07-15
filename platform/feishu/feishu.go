@@ -1099,7 +1099,7 @@ func (p *Platform) dispatchCoreMessage(msg *core.Message) {
 
 // populateWorkspaceChannelKeys keeps workspace binding scope aligned with the
 // session scope. In Feishu topic mode the session key contains the root message
-// ID, while the legacy workspace binding was scoped only to the chat.
+// ID, while the legacy chat-level binding remains the default for new topics.
 func (p *Platform) populateWorkspaceChannelKeys(msg *core.Message) {
 	if msg == nil || msg.ChannelKey != "" {
 		return

@@ -151,7 +151,7 @@ func TestWorkspaceBindingManager_UnbindScopedRemovesLegacyBinding(t *testing.T) 
 	}
 }
 
-func TestWorkspaceBindingManager_MigrateChannelKey(t *testing.T) {
+func TestWorkspaceBindingManager_InheritChannelKeyPreservesDefault(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "bindings.json")
 	mgr := NewWorkspaceBindingManager(storePath)
@@ -162,22 +162,25 @@ func TestWorkspaceBindingManager_MigrateChannelKey(t *testing.T) {
 	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/a")
 
 	if !mgr.MigrateChannelKey(projectKey, oldKey, newKey) {
-		t.Fatal("expected legacy binding to migrate")
+		t.Fatal("expected topic binding to inherit the chat default")
 	}
-	if b := mgr.Lookup(projectKey, oldKey); b != nil {
-		t.Fatalf("expected legacy binding to be removed, got %+v", b)
+	if b := mgr.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected chat default binding to be preserved, got %+v", b)
 	}
 	if b := mgr.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/a" {
-		t.Fatalf("expected migrated topic binding, got %+v", b)
+		t.Fatalf("expected inherited topic binding, got %+v", b)
 	}
 
 	reloaded := NewWorkspaceBindingManager(storePath)
 	if b := reloaded.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/a" {
-		t.Fatalf("expected migrated binding after reload, got %+v", b)
+		t.Fatalf("expected inherited binding after reload, got %+v", b)
+	}
+	if b := reloaded.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected chat default after reload, got %+v", b)
 	}
 }
 
-func TestWorkspaceBindingManager_MigrateChannelKeyDoesNotOverwriteDestination(t *testing.T) {
+func TestWorkspaceBindingManager_InheritChannelKeyDoesNotOverwriteDestination(t *testing.T) {
 	mgr := NewWorkspaceBindingManager(filepath.Join(t.TempDir(), "bindings.json"))
 	projectKey := "project:claude"
 	oldKey := workspaceChannelKey("feishu", "oc_chat")
@@ -186,17 +189,17 @@ func TestWorkspaceBindingManager_MigrateChannelKeyDoesNotOverwriteDestination(t 
 	mgr.Bind(projectKey, newKey, "topic", "/workspace/current")
 
 	if mgr.MigrateChannelKey(projectKey, oldKey, newKey) {
-		t.Fatal("migration must not overwrite an existing topic binding")
+		t.Fatal("inheritance must not overwrite an existing topic binding")
 	}
 	if b := mgr.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/current" {
 		t.Fatalf("destination binding changed unexpectedly: %+v", b)
 	}
 	if b := mgr.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/legacy" {
-		t.Fatalf("source binding should remain when migration is skipped: %+v", b)
+		t.Fatalf("chat default binding should remain: %+v", b)
 	}
 }
 
-func TestWorkspaceBindingManager_MigrateChannelKeyConcurrentSingleWinner(t *testing.T) {
+func TestWorkspaceBindingManager_InheritChannelKeyConcurrentTopics(t *testing.T) {
 	mgr := NewWorkspaceBindingManager(filepath.Join(t.TempDir(), "bindings.json"))
 	projectKey := "project:claude"
 	oldKey := workspaceChannelKey("feishu", "oc_chat")
@@ -210,21 +213,26 @@ func TestWorkspaceBindingManager_MigrateChannelKeyConcurrentSingleWinner(t *test
 	var wg sync.WaitGroup
 	for _, target := range targets {
 		wg.Add(1)
-		go func() {
+		go func(channelKey string) {
 			defer wg.Done()
-			results <- mgr.MigrateChannelKey(projectKey, oldKey, target)
-		}()
+			results <- mgr.MigrateChannelKey(projectKey, oldKey, channelKey)
+		}(target)
 	}
 	wg.Wait()
 	close(results)
 
-	winners := 0
-	for migrated := range results {
-		if migrated {
-			winners++
+	inherited := 0
+	for ok := range results {
+		if ok {
+			inherited++
 		}
 	}
-	if winners != 1 {
-		t.Fatalf("expected exactly one migration winner, got %d", winners)
+	if inherited != len(targets) {
+		t.Fatalf("expected all topics to inherit the default, got %d of %d", inherited, len(targets))
+	}
+	for _, target := range targets {
+		if b := mgr.Lookup(projectKey, target); b == nil || b.Workspace != "/workspace/a" {
+			t.Fatalf("topic %q did not inherit the default: %+v", target, b)
+		}
 	}
 }

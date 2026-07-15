@@ -115,10 +115,9 @@ func (m *WorkspaceBindingManager) Bind(projectKey, channelKey, channelName, work
 	m.saveLocked()
 }
 
-// MigrateChannelKey atomically moves an existing binding from oldChannelKey to
-// newChannelKey. It never overwrites an existing destination binding. Legacy
-// unscoped candidates are removed together with the scoped source so a later
-// lookup cannot fall back to the pre-migration binding.
+// MigrateChannelKey copies an existing default binding from oldChannelKey to
+// newChannelKey. It never overwrites an existing destination and deliberately
+// preserves the default binding for other channels and older versions.
 func (m *WorkspaceBindingManager) MigrateChannelKey(projectKey, oldChannelKey, newChannelKey string) bool {
 	if oldChannelKey == "" || newChannelKey == "" || oldChannelKey == newChannelKey {
 		return false
@@ -144,10 +143,8 @@ func (m *WorkspaceBindingManager) MigrateChannelKey(projectKey, oldChannelKey, n
 		return false
 	}
 
-	proj[newChannelKey] = binding
-	for _, candidate := range workspaceChannelKeyCandidates(oldChannelKey) {
-		delete(proj, candidate)
-	}
+	inherited := *binding
+	proj[newChannelKey] = &inherited
 	m.saveLocked()
 	return true
 }
