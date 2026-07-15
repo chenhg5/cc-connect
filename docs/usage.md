@@ -567,7 +567,7 @@ cc-connect weixin new --project my-project
 Notes:
 - `setup` without `--token` runs QR login; with `--token` behaves like bind.
 - Auto-creates the project and/or a `weixin` platform block when missing.
-- After login, send a message from WeChat once so `context_token` is cached.
+- After login, send a WeChat message once so a fresh `context_token` is cached. If logs show `ret=-2`, the old token usually expired; text replies are retried after the next inbound message refreshes it.
 - See `cc-connect weixin help` for flags (`--api-url`, `--cdn-url`, `--route-tag`, etc.).
 
 ---

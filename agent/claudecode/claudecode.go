@@ -328,7 +328,12 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
+	return claudeFallbackModels()
+}
+
+func claudeFallbackModels() []core.ModelOption {
 	return []core.ModelOption{
+		{Name: "fable", Desc: "Claude Fable (frontier model)"},
 		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
 		{Name: "opus", Desc: "Claude Opus (most capable)"},
 		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},

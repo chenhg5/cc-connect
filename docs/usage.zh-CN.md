@@ -481,7 +481,7 @@ cc-connect weixin new --project my-project
 - 扫码成功后会写入 `token`，以及网关返回的 `base_url`（若有）、`ilink_bot_id` → `account_id` 等。
 - 默认 `--set-allow-from-empty=true`：若 `allow_from` 为空，会用扫码用户的 ilink ID 预填，便于收紧权限。
 - 绑定时默认调用 `getUpdates` 校验 Token；可用 `--skip-verify` 跳过。
-- 首次使用后请在微信里 **先发一条消息**，以便缓存 `context_token`，否则可能无法回复。
+- 首次使用后请在微信里 **先发一条消息**，以便进入服务端互动窗口并缓存 `context_token`。若日志出现 `ret=-2`，可能是互动窗口、单上下文回复额度或频控；cc-connect 会先做一次无 token 降级，仍失败的文字回复会等下一条入站消息后自动补发。
 
 常用参数：`--api-url`、`--cdn-url`、`--timeout`、`--qr-image`、`--route-tag`、`--bot-type`、`--debug`（详见 `cc-connect weixin help` 或 [weixin.md](./weixin.md)）。
 

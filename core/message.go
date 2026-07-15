@@ -162,28 +162,29 @@ type LocationAttachment struct {
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey      string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform        string
-	MessageID       string // platform message ID for tracing
-	Recalled        bool   // true for platform message recall/delete events targeting MessageID
-	ParentMessageID string // direct parent/replied-to message ID when available
-	RootMessageID   string // root thread/conversation message ID when available
-	ThreadID        string // platform-native thread identifier when available
-	ChannelID       string
-	UserID          string
-	UserName        string
-	ChatName        string // human-readable chat/group name (optional)
-	Content         string
-	Images          []ImageAttachment   // attached images (if any)
-	Files           []FileAttachment    // attached files (if any)
-	Audio           *AudioAttachment    // voice message (if any)
-	Location        *LocationAttachment // geographical location (if any)
-	ExtraContent    string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
-	ChannelKey      string              // platform-provided channel identifier for workspace binding (optional)
-	AuditExtra      map[string]any      // platform-specific audit metadata that should be preserved as-is
-	ReplyCtx        any                 // platform-specific context needed for replying
-	FromVoice       bool                // true if message originated from voice transcription
-	ModeOverride    string              // if set, temporarily override agent permission mode for this message
+	SessionKey       string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform         string
+	MessageID        string // platform message ID for tracing
+	Recalled         bool   // true for platform message recall/delete events targeting MessageID
+	ParentMessageID  string // direct parent/replied-to message ID when available
+	RootMessageID    string // root thread/conversation message ID when available
+	ThreadID         string // platform-native thread identifier when available
+	ChannelID        string
+	UserID           string
+	UserName         string
+	ChatName         string // human-readable chat/group name (optional)
+	Content          string
+	Images           []ImageAttachment   // attached images (if any)
+	Files            []FileAttachment    // attached files (if any)
+	Audio            *AudioAttachment    // voice message (if any)
+	Location         *LocationAttachment // geographical location (if any)
+	ExtraContent     string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	ChannelKey       string              // platform-provided channel identifier for workspace binding (optional)
+	AuditExtra       map[string]any      // platform-specific audit metadata that should be preserved as-is
+	ReplyCtx         any                 // platform-specific context needed for replying
+	FromVoice        bool                // true if message originated from voice transcription
+	ModeOverride     string              // if set, temporarily override agent permission mode for this message
+	InstantReplySent bool                // internal: configured instant reply was already sent before processing
 }
 
 // EventType distinguishes different kinds of agent output.

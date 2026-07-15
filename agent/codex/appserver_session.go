@@ -122,6 +122,8 @@ type appServerSession struct {
 	mode          string
 	baseURL       string
 	modelProvider string
+	cliBin        string
+	cliExtraArgs  []string
 	extraEnv      []string
 	codexHome     string
 
@@ -166,7 +168,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider, cliBin string, cliExtraArgs []string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -176,6 +178,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		mode:             mode,
 		baseURL:          baseURL,
 		modelProvider:    modelProvider,
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
 		events:           make(chan core.Event, 128),
@@ -208,7 +212,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
+	args := append([]string(nil), s.cliExtraArgs...)
+	args = append(args, "app-server")
 	if strings.TrimSpace(s.url) != "" {
 		args = append(args, "--listen", strings.TrimSpace(s.url))
 	}
@@ -224,7 +229,11 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	bin := strings.TrimSpace(s.cliBin)
+	if bin == "" {
+		bin = "codex"
+	}
+	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {

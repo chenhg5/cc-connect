@@ -55,3 +55,13 @@ func TestGetModel_PrefersActiveProviderModel(t *testing.T) {
 		t.Fatalf("GetModel() = %q, want opus", got)
 	}
 }
+
+func TestClaudeFallbackModels_IncludesFable(t *testing.T) {
+	for _, model := range claudeFallbackModels() {
+		if model.Name == "fable" {
+			return
+		}
+	}
+
+	t.Fatalf("claudeFallbackModels() = %v, want fable", claudeFallbackModels())
+}

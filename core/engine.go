@@ -728,6 +728,31 @@ func (e *Engine) SetInstantReply(cfg InstantReplyCfg) {
 	e.instantReply = cfg
 }
 
+func (e *Engine) instantReplyContent() string {
+	replyContent := e.instantReply.Content
+	if replyContent == "" {
+		replyContent = e.i18n.T(MsgStarting)
+	}
+	return replyContent
+}
+
+func (e *Engine) sendInstantReply(p Platform, replyCtx any) {
+	e.send(p, replyCtx, e.instantReplyContent())
+}
+
+func (e *Engine) shouldSendEarlyInstantReply(p Platform) bool {
+	if !e.instantReply.Enabled {
+		return false
+	}
+	early, ok := p.(EarlyInstantReplyRequester)
+	return ok && early.NeedsEarlyInstantReply()
+}
+
+func holdIntermediateTextUntilFinal(p Platform) bool {
+	policy, ok := p.(FinalOnlyTextRequester)
+	return ok && policy.HoldIntermediateTextUntilFinal()
+}
+
 // SetReferenceConfig configures local reference normalization/rendering.
 func (e *Engine) SetReferenceConfig(cfg ReferenceRenderCfg) {
 	e.references = normalizeReferenceRenderCfg(cfg)
@@ -2373,6 +2398,10 @@ sessionLocked:
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
+	if e.shouldSendEarlyInstantReply(p) {
+		e.sendInstantReply(p, msg.ReplyCtx)
+		msg.InstantReplySent = true
+	}
 	// Record that a real user message is being processed. This keeps
 	// LastUserActivity separate from UpdatedAt (bumped by every Unlock), so
 	// reset_on_idle_mins is not defeated by heartbeats or unsolicited agent
@@ -2945,7 +2974,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		sendDone <- agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.InstantReplySent)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -3703,7 +3732,8 @@ var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
 }
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, instantReplyAlreadySent ...bool) {
+	instantReplySent := len(instantReplyAlreadySent) > 0 && instantReplyAlreadySent[0]
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -3777,12 +3807,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
-		replyContent := e.instantReply.Content
-		if replyContent == "" {
-			replyContent = e.i18n.T(MsgStarting)
-		}
-		e.send(state.platform, state.replyCtx, replyContent)
+	if e.instantReply.Enabled && !instantReplySent && streamCard == nil {
+		e.sendInstantReply(state.platform, state.replyCtx)
 	}
 
 	// Idle timeout: resets on every received event (0 = disabled)
@@ -3984,7 +4010,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+				if e.display.Mode == "quiet" || holdIntermediateTextUntilFinal(p) {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -4073,7 +4099,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+				if e.display.Mode == "quiet" || holdIntermediateTextUntilFinal(p) {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -4768,11 +4794,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				// Send instant reply for queued turn if no streaming card is active.
 				if e.instantReply.Enabled && streamCard == nil {
-					replyContent := e.instantReply.Content
-					if replyContent == "" {
-						replyContent = e.i18n.T(MsgStarting)
-					}
-					e.send(queued.platform, queued.replyCtx, replyContent)
+					e.sendInstantReply(queued.platform, queued.replyCtx)
 				}
 
 				session.AddHistory("user", queued.content)
@@ -5043,7 +5065,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, false)
 	}
 }
 

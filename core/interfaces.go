@@ -163,6 +163,20 @@ type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
 }
 
+// EarlyInstantReplyRequester marks platforms whose reply context expires
+// quickly. The engine sends the configured instant reply before slower
+// interactive setup, then skips the later generic instant reply for that turn.
+type EarlyInstantReplyRequester interface {
+	NeedsEarlyInstantReply() bool
+}
+
+// FinalOnlyTextRequester marks platforms where each outbound message consumes
+// a limited reply allowance. Intermediate assistant text stays buffered until
+// EventResult instead of being flushed at tool boundaries.
+type FinalOnlyTextRequester interface {
+	HoldIntermediateTextUntilFinal() bool
+}
+
 // TypingIndicatorDone is an optional interface for platforms that can show a
 // "done" reaction after processing completes. The engine calls AddDoneReaction
 // when the agent finishes a multi-round turn in quiet mode, so the user gets

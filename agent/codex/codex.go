@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,7 +40,7 @@ type Agent struct {
 	cliBin          string   // CLI binary name, default "codex"
 	cliExtraArgs    []string // extra args parsed from cli_path after the binary
 	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
+	activeIdx       int      // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	mu              sync.RWMutex
@@ -211,6 +213,9 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
+	if models := a.fetchModelsFromAppServer(ctx); len(models) > 0 {
+		return models
+	}
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
@@ -225,6 +230,147 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		{Name: "gpt-4.1-nano", Desc: "GPT-4.1 Nano (fastest)"},
 		{Name: "codex-mini-latest", Desc: "Codex Mini (code-optimized)"},
 	}
+}
+
+func (a *Agent) fetchModelsFromAppServer(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	workDir := a.workDir
+	codexHome := a.codexHome
+	cliBin := a.cliBin
+	cliExtraArgs := append([]string(nil), a.cliExtraArgs...)
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
+	extraEnv = append(extraEnv, a.sessionEnv...)
+	a.mu.RUnlock()
+
+	models, err := fetchCodexAppServerModels(ctx, cliBin, cliExtraArgs, workDir, codexHome, extraEnv)
+	if err != nil {
+		slog.Debug("codex: failed to fetch app-server models", "error", err)
+		return nil
+	}
+	return models
+}
+
+type codexAppServerModelEntry struct {
+	ID          string `json:"id"`
+	Model       string `json:"model"`
+	DisplayName string `json:"displayName"`
+	Description string `json:"description"`
+	Hidden      bool   `json:"hidden"`
+}
+
+func fetchCodexAppServerModels(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, codexHome string, extraEnv []string) ([]core.ModelOption, error) {
+	bin := strings.TrimSpace(cliBin)
+	if bin == "" {
+		bin = "codex"
+	}
+
+	args := append([]string(nil), cliExtraArgs...)
+	args = append(args, "app-server", "--listen", "stdio://")
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if strings.TrimSpace(workDir) != "" {
+		cmd.Dir = workDir
+	}
+	prepareCmdForKill(cmd)
+
+	env := append([]string(nil), extraEnv...)
+	if home := strings.TrimSpace(codexHome); home != "" {
+		env = append(env, "CODEX_HOME="+home)
+	}
+	if len(env) > 0 {
+		cmd.Env = core.MergeEnv(os.Environ(), env)
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("model list stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("model list stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("model list start app-server: %w", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	reader := bufio.NewReader(stdout)
+	nextID := int64(1)
+	if err := rpcRequestOverIO(stdin, reader, nextID, "initialize", map[string]any{
+		"clientInfo": map[string]any{
+			"name":    "cc-connect-codex-model-list",
+			"title":   "CC Connect Codex Model List",
+			"version": "0.1.0",
+		},
+		"capabilities": map[string]any{
+			"experimentalApi": true,
+		},
+	}, nil); err != nil {
+		return nil, err
+	}
+	nextID++
+
+	if err := rpcNotifyOverIO(stdin, "initialized", map[string]any{}); err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Data   []codexAppServerModelEntry `json:"data"`
+		Models []codexAppServerModelEntry `json:"models"`
+	}
+	if err := rpcRequestOverIO(stdin, reader, nextID, "model/list", map[string]any{}, &resp); err != nil {
+		return nil, err
+	}
+
+	entries := resp.Data
+	if len(entries) == 0 {
+		entries = resp.Models
+	}
+	return codexAppServerEntriesToModelOptions(entries), nil
+}
+
+func codexAppServerEntriesToModelOptions(entries []codexAppServerModelEntry) []core.ModelOption {
+	models := make([]core.ModelOption, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.Hidden {
+			continue
+		}
+		name := strings.TrimSpace(entry.ID)
+		if name == "" {
+			name = strings.TrimSpace(entry.Model)
+		}
+		if name == "" {
+			name = strings.TrimSpace(entry.DisplayName)
+		}
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+
+		alias := strings.TrimSpace(entry.DisplayName)
+		if alias == name {
+			alias = ""
+		}
+		models = append(models, core.ModelOption{
+			Name:  name,
+			Desc:  strings.TrimSpace(entry.Description),
+			Alias: alias,
+		})
+	}
+	return models
 }
 
 var openaiChatModels = map[string]bool{
@@ -392,7 +538,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, cliBin, cliExtraArgs, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)

@@ -44,11 +44,16 @@ func (p *Platform) resolveReplyContext(replyCtx any) (*replyContext, error) {
 	if !ok || rc == nil {
 		return nil, fmt.Errorf("weixin: invalid reply context")
 	}
-	if strings.TrimSpace(rc.contextToken) == "" {
-		rc.contextToken = p.getContextToken(rc.peerUserID)
+	if p.refreshReplyContextToken(rc) {
+		slog.Debug("weixin: using latest cached context_token before media send", "peer", rc.peerUserID)
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
-		return nil, fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
+		slog.Warn("weixin: context_token unavailable; attempting media send without context", "peer", rc.peerUserID)
+	} else if !p.replyContextTokenFresh(rc) {
+		slog.Warn("weixin: context_token is older than the conservative freshness window; attempting media send before deferring",
+			"peer", rc.peerUserID,
+			"token_age", p.replyContextTokenAge(rc),
+			"message_id", rc.messageID)
 	}
 	return rc, nil
 }
@@ -131,48 +136,53 @@ func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
 	}
 }
 
-// sendSingleItemWithRetry sends a media item with retry mechanism for ret=-2 errors.
+// sendSingleItemWithRetry mirrors text delivery: one contextual attempt, then
+// one context-free fallback when the server rejects a stale token.
 func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
-	var lastErr error
-	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
+	send := func(token, clientID string) error {
 		msg := sendMessageReq{
 			Msg: weixinOutboundMsg{
 				FromUserID:   "",
 				ToUserID:     rc.peerUserID,
-				ClientID:     "cc-" + randomHex(8),
+				ClientID:     clientID,
 				MessageType:  messageTypeBot,
 				MessageState: messageStateFinish,
 				ItemList:     []messageItem{item},
-				ContextToken: rc.contextToken,
+				ContextToken: token,
 			},
 		}
-		err := p.api.sendMessage(ctx, &msg)
-		if err == nil {
-			return nil
+		return p.api.sendMessage(ctx, &msg)
+	}
+
+	token := strings.TrimSpace(rc.contextToken)
+	clientID := "cc-" + randomHex(8)
+	err := send(token, clientID)
+	if err == nil {
+		if token == "" {
+			rc.deliveryUnconfirmed = true
+		} else {
+			p.markContextSendAccepted(rc.peerUserID, token)
 		}
-		lastErr = err
-		// Check if error is ret=-2 (API declined) - retry with fresh token
-		if strings.Contains(err.Error(), "ret=-2") {
-			slog.Warn("weixin: sendMessage ret=-2 for media, retrying",
-				"attempt", attempt+1, "peer", rc.peerUserID)
-			// Add delay before retry
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(weixinSendRetryDelay):
-			}
-			// Refresh context_token from stored tokens
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken != "" && freshToken != rc.contextToken {
-				rc.contextToken = freshToken
-				slog.Debug("weixin: using refreshed context_token for media retry", "peer", rc.peerUserID)
-			}
-			continue
-		}
-		// For other errors, don't retry
+		return nil
+	}
+	if !isStaleContextTokenError(err) || token == "" {
 		return err
 	}
-	return lastErr
+
+	slog.Warn("weixin: sendMessage ret=-2 for media; trying one context-free proactive fallback",
+		"peer", rc.peerUserID, "token_age", p.replyContextTokenAge(rc))
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(weixinSendRetryDelay):
+	}
+	if err := send("", clientID+"-noctx"); err != nil {
+		return err
+	}
+	rc.contextToken = ""
+	rc.contextTokenCapturedAt = time.Time{}
+	rc.deliveryUnconfirmed = true
+	return nil
 }
 
 // SendImage implements core.ImageSender.

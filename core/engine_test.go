@@ -86,6 +86,18 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+type earlyInstantReplyPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *earlyInstantReplyPlatform) NeedsEarlyInstantReply() bool { return true }
+
+type finalOnlyTextPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *finalOnlyTextPlatform) HoldIntermediateTextUntilFinal() bool { return true }
+
 type recallCheckingPlatform struct {
 	stubPlatformEngine
 	recalled bool
@@ -1209,6 +1221,33 @@ func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) 
 	sent := p.getSent()
 	if len(sent) != 1 || sent[0] != "done" {
 		t.Fatalf("sent = %#v, want only final answer without standalone ellipsis progress", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_FinalOnlyPlatformHoldsTextAcrossToolBoundary(t *testing.T) {
+	p := &finalOnlyTextPlatform{stubPlatformEngine: stubPlatformEngine{n: "limited-im"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", ThinkingMessages: false, ToolMessages: false})
+
+	sessionKey := "limited-im:user-final-only"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-final-only")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-final-only",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "已经处理完成。"}
+	agentSession.events <- Event{Type: EventResult, Content: "已经处理完成。", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-final-only", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "先检查一下。已经处理完成。" {
+		t.Fatalf("sent = %#v, want one combined final reply", sent)
 	}
 }
 
@@ -11604,6 +11643,45 @@ func TestHandleMessage_InstantReply_UsesDefaultI18nWhenContentEmpty(t *testing.T
 	sent := p.getSent()
 	if sent[0] != "⏳ 处理中..." {
 		t.Fatalf("first reply = %q, want i18n default '⏳ 处理中...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_EarlyRequesterSendsBeforeAgentSendCompletes(t *testing.T) {
+	p := &earlyInstantReplyPlatform{stubPlatformEngine: stubPlatformEngine{n: "weixin-like"}}
+	agentSession := newBlockingSendSession("early-instant")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "weixin-like:user1",
+		Platform:   "weixin-like",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "slow task",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := waitForPlatformSend(&p.stubPlatformEngine, 1, time.Second)
+	if len(sent) != 1 || sent[0] != "🤔 Thinking..." {
+		t.Fatalf("early instant reply = %v, want only '🤔 Thinking...' before agent send completes", sent)
+	}
+
+	select {
+	case <-agentSession.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("agent Send did not start")
+	}
+	close(agentSession.unblock)
+	agentSession.events <- Event{Type: EventResult, Content: "agent reply", Done: true}
+
+	sent = waitForPlatformSend(&p.stubPlatformEngine, 2, 2*time.Second)
+	if len(sent) != 2 {
+		t.Fatalf("sent messages = %v, want instant reply plus final answer", sent)
+	}
+	if sent[0] != "🤔 Thinking..." || sent[1] != "agent reply" {
+		t.Fatalf("sent messages = %v, want no duplicate instant reply", sent)
 	}
 }
 

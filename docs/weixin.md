@@ -79,7 +79,8 @@ token = "ilink_bot_bearer_token"       # 必填；扫码或 bind 写入
 # allow_from = "user@im.wechat"        # 建议限制使用者；逗号分隔或 "*"
 # account_id = "default"               # 多账号时区分状态目录，见下
 # route_tag = ""                       # 与 CLI --route-tag 一致
-# long_poll_timeout_ms = 35000
+# bot_agent = "CCConnect/1.0"           # 写入 base_info.bot_agent
+# long_poll_timeout_ms = 35000          # 建议 35s；超过 60s 会回落到默认/服务端值
 # proxy = ""                           # 可选 HTTP 代理
 ```
 
@@ -101,6 +102,23 @@ token = "ilink_bot_bearer_token"       # 必填；扫码或 bind 写入
 
 网关下发消息时可能带 `context_token`；cc-connect 会缓存并在回复时使用。  
 **首次连接**：请先启动 cc-connect，再用允许的微信账号 **给机器人发一条消息**，完成关联后再使用 `/new` 等指令。
+
+`context_token` 更像受服务端互动窗口和回复额度约束的会话凭证，不适合长期复用。腾讯上游当前确认用户主动发消息后只有约 24 小时回复窗口，社区还稳定复现了单个上下文约 10 条外发限制。cc-connect 因此会：
+
+- 普通回复优先使用最近一次入站消息携带的 token，并记录每个上下文已经被接口接受的消息数。
+- 中间助手文本不在每个工具边界单独发送，只保留即时确认和最终回复，避免进度消息耗尽回复额度。
+- 若 token 缺失，或 `sendMessage ret=-2`，只尝试一次不带 token 的主动发送；HTTP 接受仅表示请求已受理，不代表微信终端确认送达。
+- 若带 token 和无 token 两种方式都被拒绝，会把该用户最新一条未发出的文字回复写入 `pending_replies.json`。
+- 用户下一次给机器人发消息并带来新 `context_token` 后，会自动补发上一次挂起的文字回复。
+- 图片/文件等媒体也会做一次无 token 降级，但不会持久化补发。
+
+### iLink 请求契约
+
+发送到 iLink 网关的请求会带：
+
+- Header：`AuthorizationType: ilink_bot_token`、`Authorization: Bearer ...`、`X-WECHAT-UIN`、`iLink-App-Id: bot`、`iLink-App-ClientVersion: 65536`。
+- JSON：`base_info.channel_version` 和 `base_info.bot_agent`。
+- `getconfig` 使用 `ilink_user_id`，与 iLink/openclaw-weixin 约定保持一致。
 
 ---
 
@@ -131,6 +149,8 @@ go build -tags no_weixin ./cmd/cc-connect
 |------|------|
 | 扫码无反应 / 超时 | 检查网络、 `--api-url`、`--timeout`；重试 `weixin setup` |
 | 写入配置后仍收不到消息 | 确认 `allow_from`、进程已重启、微信端已发消息触发 `context_token` |
+| 偶发发不出 / 日志出现 `ret=-2` | 可能是 24 小时窗口、单上下文消息额度或频控；cc-connect 会做一次无 token 降级，仍失败则等待用户新消息后补发 |
+| 配了很大的 `long_poll_timeout_ms` | 超过 60000ms 会被忽略，避免客户端长时间卡在旧轮询上 |
 | 媒体无法解密 | 核对 `cdn_base_url`、网关返回的加密字段是否齐全 |
 | 返回 errcode `-14` 等 | 多为会话过期，按日志提示暂停轮询后重新登录或稍后再试 |
 
@@ -140,4 +160,5 @@ go build -tags no_weixin ./cmd/cc-connect
 
 - 仓库内示例配置：[config.example.toml](../config.example.toml)  
 - 使用指南中的 CLI 摘要：[usage.zh-CN.md](./usage.zh-CN.md)（「微信个人号配置 CLI」）  
-- OpenClaw 同类插件（参考实现）：`openclaw-weixin`
+- OpenClaw 微信通道文档：https://docs.openclaw.ai/channels/wechat
+- Tencent/openclaw-weixin 参考实现：https://github.com/Tencent/openclaw-weixin
