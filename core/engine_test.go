@@ -1576,7 +1576,8 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · " + compactReplyFooterPath(sessionWorkDir) + "*"
+	// Footer format after 5ef75c2d: ctx% + absolute counts first, then model/effort/workdir.
+	want := "answer\n\n*ctx 27% · 181.4k/666.0k · gpt-5.4 · xhigh · " + compactReplyFooterPath(sessionWorkDir) + "*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
