@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
+	_ "modernc.org/sqlite"
 )
 
 // opencodeSession manages multi-turn conversations with the OpenCode CLI.
@@ -39,6 +41,8 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	textEmitted       atomic.Bool // true when at least one EventText was emitted for this turn
+	turnStartedMs     atomic.Int64
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -80,6 +84,8 @@ func (s *opencodeSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	s.textEmitted.Store(false)
+	s.turnStartedMs.Store(time.Now().Add(-2 * time.Second).UnixMilli())
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -262,13 +268,13 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 	switch eventType {
 	case "text":
 		s.handleText(raw)
-	case "tool_use":
+	case "tool_use", "tool":
 		s.handleToolUse(raw)
 	case "reasoning":
 		s.handleReasoning(raw)
-	case "step_start":
+	case "step_start", "step-start":
 		s.handleStepStart(raw)
-	case "step_finish":
+	case "step_finish", "step-finish":
 		s.handleStepFinish(raw)
 	case "error":
 		s.handleError(raw)
@@ -278,11 +284,15 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 	}
 }
 
-func (s *opencodeSession) handleText(raw map[string]any) {
-	part, _ := raw["part"].(map[string]any)
-	if part == nil {
-		return
+func opencodeEventPart(raw map[string]any) map[string]any {
+	if part, ok := raw["part"].(map[string]any); ok && part != nil {
+		return part
 	}
+	return raw
+}
+
+func (s *opencodeSession) handleText(raw map[string]any) {
+	part := opencodeEventPart(raw)
 	text, _ := part["text"].(string)
 
 	// Extract metadata and synthetic flags to identify compaction_continue
@@ -305,6 +315,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
+			s.textEmitted.Store(true)
 		case <-s.ctx.Done():
 			return
 		}
@@ -312,10 +323,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 }
 
 func (s *opencodeSession) handleToolUse(raw map[string]any) {
-	part, _ := raw["part"].(map[string]any)
-	if part == nil {
-		return
-	}
+	part := opencodeEventPart(raw)
 
 	toolName, _ := part["tool"].(string)
 
@@ -398,10 +406,7 @@ func extractToolInput(state map[string]any) string {
 }
 
 func (s *opencodeSession) handleReasoning(raw map[string]any) {
-	part, _ := raw["part"].(map[string]any)
-	if part == nil {
-		return
-	}
+	part := opencodeEventPart(raw)
 	text, _ := part["text"].(string)
 	if text != "" {
 		evt := core.Event{Type: core.EventThinking, Content: text}
@@ -468,10 +473,8 @@ func extractErrorMessage(raw map[string]any) string {
 func (s *opencodeSession) handleStepStart(raw map[string]any) {
 	sessionID, _ := raw["sessionID"].(string)
 	if sessionID == "" {
-		part, _ := raw["part"].(map[string]any)
-		if part != nil {
-			sessionID, _ = part["sessionID"].(string)
-		}
+		part := opencodeEventPart(raw)
+		sessionID, _ = part["sessionID"].(string)
 	}
 	if sessionID != "" {
 		s.chatID.Store(sessionID)
@@ -480,11 +483,9 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 }
 
 func (s *opencodeSession) handleStepFinish(raw map[string]any) {
-	part, _ := raw["part"].(map[string]any)
+	part := opencodeEventPart(raw)
 	reason := ""
-	if part != nil {
-		reason, _ = part["reason"].(string)
-	}
+	reason, _ = part["reason"].(string)
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
 	if reason == "stop" {
@@ -499,11 +500,71 @@ func (s *opencodeSession) sendEventResult() {
 	}
 	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	content := ""
+	if !s.textEmitted.Load() && sid != "" {
+		if recovered, err := recoverLatestAssistantTextFromOpenCodeDB(context.Background(), sid, s.turnStartedMs.Load()); err == nil && strings.TrimSpace(recovered) != "" {
+			content = recovered
+			slog.Warn("opencodeSession: recovered assistant text from OpenCode DB after empty stdout text", "session_id", sid, "content_len", len(content))
+		} else if err != nil {
+			slog.Debug("opencodeSession: DB text recovery skipped", "session_id", sid, "error", err)
+		}
+	}
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Content: content, Done: true}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 	}
+}
+
+func recoverLatestAssistantTextFromOpenCodeDB(parent context.Context, sessionID string, startedMs int64) (string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || startedMs <= 0 {
+		return "", nil
+	}
+	dbPath := opencodeDBPath()
+	if dbPath == "" {
+		return "", nil
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 2000"); err != nil {
+		return "", err
+	}
+
+	const query = `
+SELECT json_extract(p.data, '$.text')
+FROM part p
+JOIN message m ON m.id = p.message_id
+WHERE p.session_id = ?
+  AND json_extract(m.data, '$.role') = 'assistant'
+  AND json_extract(p.data, '$.type') = 'text'
+  AND m.time_created >= ?
+ORDER BY p.time_created DESC, p.id DESC
+LIMIT 1`
+
+	var text sql.NullString
+	if err := db.QueryRowContext(ctx, query, sessionID, startedMs).Scan(&text); err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	if !text.Valid {
+		return "", nil
+	}
+	return text.String, nil
 }
 
 // RespondPermission is a no-op — OpenCode handles permissions internally.

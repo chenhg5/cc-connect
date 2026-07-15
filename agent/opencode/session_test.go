@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -157,10 +159,65 @@ func TestHandleStepStart_SessionIDFromPart(t *testing.T) {
 	}
 }
 
+func TestHandleText_TopLevelShape(t *testing.T) {
+	jsonData := `{"type":"text","text":"hello from top-level"}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
+	s.handleText(raw)
+
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventText {
+			t.Fatalf("event type = %q, want EventText", evt.Type)
+		}
+		if evt.Content != "hello from top-level" {
+			t.Fatalf("content = %q", evt.Content)
+		}
+	default:
+		t.Fatal("expected EventText")
+	}
+	if !s.textEmitted.Load() {
+		t.Fatal("textEmitted should be true after EventText")
+	}
+}
+
 // TestHandleStepStopSendsEventResult verifies that handleStepFinish sends
 // an EventResult when reason="stop", signaling turn completion to the engine.
 func TestHandleStepStopSendsEventResult(t *testing.T) {
 	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
+	s.handleStepFinish(raw)
+
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventResult {
+			t.Errorf("event type = %q, want EventResult", evt.Type)
+		}
+		if !evt.Done {
+			t.Errorf("event.Done = false, want true")
+		}
+	default:
+		t.Error("expected EventResult to be sent when reason=stop")
+	}
+}
+
+func TestHandleStepStopSendsEventResultTopLevelShape(t *testing.T) {
+	jsonData := `{"type":"step_finish","reason":"stop"}`
 
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
@@ -240,6 +297,76 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 
 	if count != 1 {
 		t.Errorf("EventResult count = %d, want 1 (duplicate should be prevented)", count)
+	}
+}
+
+func TestSendEventResultRecoversLatestAssistantTextFromDB(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	dbDir := filepath.Join(dataHome, "opencode")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dbDir, "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := []string{
+		`CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)`,
+		`CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)`,
+	}
+	for _, stmt := range schema {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	startedMs := time.Now().UnixMilli()
+	if _, err := db.Exec(
+		`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg_old", "ses_test", startedMs-10_000, startedMs-10_000, `{"role":"assistant"}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_old", "msg_old", "ses_test", startedMs-10_000, startedMs-10_000, `{"type":"text","text":"old answer"}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg_new", "ses_test", startedMs+10, startedMs+10, `{"role":"assistant"}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_new", "msg_new", "ses_test", startedMs+20, startedMs+20, `{"type":"text","text":"recovered answer"}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
+	s.chatID.Store("ses_test")
+	s.turnStartedMs.Store(startedMs)
+	s.sendEventResult()
+
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %q, want EventResult", evt.Type)
+		}
+		if evt.Content != "recovered answer" {
+			t.Fatalf("content = %q, want DB recovery text", evt.Content)
+		}
+	default:
+		t.Fatal("expected EventResult")
 	}
 }
 

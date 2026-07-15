@@ -263,6 +263,20 @@ type TypingIndicator interface {
 	StartTyping(ctx context.Context, replyCtx any) (stop func())
 }
 
+// EarlyInstantReplyRequester marks platforms whose reply context expires
+// quickly. The engine sends the configured instant reply before slower
+// interactive setup, then skips the later generic instant reply for that turn.
+type EarlyInstantReplyRequester interface {
+	NeedsEarlyInstantReply() bool
+}
+
+// FinalOnlyTextRequester marks platforms where each outbound message consumes
+// a limited reply allowance. Intermediate assistant text stays buffered until
+// EventResult instead of being flushed at tool boundaries.
+type FinalOnlyTextRequester interface {
+	HoldIntermediateTextUntilFinal() bool
+}
+
 // TypingIndicatorDone is an optional interface for platforms that can show a
 // "done" reaction after processing completes. The engine calls AddDoneReaction
 // when the agent finishes a multi-round turn in quiet mode, so the user gets
@@ -540,6 +554,21 @@ type UsageCredits struct {
 // can report real runtime context usage for the active conversation.
 type ContextUsageReporter interface {
 	GetContextUsage() *ContextUsage
+}
+
+// TurnUsageReporter is an optional interface for running agent sessions that
+// can report the final token usage for the current user turn.
+type TurnUsageReporter interface {
+	GetTurnUsage() *TokenUsage
+}
+
+// TokenUsage describes token accounting for one completed turn.
+type TokenUsage struct {
+	TotalTokens           int
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningOutputTokens int
 }
 
 // ContextUsage describes runtime context consumption for the active session.

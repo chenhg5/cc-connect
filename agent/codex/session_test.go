@@ -279,6 +279,10 @@ func TestCodexPromptPreamble_EmptyIsNoop(t *testing.T) {
 }
 
 func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
+	oldTimeout := codexRuntimeConfigTimeout
+	codexRuntimeConfigTimeout = 5 * time.Second
+	t.Cleanup(func() { codexRuntimeConfigTimeout = oldTimeout })
+
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -371,6 +375,43 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 	}
 	if usage.ContextWindow != 258400 {
 		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
+	}
+	turnUsage := cs.GetTurnUsage()
+	if turnUsage == nil {
+		t.Fatal("GetTurnUsage() = nil, want rollout turn usage")
+	}
+	if turnUsage.InputTokens != 180805 {
+		t.Fatalf("turn input tokens = %d, want 180805", turnUsage.InputTokens)
+	}
+	if turnUsage.OutputTokens != 619 {
+		t.Fatalf("turn output tokens = %d, want 619", turnUsage.OutputTokens)
+	}
+	if turnUsage.CachedInputTokens != 139776 {
+		t.Fatalf("turn cached input tokens = %d, want 139776", turnUsage.CachedInputTokens)
+	}
+}
+
+func TestParseUsageSnapshotFromRollout_ComputesTurnDeltaSinceTurnContext(t *testing.T) {
+	rollout := strings.Join([]string{
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":110},"model_context_window":258400}}}`,
+		`{"type":"turn_context","payload":{"turn_id":"turn-2"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":40,"output_tokens":12,"reasoning_output_tokens":6,"total_tokens":162},"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":2,"reasoning_output_tokens":1,"total_tokens":52},"model_context_window":258400}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":230,"cached_input_tokens":90,"output_tokens":20,"reasoning_output_tokens":9,"total_tokens":250},"last_token_usage":{"input_tokens":80,"cached_input_tokens":50,"output_tokens":8,"reasoning_output_tokens":3,"total_tokens":88},"model_context_window":258400}}}`,
+		"",
+	}, "\n")
+
+	snapshot := parseUsageSnapshotFromRolloutBytes([]byte(rollout))
+	if snapshot == nil {
+		t.Fatal("snapshot = nil, want usage snapshot")
+	}
+	if snapshot.Context == nil || snapshot.Context.InputTokens != 80 || snapshot.Context.OutputTokens != 8 {
+		t.Fatalf("context usage = %#v, want last request usage", snapshot.Context)
+	}
+	if snapshot.Turn == nil {
+		t.Fatal("turn usage = nil, want cumulative delta")
+	}
+	if snapshot.Turn.InputTokens != 130 || snapshot.Turn.OutputTokens != 10 || snapshot.Turn.CachedInputTokens != 70 || snapshot.Turn.ReasoningOutputTokens != 4 {
+		t.Fatalf("turn usage = %#v, want cumulative delta since turn_context", snapshot.Turn)
 	}
 }
 

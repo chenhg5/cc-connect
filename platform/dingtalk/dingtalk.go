@@ -32,6 +32,9 @@ type replyContext struct {
 	conversationId string
 	senderStaffId  string
 	messageID      string
+	sessionKey     string
+	userName       string
+	chatName       string
 	isGroup        bool
 	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
@@ -167,6 +170,25 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "dingtalk" }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.senderStaffId,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.conversationId,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"conversation_id": rc.conversationId,
+		},
+	}
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -353,7 +375,14 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 			conversationId: data.ConversationId,
 			senderStaffId:  data.SenderStaffId,
 			messageID:      data.MsgId,
+			sessionKey:     sessionKey,
+			userName:       data.SenderNick,
+			chatName:       data.ConversationTitle,
 			isGroup:        data.ConversationType == "2",
+		},
+		AuditExtra: map[string]any{
+			"conversation_id": data.ConversationId,
+			"msg_type":        data.Msgtype,
 		},
 	}
 
@@ -439,9 +468,16 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 					conversationId: data.ConversationId,
 					senderStaffId:  data.SenderStaffId,
 					messageID:      data.MsgId,
+					sessionKey:     sessionKey,
+					userName:       data.SenderNick,
+					chatName:       data.ConversationTitle,
 					isGroup:        data.ConversationType == "2",
 				},
 				FromVoice: true,
+				AuditExtra: map[string]any{
+					"conversation_id": data.ConversationId,
+					"msg_type":        data.Msgtype,
+				},
 			}
 			p.handler(p, msg)
 		}
@@ -464,9 +500,16 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			conversationId: data.ConversationId,
 			senderStaffId:  data.SenderStaffId,
 			messageID:      data.MsgId,
+			sessionKey:     sessionKey,
+			userName:       data.SenderNick,
+			chatName:       data.ConversationTitle,
 			isGroup:        data.ConversationType == "2",
 		},
 		FromVoice: true,
+		AuditExtra: map[string]any{
+			"conversation_id": data.ConversationId,
+			"msg_type":        data.Msgtype,
+		},
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -835,14 +878,22 @@ func (p *Platform) ReplyWithAt(ctx context.Context, rctx any, content string, at
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
+		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
 	}
 
 	// Fall back to proactive API when sessionWebhook is unavailable
 	if rc.proactive || rc.sessionWebhook == "" {
-		return p.sendProactiveMessage(ctx, rc, content)
+		if err := p.sendProactiveMessage(ctx, rc, content); err != nil {
+			return nil, err
+		}
+		return &core.SendReceipt{ParentMessageID: rc.messageID, Extra: map[string]any{"conversation_id": rc.conversationId}}, nil
 	}
 
 	atUserIds := extractAtUserIds(content)
@@ -861,38 +912,41 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("dingtalk: marshal reply: %w", err)
+		return nil, fmt.Errorf("dingtalk: marshal reply: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rc.sessionWebhook, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("dingtalk: create request: %w", err)
+		return nil, fmt.Errorf("dingtalk: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("dingtalk: send reply: %w", err)
+		return nil, fmt.Errorf("dingtalk: send reply: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("dingtalk: reply returned status %d", resp.StatusCode)
 	}
-	return nil
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"conversation_id": rc.conversationId,
+		},
+	}, nil
 }
 
 // Send sends a new message. For proactive contexts (no sessionWebhook),
 // it uses the DingTalk group/direct message API instead.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("dingtalk: invalid reply context type %T", rctx)
-	}
-	if rc.proactive || rc.sessionWebhook == "" {
-		return p.sendProactiveMessage(ctx, rc, content)
-	}
-	return p.Reply(ctx, rctx, content)
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
+	return p.ReplyWithReceipt(ctx, rctx, content)
 }
 
 type dingtalkTextEmotion struct {

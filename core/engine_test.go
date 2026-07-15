@@ -86,6 +86,18 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+type earlyInstantReplyPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *earlyInstantReplyPlatform) NeedsEarlyInstantReply() bool { return true }
+
+type finalOnlyTextPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *finalOnlyTextPlatform) HoldIntermediateTextUntilFinal() bool { return true }
+
 type recallCheckingPlatform struct {
 	stubPlatformEngine
 	recalled bool
@@ -1397,6 +1409,33 @@ func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) 
 	}
 }
 
+func TestProcessInteractiveEvents_FinalOnlyPlatformHoldsTextAcrossToolBoundary(t *testing.T) {
+	p := &finalOnlyTextPlatform{stubPlatformEngine: stubPlatformEngine{n: "limited-im"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", ThinkingMessages: false, ToolMessages: false})
+
+	sessionKey := "limited-im:user-final-only"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-final-only")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-final-only",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "已经处理完成。"}
+	agentSession.events <- Event{Type: EventResult, Content: "已经处理完成。", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-final-only", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "先检查一下。已经处理完成。" {
+		t.Fatalf("sent = %#v, want one combined final reply", sent)
+	}
+}
+
 func TestProcessInteractiveEvents_AddsDoneReactionAfterNormalReply(t *testing.T) {
 	p := &stubDoneReactionPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1537,7 +1576,106 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · " + compactReplyFooterPath(sessionWorkDir) + "*"
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · 31%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_AppendsReplyFooterTokensWhenEnabled(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "gpt-5.4",
+			reasoningEffort: "xhigh",
+		},
+		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetReplyFooterTokensEnabled(true)
+
+	sessionKey := "telegram:user-footer-tokens"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-tokens")
+	agentSession.model = "gpt-5.4"
+	agentSession.reasoningEffort = "xhigh"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.contextUsage = &ContextUsage{
+		UsedTokens:     181424,
+		BaselineTokens: 12000,
+		TotalTokens:    181424,
+		ContextWindow:  258400,
+	}
+	agentSession.turnUsage = &TokenUsage{
+		TotalTokens:       181424,
+		InputTokens:       180805,
+		CachedInputTokens: 139776,
+		OutputTokens:      619,
+	}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-tokens",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 7, OutputTokens: 3, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-tokens", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · in: 180805 / out: 619 / cache: 139776 · 31%% left · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+func TestProcessInteractiveEvents_ReplyFooterTokensFallbackToEventUsage(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{
+			model:           "gpt-5.4",
+			reasoningEffort: "xhigh",
+		},
+		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+	e.SetReplyFooterTokensEnabled(true)
+	e.SetShowContextIndicator(false)
+
+	sessionKey := "telegram:user-footer-event-tokens"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-event-tokens")
+	agentSession.model = "gpt-5.4"
+	agentSession.reasoningEffort = "xhigh"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-event-tokens",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 123, OutputTokens: 45, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-event-tokens", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := fmt.Sprintf("answer\n\n*gpt-5.4 · xhigh · in: 123 / out: 45 · %s*", compactReplyFooterPath(filepath.Join(homeDir, "codes", "cc-connect")))
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -7104,6 +7242,7 @@ type controllableAgentSession struct {
 	workDir         string
 	report          *UsageReport
 	contextUsage    *ContextUsage
+	turnUsage       *TokenUsage
 	usageErr        error
 }
 
@@ -7132,6 +7271,7 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 	return s.report, s.usageErr
 }
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
+func (s *controllableAgentSession) GetTurnUsage() *TokenUsage      { return s.turnUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
 	s.alive = false
@@ -13633,6 +13773,45 @@ func TestHandleMessage_InstantReply_UsesDefaultI18nWhenContentEmpty(t *testing.T
 	sent := p.getSent()
 	if sent[0] != "⏳ 处理中..." {
 		t.Fatalf("first reply = %q, want i18n default '⏳ 处理中...'", sent[0])
+	}
+}
+
+func TestHandleMessage_InstantReply_EarlyRequesterSendsBeforeAgentSendCompletes(t *testing.T) {
+	p := &earlyInstantReplyPlatform{stubPlatformEngine: stubPlatformEngine{n: "weixin-like"}}
+	agentSession := newBlockingSendSession("early-instant")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "🤔 Thinking..."})
+
+	msg := &Message{
+		SessionKey: "weixin-like:user1",
+		Platform:   "weixin-like",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "slow task",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := waitForPlatformSend(&p.stubPlatformEngine, 1, time.Second)
+	if len(sent) != 1 || sent[0] != "🤔 Thinking..." {
+		t.Fatalf("early instant reply = %v, want only '🤔 Thinking...' before agent send completes", sent)
+	}
+
+	select {
+	case <-agentSession.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("agent Send did not start")
+	}
+	close(agentSession.unblock)
+	agentSession.events <- Event{Type: EventResult, Content: "agent reply", Done: true}
+
+	sent = waitForPlatformSend(&p.stubPlatformEngine, 2, 2*time.Second)
+	if len(sent) != 2 {
+		t.Fatalf("sent messages = %v, want instant reply plus final answer", sent)
+	}
+	if sent[0] != "🤔 Thinking..." || sent[1] != "agent reply" {
+		t.Fatalf("sent messages = %v, want no duplicate instant reply", sent)
 	}
 }
 

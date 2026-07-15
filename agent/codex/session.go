@@ -54,12 +54,14 @@ type codexSession struct {
 
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
+	turnUsage    *core.TokenUsage
+	totalUsage   *core.TokenUsage
+	turnBaseline *core.TokenUsage
 	sessionFile  string
 }
 
 var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
-var codexRuntimeConfigCacheTTL = 5 * time.Second
 var codexRuntimeConfigTimeout = 1500 * time.Millisecond
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
@@ -379,6 +381,9 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 			cs.contextMu.Lock()
 			cs.sessionFile = ""
 			cs.contextUsage = nil
+			cs.turnUsage = nil
+			cs.totalUsage = nil
+			cs.turnBaseline = nil
 			cs.contextMu.Unlock()
 			slog.Debug("codexSession: thread started", "thread_id", tid)
 		}
@@ -386,6 +391,8 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	case "turn.started":
 		cs.pendingMsgs = cs.pendingMsgs[:0]
 		cs.contextMu.Lock()
+		cs.turnBaseline = cloneTokenUsage(cs.totalUsage)
+		cs.turnUsage = nil
 		cs.contextUsage = nil
 		cs.contextMu.Unlock()
 		slog.Debug("codexSession: turn started")
@@ -656,8 +663,14 @@ func codexToolSuccess(status string, exitCode *int) bool {
 	return s == "completed" || s == "success" || s == "succeeded" || s == "ok"
 }
 
-func loadCodexRuntimeConfig(ctx context.Context, workDir string, extraEnv []string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "codex", "app-server")
+func loadCodexRuntimeConfig(ctx context.Context, cliBin string, cliExtraArgs []string, workDir string, extraEnv []string) (string, string, error) {
+	bin := strings.TrimSpace(cliBin)
+	if bin == "" {
+		bin = "codex"
+	}
+	args := append([]string(nil), cliExtraArgs...)
+	args = append(args, "app-server")
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = workDir
 	prepareCmdForKill(cmd)
 	if len(extraEnv) > 0 {
@@ -828,18 +841,24 @@ func (cs *codexSession) GetContextUsage() *core.ContextUsage {
 	return cloneContextUsage(cs.contextUsage)
 }
 
+func (cs *codexSession) GetTurnUsage() *core.TokenUsage {
+	cs.contextMu.RLock()
+	defer cs.contextMu.RUnlock()
+	return cloneTokenUsage(cs.turnUsage)
+}
+
 func (cs *codexSession) runtimeConfig() (string, string) {
 	cs.runtimeCfgMu.Lock()
 	defer cs.runtimeCfgMu.Unlock()
 
-	if !cs.runtimeCfgFetched.IsZero() && time.Since(cs.runtimeCfgFetched) < codexRuntimeConfigCacheTTL {
+	if !cs.runtimeCfgFetched.IsZero() {
 		return cs.runtimeCfgModel, cs.runtimeCfgEffort
 	}
 
 	ctx, cancel := context.WithTimeout(cs.ctx, codexRuntimeConfigTimeout)
 	defer cancel()
 
-	model, effort, err := loadCodexRuntimeConfig(ctx, cs.workDir, cs.extraEnv)
+	model, effort, err := loadCodexRuntimeConfig(ctx, cs.cmd, cs.cliExtraArgs, cs.workDir, cs.extraEnv)
 	if err == nil {
 		cs.runtimeCfgModel = model
 		cs.runtimeCfgEffort = effort
@@ -866,11 +885,16 @@ func (cs *codexSession) refreshContextUsageFromRollout() {
 		cachedPath := cs.sessionFile
 		cs.contextMu.RUnlock()
 
-		usage, path, err := loadContextUsageFromRollout(cs.extraEnv, sessionID, cachedPath)
-		if err == nil && usage != nil {
+		snapshot, path, err := loadUsageSnapshotFromRollout(cs.extraEnv, sessionID, cachedPath)
+		if err == nil && snapshot != nil {
 			cs.contextMu.Lock()
 			cs.sessionFile = path
-			cs.contextUsage = cloneContextUsage(usage)
+			cs.contextUsage = cloneContextUsage(snapshot.Context)
+			cs.turnUsage = cloneTokenUsage(snapshot.Turn)
+			if cs.turnUsage == nil {
+				cs.turnUsage = turnUsageFromCumulativeAndLast(snapshot.Total, snapshot.Last, cs.turnBaseline)
+			}
+			cs.totalUsage = cloneTokenUsage(snapshot.Total)
 			cs.contextMu.Unlock()
 			return
 		}

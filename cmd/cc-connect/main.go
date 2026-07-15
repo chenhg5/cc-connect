@@ -17,6 +17,8 @@ import (
 	"time"
 
 	ccconnect "github.com/chenhg5/cc-connect"
+	auditmongodb "github.com/chenhg5/cc-connect/audit/mongodb"
+	auditpostgres "github.com/chenhg5/cc-connect/audit/postgres"
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
@@ -362,6 +364,61 @@ func main() {
 
 	setupLogger(cfg.Log.Level, logWriter)
 
+	var auditor *core.Auditor
+	if auditEnabled(cfg.Audit) {
+		var sinks []core.AuditSink
+
+		if strings.TrimSpace(cfg.Audit.Postgres.DSN) != "" {
+			pgCfg := auditpostgres.DefaultConfig()
+			pgCfg.DSN = cfg.Audit.Postgres.DSN
+			pgCfg.Table = cfg.Audit.Postgres.Table
+			pgCfg.AutoCreate = cfg.Audit.Postgres.AutoCreate
+			if strings.TrimSpace(cfg.Audit.Postgres.IndexProfile) != "" {
+				pgCfg.IndexProfile = cfg.Audit.Postgres.IndexProfile
+			}
+			if cfg.Audit.Postgres.MaxOpenConns != nil {
+				pgCfg.MaxOpenConns = *cfg.Audit.Postgres.MaxOpenConns
+			}
+			if cfg.Audit.Postgres.MaxIdleConns != nil {
+				pgCfg.MaxIdleConns = *cfg.Audit.Postgres.MaxIdleConns
+			}
+			if cfg.Audit.Postgres.ConnMaxLifetimeMins != nil {
+				pgCfg.ConnMaxLifetime = time.Duration(*cfg.Audit.Postgres.ConnMaxLifetimeMins) * time.Minute
+			}
+			pgSink, err := auditpostgres.New(pgCfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error initializing postgres audit sink: %v\n", err)
+				os.Exit(1)
+			}
+			sinks = append(sinks, pgSink)
+			slog.Info("audit sink enabled", "backend", "postgres", "index_profile", pgCfg.IndexProfile)
+		}
+
+		if strings.TrimSpace(cfg.Audit.MongoDB.URI) != "" {
+			mongoCfg := auditmongodb.DefaultConfig()
+			mongoCfg.URI = cfg.Audit.MongoDB.URI
+			mongoCfg.Database = cfg.Audit.MongoDB.Database
+			mongoCfg.Collection = cfg.Audit.MongoDB.Collection
+			mongoCfg.AutoCreateIndexes = cfg.Audit.MongoDB.AutoCreateIndexes
+			if strings.TrimSpace(cfg.Audit.MongoDB.IndexProfile) != "" {
+				mongoCfg.IndexProfile = cfg.Audit.MongoDB.IndexProfile
+			}
+			mongoSink, err := auditmongodb.New(mongoCfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error initializing mongodb audit sink: %v\n", err)
+				os.Exit(1)
+			}
+			sinks = append(sinks, mongoSink)
+			slog.Info("audit sink enabled", "backend", "mongodb", "index_profile", mongoCfg.IndexProfile)
+		}
+
+		if len(sinks) == 0 {
+			fmt.Fprintln(os.Stderr, "Error initializing audit sink: audit is enabled but no sink is configured")
+			os.Exit(1)
+		}
+		auditor = core.NewAuditor(resolveAuditTimeout(cfg.Audit), sinks...)
+	}
+
 	// run_as_user preflight + isolation audit. MUST run before any engine
 	// or agent is constructed. If any project fails, abort startup
 	// entirely — never half-spawn. See core/runas_check.go and
@@ -435,6 +492,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetAuditor(auditor)
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
@@ -445,6 +503,11 @@ func main() {
 		}
 		engine.SetShowWorkdirIndicator(showWorkdir)
 		engine.SetReplyFooterEnabled(showFooter)
+		showFooterTokens := false
+		if proj.ReplyFooterTokens != nil {
+			showFooterTokens = *proj.ReplyFooterTokens
+		}
+		engine.SetReplyFooterTokensEnabled(showFooterTokens)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
@@ -565,21 +628,7 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings (includes legacy quiet → display mapping)
-		{
-			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
-			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
-			engine.SetDisplayConfig(core.DisplayCfg{
-				Mode:             mode,
-				CardMode:         config.EffectiveCardMode(cfg, &proj),
-				ThinkingMessages: tm,
-				ThinkingMaxLen:   tmlen,
-				ToolMaxLen:       toollen,
-				ToolMessages:     tool,
-				HistoryMaxLen:    &historyMaxLen,
-				HideAgentFooter:  hideAgentFooter,
-			})
-		}
+		engine.SetDisplayConfig(projectDisplayCfg(cfg, &proj))
 
 		// Wire shell configuration
 		shell, shellFlag, shellProfile := config.EffectiveShell(cfg, &proj)
@@ -949,6 +998,20 @@ func main() {
 			return config.SaveAgentModel(projName, model)
 		})
 
+		// Wire agent type switching
+		if len(proj.AgentTypes) > 0 {
+			// Build list of alternate agent type names
+			agentTypes := make([]string, 0, len(proj.AgentTypes))
+			for _, at := range proj.AgentTypes {
+				agentTypes = append(agentTypes, at.Type)
+			}
+			engine.SetAlternateAgentTypes(agentTypes)
+			engine.SetCurrentAgentType(proj.Agent.Type)
+			engine.SetAgentTypeSaveFunc(func(agentType string) error {
+				return config.SaveActiveAgentType(projName, agentType)
+			})
+		}
+
 		// Wire config reload
 		capturedEngine := engine
 		capturedProjName := projName
@@ -1188,6 +1251,7 @@ func main() {
 				ShowContextIndicator: u.ShowContextIndicator,
 				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
 				ReplyFooter:          u.ReplyFooter,
+				ReplyFooterTokens:    u.ReplyFooterTokens,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
 			})
@@ -1365,6 +1429,11 @@ func main() {
 			slog.Error("shutdown error", "error", err)
 		}
 	}
+	if auditor != nil {
+		if err := auditor.Close(); err != nil {
+			slog.Error("audit shutdown error", "error", err)
+		}
+	}
 	if logCloser != nil {
 		logCloser.Close()
 	}
@@ -1509,6 +1578,62 @@ func resolveConfigPath(explicit string) string {
 		return filepath.Join(home, ".cc-connect", "config.toml")
 	}
 	return "config.toml"
+}
+
+func auditEnabled(cfg config.AuditConfig) bool {
+	if cfg.Enabled != nil {
+		return *cfg.Enabled
+	}
+	return strings.TrimSpace(cfg.Postgres.DSN) != "" || strings.TrimSpace(cfg.MongoDB.URI) != ""
+}
+
+func projectDisplayCfg(cfg *config.Config, proj *config.ProjectConfig) core.DisplayCfg {
+	mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
+	if override, ok := projectAgentToolMessagesOverride(proj.Agent.Options); ok {
+		tool = override
+	}
+	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
+	return core.DisplayCfg{
+		Mode:             mode,
+		CardMode:         config.EffectiveCardMode(cfg, proj),
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+		HistoryMaxLen:    &historyMaxLen,
+		HideAgentFooter:  hideAgentFooter,
+	}
+}
+
+func projectAgentToolMessagesOverride(opts map[string]any) (bool, bool) {
+	if len(opts) == 0 {
+		return false, false
+	}
+	raw, ok := opts["tool_messages"]
+	if !ok || raw == nil {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			slog.Warn("ignoring invalid agent.options.tool_messages override", "value", v)
+			return false, false
+		}
+		return parsed, true
+	default:
+		slog.Warn("ignoring invalid agent.options.tool_messages override type", "type", fmt.Sprintf("%T", raw))
+		return false, false
+	}
+}
+
+func resolveAuditTimeout(cfg config.AuditConfig) time.Duration {
+	if cfg.TimeoutMs != nil {
+		return time.Duration(*cfg.TimeoutMs) * time.Millisecond
+	}
+	return 2 * time.Second
 }
 
 func bootstrapConfig(path string) error {
@@ -1700,18 +1825,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 
 	// Reload display config (includes legacy quiet → display mapping)
-	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
-	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
-	engine.SetDisplayConfig(core.DisplayCfg{
-		Mode:             mode,
-		CardMode:         config.EffectiveCardMode(cfg, proj),
-		ThinkingMessages: tm,
-		ThinkingMaxLen:   tmlen,
-		ToolMaxLen:       toollen,
-		ToolMessages:     tool,
-		HistoryMaxLen:    &historyMaxLen,
-		HideAgentFooter:  hideAgentFooter,
-	})
+	_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, proj)
+	engine.SetDisplayConfig(projectDisplayCfg(cfg, proj))
 	result.DisplayUpdated = true
 
 	// Wire show_context_indicator and reply_footer from display config
@@ -1765,6 +1880,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetInstantReply(core.InstantReplyCfg{})
 	}
+	showFooterTokens := false
+	if proj.ReplyFooterTokens != nil {
+		showFooterTokens = *proj.ReplyFooterTokens
+	}
+	engine.SetReplyFooterTokensEnabled(showFooterTokens)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)

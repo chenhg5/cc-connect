@@ -400,6 +400,31 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# Audit (Structured Message Audit)
+# =============================================================================
+# Persist inbound/outbound audit records to one or more database sinks.
+#
+# [audit]
+# enabled = true
+# timeout_ms = 2000
+#
+# [audit.postgres]
+# dsn = "postgres://user:password@localhost:5432/ccconnect?sslmode=disable"
+# table = "audit_records"
+# auto_create = true
+# index_profile = "minimal"           # minimal (default), lookup, or full
+# max_open_conns = 10
+# max_idle_conns = 5
+# conn_max_lifetime_mins = 30
+#
+# [audit.mongodb]
+# uri = "mongodb://localhost:27017"
+# database = "ccconnect"
+# collection = "audit_records"
+# auto_create_indexes = true
+# index_profile = "minimal"           # minimal (default), lookup, or full
+
+# =============================================================================
 # Hooks (Event Triggers / 事件钩子)
 # =============================================================================
 # Execute shell commands or send HTTP requests when lifecycle events occur.
@@ -717,6 +742,8 @@ name = "my-backend"
 #                                   # 隐藏 footer 第一行：model · [effort ·] out/in/cw/cr · ctx %（默认 true 显示）
 # show_workdir_indicator = false   # Hide the footer's second line: workspace directory (default: true)
 #                                   # 隐藏 footer 第二行：工作区目录（默认 true 显示）
+# reply_footer_tokens = true       # Show per-turn token counts in the footer when available (default: false / hide)
+#                                   # 在回复底部显示每轮 token 消耗（如可用，默认 false 隐藏）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
@@ -963,6 +990,33 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # 对于不支持 adaptive thinking 的 Bedrock/Vertex/Foundry，
 # # 设置 thinking = "disabled" 启用自动请求重写。
 # thinking = "disabled"
+
+# Alternate Agent Types — switch between different agent types at runtime
+# 备用 Agent 类型 — 支持在运行时通过 /agent 命令切换不同的 Agent 类型
+#
+# When configured, administrators can use /agent list/switch to change the active
+# agent type without restarting cc-connect. The current agent config is swapped with
+# the target agent_types entry, enabling switch-back.
+# 配置后，管理员可使用 /agent list/switch 命令在不重启 cc-connect 的情况下切换
+# Agent 类型。当前 Agent 配置会与目标 agent_types 条目互换，支持切换回来。
+#
+# Example: switch between Claude Code, Codex, and OpenCode based on quota:
+# 示例：在 Claude Code、Codex 和 OpenCode 之间切换（根据额度情况）：
+#
+# [projects.agent]
+# type = "claudecode"
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+#
+# [[projects.agent_types]]
+# type = "codex"
+# [projects.agent_types.options]
+# work_dir = "/path/to/project"
+#
+# [[projects.agent_types]]
+# type = "opencode"
+# [projects.agent_types.options]
+# work_dir = "/path/to/project"
 
 # Reference normalization and rendering / 本地引用标准化与展示优化
 # Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
@@ -1428,7 +1482,8 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"                             # or "user1@im.wechat,user2@im.wechat"
 # account_id = "default"                       # optional: isolate state dirs / 可选：区分多账号状态目录
 # route_tag = ""                               # optional SKRouteTag header / 可选路由头
-# long_poll_timeout_ms = 35000                 # optional / 可选
+# bot_agent = "CCConnect/1.0"                  # optional base_info.bot_agent / 可选
+# long_poll_timeout_ms = 35000                 # optional, max 60000 / 可选，最大 60000
 # state_dir = ""                               # optional: override persistence directory / 可选覆盖状态目录
 # proxy = ""                                   # optional HTTP proxy / 可选代理
 # proxy_username = ""
@@ -1568,6 +1623,12 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
+#
+# Optional: override whether tool call progress messages are sent for this project.
+# This only changes the startup default for the project; /quiet and /config can still change it at runtime.
+# 可选：覆盖当前项目是否发送工具调用进度消息。
+# 这只会修改项目启动时的默认值；运行时仍可通过 /quiet 和 /config 变更。
+# tool_messages = false
 #
 # Optional: project system prompt / 可选：项目系统提示
 # Codex has no native system-prompt flag, so cc-connect injects this as a
@@ -2186,4 +2247,3 @@ app_secret = "your-feishu-app-secret"
 # wps_sid = "your-wps-sid"             # WPS登录凭证 (Cookie中的wps_sid)
 # device_name = "cc-connect"           # 设备名称（可选）
 # device_uuid = ""                     # 设备UUID（可选，留空自动生成）
-

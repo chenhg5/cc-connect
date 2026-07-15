@@ -59,7 +59,10 @@ type threadResumeResponse struct {
 }
 
 type turnStartResponse struct {
-	Turn struct {
+	Cwd             string  `json:"cwd"`
+	Model           string  `json:"model"`
+	ReasoningEffort *string `json:"reasoningEffort"`
+	Turn            struct {
 		ID string `json:"id"`
 	} `json:"turn"`
 }
@@ -148,6 +151,8 @@ type appServerSession struct {
 	mode           string
 	baseURL        string
 	modelProvider  string
+	cliBin         string
+	cliExtraArgs   []string
 	extraEnv       []string
 	codexHome      string
 	promptPreamble string
@@ -181,9 +186,12 @@ type appServerSession struct {
 	currentTurn  string
 	preambleSent bool
 
-	runtimeMu sync.RWMutex
-	usage     *core.UsageReport
-	context   *core.ContextUsage
+	runtimeMu    sync.RWMutex
+	usage        *core.UsageReport
+	context      *core.ContextUsage
+	turnUsage    *core.TokenUsage
+	totalUsage   *core.TokenUsage
+	turnBaseline *core.TokenUsage
 }
 
 const (
@@ -191,7 +199,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider, cliBin string, cliExtraArgs []string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -201,6 +209,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		mode:             mode,
 		baseURL:          baseURL,
 		modelProvider:    modelProvider,
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
 		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
@@ -235,7 +245,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
+	args := append([]string(nil), s.cliExtraArgs...)
+	args = append(args, "app-server")
 	if strings.TrimSpace(s.url) != "" {
 		args = append(args, "--listen", strings.TrimSpace(s.url))
 	}
@@ -251,7 +262,11 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	bin := strings.TrimSpace(s.cliBin)
+	if bin == "" {
+		bin = "codex"
+	}
+	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -393,6 +408,20 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 	s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
 }
 
+func (s *appServerSession) applyTurnRuntimeState(workDir, model string, effort *string) {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	if dir := strings.TrimSpace(workDir); dir != "" {
+		s.workDir = dir
+	}
+	if m := strings.TrimSpace(model); m != "" {
+		s.model = m
+	}
+	if effort != nil {
+		s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	}
+}
+
 func (s *appServerSession) refreshUsage(ctx context.Context) error {
 	timeout := appServerUsageRefreshTimeout
 	if ctx != nil {
@@ -429,16 +458,39 @@ func (s *appServerSession) cachedContextUsage() *core.ContextUsage {
 	return cloneContextUsage(s.context)
 }
 
+func (s *appServerSession) cachedTurnUsage() *core.TokenUsage {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return cloneTokenUsage(s.turnUsage)
+}
+
 func (s *appServerSession) storeUsage(report *core.UsageReport) {
 	s.runtimeMu.Lock()
 	defer s.runtimeMu.Unlock()
 	s.usage = cloneUsageReport(report)
 }
 
-func (s *appServerSession) storeContextUsage(usage *core.ContextUsage) {
+func (s *appServerSession) beginTurnUsage() {
 	s.runtimeMu.Lock()
 	defer s.runtimeMu.Unlock()
-	s.context = cloneContextUsage(usage)
+	s.context = nil
+	s.turnUsage = nil
+	s.turnBaseline = cloneTokenUsage(s.totalUsage)
+}
+
+func (s *appServerSession) storeTokenUsage(notif appServerThreadTokenUsageNotification) {
+	contextUsage := mapAppServerContextUsage(notif)
+	totalUsage := tokenUsageFromCamel(notif.TokenUsage.Total)
+	lastUsage := tokenUsageFromCamel(notif.TokenUsage.Last)
+
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	if s.turnBaseline == nil {
+		s.turnBaseline = inferTokenUsageBaseline(totalUsage, lastUsage)
+	}
+	s.context = cloneContextUsage(contextUsage)
+	s.turnUsage = mapAppServerTurnUsage(notif, s.turnBaseline)
+	s.totalUsage = cloneTokenUsage(totalUsage)
 }
 
 func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
@@ -502,6 +554,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if resp.Turn.ID == "" {
 		return fmt.Errorf("codex app-server turn/start returned empty turn id")
 	}
+	s.applyTurnRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
@@ -933,6 +986,10 @@ func (s *appServerSession) GetContextUsage() *core.ContextUsage {
 	return s.cachedContextUsage()
 }
 
+func (s *appServerSession) GetTurnUsage() *core.TokenUsage {
+	return s.cachedTurnUsage()
+}
+
 func (s *appServerSession) Alive() bool {
 	return s.alive.Load()
 }
@@ -1108,7 +1165,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
-			s.storeContextUsage(nil)
+			s.beginTurnUsage()
 		}
 
 	case "item/started":
@@ -1150,7 +1207,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "thread/tokenUsage/updated":
 		var notif appServerThreadTokenUsageNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.storeContextUsage(mapAppServerTokenUsage(notif))
+			s.storeTokenUsage(notif)
 		}
 
 	case "error":

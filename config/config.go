@@ -110,6 +110,7 @@ type Config struct {
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
+	Audit              AuditConfig             `toml:"audit"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
@@ -173,6 +174,34 @@ type HookConfig struct {
 	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
 	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
 	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
+}
+
+// AuditConfig controls structured message auditing.
+type AuditConfig struct {
+	Enabled   *bool               `toml:"enabled,omitempty"`    // default false unless a sink DSN/URI is provided
+	TimeoutMs *int                `toml:"timeout_ms,omitempty"` // per-record sink write timeout; default 2000ms
+	Postgres  AuditPostgresConfig `toml:"postgres"`
+	MongoDB   AuditMongoDBConfig  `toml:"mongodb"`
+}
+
+// AuditPostgresConfig configures the PostgreSQL audit sink.
+type AuditPostgresConfig struct {
+	DSN                 string `toml:"dsn,omitempty"`
+	Table               string `toml:"table,omitempty"`
+	AutoCreate          *bool  `toml:"auto_create,omitempty"`            // default true
+	IndexProfile        string `toml:"index_profile,omitempty"`          // "minimal" (default), "lookup", or "full"
+	MaxOpenConns        *int   `toml:"max_open_conns,omitempty"`         // default 10
+	MaxIdleConns        *int   `toml:"max_idle_conns,omitempty"`         // default 5
+	ConnMaxLifetimeMins *int   `toml:"conn_max_lifetime_mins,omitempty"` // default 30
+}
+
+// AuditMongoDBConfig configures the MongoDB audit sink.
+type AuditMongoDBConfig struct {
+	URI               string `toml:"uri,omitempty"`
+	Database          string `toml:"database,omitempty"`
+	Collection        string `toml:"collection,omitempty"`
+	AutoCreateIndexes *bool  `toml:"auto_create_indexes,omitempty"` // default true
+	IndexProfile      string `toml:"index_profile,omitempty"`       // "minimal" (default), "lookup", or "full"
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
@@ -510,13 +539,16 @@ type ProjectConfig struct {
 	// ShowWorkdirIndicator: nil/true = render the reply footer's second line
 	// (workspace directory); false = hide that line. Subordinate to ReplyFooter.
 	ShowWorkdirIndicator *bool `toml:"show_workdir_indicator,omitempty"`
-	// ReplyFooter: nil/true = render the reply footer; false = disable it
-	// entirely (the per-line indicator flags above become no-ops).
-	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
-	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
+	// (model/reasoning/usage/workdir, when available) to assistant replies.
+	ReplyFooter *bool `toml:"reply_footer,omitempty"`
+	// ReplyFooterTokens: nil/false = keep token counts out of the footer; true = show
+	// per-turn input/output/cache token counts when available.
+	ReplyFooterTokens *bool        `toml:"reply_footer_tokens,omitempty"`
+	InjectSender      *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands  []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom         string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users             *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
 	// WorkspaceIdleTimeoutMinsLegacy is the deprecated per-project form of
 	// the workspace idle reaper timeout. New configs should set the top-level
 	// Config.WorkspaceIdleTimeoutMins instead. When the top-level field is
@@ -544,6 +576,10 @@ type ProjectConfig struct {
 	Display    *DisplayConfig  `toml:"display,omitempty"`
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
+	// AgentTypes lists alternative agent type configurations that can be switched
+	// at runtime via the /agent command. Each entry is a complete agent config
+	// (type + options + providers) that replaces the active [projects.agent] on switch.
+	AgentTypes []AgentTypeConfig `toml:"agent_types,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
@@ -560,6 +596,10 @@ type AgentConfig struct {
 	ProviderRefs []string         `toml:"provider_refs,omitempty"` // references to global [[providers]] by name
 	Providers    []ProviderConfig `toml:"providers"`
 }
+
+// AgentTypeConfig is an alias for AgentConfig, used for alternate agent configs
+// that can be switched at runtime via the /agent command.
+type AgentTypeConfig = AgentConfig
 
 // ProviderModelConfig defines a selectable model entry for a provider,
 // with an optional short alias used by the /model command.
@@ -668,6 +708,7 @@ func Load(path string) (*Config, error) {
 }
 
 var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var auditIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func resolveEnvInConfig(cfg *Config) {
 	resolveEnvValue(reflect.ValueOf(cfg))
@@ -1015,6 +1056,9 @@ func (c *Config) validateInternal(permissive bool) error {
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
 	}
+	if err := validateAuditConfig(c.Audit); err != nil {
+		return err
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Relay.Visibility)) {
 	case "", "full", "summary", "none":
 	default:
@@ -1096,6 +1140,48 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	return nil
 }
 
+func validateAuditConfig(cfg AuditConfig) error {
+	enabled := cfg.Enabled != nil && *cfg.Enabled
+	hasPostgres := strings.TrimSpace(cfg.Postgres.DSN) != ""
+	hasMongo := strings.TrimSpace(cfg.MongoDB.URI) != ""
+	if !enabled && !hasPostgres && !hasMongo {
+		return nil
+	}
+	if cfg.TimeoutMs != nil && *cfg.TimeoutMs < 0 {
+		return fmt.Errorf("config: audit.timeout_ms must be >= 0")
+	}
+	if enabled && !hasPostgres && !hasMongo {
+		return fmt.Errorf("config: at least one audit sink must be configured when audit is enabled")
+	}
+	if table := strings.TrimSpace(cfg.Postgres.Table); table != "" && !auditIdentifierPattern.MatchString(table) {
+		return fmt.Errorf("config: audit.postgres.table %q contains invalid characters (allowed: letters, numbers, underscore; must start with a letter or underscore)", cfg.Postgres.Table)
+	}
+	if _, ok := supportedAuditIndexProfiles[strings.ToLower(strings.TrimSpace(cfg.Postgres.IndexProfile))]; !ok {
+		return fmt.Errorf("config: audit.postgres.index_profile %q must be one of: minimal, lookup, full", cfg.Postgres.IndexProfile)
+	}
+	if cfg.Postgres.MaxOpenConns != nil && *cfg.Postgres.MaxOpenConns < 0 {
+		return fmt.Errorf("config: audit.postgres.max_open_conns must be >= 0")
+	}
+	if cfg.Postgres.MaxIdleConns != nil && *cfg.Postgres.MaxIdleConns < 0 {
+		return fmt.Errorf("config: audit.postgres.max_idle_conns must be >= 0")
+	}
+	if cfg.Postgres.ConnMaxLifetimeMins != nil && *cfg.Postgres.ConnMaxLifetimeMins < 0 {
+		return fmt.Errorf("config: audit.postgres.conn_max_lifetime_mins must be >= 0")
+	}
+	if hasMongo {
+		if strings.TrimSpace(cfg.MongoDB.Database) == "" {
+			return fmt.Errorf("config: audit.mongodb.database is required when audit.mongodb.uri is set")
+		}
+		if strings.Contains(cfg.MongoDB.Collection, "\x00") {
+			return fmt.Errorf("config: audit.mongodb.collection must not contain NUL characters")
+		}
+	}
+	if _, ok := supportedAuditIndexProfiles[strings.ToLower(strings.TrimSpace(cfg.MongoDB.IndexProfile))]; !ok {
+		return fmt.Errorf("config: audit.mongodb.index_profile %q must be one of: minimal, lookup, full", cfg.MongoDB.IndexProfile)
+	}
+	return nil
+}
+
 var supportedReferenceAgents = map[string]struct{}{
 	"all":        {},
 	"codex":      {},
@@ -1131,6 +1217,13 @@ var supportedReferenceEnclosureStyles = map[string]struct{}{
 	"angle":     {},
 	"fullwidth": {},
 	"code":      {},
+}
+
+var supportedAuditIndexProfiles = map[string]struct{}{
+	"":        {},
+	"minimal": {},
+	"lookup":  {},
+	"full":    {},
 }
 
 func validateReferenceConfig(prefix string, rc ReferenceConfig) error {
@@ -1201,6 +1294,107 @@ func SaveActiveProvider(projectName, providerName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	return patchProjectAgentOption(projectName, "provider", providerName)
+}
+
+// SaveActiveAgentType swaps the active [projects.agent] configuration with an alternate
+// one from [projects.agent_types]. The old active config is stored back into AgentTypes
+// at the position of the new config, enabling switch-back later.
+//
+// Swap is done field-by-field with deep-copy of Options map to avoid map reference
+// aliasing. Logs warnings for duplicate agent types in AgentTypes config.
+// Uses full config rewrite (saveConfig) since this is a multi-field swap.
+func SaveActiveAgentType(projectName, agentType string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	// Find the project
+	projIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projIdx = i
+			break
+		}
+	}
+	if projIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+	proj := &cfg.Projects[projIdx]
+
+	// Check for duplicate agent types in AgentTypes
+	seenTypes := make(map[string]int)
+	for i, at := range proj.AgentTypes {
+		if prevIdx, exists := seenTypes[at.Type]; exists {
+			slog.Warn("SaveActiveAgentType: duplicate agent type in AgentTypes",
+				"project", projectName, "type", at.Type,
+				"first_index", prevIdx, "duplicate_index", i)
+		}
+		seenTypes[at.Type] = i
+	}
+
+	// Find the alternate agent type config
+	altIdx := -1
+	for i := range proj.AgentTypes {
+		if proj.AgentTypes[i].Type == agentType {
+			altIdx = i
+			break
+		}
+	}
+	if altIdx < 0 {
+		return fmt.Errorf("agent type %q not found in project %q AgentTypes", agentType, projectName)
+	}
+
+	// Check if the old agent type is already in the alternate list (besides altIdx)
+	oldAgentType := proj.Agent.Type
+	for i, at := range proj.AgentTypes {
+		if i != altIdx && at.Type == oldAgentType {
+			slog.Info("SaveActiveAgentType: old agent type already in AgentTypes, will be overwritten on next swap",
+				"project", projectName, "old_type", oldAgentType)
+			break
+		}
+	}
+
+	// Deep copy the Options maps to avoid map reference aliasing
+	oldOptionsCopy := make(map[string]any, len(proj.Agent.Options))
+	for k, v := range proj.Agent.Options {
+		oldOptionsCopy[k] = v
+	}
+	newOptionsCopy := make(map[string]any, len(proj.AgentTypes[altIdx].Options))
+	for k, v := range proj.AgentTypes[altIdx].Options {
+		newOptionsCopy[k] = v
+	}
+
+	// Save references to Providers and ProviderRefs before overwriting
+	oldProviderRefs := proj.Agent.ProviderRefs
+	oldProviders := proj.Agent.Providers
+	newProviderRefs := proj.AgentTypes[altIdx].ProviderRefs
+	newProviders := proj.AgentTypes[altIdx].Providers
+
+	// Perform the swap with deep-copied Options maps
+	proj.Agent = AgentConfig{
+		Type:         proj.AgentTypes[altIdx].Type,
+		Options:      newOptionsCopy,
+		ProviderRefs: newProviderRefs,
+		Providers:    newProviders,
+	}
+	proj.AgentTypes[altIdx] = AgentConfig{
+		Type:         oldAgentType,
+		Options:      oldOptionsCopy,
+		ProviderRefs: oldProviderRefs,
+		Providers:    oldProviders,
+	}
+
+	return saveConfig(cfg)
 }
 
 // SaveProviderModel persists the selected model for a provider in a project.
@@ -1572,7 +1766,43 @@ func saveConfig(cfg *Config) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, ConfigPath)
+
+	// Try atomic rename first; fall back to WriteFile on "device busy" errors
+	// (can happen with NFS mounts, containers, or when the target file is held open)
+	if err := os.Rename(tmpPath, ConfigPath); err != nil {
+		// Clean up the temp file on failure
+		os.Remove(tmpPath)
+
+		// If the error is not a "device busy" type, report it immediately
+		if !isBusyError(err) {
+			return fmt.Errorf("rename config: %w", err)
+		}
+
+		// Fallback: write directly to the target file
+		slog.Warn("config: atomic rename failed (device busy), falling back to WriteFile",
+			"path", ConfigPath, "error", err)
+
+		if err := os.WriteFile(ConfigPath, []byte(formatted), 0644); err != nil {
+			return fmt.Errorf("write config (fallback): %w", err)
+		}
+		slog.Info("config: saved via WriteFile fallback", "path", ConfigPath)
+		return nil
+	}
+	return nil
+}
+
+// isBusyError returns true if err indicates the file is busy (EBUSY on POSIX,
+// "device or resource busy", or similar). Used to detect when atomic rename
+// will fail and a direct WriteFile fallback is needed.
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "device or resource busy") ||
+		strings.Contains(errStr, "EBUSY") ||
+		strings.Contains(errStr, "resource busy") ||
+		strings.Contains(errStr, " text file busy")
 }
 
 // formatTOML post-processes raw TOML encoder output to improve readability:
@@ -3373,6 +3603,7 @@ type ProjectSettingsUpdate struct {
 	ShowContextIndicator *bool
 	ShowWorkdirIndicator *bool
 	ReplyFooter          *bool
+	ReplyFooterTokens    *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
 }
@@ -3458,6 +3689,10 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.ReplyFooter != nil {
 			v := *update.ReplyFooter
 			proj.ReplyFooter = &v
+		}
+		if update.ReplyFooterTokens != nil {
+			v := *update.ReplyFooterTokens
+			proj.ReplyFooterTokens = &v
 		}
 		if update.InjectSender != nil {
 			v := *update.InjectSender
@@ -3546,6 +3781,9 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.ReplyFooter != nil {
 			result["reply_footer"] = *p.ReplyFooter
+		}
+		if p.ReplyFooterTokens != nil {
+			result["reply_footer_tokens"] = *p.ReplyFooterTokens
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
