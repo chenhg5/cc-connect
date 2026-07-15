@@ -1,8 +1,0 @@
-blank_issues_enabled: true
-contact_links:
-  - name: Documentation
-    url: https://github.com/chenhg5/cc-connect#readme
-    about: Check the README and platform setup guides before opening an issue
-  - name: Discussions
-    url: https://github.com/chenhg5/cc-connect/discussions
-    about: Ask questions and share ideas in GitHub Discussions
