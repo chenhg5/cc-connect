@@ -25,10 +25,15 @@ const ExplicitActivationTTL = 7 * 24 * time.Hour
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string   `json:"id"`
-	Name                string   `json:"name"`
-	AgentSessionID      string   `json:"agent_session_id"`
-	AgentType           string   `json:"agent_type,omitempty"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	AgentSessionID string `json:"agent_session_id"`
+	AgentType      string `json:"agent_type,omitempty"`
+	// AgentCwd is the working directory the agent reported for this session.
+	// Resume validation uses it to locate the session's transcript, since the
+	// agent process may run in a different directory than the configured
+	// work_dir (a custom agent command can cd anywhere).
+	AgentCwd            string   `json:"agent_cwd,omitempty"`
 	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
@@ -206,6 +211,25 @@ func (s *Session) GetAgentSessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.AgentSessionID
+}
+
+// SetAgentCwd records the working directory the agent reported for this
+// session, used later to locate its transcript for resume validation. Empty
+// values are ignored so a missing cwd never clobbers a previously captured one.
+func (s *Session) SetAgentCwd(cwd string) {
+	if cwd == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentCwd = cwd
+}
+
+// GetAgentCwd atomically reads the agent working directory (empty if none).
+func (s *Session) GetAgentCwd() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentCwd
 }
 
 // SetName atomically updates the session's display name. The management
