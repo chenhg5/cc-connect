@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -708,9 +709,52 @@ func TestScanSessionMeta_ArrayContent(t *testing.T) {
 		t.Errorf("scanSessionMeta count = %d, want 4 (2 user + 2 assistant, array content should not be skipped)", count)
 	}
 
-	// Summary should come from the last user message with string content (line 2)
+	// Summary should come from the first user message with string content (line 2)
 	if summary != "Hello world" {
 		t.Errorf("scanSessionMeta summary = %q, want %q", summary, "Hello world")
+	}
+}
+
+func TestScanSessionMeta_AITitleAndCustomTitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "[cc-connect sender_id=abc] first prompt"}}`,
+		`{"type": "assistant", "message": {"content": "reply"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "查看cc-connect开机自启功能"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "查看cc-connect开机自启功能" {
+		t.Errorf("scanSessionMeta summary = %q, want ai-title", summary)
+	}
+}
+
+func TestScanSessionMeta_CustomTitleOverridesAITitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "ignored fallback"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "AI generated title"}`,
+		`{"type": "custom-title", "sessionId": "sess-1", "customTitle": "User renamed title"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, _ := scanSessionMeta(path)
+	if summary != "User renamed title" {
+		t.Errorf("scanSessionMeta summary = %q, want custom-title", summary)
 	}
 }
 
