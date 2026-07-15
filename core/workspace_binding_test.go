@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -147,5 +148,83 @@ func TestWorkspaceBindingManager_UnbindScopedRemovesLegacyBinding(t *testing.T) 
 	}
 	if b := mgr.Lookup("project:claude", "C1"); b != nil {
 		t.Fatalf("expected legacy binding to be removed, got %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_MigrateChannelKey(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "bindings.json")
+	mgr := NewWorkspaceBindingManager(storePath)
+
+	projectKey := "project:claude"
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	newKey := workspaceChannelKey("feishu", "oc_chat:topic:om_root")
+	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/a")
+
+	if !mgr.MigrateChannelKey(projectKey, oldKey, newKey) {
+		t.Fatal("expected legacy binding to migrate")
+	}
+	if b := mgr.Lookup(projectKey, oldKey); b != nil {
+		t.Fatalf("expected legacy binding to be removed, got %+v", b)
+	}
+	if b := mgr.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected migrated topic binding, got %+v", b)
+	}
+
+	reloaded := NewWorkspaceBindingManager(storePath)
+	if b := reloaded.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected migrated binding after reload, got %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_MigrateChannelKeyDoesNotOverwriteDestination(t *testing.T) {
+	mgr := NewWorkspaceBindingManager(filepath.Join(t.TempDir(), "bindings.json"))
+	projectKey := "project:claude"
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	newKey := workspaceChannelKey("feishu", "oc_chat:topic:om_root")
+	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/legacy")
+	mgr.Bind(projectKey, newKey, "topic", "/workspace/current")
+
+	if mgr.MigrateChannelKey(projectKey, oldKey, newKey) {
+		t.Fatal("migration must not overwrite an existing topic binding")
+	}
+	if b := mgr.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/current" {
+		t.Fatalf("destination binding changed unexpectedly: %+v", b)
+	}
+	if b := mgr.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/legacy" {
+		t.Fatalf("source binding should remain when migration is skipped: %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_MigrateChannelKeyConcurrentSingleWinner(t *testing.T) {
+	mgr := NewWorkspaceBindingManager(filepath.Join(t.TempDir(), "bindings.json"))
+	projectKey := "project:claude"
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	targets := []string{
+		workspaceChannelKey("feishu", "oc_chat:topic:om_root_a"),
+		workspaceChannelKey("feishu", "oc_chat:topic:om_root_b"),
+	}
+	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/a")
+
+	results := make(chan bool, len(targets))
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- mgr.MigrateChannelKey(projectKey, oldKey, target)
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	winners := 0
+	for migrated := range results {
+		if migrated {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly one migration winner, got %d", winners)
 	}
 }

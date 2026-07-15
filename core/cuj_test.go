@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -64,8 +65,8 @@ type cujAgent struct {
 	// Used by tests that need to drive a multi-event turn (text chunks +
 	// permission request + result) from a single Send call. See
 	// setNextSessionEvents on cujAgent.
-	nextSessionEvents    []Event
-	nextSessionDelayMs   int
+	nextSessionEvents  []Event
+	nextSessionDelayMs int
 }
 
 func (a *cujAgent) Name() string { return "cuj" }
@@ -1130,8 +1131,8 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:img", Platform: "test", MessageID: "img1",
 		UserID: "img", UserName: "img",
-		Content: "what is in this image",
-		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
+		Content:  "what is in this image",
+		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -1194,8 +1195,8 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
 		UserID: "file", UserName: "file",
-		Content: "read this file",
-		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
+		Content:  "read this file",
+		Files:    []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -2326,3 +2327,68 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 	}
 }
 
+func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
+	baseDir := t.TempDir()
+	workspaceA := filepath.Join(baseDir, "workspace-a")
+	workspaceB := filepath.Join(baseDir, "workspace-b")
+	for _, dir := range []string{workspaceA, workspaceB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const agentName = "cuj-feishu-topic-workspace-agent"
+	RegisterAgent(agentName, func(map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+	platform := &stubPlatformEngine{n: "feishu"}
+	engine := NewEngine(
+		"test",
+		&namedTestAgent{name: agentName},
+		[]Platform{platform},
+		filepath.Join(t.TempDir(), "sessions.json"),
+		LangEnglish,
+	)
+	engine.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	sendTopicCommand := func(rootID, command string) {
+		engine.ReceiveMessage(platform, &Message{
+			SessionKey: "feishu:oc_chat:root:" + rootID,
+			Platform:   "feishu",
+			MessageID:  "msg-" + rootID,
+			UserID:     "user",
+			UserName:   "user",
+			Content:    command,
+			ChannelKey: "oc_chat:topic:" + rootID,
+			ReplyCtx:   "ctx-" + rootID,
+		})
+	}
+	lastReply := func() string {
+		sent := platform.getSent()
+		if len(sent) == 0 {
+			t.Fatal("expected a user-visible workspace reply")
+		}
+		return sent[len(sent)-1]
+	}
+
+	// User actions 1-2: bind two topics in the same Feishu group.
+	sendTopicCommand("om_root_a", "/workspace bind workspace-a")
+	sendTopicCommand("om_root_b", "/workspace bind workspace-b")
+
+	// User actions 3-4: each topic reports its own workspace.
+	sendTopicCommand("om_root_a", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceA)) {
+		t.Fatalf("topic A workspace reply = %q, want %q", got, normalizeWorkspacePath(workspaceA))
+	}
+	sendTopicCommand("om_root_b", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceB)) {
+		t.Fatalf("topic B workspace reply = %q, want %q", got, normalizeWorkspacePath(workspaceB))
+	}
+
+	// User action 5: unbinding A must not affect B.
+	sendTopicCommand("om_root_a", "/workspace unbind")
+	sendTopicCommand("om_root_b", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceB)) {
+		t.Fatalf("topic B changed after topic A unbind: %q", got)
+	}
+}

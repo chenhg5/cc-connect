@@ -224,9 +224,13 @@ type Message struct {
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any                 // platform-specific context needed for replying
-	FromVoice    bool                // true if message originated from voice transcription
-	ModeOverride string              // if set, temporarily override agent permission mode for this message
+	// LegacyChannelKey is the platform-provided channel identifier used by an
+	// older workspace-binding scope. When both keys are set, multi-workspace
+	// routing atomically migrates the legacy binding to ChannelKey.
+	LegacyChannelKey string
+	ReplyCtx         any    // platform-specific context needed for replying
+	FromVoice        bool   // true if message originated from voice transcription
+	ModeOverride     string // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,
