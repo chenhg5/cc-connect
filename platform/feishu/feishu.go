@@ -2402,29 +2402,27 @@ func (p *Platform) maybeSendKnowledgeConfirmCard(ctx context.Context, rc replyCo
 	if cacheDir == "" {
 		return
 	}
-	// Skip if a confirm card for this path was already emitted (tracked by the
-	// marker file in the directory), so the card does not re-pop when the
-	// write follow-up echoes the same KNOWLEDGE_CACHE_DIR path.
-	if p.knowledgeCardMarkerExists(cacheDir) {
-		slog.Debug(p.tag()+": skip knowledge confirm card, marker already present", "dir", cacheDir)
-		return
-	}
-	// Only offer the button when the path is absolute and the conclusion file
-	// actually exists. This guards against stale/garbage tokens (e.g. a cached
-	// KNOWLEDGE_CACHE_DIR printed earlier whose /tmp dir has since been cleaned),
-	// which would otherwise produce a button that fails on click.
+	// Only offer the button when the path is absolute and the staging
+	// directory still exists. The dir is created by save-alert-conclusion.js and
+	// deleted by knowledge-write-intent.js the moment the conclusion is written
+	// (rm -rf <cacheDir>). If it is already gone, the token is stale (write done
+	// / cleaned) — skip instead of offering a button that would fail on click.
+	// Checking the directory first (before the marker below) also avoids
+	// stat-ing a marker file inside a directory that may no longer exist.
 	if !filepath.IsAbs(cacheDir) {
 		slog.Debug(p.tag()+": skip knowledge confirm card, cache dir not absolute", "dir", cacheDir)
 		return
 	}
 	if info, err := os.Stat(cacheDir); err != nil || !info.IsDir() {
-		// NOTE: the cache dir lives on the agent host, which is not necessarily
-		// the cc-connect host. The actual write happens agent-side via
-		// knowledge-write-intent.js --cache-dir, which validates the path there.
-		// We therefore only warn here instead of silently dropping the card,
-		// so the confirmation button stays available even when cc-connect runs
-		// on a different machine than the agent.
-		slog.Warn(p.tag()+": knowledge confirm card cache dir not present on this host (expected if agent runs elsewhere)", "dir", cacheDir, "err", err)
+		slog.Debug(p.tag()+": skip knowledge confirm card, cache dir missing (already written or cleaned)", "dir", cacheDir)
+		return
+	}
+	// Skip if a confirm card for this path was already emitted (tracked by the
+	// marker file inside the directory), so the card does not re-pop when the
+	// agent re-quotes the same KNOWLEDGE_CACHE_DIR before the write happens.
+	if p.knowledgeCardMarkerExists(cacheDir) {
+		slog.Debug(p.tag()+": skip knowledge confirm card, marker already present", "dir", cacheDir)
+		return
 	}
 	card := core.NewCard().
 		Title("📚 知识库写入确认", "blue").
