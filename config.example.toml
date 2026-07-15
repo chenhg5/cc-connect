@@ -415,6 +415,16 @@ level = "info" # debug, info, warn, error
 #   error              — an error occurs / 发生错误
 #   *                  — match all events / 匹配所有事件
 #
+# Hook payloads include stable session metadata in extra.cc_session_id and
+# extra.agent_session_id when available. message.received and session.started
+# also include trigger message metadata such as extra.message_id, channel_id,
+# channel_key and chat_name. message.sent includes extra.trigger_message_id
+# so consumers can correlate an agent reply with the user message that caused it.
+# Hook payload 会在可用时通过 extra.cc_session_id 和 extra.agent_session_id
+# 提供稳定会话信息。message.received 与 session.started 还会带上触发消息的
+# extra.message_id、channel_id、channel_key、chat_name 等信息。message.sent
+# 会带上 extra.trigger_message_id，便于消费方把 Agent 回复关联到触发它的用户消息。
+#
 # Handler types / 处理器类型:
 #   command — run a shell command; event context in CC_HOOK_* env vars
 #           — 执行 Shell 命令；事件上下文通过 CC_HOOK_* 环境变量传递
