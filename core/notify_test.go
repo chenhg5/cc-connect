@@ -1,8 +1,6 @@
 package core
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -236,35 +234,24 @@ func TestNotifyStoreReceiptPersistsAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestNotifyStoreSnapshotsResultAtArrival(t *testing.T) {
+func TestNotifyStoreKeepsOriginalResultPathAtArrival(t *testing.T) {
 	root := t.TempDir()
 	resultPath := writeResultFile(t, root, "alpha", "L-0431", "ID: L-0431\nStatus: DONE\n---\n\n## Conclusion\noriginal\n")
 	store := newNotifyStore(filepath.Join(root, "data"))
 	if err := store.recordArrival(indexResultRow{Letter: "L-0431", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
 		t.Fatalf("record arrival: %v", err)
 	}
-	if err := os.WriteFile(resultPath, []byte("changed after arrival"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	ledger, err := store.load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	record := ledger.Receipts["L-0431"]
-	data, err := os.ReadFile(record.SnapshotPath)
-	if err != nil {
-		t.Fatalf("read snapshot: %v", err)
-	}
-	want := "ID: L-0431\nStatus: DONE\n---\n\n## Conclusion\noriginal\n"
-	if got := string(data); got != want {
-		t.Fatalf("snapshot = %q, want %q", got, want)
-	}
-	if got, want := record.SnapshotSHA256, fmt.Sprintf("%x", sha256.Sum256([]byte(want))); got != want {
-		t.Fatalf("snapshot hash = %q, want %q", got, want)
+	if got, want := record.ResultPath, resultPath; got != want {
+		t.Fatalf("result path = %q, want %q", got, want)
 	}
 }
 
-func TestNotifyStoreBackfillsLegacyReceiptSnapshotAndSummary(t *testing.T) {
+func TestNotifyStoreCompactsLegacyReceiptSummaryWithoutCreatingSnapshot(t *testing.T) {
 	root := t.TempDir()
 	body := "ID: L-0430\nStatus: DONE\n---\n\nimmutable body\n"
 	resultPath := writeResultFile(t, root, "alpha", "L-0430", body)
@@ -282,38 +269,33 @@ func TestNotifyStoreBackfillsLegacyReceiptSnapshotAndSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.SnapshotPath == "" || record.SnapshotSHA256 == "" {
-		t.Fatalf("legacy receipt was not backfilled: %+v", record)
-	}
-	data, err := os.ReadFile(record.SnapshotPath)
-	if err != nil || string(data) != body {
-		t.Fatalf("snapshot = %q, %v", data, err)
+	if got, want := record.ResultPath, resultPath; got != want {
+		t.Fatalf("legacy result path = %q, want %q", got, want)
 	}
 	if len([]rune(record.Summary)) > 240 {
 		t.Fatalf("summary was not compacted: %d", len([]rune(record.Summary)))
 	}
 }
 
-func TestReceiptEnvelopeGivesAgentDirectResultContext(t *testing.T) {
+func TestReceiptEnvelopeGivesAgentOriginalResultPath(t *testing.T) {
 	got := formatReceiptEnvelope("L-0430", receiptRecord{
-		Thread:         "cc-connect-maintenance",
-		Status:         "DONE",
-		SnapshotPath:   "F:\\nexus\\data\\notify_snapshots\\L-0430.result.md",
-		SnapshotSHA256: "abc123",
+		Thread:     "cc-connect-maintenance",
+		Status:     "DONE",
+		ResultPath: "F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md",
 	})
-	want := "[RECEIPT L-0430]\n快照文件：F:\\nexus\\data\\notify_snapshots\\L-0430.result.md\nSHA-256：abc123\n线程：cc-connect-maintenance\n状态：DONE\n\n请直接读取上述 receipt snapshot，并按正常译信流程处理。"
+	want := "[RECEIPT L-0430]\n原信文件：F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md\n线程：cc-connect-maintenance\n状态：DONE\n\n请直接读取上述 RESULT 原信，并按正常译信流程处理。"
 	if got != want {
 		t.Errorf("receipt envelope = %q, want %q", got, want)
 	}
 }
 
-func TestReceiptInboxCardPaginatesSnapshotWithoutChangingItsContent(t *testing.T) {
+func TestReceiptInboxCardPaginatesOriginalResultWithoutHash(t *testing.T) {
 	record := receiptRecord{
 		Thread: "alpha", Status: "DONE", Summary: "ready", ArrivedAt: "2026-07-16T16:20:00Z",
-		SnapshotPath: "F:\\data\\notify_snapshots\\L-0431.result.md", SnapshotSHA256: "abc123",
+		ResultPath: "F:\\nexus\\docs\\archive\\threads\\alpha\\L-0431.result.md",
 	}
 	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0431", record, "first page\nsecond page", 0, 2)
-	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "Thread: alpha") || !strings.Contains(content, "Snapshot path: F:\\data\\notify_snapshots\\L-0431.result.md") || !strings.Contains(content, "Snapshot SHA-256: abc123") || !strings.Contains(content, "Page 1/2") {
+	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "Thread: alpha") || !strings.Contains(content, "Result path: F:\\nexus\\docs\\archive\\threads\\alpha\\L-0431.result.md") || strings.Contains(content, "SHA-256") || !strings.Contains(content, "Page 1/2") {
 		t.Fatalf("inbox card content = %q", content)
 	}
 	if got := buttons[0][0].Text; got != "Next →" {

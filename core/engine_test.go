@@ -822,10 +822,10 @@ func TestEngineReceiptManualAcknowledgesWithoutAgentTurn(t *testing.T) {
 	}
 }
 
-func TestEngineReceiptPrimaryHandsSnapshotToConfiguredSession(t *testing.T) {
+func TestEngineReceiptPrimaryHandsCurrentOriginalToConfiguredSession(t *testing.T) {
 	root := t.TempDir()
-	snapshotBody := "ID: L-0430\nStatus: DONE\n---\n\n## Conclusion\noriginal body\n"
-	resultPath := writeResultFile(t, root, "cc-connect-maintenance", "L-0430", snapshotBody)
+	originalBody := "ID: L-0430\nStatus: DONE\n---\n\n## Conclusion\noriginal body\n"
+	resultPath := writeResultFile(t, root, "cc-connect-maintenance", "L-0430", originalBody)
 	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.notifyConfig.ReceiptSessionKey = "test:secretary"
@@ -836,12 +836,16 @@ func TestEngineReceiptPrimaryHandsSnapshotToConfiguredSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record arrival: %v", err)
 	}
+	currentBody := "ID: L-0430\nStatus: DONE\n---\n\n## Conclusion\nupdated body\n"
+	if err := os.WriteFile(resultPath, []byte(currentBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	msg := &Message{UserName: "jay", ReplyCtx: "ctx"}
 
 	if handled := e.handoffReceiptToPrimary(p, msg, "L-0430"); handled {
 		t.Fatal("primary handoff must start one agent turn")
 	}
-	if !strings.Contains(msg.Content, snapshotBody) {
+	if !strings.Contains(msg.Content, currentBody) {
 		t.Fatalf("primary source missing from message: %q", msg.Content)
 	}
 	if msg.SessionKey != "test:secretary" || msg.ReplyCtx != "ctx:test:secretary" {
@@ -901,7 +905,7 @@ func TestEngineReceiptPrimaryDeleteFailureRestoresPendingReceipt(t *testing.T) {
 	}
 }
 
-func TestEngineLetterInjectsSnapshotAndQuestionWithoutAcknowledging(t *testing.T) {
+func TestEngineLetterInjectsCurrentOriginalAndQuestionWithoutAcknowledging(t *testing.T) {
 	root := t.TempDir()
 	resultPath := writeResultFile(t, root, "alpha", "L-0436", "ID: L-0436\nStatus: DONE\n---\n\nimmutable body\n")
 	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}

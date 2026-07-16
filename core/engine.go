@@ -7312,13 +7312,13 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 			return true
 		}
-		snapshot, err := os.ReadFile(receipt.SnapshotPath)
+		original, err := os.ReadFile(receipt.ResultPath)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 			return true
 		}
 		question := strings.TrimSpace(strings.Join(args[1:], " "))
-		msg.Content = fmt.Sprintf("[IMMUTABLE RESULT SOURCE]\nL-ID: %s\nSnapshot: %s\nSHA-256: %s\nThread: %s\n---\n%s\n---\nBoss question:\n%s", args[0], receipt.SnapshotPath, receipt.SnapshotSHA256, receipt.Thread, string(snapshot), question)
+		msg.Content = fmt.Sprintf("[RESULT SOURCE]\nL-ID: %s\nOriginal: %s\nThread: %s\n---\n%s\n---\nBoss question:\n%s", args[0], receipt.ResultPath, receipt.Thread, string(original), question)
 		return false
 
 	default:
@@ -7368,7 +7368,7 @@ func (e *Engine) showReceiptPage(p Platform, msg *Message, letter string, page i
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return
 	}
-	pages, err := receiptSnapshotPages(receipt, e.i18n.T(MsgReceiptEmptyOriginal))
+	pages, err := receiptOriginalPages(receipt, e.i18n.T(MsgReceiptEmptyOriginal))
 	if err != nil || page >= len(pages) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return
@@ -7443,7 +7443,7 @@ func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
-	snapshot, err := os.ReadFile(receipt.SnapshotPath)
+	original, err := os.ReadFile(receipt.ResultPath)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
@@ -7471,7 +7471,7 @@ func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string
 	}
 	msg.SessionKey = targetSession
 	msg.ReplyCtx = targetReplyCtx
-	msg.Content = string(snapshot)
+	msg.Content = string(original)
 	return false
 }
 

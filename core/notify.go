@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -75,8 +74,6 @@ type receiptRecord struct {
 	Thread         string `json:"thread"`
 	Summary        string `json:"summary"`
 	ResultPath     string `json:"result_path"`
-	SnapshotPath   string `json:"snapshot_path"`
-	SnapshotSHA256 string `json:"snapshot_sha256"`
 	Status         string `json:"status"`
 	ArrivedAt      string `json:"arrived_at"`
 	AcknowledgedAt string `json:"acknowledged_at,omitempty"`
@@ -138,10 +135,6 @@ func (s *notifyStore) save(ledger notifyLedger) error {
 	return AtomicWriteFile(s.path, data, 0o644)
 }
 
-func (s *notifyStore) snapshotPath(letter string) string {
-	return filepath.Join(filepath.Dir(s.path), "notify_snapshots", letter+".result.md")
-}
-
 func (s *notifyStore) recordArrival(row indexResultRow) error {
 	if s == nil || strings.TrimSpace(row.Letter) == "" {
 		return nil
@@ -167,21 +160,6 @@ func (s *notifyStore) recordArrival(row indexResultRow) error {
 	}
 	if record.Status == "" {
 		record.Status = row.Status
-	}
-	if !exists || record.SnapshotPath == "" || record.SnapshotSHA256 == "" {
-		data, err := os.ReadFile(record.ResultPath)
-		if err != nil {
-			return fmt.Errorf("read result snapshot: %w", err)
-		}
-		snapshotPath := s.snapshotPath(row.Letter)
-		if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o755); err != nil {
-			return fmt.Errorf("create snapshot directory: %w", err)
-		}
-		if err := AtomicWriteFile(snapshotPath, data, 0o644); err != nil {
-			return fmt.Errorf("write result snapshot: %w", err)
-		}
-		record.SnapshotPath = snapshotPath
-		record.SnapshotSHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
 	}
 	if record.Summary == "" || len([]rune(record.Summary)) > 240 {
 		record.Summary = compactReceiptSummary(row.Summary)
@@ -389,16 +367,15 @@ func extractResultStatus(path string) string {
 	return ""
 }
 
-// formatReceiptEnvelope is the intentional message passed to the secretary
-// after a Boss acknowledges a result. It includes the exact file location so
-// the agent can read the source directly instead of searching the archive.
+// formatReceiptEnvelope gives a secretary the original RESULT path without
+// asking it to locate the letter itself.
 func formatReceiptEnvelope(letter string, record receiptRecord) string {
-	return fmt.Sprintf("[RECEIPT %s]\n快照文件：%s\nSHA-256：%s\n线程：%s\n状态：%s\n\n请直接读取上述 receipt snapshot，并按正常译信流程处理。",
-		letter, record.SnapshotPath, record.SnapshotSHA256, record.Thread, record.Status)
+	return fmt.Sprintf("[RECEIPT %s]\n原信文件：%s\n线程：%s\n状态：%s\n\n请直接读取上述 RESULT 原信，并按正常译信流程处理。",
+		letter, record.ResultPath, record.Thread, record.Status)
 }
 
-func receiptSnapshotPages(record receiptRecord, emptyText string) ([]string, error) {
-	data, err := os.ReadFile(record.SnapshotPath)
+func receiptOriginalPages(record receiptRecord, emptyText string) ([]string, error) {
+	data, err := os.ReadFile(record.ResultPath)
 	if err != nil {
 		return nil, err
 	}
@@ -420,9 +397,9 @@ func receiptSnapshotPages(record receiptRecord, emptyText string) ([]string, err
 }
 
 // formatReceiptInboxCard renders the Boss-facing inbox card. A non-positive
-// pageCount is the compact envelope; positive pageCount is a snapshot page.
+// pageCount is the compact envelope; positive pageCount is an original page.
 func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, body string, page, pageCount int) (string, [][]ButtonOption) {
-	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt, record.SnapshotPath, record.SnapshotSHA256)
+	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt, record.ResultPath)
 	if pageCount <= 0 {
 		return content, [][]ButtonOption{{
 			{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/receipt page " + letter + " 0"},

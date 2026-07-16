@@ -833,11 +833,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Recibos pendientes:%s",
 	},
 	MsgReceiptCardCompact: {
-		LangEnglish:            "📬 %s\nThread: %s\nStatus: %s\nSummary: %s\nArrived: %s\nSnapshot path: %s\nSnapshot SHA-256: %s",
-		LangChinese:            "📬 %s\n线程：%s\n状态：%s\n摘要：%s\n到货：%s\n快照路径：%s\n快照 SHA-256：%s",
-		LangTraditionalChinese: "📬 %s\n執行緒：%s\n狀態：%s\n摘要：%s\n送達：%s\n快照路徑：%s\n快照 SHA-256：%s",
-		LangJapanese:           "📬 %s\nスレッド: %s\nステータス: %s\n概要: %s\n到着: %s\nスナップショット: %s\nSHA-256: %s",
-		LangSpanish:            "📬 %s\nHilo: %s\nEstado: %s\nResumen: %s\nRecibido: %s\nRuta de instantánea: %s\nSHA-256 de instantánea: %s",
+		LangEnglish:            "📬 %s\nThread: %s\nStatus: %s\nSummary: %s\nArrived: %s\nResult path: %s",
+		LangChinese:            "📬 %s\n线程：%s\n状态：%s\n摘要：%s\n到货：%s\n原信路径：%s",
+		LangTraditionalChinese: "📬 %s\n執行緒：%s\n狀態：%s\n摘要：%s\n送達：%s\n原信路徑：%s",
+		LangJapanese:           "📬 %s\nスレッド: %s\nステータス: %s\n概要: %s\n到着: %s\n原信パス: %s",
+		LangSpanish:            "📬 %s\nHilo: %s\nEstado: %s\nResumen: %s\nRecibido: %s\nRuta del resultado: %s",
 	},
 	MsgReceiptCardPage: {
 		LangEnglish:            "Original (Page %d/%d)\n%s",
