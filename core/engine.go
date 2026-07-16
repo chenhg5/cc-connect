@@ -2999,6 +2999,7 @@ sessionLocked:
 	// reset because cleanupInteractiveState may remove the early placeholder.
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	runMessageAccepted(msg)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
 		"session", msg.SessionKey,
@@ -3014,6 +3015,15 @@ sessionLocked:
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+}
+
+func runMessageAccepted(msg *Message) {
+	if msg == nil || msg.OnAccepted == nil {
+		return
+	}
+	callback := msg.OnAccepted
+	msg.OnAccepted = nil
+	callback()
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -3127,6 +3137,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
 	})
+	runMessageAccepted(msg)
 	queueDepth := len(state.pendingMessages)
 
 	slog.Debug("user message accepted into queue",

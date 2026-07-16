@@ -223,6 +223,7 @@ type Message struct {
 	Audio        *AudioAttachment    // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	OnAccepted   func()              // called once when the engine accepts this message for an agent turn
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription

@@ -5876,6 +5876,37 @@ func TestHandleMessage_ExtraContentOnlyIsProcessed(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_OnAcceptedOnlyRunsForAgentTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	commandAccepted := false
+	e.handleMessage(p, &Message{
+		SessionKey: "test:command-user",
+		ReplyCtx:   "ctx",
+		Content:    "/status",
+		Platform:   "test",
+		UserID:     "command-user",
+		OnAccepted: func() { commandAccepted = true },
+	})
+	if commandAccepted {
+		t.Fatal("handled command consumed agent-bound context")
+	}
+
+	agentAccepted := false
+	e.handleMessage(p, &Message{
+		SessionKey: "test:agent-user",
+		ReplyCtx:   "ctx",
+		Content:    "hello",
+		Platform:   "test",
+		UserID:     "agent-user",
+		OnAccepted: func() { agentAccepted = true },
+	})
+	if !agentAccepted {
+		t.Fatal("agent-bound message did not run OnAccepted")
+	}
+}
+
 func TestCmdDiff_RejectsDashTarget(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
