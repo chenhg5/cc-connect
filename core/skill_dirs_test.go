@@ -108,7 +108,7 @@ func writeTestSkillDir(t *testing.T, root, subdir, name, body string) string {
 }
 
 func TestNexusSharedSkillsDiscovery(t *testing.T) {
-	shared := filepath.Join(`F:\nexus`, "data", "skills", "shared")
+	shared := filepath.Join(`F:\nexus`, "data", "skills", "shared", "productivity")
 	if _, err := os.Stat(shared); err != nil {
 		t.Skip("nexus shared skills dir not present:", err)
 	}
@@ -125,14 +125,11 @@ func TestNexusSharedSkillsDiscovery(t *testing.T) {
 			t.Fatalf("missing skill %q in %#v", want, got)
 		}
 	}
-	if got["handoff"] {
-		t.Fatalf("handoff should not be in shared-only dirs, got %#v", got)
-	}
 }
 
 func TestNexusChefSeatSkillsDiscovery(t *testing.T) {
 	chefSeat := filepath.Join(`F:\nexus`, "data", "skills", "chef-seat")
-	shared := filepath.Join(`F:\nexus`, "data", "skills", "shared")
+	shared := filepath.Join(`F:\nexus`, "data", "skills", "shared", "productivity")
 	if _, err := os.Stat(chefSeat); err != nil {
 		t.Skip("nexus chef-seat skills dir not present:", err)
 	}

@@ -11074,10 +11074,10 @@ func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
-		Content:    "/shell pwd",
+		Content:    "/shell (Get-Location).Path",
 		ReplyCtx:   "ctx",
 	}
-	e.cmdShell(p, msg, "/shell pwd")
+	e.cmdShell(p, msg, "/shell (Get-Location).Path")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
