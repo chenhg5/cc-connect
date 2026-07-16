@@ -64,6 +64,15 @@ type resultFileInfo struct {
 type notifyLedger struct {
 	Seeded   bool              `json:"seeded"`
 	Notified map[string]string `json:"notified"`
+	Receipts map[string]receiptRecord `json:"receipts"`
+}
+
+type receiptRecord struct {
+	Thread         string `json:"thread"`
+	Summary        string `json:"summary"`
+	ArrivedAt      string `json:"arrived_at"`
+	AcknowledgedAt string `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy string `json:"acknowledged_by,omitempty"`
 }
 
 type notifyStore struct {
@@ -79,7 +88,7 @@ func newNotifyStore(dataDir string) *notifyStore {
 }
 
 func (s *notifyStore) load() (notifyLedger, error) {
-	ledger := notifyLedger{Notified: map[string]string{}}
+	ledger := notifyLedger{Notified: map[string]string{}, Receipts: map[string]receiptRecord{}}
 	if s == nil {
 		return ledger, nil
 	}
@@ -99,6 +108,9 @@ func (s *notifyStore) load() (notifyLedger, error) {
 	if ledger.Notified == nil {
 		ledger.Notified = map[string]string{}
 	}
+	if ledger.Receipts == nil {
+		ledger.Receipts = map[string]receiptRecord{}
+	}
 	return ledger, nil
 }
 
@@ -115,6 +127,47 @@ func (s *notifyStore) save(ledger notifyLedger) error {
 	}
 	data = append(data, '\n')
 	return AtomicWriteFile(s.path, data, 0o644)
+}
+
+func (s *notifyStore) recordArrival(row indexResultRow) error {
+	if s == nil || strings.TrimSpace(row.Letter) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.load()
+	if err != nil {
+		return err
+	}
+	if _, exists := ledger.Receipts[row.Letter]; !exists {
+		ledger.Receipts[row.Letter] = receiptRecord{
+			Thread: row.Thread, Summary: row.Summary, ArrivedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+	return s.save(ledger)
+}
+
+func (s *notifyStore) acknowledge(letter, user string) (receiptRecord, bool, error) {
+	if s == nil {
+		return receiptRecord{}, false, fmt.Errorf("receipt store unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.load()
+	if err != nil {
+		return receiptRecord{}, false, err
+	}
+	record, exists := ledger.Receipts[letter]
+	if !exists {
+		return receiptRecord{}, false, fmt.Errorf("receipt %s not found", letter)
+	}
+	if record.AcknowledgedAt != "" {
+		return record, false, nil
+	}
+	record.AcknowledgedAt = time.Now().UTC().Format(time.RFC3339)
+	record.AcknowledgedBy = user
+	ledger.Receipts[letter] = record
+	return record, true, s.save(ledger)
 }
 
 // scanResultFiles walks threadsDir for threads/<thread>/<letter>.result.md
@@ -314,8 +367,11 @@ func (e *Engine) checkNewResults() {
 
 func (e *Engine) notifyLetterArrived(row indexResultRow) {
 	slog.Info("notify: letter arrived", "letter", row.Letter, "thread", row.Thread)
+	if err := e.notifyStore.recordArrival(row); err != nil {
+		slog.Warn("notify: failed to record receipt", "letter", row.Letter, "error", err)
+	}
 	if e.notifyConfig.TelegramEnabled && strings.TrimSpace(e.notifyConfig.SessionKey) != "" {
-		content := fmt.Sprintf("📬 %s RESULT — %s: %s", row.Letter, row.Thread, row.Summary)
+		content := fmt.Sprintf("📬 %s 到货", row.Letter)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, p := range e.platforms {
@@ -327,6 +383,15 @@ func (e *Engine) notifyLetterArrived(row indexResultRow) {
 				if reconstructed, err := rc.ReconstructReplyCtx(e.notifyConfig.SessionKey); err == nil {
 					replyCtx = reconstructed
 				}
+			}
+			if buttons, ok := p.(InlineButtonSender); ok {
+				if err := buttons.SendWithButtons(ctx, replyCtx, content, [][]ButtonOption{{{Text: "✅ 收件", Data: "cmd:/receipt " + row.Letter}}}); err != nil {
+					slog.Warn("notify: failed to send receipt button", "letter", row.Letter, "error", err)
+					if err := p.Send(ctx, replyCtx, content); err != nil {
+						slog.Warn("notify: failed to send fallback receipt notice", "letter", row.Letter, "error", err)
+					}
+				}
+				break
 			}
 			if err := p.Send(ctx, replyCtx, content); err != nil {
 				slog.Warn("notify: failed to send LETTER_ARRIVED", "letter", row.Letter, "error", err)

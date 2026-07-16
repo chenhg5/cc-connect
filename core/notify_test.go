@@ -192,6 +192,27 @@ func TestPsToastEscape(t *testing.T) {
 	}
 }
 
+func TestNotifyStoreReceiptPersistsAndIsIdempotent(t *testing.T) {
+	store := newNotifyStore(t.TempDir())
+	if err := store.recordArrival(indexResultRow{Letter: "L-0430", Thread: "cc-connect-maintenance", Summary: "ready"}); err != nil {
+		t.Fatalf("recordArrival: %v", err)
+	}
+	first, changed, err := store.acknowledge("L-0430", "jay")
+	if err != nil || !changed {
+		t.Fatalf("first acknowledge = (%+v, %v, %v), want changed receipt", first, changed, err)
+	}
+	if first.AcknowledgedBy != "jay" || first.AcknowledgedAt == "" {
+		t.Fatalf("first receipt = %+v", first)
+	}
+	second, changed, err := store.acknowledge("L-0430", "other")
+	if err != nil || changed {
+		t.Fatalf("second acknowledge = (%+v, %v, %v), want idempotent", second, changed, err)
+	}
+	if second.AcknowledgedBy != "jay" || second.AcknowledgedAt != first.AcknowledgedAt {
+		t.Fatalf("idempotent receipt = %+v, want %+v", second, first)
+	}
+}
+
 func TestNotifyLetterArrivedSendsShortPlatformMessageWithoutAgentTurn(t *testing.T) {
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -212,7 +233,7 @@ func TestNotifyLetterArrivedSendsShortPlatformMessageWithoutAgentTurn(t *testing
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one direct notification", sent)
 	}
-	if got, want := sent[0], "📬 L-0430 RESULT — cc-connect-maintenance: notification context is decoupled."; got != want {
+	if got, want := sent[0], "📬 L-0430 到货"; got != want {
 		t.Fatalf("notification = %q, want %q", got, want)
 	}
 	if strings.Contains(sent[0], "[LETTER_ARRIVED]") {

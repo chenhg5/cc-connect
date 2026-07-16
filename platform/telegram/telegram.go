@@ -1149,6 +1149,10 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
 	if strings.HasPrefix(data, "cmd:") {
 		command := strings.TrimPrefix(data, "cmd:")
+		choiceLabel := "> " + command
+		if strings.HasPrefix(command, "/receipt ") {
+			choiceLabel = "✅ 已收件 — " + strings.TrimSpace(strings.TrimPrefix(command, "/receipt "))
+		}
 
 		origText := msg.Text
 		if origText == "" {
@@ -1157,7 +1161,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		if _, err := bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
 			ChatID:      chatID,
 			MessageID:   msgID,
-			Text:        origText + "\n\n> " + command,
+			Text:        origText + "\n\n" + choiceLabel,
 			ReplyMarkup: emptyMarkup,
 		}); err != nil {
 			slog.Debug("telegram: callback edit failed", "error", err)

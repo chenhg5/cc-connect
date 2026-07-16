@@ -6943,6 +6943,7 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"receipt", "inbox"}, "receipt"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -7274,6 +7275,17 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return true
 		}
 		e.cmdPs(p, msg, args)
+	case "receipt":
+		if len(args) == 0 {
+			e.cmdInbox(p, msg)
+			return true
+		}
+		if err := e.markReceipt(args[0], msg.UserName); err != nil {
+			e.reply(p, msg.ReplyCtx, "无法标记收件："+err.Error())
+			return true
+		}
+		msg.Content = "收件 " + args[0]
+		return false
 
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
@@ -7309,6 +7321,31 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return false
 	}
 	return true
+}
+
+func (e *Engine) markReceipt(letter, user string) error {
+	_, _, err := e.notifyStore.acknowledge(letter, user)
+	return err
+}
+
+func (e *Engine) cmdInbox(p Platform, msg *Message) {
+	ledger, err := e.notifyStore.load()
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, "无法读取收件箱："+err.Error())
+		return
+	}
+	var pending, done []string
+	for letter, record := range ledger.Receipts {
+		line := fmt.Sprintf("%s · %s", letter, record.Thread)
+		if record.AcknowledgedAt == "" {
+			pending = append(pending, line)
+		} else {
+			done = append(done, "✅ "+line)
+		}
+	}
+	sort.Strings(pending)
+	sort.Strings(done)
+	e.reply(p, msg.ReplyCtx, "待收件：\n"+strings.Join(pending, "\n")+"\n\n已收件：\n"+strings.Join(done, "\n"))
 }
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
