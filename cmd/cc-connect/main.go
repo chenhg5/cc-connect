@@ -568,6 +568,13 @@ func main() {
 			if strings.TrimSpace(sessionKey) == "" {
 				sessionKey, _ = proj.Agent.Options["dispatch_session_key"].(string)
 			}
+			receiptSessionKey, _ := proj.Agent.Options["receipt_session_key"].(string)
+			if strings.TrimSpace(receiptSessionKey) == "" {
+				receiptSessionKey, _ = proj.Agent.Options["dispatch_session_key"].(string)
+			}
+			if strings.TrimSpace(receiptSessionKey) == "" {
+				receiptSessionKey = sessionKey
+			}
 			platform, _ := proj.Agent.Options["notify_platform"].(string)
 			telegramEnabled := true
 			if v, ok := proj.Agent.Options["notify_telegram_enabled"].(bool); ok {
@@ -593,13 +600,14 @@ func main() {
 				}
 			}
 			engine.SetNotifyConfig(core.NotifyConfig{
-				Enabled:         true,
-				IndexPath:       indexPath,
-				SessionKey:      sessionKey,
-				Platform:        platform,
-				TelegramEnabled: telegramEnabled,
-				ToastEnabled:    toastEnabled,
-				PollInterval:    time.Duration(pollSecs) * time.Second,
+				Enabled:           true,
+				IndexPath:         indexPath,
+				SessionKey:        sessionKey,
+				ReceiptSessionKey: receiptSessionKey,
+				Platform:          platform,
+				TelegramEnabled:   telegramEnabled,
+				ToastEnabled:      toastEnabled,
+				PollInterval:      time.Duration(pollSecs) * time.Second,
 			})
 		}
 

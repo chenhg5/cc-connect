@@ -1182,6 +1182,13 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
 	if strings.HasPrefix(data, "cmd:") {
 		command := strings.TrimPrefix(data, "cmd:")
+		if strings.HasPrefix(command, "/receipt ") {
+			p.handler(p, &core.Message{
+				SessionKey: sessionKey, Platform: "telegram", UserID: userID, UserName: userName,
+				ChatName: chatName, Content: command, MessageID: strconv.Itoa(msgID), ChannelKey: channelKey, ReplyCtx: rctx,
+			})
+			return
+		}
 		choiceLabel := receiptChoiceLabel(command)
 
 		origText := msg.Text
@@ -1898,6 +1905,45 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 	slog.Debug("telegram: UpdateMessage HTML success")
 	return nil
+}
+
+// UpdateMessageWithButtons edits a callback-originated message in place.
+func (p *Platform) UpdateMessageWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == 0 {
+		return fmt.Errorf("telegram: invalid message reply context %T", rctx)
+	}
+	bot, err := p.connectedBot("update receipt inbox")
+	if err != nil {
+		return err
+	}
+	var rows [][]models.InlineKeyboardButton
+	for _, row := range buttons {
+		var out []models.InlineKeyboardButton
+		for _, button := range row {
+			out = append(out, models.InlineKeyboardButton{Text: button.Text, CallbackData: button.Data})
+		}
+		rows = append(rows, out)
+	}
+	_, err = bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+		ChatID: rc.chatID, MessageID: rc.messageID, Text: core.MarkdownToSimpleHTML(content), ParseMode: models.ParseModeHTML,
+		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: rows},
+	})
+	return err
+}
+
+// DeleteMessage removes a receipt inbox card after it has been accepted.
+func (p *Platform) DeleteMessage(ctx context.Context, rctx any) error {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == 0 {
+		return fmt.Errorf("telegram: invalid message reply context %T", rctx)
+	}
+	bot, err := p.connectedBot("delete receipt inbox")
+	if err != nil {
+		return err
+	}
+	_, err = bot.DeleteMessage(ctx, &tgbot.DeleteMessageParams{ChatID: rc.chatID, MessageID: rc.messageID})
+	return err
 }
 
 // telegramMaxMessageLen is the maximum message length for Telegram.

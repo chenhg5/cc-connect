@@ -819,11 +819,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ La bandeja de recibos no está disponible.",
 	},
 	MsgReceiptInbox: {
-		LangEnglish:            "Pending receipts:%s\n\nReceived:%s",
-		LangChinese:            "待收件：%s\n\n已收件：%s",
-		LangTraditionalChinese: "待收件：%s\n\n已收件：%s",
-		LangJapanese:           "未受領：%s\n\n受領済み：%s",
-		LangSpanish:            "Recibos pendientes:%s\n\nRecibidos:%s",
+		LangEnglish:            "Pending receipts:%s",
+		LangChinese:            "待收件：%s",
+		LangTraditionalChinese: "待收件：%s",
+		LangJapanese:           "未受領：%s",
+		LangSpanish:            "Recibos pendientes:%s",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",

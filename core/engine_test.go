@@ -289,6 +289,42 @@ type stubInlineButtonPlatform struct {
 	buttonRows    [][]ButtonOption
 }
 
+type receiptActionPlatform struct {
+	stubPlatformEngine
+	updatedContent string
+	updatedButtons [][]ButtonOption
+	buttonContent  string
+	buttonRows     [][]ButtonOption
+	deleted        bool
+	deleteErr      error
+	reconstructed  string
+}
+
+func (p *receiptActionPlatform) SendWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
+	p.buttonContent = content
+	p.buttonRows = buttons
+	return nil
+}
+
+func (p *receiptActionPlatform) UpdateMessageWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
+	p.updatedContent = content
+	p.updatedButtons = buttons
+	return nil
+}
+
+func (p *receiptActionPlatform) DeleteMessage(_ context.Context, _ any) error {
+	if p.deleteErr != nil {
+		return p.deleteErr
+	}
+	p.deleted = true
+	return nil
+}
+
+func (p *receiptActionPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	p.reconstructed = sessionKey
+	return "ctx:" + sessionKey, nil
+}
+
 func (p *stubInlineButtonPlatform) SendWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
 	p.buttonContent = content
 	p.buttonRows = buttons
@@ -740,7 +776,9 @@ func newTestEngine() *Engine {
 }
 
 func TestEngineReceiptCommandsUseReceiptEnvelopeAndLocalizedReplies(t *testing.T) {
-	e := newTestEngine()
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.ReceiptSessionKey = "test:secretary"
 	e.notifyStore = newNotifyStore(t.TempDir())
 	if err := e.notifyStore.recordArrival(indexResultRow{
 		Letter: "L-0430", Thread: "cc-connect-maintenance", Status: "DONE", Summary: "ready",
@@ -748,7 +786,6 @@ func TestEngineReceiptCommandsUseReceiptEnvelopeAndLocalizedReplies(t *testing.T
 	}); err != nil {
 		t.Fatalf("record arrival: %v", err)
 	}
-	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{UserName: "jay", ReplyCtx: "ctx"}
 
 	if handled := e.handleCommand(p, msg, "/receipt L-0430"); handled {
@@ -756,6 +793,9 @@ func TestEngineReceiptCommandsUseReceiptEnvelopeAndLocalizedReplies(t *testing.T
 	}
 	if !strings.Contains(msg.Content, "[RECEIPT L-0430]") || !strings.Contains(msg.Content, "L-0430.result.md") {
 		t.Fatalf("receipt message = %q", msg.Content)
+	}
+	if !p.deleted || p.reconstructed != "test:secretary" {
+		t.Fatalf("receipt did not delete source and route target: deleted=%v target=%q", p.deleted, p.reconstructed)
 	}
 
 	if handled := e.handleCommand(p, msg, "/receipt L-missing"); !handled {
@@ -769,8 +809,55 @@ func TestEngineReceiptCommandsUseReceiptEnvelopeAndLocalizedReplies(t *testing.T
 	if handled := e.handleCommand(p, msg, "/receipt"); !handled {
 		t.Fatal("receipt without an ID should render inbox locally")
 	}
-	if got, want := p.getSent()[0], "Pending receipts:\n\nReceived:\n✅ L-0430 · cc-connect-maintenance"; got != want {
+	if got, want := p.getSent()[0], "Pending receipts:"; got != want {
 		t.Fatalf("inbox reply = %q, want %q", got, want)
+	}
+}
+
+func TestEngineReceiptPageUpdatesInboxCardWithoutAgentTurn(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0432", "ID: L-0432\nStatus: DONE\n---\n\n## Conclusion\noriginal body\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0432", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt page L-0432 0"); !handled {
+		t.Fatal("page action must be handled without reaching the agent")
+	}
+	if !strings.Contains(p.updatedContent, "original body") {
+		t.Fatalf("updated card = %q", p.updatedContent)
+	}
+	if p.deleted {
+		t.Fatal("expand must not delete the inbox card")
+	}
+}
+
+func TestEngineReceiptDeleteFailureKeepsCardAndDoesNotForward(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0433", "ID: L-0433\nStatus: DONE\n---\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}, deleteErr: errors.New("delete failed")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.ReceiptSessionKey = "telegram:main"
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0433", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserName: "jay", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt receive L-0433"); !handled {
+		t.Fatal("failed delete must remain local")
+	}
+	record, err := e.notifyStore.receipt("L-0433")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ForwardedAt != "" {
+		t.Fatalf("failed delete forwarded receipt: %+v", record)
+	}
+	if p.deleted {
+		t.Fatal("failed delete must leave inbox card")
 	}
 }
 

@@ -283,6 +283,16 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// InlineMessageUpdater updates an existing message and replaces its buttons.
+type InlineMessageUpdater interface {
+	UpdateMessageWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
+}
+
+// MessageDeleter removes the message identified by a platform reply context.
+type MessageDeleter interface {
+	DeleteMessage(ctx context.Context, replyCtx any) error
+}
+
 // StatusFooterSender is an optional Platform extension for sending a reply
 // with a structured per-turn status footer rendered using platform-specific
 // dim/small styling (e.g. Lark `text_size: "notation"`). Platforms that do

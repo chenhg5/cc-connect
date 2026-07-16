@@ -1,6 +1,8 @@
 package core
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -232,16 +234,64 @@ func TestNotifyStoreReceiptPersistsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestNotifyStoreSnapshotsResultAtArrival(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0431", "ID: L-0431\nStatus: DONE\n---\n\n## Conclusion\noriginal\n")
+	store := newNotifyStore(filepath.Join(root, "data"))
+	if err := store.recordArrival(indexResultRow{Letter: "L-0431", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatalf("record arrival: %v", err)
+	}
+	if err := os.WriteFile(resultPath, []byte("changed after arrival"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := ledger.Receipts["L-0431"]
+	data, err := os.ReadFile(record.SnapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	want := "ID: L-0431\nStatus: DONE\n---\n\n## Conclusion\noriginal\n"
+	if got := string(data); got != want {
+		t.Fatalf("snapshot = %q, want %q", got, want)
+	}
+	if got, want := record.SnapshotSHA256, fmt.Sprintf("%x", sha256.Sum256([]byte(want))); got != want {
+		t.Fatalf("snapshot hash = %q, want %q", got, want)
+	}
+}
+
 func TestReceiptEnvelopeGivesAgentDirectResultContext(t *testing.T) {
 	got := formatReceiptEnvelope("L-0430", receiptRecord{
-		Thread:     "cc-connect-maintenance",
-		Status:     "DONE",
-		Summary:    "notification delivery is now transcript-safe.",
-		ResultPath: "F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md",
+		Thread:         "cc-connect-maintenance",
+		Status:         "DONE",
+		SnapshotPath:   "F:\\nexus\\data\\notify_snapshots\\L-0430.result.md",
+		SnapshotSHA256: "abc123",
 	})
-	want := "[RECEIPT L-0430]\n结果文件：F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md\n线程：cc-connect-maintenance\n状态：DONE\n摘要：notification delivery is now transcript-safe.\n\n请直接读取上述 result.md，并按正常译信流程处理。"
+	want := "[RECEIPT L-0430]\n快照文件：F:\\nexus\\data\\notify_snapshots\\L-0430.result.md\nSHA-256：abc123\n线程：cc-connect-maintenance\n状态：DONE\n\n请直接读取上述 receipt snapshot，并按正常译信流程处理。"
 	if got != want {
 		t.Errorf("receipt envelope = %q, want %q", got, want)
+	}
+}
+
+func TestReceiptInboxCardPaginatesSnapshotWithoutChangingItsContent(t *testing.T) {
+	record := receiptRecord{
+		Thread: "alpha", Status: "DONE", Summary: "ready", ArrivedAt: "2026-07-16T16:20:00Z",
+		SnapshotPath: "F:\\data\\notify_snapshots\\L-0431.result.md", SnapshotSHA256: "abc123",
+	}
+	content, buttons := formatReceiptInboxCard("L-0431", record, "first page\nsecond page", 0, 2)
+	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "线程：alpha") || !strings.Contains(content, "第 1/2 页") {
+		t.Fatalf("inbox card content = %q", content)
+	}
+	if got := buttons[0][0].Data; got != "cmd:/receipt page L-0431 1" {
+		t.Fatalf("next button = %q", got)
+	}
+	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt collapse L-0431" {
+		t.Fatalf("collapse button = %q", got)
+	}
+	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431" {
+		t.Fatalf("receive button = %q", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -31,13 +32,14 @@ import (
 // notify_index_path deployments even though INDEX.md's contents are no
 // longer parsed.
 type NotifyConfig struct {
-	Enabled         bool
-	IndexPath       string
-	PollInterval    time.Duration
-	Platform        string // platform name for session injection; default "telegram"
-	SessionKey      string // Secretary session receiving [LETTER_ARRIVED]
-	TelegramEnabled bool
-	ToastEnabled    bool
+	Enabled           bool
+	IndexPath         string
+	PollInterval      time.Duration
+	Platform          string // platform name for session injection; default "telegram"
+	SessionKey        string // Secretary session receiving [LETTER_ARRIVED]
+	ReceiptSessionKey string // Secretary session that processes acknowledged receipts
+	TelegramEnabled   bool
+	ToastEnabled      bool
 }
 
 // threadsDir returns the threads/ directory that sits alongside INDEX.md at
@@ -73,10 +75,13 @@ type receiptRecord struct {
 	Thread         string `json:"thread"`
 	Summary        string `json:"summary"`
 	ResultPath     string `json:"result_path"`
+	SnapshotPath   string `json:"snapshot_path"`
+	SnapshotSHA256 string `json:"snapshot_sha256"`
 	Status         string `json:"status"`
 	ArrivedAt      string `json:"arrived_at"`
 	AcknowledgedAt string `json:"acknowledged_at,omitempty"`
 	AcknowledgedBy string `json:"acknowledged_by,omitempty"`
+	ForwardedAt    string `json:"forwarded_at,omitempty"`
 }
 
 type notifyStore struct {
@@ -133,6 +138,10 @@ func (s *notifyStore) save(ledger notifyLedger) error {
 	return AtomicWriteFile(s.path, data, 0o644)
 }
 
+func (s *notifyStore) snapshotPath(letter string) string {
+	return filepath.Join(filepath.Dir(s.path), "notify_snapshots", letter+".result.md")
+}
+
 func (s *notifyStore) recordArrival(row indexResultRow) error {
 	if s == nil || strings.TrimSpace(row.Letter) == "" {
 		return nil
@@ -144,8 +153,20 @@ func (s *notifyStore) recordArrival(row indexResultRow) error {
 		return err
 	}
 	if _, exists := ledger.Receipts[row.Letter]; !exists {
+		data, err := os.ReadFile(row.Path)
+		if err != nil {
+			return fmt.Errorf("read result snapshot: %w", err)
+		}
+		snapshotPath := s.snapshotPath(row.Letter)
+		if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o755); err != nil {
+			return fmt.Errorf("create snapshot directory: %w", err)
+		}
+		if err := AtomicWriteFile(snapshotPath, data, 0o644); err != nil {
+			return fmt.Errorf("write result snapshot: %w", err)
+		}
 		ledger.Receipts[row.Letter] = receiptRecord{
-			Thread: row.Thread, Summary: row.Summary, ResultPath: row.Path, Status: row.Status,
+			Thread: row.Thread, Summary: row.Summary, ResultPath: row.Path,
+			SnapshotPath: snapshotPath, SnapshotSHA256: fmt.Sprintf("%x", sha256.Sum256(data)), Status: row.Status,
 			ArrivedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 	}
@@ -173,6 +194,45 @@ func (s *notifyStore) acknowledge(letter, user string) (receiptRecord, bool, err
 	record.AcknowledgedBy = user
 	ledger.Receipts[letter] = record
 	return record, true, s.save(ledger)
+}
+
+func (s *notifyStore) markForwarded(letter string) (receiptRecord, bool, error) {
+	if s == nil {
+		return receiptRecord{}, false, fmt.Errorf("receipt store unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.load()
+	if err != nil {
+		return receiptRecord{}, false, err
+	}
+	record, exists := ledger.Receipts[letter]
+	if !exists {
+		return receiptRecord{}, false, fmt.Errorf("receipt %s not found", letter)
+	}
+	if record.ForwardedAt != "" {
+		return record, false, nil
+	}
+	record.ForwardedAt = time.Now().UTC().Format(time.RFC3339)
+	ledger.Receipts[letter] = record
+	return record, true, s.save(ledger)
+}
+
+func (s *notifyStore) receipt(letter string) (receiptRecord, error) {
+	if s == nil {
+		return receiptRecord{}, fmt.Errorf("receipt store unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.load()
+	if err != nil {
+		return receiptRecord{}, err
+	}
+	record, exists := ledger.Receipts[letter]
+	if !exists {
+		return receiptRecord{}, fmt.Errorf("receipt %s not found", letter)
+	}
+	return record, nil
 }
 
 // scanResultFiles walks threadsDir for threads/<thread>/<letter>.result.md
@@ -287,8 +347,59 @@ func extractResultStatus(path string) string {
 // after a Boss acknowledges a result. It includes the exact file location so
 // the agent can read the source directly instead of searching the archive.
 func formatReceiptEnvelope(letter string, record receiptRecord) string {
-	return fmt.Sprintf("[RECEIPT %s]\n结果文件：%s\n线程：%s\n状态：%s\n摘要：%s\n\n请直接读取上述 result.md，并按正常译信流程处理。",
-		letter, record.ResultPath, record.Thread, record.Status, record.Summary)
+	return fmt.Sprintf("[RECEIPT %s]\n快照文件：%s\nSHA-256：%s\n线程：%s\n状态：%s\n\n请直接读取上述 receipt snapshot，并按正常译信流程处理。",
+		letter, record.SnapshotPath, record.SnapshotSHA256, record.Thread, record.Status)
+}
+
+func receiptSnapshotPages(record receiptRecord) ([]string, error) {
+	data, err := os.ReadFile(record.SnapshotPath)
+	if err != nil {
+		return nil, err
+	}
+	const pageSize = 3000
+	runes := []rune(string(data))
+	if len(runes) == 0 {
+		return []string{"（原信为空）"}, nil
+	}
+	var pages []string
+	for len(runes) > 0 {
+		n := pageSize
+		if len(runes) < n {
+			n = len(runes)
+		}
+		pages = append(pages, string(runes[:n]))
+		runes = runes[n:]
+	}
+	return pages, nil
+}
+
+// formatReceiptInboxCard renders the Boss-facing inbox card. A non-positive
+// pageCount is the compact envelope; positive pageCount is a snapshot page.
+func formatReceiptInboxCard(letter string, record receiptRecord, body string, page, pageCount int) (string, [][]ButtonOption) {
+	content := fmt.Sprintf("📬 %s\n线程：%s\n状态：%s\n摘要：%s\n到货：%s", letter, record.Thread, record.Status, record.Summary, record.ArrivedAt)
+	if pageCount <= 0 {
+		return content, [][]ButtonOption{{
+			{Text: "展开原信", Data: "cmd:/receipt page " + letter + " 0"},
+			{Text: "✅ 收件", Data: "cmd:/receipt receive " + letter},
+		}}
+	}
+	content += fmt.Sprintf("\n\n原信（第 %d/%d 页）\n%s", page+1, pageCount, body)
+	var buttons [][]ButtonOption
+	var pageButtons []ButtonOption
+	if page > 0 {
+		pageButtons = append(pageButtons, ButtonOption{Text: "上一页", Data: fmt.Sprintf("cmd:/receipt page %s %d", letter, page-1)})
+	}
+	if page+1 < pageCount {
+		pageButtons = append(pageButtons, ButtonOption{Text: "下一页", Data: fmt.Sprintf("cmd:/receipt page %s %d", letter, page+1)})
+	}
+	if len(pageButtons) > 0 {
+		buttons = append(buttons, pageButtons)
+	}
+	buttons = append(buttons, []ButtonOption{
+		{Text: "收起", Data: "cmd:/receipt collapse " + letter},
+		{Text: "✅ 收件", Data: "cmd:/receipt receive " + letter},
+	})
+	return content, buttons
 }
 
 func firstNonEmptyAfter(lines []string, heading string) string {
@@ -431,7 +542,12 @@ func (e *Engine) notifyLetterArrived(row indexResultRow) {
 				}
 			}
 			if buttons, ok := p.(InlineButtonSender); ok && e.notifyStore != nil {
-				if err := buttons.SendWithButtons(ctx, replyCtx, content, [][]ButtonOption{{{Text: "✅ 收件", Data: "cmd:/receipt " + row.Letter}}}); err != nil {
+				receipt, err := e.notifyStore.receipt(row.Letter)
+				if err == nil {
+					content, cardButtons := formatReceiptInboxCard(row.Letter, receipt, "", 0, 0)
+					err = buttons.SendWithButtons(ctx, replyCtx, content, cardButtons)
+				}
+				if err != nil {
 					slog.Warn("notify: failed to send receipt button", "letter", row.Letter, "error", err)
 					if err := p.Send(ctx, replyCtx, content); err != nil {
 						slog.Warn("notify: failed to send fallback receipt notice", "letter", row.Letter, "error", err)
