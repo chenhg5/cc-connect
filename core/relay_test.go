@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -654,12 +655,15 @@ func TestHandleRelay_WorkspacePatternRoutesByThreadID(t *testing.T) {
 
 type msgRecordingAgentSession struct {
 	stubAgentSession
+	mu              sync.Mutex
 	receivedPrompts []string
 	events          chan Event
 }
 
 func (s *msgRecordingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
 	s.receivedPrompts = append(s.receivedPrompts, prompt)
+	s.mu.Unlock()
 	go func() {
 		s.events <- Event{Type: EventResult, Content: "ok", Done: true}
 	}()
@@ -668,6 +672,14 @@ func (s *msgRecordingAgentSession) Send(prompt string, _ []ImageAttachment, _ []
 
 func (s *msgRecordingAgentSession) Events() <-chan Event {
 	return s.events
+}
+
+func (s *msgRecordingAgentSession) prompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.receivedPrompts))
+	copy(out, s.receivedPrompts)
+	return out
 }
 
 type msgRecordingAgent struct {
@@ -722,12 +734,13 @@ func TestRelayManager_ProactiveDeathNotifications(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	if len(sourceSession.receivedPrompts) != 1 {
-		t.Fatalf("expected 1 proactive notification injected, got %d", len(sourceSession.receivedPrompts))
+	prompts := sourceSession.prompts()
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 proactive notification injected, got %d", len(prompts))
 	}
 	wantMsg := "[CC-RELAY-HANDBACK]\nFrom: target-bot\n\ntarget-bot process has crashed. It will be restarted on next message, but context was lost."
-	if sourceSession.receivedPrompts[0] != wantMsg {
-		t.Errorf("got prompt %q, want %q", sourceSession.receivedPrompts[0], wantMsg)
+	if prompts[0] != wantMsg {
+		t.Errorf("got prompt %q, want %q", prompts[0], wantMsg)
 	}
 
 	// 2. Timeout Case
@@ -778,12 +791,13 @@ func TestRelayManager_ProactiveDeathNotifications(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	if len(sourceSession2.receivedPrompts) != 1 {
-		t.Fatalf("expected 1 proactive notification injected for timeout, got %d", len(sourceSession2.receivedPrompts))
+	prompts2 := sourceSession2.prompts()
+	if len(prompts2) != 1 {
+		t.Fatalf("expected 1 proactive notification injected for timeout, got %d", len(prompts2))
 	}
 	wantMsgTimeout := "[CC-RELAY-HANDBACK]\nFrom: target-bot\n\ntarget-bot appears to be hung (session locked beyond timeout). You can decide to wait, retry, or escalate."
-	if sourceSession2.receivedPrompts[0] != wantMsgTimeout {
-		t.Errorf("got timeout prompt %q, want %q", sourceSession2.receivedPrompts[0], wantMsgTimeout)
+	if prompts2[0] != wantMsgTimeout {
+		t.Errorf("got timeout prompt %q, want %q", prompts2[0], wantMsgTimeout)
 	}
 }
 
