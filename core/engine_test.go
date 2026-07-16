@@ -1025,6 +1025,16 @@ func TestEngineReceiptUpdatePageUpdatesInboxCardWithoutAgentTurn(t *testing.T) {
 	}
 }
 
+func TestEngineReceiptUpdatePageRejectsStaleGeneration(t *testing.T) {
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(t.TempDir())
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0432", Generation: "current", Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "new"}}}}); err != nil { t.Fatal(err) }
+	if handled := e.handleCommand(p, &Message{ReplyCtx: "inbox"}, "/receipt update L-0432 stale 0"); !handled { t.Fatal("stale update must be handled locally") }
+	if p.updatedContent != "" { t.Fatalf("stale update edited card: %q", p.updatedContent) }
+	if got := p.getSent(); len(got) != 1 || got[0] != "❌ Receipt is unavailable." { t.Fatalf("stale reply = %#v", got) }
+}
+
 func TestEngineReceiptDeleteFailureKeepsCardAndDoesNotForward(t *testing.T) {
 	root := t.TempDir()
 	resultPath := writeResultFile(t, root, "alpha", "L-0433", "ID: L-0433\nStatus: DONE\n---\n")
