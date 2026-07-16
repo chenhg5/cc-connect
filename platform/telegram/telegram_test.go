@@ -239,15 +239,18 @@ func TestUpdateMessageWithButtonsRetriesPlainTextAfterHTMLParseFailure(t *testin
 	if got, want := stubBot.editMessageTextCalls, 2; got != want {
 		t.Fatalf("edit calls = %d, want %d", got, want)
 	}
-	first, second := stubBot.editMessageParams[0], stubBot.editMessageParams[1]
+	second := stubBot.editMessageParams[1]
 	if got := second.ParseMode; got != "" {
 		t.Fatalf("second ParseMode = %q, want empty", got)
 	}
 	if got, want := second.Text, "*plain*"; got != want {
 		t.Fatalf("second text = %q, want %q", got, want)
 	}
-	if !reflect.DeepEqual(second.ReplyMarkup, first.ReplyMarkup) {
-		t.Fatalf("second ReplyMarkup = %#v, want %#v", second.ReplyMarkup, first.ReplyMarkup)
+	wantMarkup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
+		{Text: "Open", CallbackData: "open"},
+	}}}
+	if !reflect.DeepEqual(second.ReplyMarkup, wantMarkup) {
+		t.Fatalf("second ReplyMarkup = %#v, want %#v", second.ReplyMarkup, wantMarkup)
 	}
 }
 
