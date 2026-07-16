@@ -251,6 +251,31 @@ func TestNotifyStoreKeepsOriginalResultPathAtArrival(t *testing.T) {
 	}
 }
 
+func TestNotifyStoreReceiptGenerationReplacesPendingAndReopensAcknowledged(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", "body")
+	store := newNotifyStore(filepath.Join(root, "data"))
+	first := indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Summary: "first", Status: "DONE", Generation: "2026-07-16T20:00:00Z"}
+	if _, err := store.recordArrivalTransition(first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Summary, second.Generation = "second", "2026-07-16T20:01:00Z"
+	arrival, err := store.recordArrivalTransition(second)
+	if err != nil || !arrival.Replaced || arrival.Receipt.Summary != "second" || arrival.Receipt.AcknowledgedAt != "" {
+		t.Fatalf("pending replacement = %+v, %v", arrival, err)
+	}
+	if _, changed, err := store.acknowledge("L-0430", "jay"); err != nil || !changed {
+		t.Fatalf("acknowledge = (%v, %v)", changed, err)
+	}
+	third := second
+	third.Summary, third.Generation = "third", "2026-07-16T20:02:00Z"
+	arrival, err = store.recordArrivalTransition(third)
+	if err != nil || !arrival.Replaced || arrival.Receipt.AcknowledgedAt != "" || arrival.Receipt.Summary != "third" {
+		t.Fatalf("acknowledged re-entry = %+v, %v", arrival, err)
+	}
+}
+
 func TestNotifyStorePreservesFullReceiptSummaryWithoutCreatingSnapshot(t *testing.T) {
 	root := t.TempDir()
 	body := "ID: L-0430\nStatus: DONE\n---\n\nimmutable body\n"
@@ -301,16 +326,16 @@ func TestReceiptInboxCardPaginatesOriginalResultWithoutHash(t *testing.T) {
 	if got := buttons[0][0].Text; got != "Next →" {
 		t.Fatalf("next button = %q", got)
 	}
-	if got := buttons[0][0].Data; got != "cmd:/receipt page L-0431 1" {
+	if got := buttons[0][0].Data; got != "cmd:/receipt page L-0431 2026-07-16T16:20:00Z 1" {
 		t.Fatalf("next button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt collapse L-0431" {
+	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt collapse L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("collapse button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431" {
+	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("receive button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][2].Data; got != "cmd:/receipt primary L-0431" {
+	if got := buttons[len(buttons)-1][2].Data; got != "cmd:/receipt primary L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("primary button = %q", got)
 	}
 
@@ -365,5 +390,25 @@ func TestNotifyLetterArrivedDoesNotAdvertiseReceiptWithoutStore(t *testing.T) {
 	}
 	if got, want := p.getSent(), []string{"📬 L-0430 到货"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plain notification = %#v, want %#v", got, want)
+	}
+}
+
+func TestNotifyLetterArrivedUpdatesPendingCardForNewGeneration(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", "body")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.notifyConfig = NotifyConfig{TelegramEnabled: true, Platform: "telegram", SessionKey: "telegram:123:123"}
+	first := indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Status: "DONE", Summary: "first", Generation: "2026-07-16T20:00:00Z"}
+	e.notifyLetterArrived(first)
+	second := first
+	second.Summary, second.Generation = "second", "2026-07-16T20:01:00Z"
+	e.notifyLetterArrived(second)
+	if p.receiptCardsSent != 1 || p.receiptCardsUpdated != 1 {
+		t.Fatalf("card lifecycle = send %d update %d, want 1/1", p.receiptCardsSent, p.receiptCardsUpdated)
+	}
+	if !strings.Contains(p.updatedContent, "second") {
+		t.Fatalf("updated card = %q", p.updatedContent)
 	}
 }

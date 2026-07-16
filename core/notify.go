@@ -48,11 +48,12 @@ func (c NotifyConfig) threadsDir() string {
 }
 
 type indexResultRow struct {
-	Letter  string
-	Thread  string
-	Summary string
-	Path    string
-	Status  string
+	Letter     string
+	Thread     string
+	Summary    string
+	Path       string
+	Status     string
+	Generation string
 }
 
 // resultFileInfo describes one threads/**/*.result.md file discovered by
@@ -71,14 +72,16 @@ type notifyLedger struct {
 }
 
 type receiptRecord struct {
-	Thread         string `json:"thread"`
-	Summary        string `json:"summary"`
-	ResultPath     string `json:"result_path"`
-	Status         string `json:"status"`
-	ArrivedAt      string `json:"arrived_at"`
-	AcknowledgedAt string `json:"acknowledged_at,omitempty"`
-	AcknowledgedBy string `json:"acknowledged_by,omitempty"`
-	ForwardedAt    string `json:"forwarded_at,omitempty"`
+	Thread         string          `json:"thread"`
+	Summary        string          `json:"summary"`
+	ResultPath     string          `json:"result_path"`
+	Generation     string          `json:"generation"`
+	Card           *MessageLocator `json:"card,omitempty"`
+	Status         string          `json:"status"`
+	ArrivedAt      string          `json:"arrived_at"`
+	AcknowledgedAt string          `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy string          `json:"acknowledged_by,omitempty"`
+	ForwardedAt    string          `json:"forwarded_at,omitempty"`
 }
 
 type notifyStore struct {
@@ -135,21 +138,45 @@ func (s *notifyStore) save(ledger notifyLedger) error {
 	return AtomicWriteFile(s.path, data, 0o644)
 }
 
-func (s *notifyStore) recordArrival(row indexResultRow) error {
+type receiptArrival struct {
+	Receipt  receiptRecord
+	Previous receiptRecord
+	Replaced bool
+}
+
+func (s *notifyStore) recordArrivalTransition(row indexResultRow) (receiptArrival, error) {
 	if s == nil || strings.TrimSpace(row.Letter) == "" {
-		return nil
+		return receiptArrival{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ledger, err := s.load()
 	if err != nil {
-		return err
+		return receiptArrival{}, err
 	}
 	record, exists := ledger.Receipts[row.Letter]
+	previous := record
+	generation := row.Generation
+	if generation == "" {
+		generation = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	if !exists {
 		record = receiptRecord{
 			Thread: row.Thread, Summary: row.Summary, ResultPath: row.Path,
-			Status: row.Status, ArrivedAt: time.Now().UTC().Format(time.RFC3339),
+			Status: row.Status, Generation: generation, ArrivedAt: generation,
+		}
+	} else if record.Generation == "" || generation > record.Generation {
+		record.Thread = row.Thread
+		record.Summary = row.Summary
+		record.ResultPath = row.Path
+		record.Status = row.Status
+		record.Generation = generation
+		record.ArrivedAt = generation
+		if record.AcknowledgedAt != "" {
+			record.AcknowledgedAt = ""
+			record.AcknowledgedBy = ""
+			record.ForwardedAt = ""
+			record.Card = nil
 		}
 	}
 	if record.ResultPath == "" {
@@ -165,6 +192,33 @@ func (s *notifyStore) recordArrival(row indexResultRow) error {
 		record.Summary = row.Summary
 	}
 	ledger.Receipts[row.Letter] = record
+	if err := s.save(ledger); err != nil {
+		return receiptArrival{}, err
+	}
+	return receiptArrival{Receipt: record, Previous: previous, Replaced: exists && generation != previous.Generation && generation > previous.Generation}, nil
+}
+
+func (s *notifyStore) recordArrival(row indexResultRow) error {
+	_, err := s.recordArrivalTransition(row)
+	return err
+}
+
+func (s *notifyStore) storeReceiptCard(letter string, card MessageLocator) error {
+	if s == nil {
+		return fmt.Errorf("receipt store unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.load()
+	if err != nil {
+		return err
+	}
+	record, ok := ledger.Receipts[letter]
+	if !ok {
+		return fmt.Errorf("receipt %s not found", letter)
+	}
+	record.Card = &card
+	ledger.Receipts[letter] = record
 	return s.save(ledger)
 }
 
@@ -391,29 +445,33 @@ func receiptOriginalPages(record receiptRecord, emptyText string) ([]string, err
 // pageCount is the compact envelope; positive pageCount is an original page.
 func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, body string, page, pageCount int) (string, [][]ButtonOption) {
 	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt, record.ResultPath)
+	generation := record.Generation
+	if generation == "" {
+		generation = record.ArrivedAt
+	}
 	if pageCount <= 0 {
 		return content, [][]ButtonOption{{
-			{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/receipt page " + letter + " 0"},
-			{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter},
-			{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter},
+			{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/receipt page " + letter + " " + generation + " 0"},
+			{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter + " " + generation},
+			{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter + " " + generation},
 		}}
 	}
 	content += "\n\n" + i18n.Tf(MsgReceiptCardPage, page+1, pageCount, body)
 	var buttons [][]ButtonOption
 	var pageButtons []ButtonOption
 	if page > 0 {
-		pageButtons = append(pageButtons, ButtonOption{Text: i18n.T(MsgCardPrev), Data: fmt.Sprintf("cmd:/receipt page %s %d", letter, page-1)})
+		pageButtons = append(pageButtons, ButtonOption{Text: i18n.T(MsgCardPrev), Data: fmt.Sprintf("cmd:/receipt page %s %s %d", letter, generation, page-1)})
 	}
 	if page+1 < pageCount {
-		pageButtons = append(pageButtons, ButtonOption{Text: i18n.T(MsgCardNext), Data: fmt.Sprintf("cmd:/receipt page %s %d", letter, page+1)})
+		pageButtons = append(pageButtons, ButtonOption{Text: i18n.T(MsgCardNext), Data: fmt.Sprintf("cmd:/receipt page %s %s %d", letter, generation, page+1)})
 	}
 	if len(pageButtons) > 0 {
 		buttons = append(buttons, pageButtons)
 	}
 	buttons = append(buttons, []ButtonOption{
-		{Text: i18n.T(MsgReceiptCollapse), Data: "cmd:/receipt collapse " + letter},
-		{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter},
-		{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter},
+		{Text: i18n.T(MsgReceiptCollapse), Data: "cmd:/receipt collapse " + letter + " " + generation},
+		{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter + " " + generation},
+		{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter + " " + generation},
 	})
 	return content, buttons
 }
@@ -529,19 +587,22 @@ func (e *Engine) checkNewResults() {
 	}
 	for _, f := range fresh {
 		e.notifyLetterArrived(indexResultRow{
-			Letter:  f.Letter,
-			Thread:  f.Thread,
-			Summary: extractResultSummary(f.Path),
-			Path:    f.Path,
-			Status:  extractResultStatus(f.Path),
+			Letter:     f.Letter,
+			Thread:     f.Thread,
+			Summary:    extractResultSummary(f.Path),
+			Path:       f.Path,
+			Status:     extractResultStatus(f.Path),
+			Generation: f.ModTime.UTC().Format(time.RFC3339Nano),
 		})
 	}
 }
 
 func (e *Engine) notifyLetterArrived(row indexResultRow) {
 	slog.Info("notify: letter arrived", "letter", row.Letter, "thread", row.Thread)
-	if err := e.notifyStore.recordArrival(row); err != nil {
+	arrival, err := e.notifyStore.recordArrivalTransition(row)
+	if err != nil {
 		slog.Warn("notify: failed to record receipt", "letter", row.Letter, "error", err)
+		return
 	}
 	if e.notifyConfig.TelegramEnabled && strings.TrimSpace(e.notifyConfig.SessionKey) != "" {
 		content := fmt.Sprintf("📬 %s 到货", row.Letter)
@@ -557,17 +618,29 @@ func (e *Engine) notifyLetterArrived(row indexResultRow) {
 					replyCtx = reconstructed
 				}
 			}
-			if buttons, ok := p.(InlineButtonSender); ok && e.notifyStore != nil {
-				receipt, err := e.notifyStore.receipt(row.Letter)
-				if err == nil {
-					content, cardButtons := formatReceiptInboxCard(e.i18n, row.Letter, receipt, "", 0, 0)
-					err = buttons.SendWithButtons(ctx, replyCtx, content, cardButtons)
-				}
-				if err != nil {
-					slog.Warn("notify: failed to send receipt button", "letter", row.Letter, "error", err)
-					if err := p.Send(ctx, replyCtx, content); err != nil {
-						slog.Warn("notify: failed to send fallback receipt notice", "letter", row.Letter, "error", err)
+			if cards, ok := p.(ReceiptCardManager); ok && e.notifyStore != nil {
+				content, cardButtons := formatReceiptInboxCard(e.i18n, row.Letter, arrival.Receipt, "", 0, 0)
+				if arrival.Replaced && arrival.Previous.AcknowledgedAt == "" && arrival.Previous.Card != nil {
+					if err := cards.UpdateReceiptCard(ctx, *arrival.Previous.Card, content, cardButtons); err != nil {
+						slog.Warn("notify: failed to replace receipt card", "letter", row.Letter, "error", err)
+						if card, sendErr := cards.SendReceiptCard(ctx, replyCtx, content, cardButtons); sendErr != nil {
+							slog.Warn("notify: failed to send replacement receipt card", "letter", row.Letter, "error", sendErr)
+						} else if storeErr := e.notifyStore.storeReceiptCard(row.Letter, card); storeErr != nil {
+							slog.Warn("notify: failed to persist replacement receipt card", "letter", row.Letter, "error", storeErr)
+						}
 					}
+					break
+				}
+				if arrival.Receipt.Card != nil && !arrival.Replaced {
+					break
+				}
+				card, err := cards.SendReceiptCard(ctx, replyCtx, content, cardButtons)
+				if err != nil {
+					slog.Warn("notify: failed to send receipt card", "letter", row.Letter, "error", err)
+					break
+				}
+				if err := e.notifyStore.storeReceiptCard(row.Letter, card); err != nil {
+					slog.Warn("notify: failed to persist receipt card", "letter", row.Letter, "error", err)
 				}
 				break
 			}

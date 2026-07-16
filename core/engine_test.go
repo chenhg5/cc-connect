@@ -291,13 +291,27 @@ type stubInlineButtonPlatform struct {
 
 type receiptActionPlatform struct {
 	stubPlatformEngine
-	updatedContent string
-	updatedButtons [][]ButtonOption
-	buttonContent  string
-	buttonRows     [][]ButtonOption
-	deleted        bool
-	deleteErr      error
-	reconstructed  string
+	updatedContent      string
+	updatedButtons      [][]ButtonOption
+	buttonContent       string
+	buttonRows          [][]ButtonOption
+	deleted             bool
+	deleteErr           error
+	reconstructed       string
+	receiptCardsSent    int
+	receiptCardsUpdated int
+}
+
+func (p *receiptActionPlatform) SendReceiptCard(_ context.Context, _ any, content string, buttons [][]ButtonOption) (MessageLocator, error) {
+	p.receiptCardsSent++
+	p.buttonContent, p.buttonRows = content, buttons
+	return MessageLocator{Platform: p.n, ChatID: 1, ThreadID: 2, MessageID: p.receiptCardsSent}, nil
+}
+
+func (p *receiptActionPlatform) UpdateReceiptCard(_ context.Context, _ MessageLocator, content string, buttons [][]ButtonOption) error {
+	p.receiptCardsUpdated++
+	p.updatedContent, p.updatedButtons = content, buttons
+	return nil
 }
 
 func (p *receiptActionPlatform) SendWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
@@ -819,6 +833,30 @@ func TestEngineReceiptManualAcknowledgesWithoutAgentTurn(t *testing.T) {
 	}
 	if !p.deleted {
 		t.Fatal("manual receipt did not delete inbox card")
+	}
+}
+
+func TestEngineReceiptRejectsStaleGeneration(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", "body")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	first := indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Status: "DONE", Generation: "2026-07-16T20:00:00Z"}
+	if err := e.notifyStore.recordArrival(first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Generation = "2026-07-16T20:01:00Z"
+	if err := e.notifyStore.recordArrival(second); err != nil {
+		t.Fatal(err)
+	}
+	if handled := e.receiveReceipt(p, &Message{UserName: "jay", ReplyCtx: "ctx"}, "L-0430", first.Generation); !handled {
+		t.Fatal("stale receipt must remain local")
+	}
+	record, err := e.notifyStore.receipt("L-0430")
+	if err != nil || record.AcknowledgedAt != "" || p.deleted {
+		t.Fatalf("stale receipt changed current generation: %+v, deleted=%v, err=%v", record, p.deleted, err)
 	}
 }
 

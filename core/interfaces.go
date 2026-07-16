@@ -293,6 +293,22 @@ type MessageDeleter interface {
 	DeleteMessage(ctx context.Context, replyCtx any) error
 }
 
+// MessageLocator is a durable, platform-neutral address of a sent message.
+// Receipt cards persist it so a later RESULT update can replace the same card.
+type MessageLocator struct {
+	Platform  string `json:"platform"`
+	ChatID    int64  `json:"chat_id"`
+	ThreadID  int    `json:"thread_id"`
+	MessageID int    `json:"message_id"`
+}
+
+// ReceiptCardManager is implemented by platforms that can persist and later
+// replace a proactively-sent receipt card.
+type ReceiptCardManager interface {
+	SendReceiptCard(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) (MessageLocator, error)
+	UpdateReceiptCard(ctx context.Context, locator MessageLocator, content string, buttons [][]ButtonOption) error
+}
+
 // StatusFooterSender is an optional Platform extension for sending a reply
 // with a structured per-turn status footer rendered using platform-specific
 // dim/small styling (e.g. Lark `text_size: "notation"`). Platforms that do

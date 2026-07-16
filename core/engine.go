@@ -7281,27 +7281,44 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.cmdInbox(p, msg)
 			return true
 		}
-		if args[0] == "page" && len(args) == 3 {
-			page, err := strconv.Atoi(args[2])
+		if args[0] == "page" && (len(args) == 3 || len(args) == 4) {
+			pageArg := args[len(args)-1]
+			page, err := strconv.Atoi(pageArg)
 			if err != nil || page < 0 {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 				return true
 			}
-			e.showReceiptPage(p, msg, args[1], page)
+			generation := ""
+			if len(args) == 4 {
+				generation = args[2]
+			}
+			e.showReceiptPage(p, msg, args[1], page, generation)
 			return true
 		}
-		if args[0] == "collapse" && len(args) == 2 {
-			e.showReceiptCompact(p, msg, args[1])
+		if args[0] == "collapse" && (len(args) == 2 || len(args) == 3) {
+			generation := ""
+			if len(args) == 3 {
+				generation = args[2]
+			}
+			e.showReceiptCompact(p, msg, args[1], generation)
 			return true
 		}
-		if args[0] == "primary" && len(args) == 2 {
-			return e.handoffReceiptToPrimary(p, msg, args[1])
+		if args[0] == "primary" && (len(args) == 2 || len(args) == 3) {
+			generation := ""
+			if len(args) == 3 {
+				generation = args[2]
+			}
+			return e.handoffReceiptToPrimary(p, msg, args[1], generation)
 		}
 		letter := args[0]
-		if args[0] == "receive" && len(args) == 2 {
+		generation := ""
+		if args[0] == "receive" && (len(args) == 2 || len(args) == 3) {
 			letter = args[1]
+			if len(args) == 3 {
+				generation = args[2]
+			}
 		}
-		return e.receiveReceipt(p, msg, letter)
+		return e.receiveReceipt(p, msg, letter, generation)
 	case "letter":
 		if len(args) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
@@ -7362,9 +7379,9 @@ func (e *Engine) markReceipt(letter, user string) (receiptRecord, bool, error) {
 	return receipt, changed, err
 }
 
-func (e *Engine) showReceiptPage(p Platform, msg *Message, letter string, page int) {
+func (e *Engine) showReceiptPage(p Platform, msg *Message, letter string, page int, generation ...string) {
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil || receipt.AcknowledgedAt != "" {
+	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return
 	}
@@ -7385,9 +7402,9 @@ func (e *Engine) showReceiptPage(p Platform, msg *Message, letter string, page i
 	}
 }
 
-func (e *Engine) showReceiptCompact(p Platform, msg *Message, letter string) {
+func (e *Engine) showReceiptCompact(p Platform, msg *Message, letter string, generation ...string) {
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil || receipt.AcknowledgedAt != "" {
+	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return
 	}
@@ -7402,9 +7419,9 @@ func (e *Engine) showReceiptCompact(p Platform, msg *Message, letter string) {
 	}
 }
 
-func (e *Engine) receiveReceipt(p Platform, msg *Message, letter string) bool {
+func (e *Engine) receiveReceipt(p Platform, msg *Message, letter string, generation ...string) bool {
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil || receipt.AcknowledgedAt != "" {
+	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
@@ -7423,7 +7440,7 @@ func (e *Engine) receiveReceipt(p Platform, msg *Message, letter string) bool {
 	return true
 }
 
-func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string) bool {
+func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string, generation ...string) bool {
 	targetSession := e.notifyConfig.ReceiptSessionKey
 	if targetSession == "" {
 		targetSession = e.notifyConfig.SessionKey
@@ -7439,7 +7456,7 @@ func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string
 		return true
 	}
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil || receipt.AcknowledgedAt != "" {
+	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}

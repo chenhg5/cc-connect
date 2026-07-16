@@ -21,7 +21,7 @@ No external-routing or export button is added. Boss may copy the expanded origin
 
 `AcknowledgedAt` means the card was received and removed. A separate primary-handoff record captures recipient/session/time only when `交主秘书` succeeds. Both actions are idempotent. A failed card deletion or failed primary handoff keeps the card pending and does not write acknowledgement, preventing lost letters.
 
-The original archive RESULT is authoritative for Telegram reading, manual external work, `/letter`, and primary-secretary handoff. It is intentionally re-read for each operation, so a pursuit edit is immediately visible and there is no copied-file retention or hash protocol.
+The original archive RESULT is authoritative for Telegram reading, manual external work, `/letter`, and primary-secretary handoff. It is intentionally re-read for each operation, so a pursuit edit is immediately visible and there is no copied-file retention or hash protocol. The file modification timestamp is the receipt generation: an unreceived update replaces the existing card in place; an update after receipt creates a fresh pending card. Callback data includes that timestamp, so stale buttons cannot act on newer content.
 
 ## Verification
 
