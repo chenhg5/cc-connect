@@ -148,7 +148,7 @@ func (s *notifyStore) recordArrival(row indexResultRow) error {
 	record, exists := ledger.Receipts[row.Letter]
 	if !exists {
 		record = receiptRecord{
-			Thread: row.Thread, Summary: compactReceiptSummary(row.Summary), ResultPath: row.Path,
+			Thread: row.Thread, Summary: row.Summary, ResultPath: row.Path,
 			Status: row.Status, ArrivedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 	}
@@ -161,20 +161,11 @@ func (s *notifyStore) recordArrival(row indexResultRow) error {
 	if record.Status == "" {
 		record.Status = row.Status
 	}
-	if record.Summary == "" || len([]rune(record.Summary)) > 240 {
-		record.Summary = compactReceiptSummary(row.Summary)
+	if record.Summary == "" {
+		record.Summary = row.Summary
 	}
 	ledger.Receipts[row.Letter] = record
 	return s.save(ledger)
-}
-
-func compactReceiptSummary(summary string) string {
-	summary = strings.Join(strings.Fields(summary), " ")
-	runes := []rune(summary)
-	if len(runes) <= 240 {
-		return summary
-	}
-	return string(runes[:237]) + "..."
 }
 
 func (s *notifyStore) acknowledge(letter, user string) (receiptRecord, bool, error) {

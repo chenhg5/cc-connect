@@ -251,7 +251,7 @@ func TestNotifyStoreKeepsOriginalResultPathAtArrival(t *testing.T) {
 	}
 }
 
-func TestNotifyStoreCompactsLegacyReceiptSummaryWithoutCreatingSnapshot(t *testing.T) {
+func TestNotifyStorePreservesFullReceiptSummaryWithoutCreatingSnapshot(t *testing.T) {
 	root := t.TempDir()
 	body := "ID: L-0430\nStatus: DONE\n---\n\nimmutable body\n"
 	resultPath := writeResultFile(t, root, "alpha", "L-0430", body)
@@ -272,8 +272,8 @@ func TestNotifyStoreCompactsLegacyReceiptSummaryWithoutCreatingSnapshot(t *testi
 	if got, want := record.ResultPath, resultPath; got != want {
 		t.Fatalf("legacy result path = %q, want %q", got, want)
 	}
-	if len([]rune(record.Summary)) > 240 {
-		t.Fatalf("summary was not compacted: %d", len([]rune(record.Summary)))
+	if got, want := record.Summary, longSummary; got != want {
+		t.Fatalf("summary = %q, want full %q", got, want)
 	}
 }
 
