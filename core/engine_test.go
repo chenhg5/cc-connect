@@ -859,6 +859,48 @@ func TestEngineReceiptPrimaryHandsSnapshotToConfiguredSession(t *testing.T) {
 	}
 }
 
+func TestEngineReceiptPrimaryCommandRoutesToPrimaryHandoff(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0434", "ID: L-0434\nStatus: DONE\n---\n\n## Conclusion\nfull immutable snapshot\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.ReceiptSessionKey = "test:secretary"
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0434", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserName: "jay", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt primary L-0434"); handled {
+		t.Fatal("primary callback must route to the secretary agent turn")
+	}
+	if got, want := msg.SessionKey, "test:secretary"; got != want {
+		t.Fatalf("primary target = %q, want %q", got, want)
+	}
+}
+
+func TestEngineReceiptPrimaryDeleteFailureRestoresPendingReceipt(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0435", "ID: L-0435\nStatus: DONE\n---\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, deleteErr: errors.New("delete failed")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.ReceiptSessionKey = "test:secretary"
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0435", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserName: "jay", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt primary L-0435"); !handled {
+		t.Fatal("failed primary delete must remain local")
+	}
+	record, err := e.notifyStore.receipt("L-0435")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AcknowledgedAt != "" || record.ForwardedAt != "" {
+		t.Fatalf("failed delete must restore pending receipt: %+v", record)
+	}
+}
+
 func TestEngineReceiptCommandsUseLocalizedReplies(t *testing.T) {
 	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

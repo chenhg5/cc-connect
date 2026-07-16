@@ -281,7 +281,7 @@ func TestReceiptInboxCardPaginatesSnapshotWithoutChangingItsContent(t *testing.T
 		SnapshotPath: "F:\\data\\notify_snapshots\\L-0431.result.md", SnapshotSHA256: "abc123",
 	}
 	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0431", record, "first page\nsecond page", 0, 2)
-	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "Thread: alpha") || !strings.Contains(content, "Page 1/2") {
+	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "Thread: alpha") || !strings.Contains(content, "Snapshot path: F:\\data\\notify_snapshots\\L-0431.result.md") || !strings.Contains(content, "Snapshot SHA-256: abc123") || !strings.Contains(content, "Page 1/2") {
 		t.Fatalf("inbox card content = %q", content)
 	}
 	if got := buttons[0][0].Text; got != "Next →" {
@@ -295,6 +295,9 @@ func TestReceiptInboxCardPaginatesSnapshotWithoutChangingItsContent(t *testing.T
 	}
 	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431" {
 		t.Fatalf("receive button = %q", got)
+	}
+	if got := buttons[len(buttons)-1][2].Data; got != "cmd:/receipt primary L-0431" {
+		t.Fatalf("primary button = %q", got)
 	}
 
 	_, buttons = formatReceiptInboxCard(NewI18n(LangEnglish), "L-0431", record, "", 0, 0)

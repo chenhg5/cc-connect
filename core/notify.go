@@ -218,6 +218,26 @@ func (s *notifyStore) markForwarded(letter string) (receiptRecord, bool, error) 
 	return record, true, s.save(ledger)
 }
 
+// restoreReceipt compensates a local ledger transition when its corresponding
+// Telegram card operation fails. The caller supplies the record read before
+// acknowledgement, so a retry remains a pending Inbox receipt.
+func (s *notifyStore) restoreReceipt(letter string, previous receiptRecord) error {
+	if s == nil {
+		return fmt.Errorf("receipt store unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.load()
+	if err != nil {
+		return err
+	}
+	if _, exists := ledger.Receipts[letter]; !exists {
+		return fmt.Errorf("receipt %s not found", letter)
+	}
+	ledger.Receipts[letter] = previous
+	return s.save(ledger)
+}
+
 func (s *notifyStore) receipt(letter string) (receiptRecord, error) {
 	if s == nil {
 		return receiptRecord{}, fmt.Errorf("receipt store unavailable")
@@ -376,11 +396,12 @@ func receiptSnapshotPages(record receiptRecord, emptyText string) ([]string, err
 // formatReceiptInboxCard renders the Boss-facing inbox card. A non-positive
 // pageCount is the compact envelope; positive pageCount is a snapshot page.
 func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, body string, page, pageCount int) (string, [][]ButtonOption) {
-	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt)
+	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt, record.SnapshotPath, record.SnapshotSHA256)
 	if pageCount <= 0 {
 		return content, [][]ButtonOption{{
 			{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/receipt page " + letter + " 0"},
 			{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter},
+			{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter},
 		}}
 	}
 	content += "\n\n" + i18n.Tf(MsgReceiptCardPage, page+1, pageCount, body)
@@ -398,6 +419,7 @@ func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, bod
 	buttons = append(buttons, []ButtonOption{
 		{Text: i18n.T(MsgReceiptCollapse), Data: "cmd:/receipt collapse " + letter},
 		{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter},
+		{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter},
 	})
 	return content, buttons
 }

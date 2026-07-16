@@ -7293,6 +7293,9 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.showReceiptCompact(p, msg, args[1])
 			return true
 		}
+		if args[0] == "primary" && len(args) == 2 {
+			return e.handoffReceiptToPrimary(p, msg, args[1])
+		}
 		letter := args[0]
 		if args[0] == "receive" && len(args) == 2 {
 			letter = args[1]
@@ -7381,16 +7384,21 @@ func (e *Engine) showReceiptCompact(p Platform, msg *Message, letter string) {
 }
 
 func (e *Engine) receiveReceipt(p Platform, msg *Message, letter string) bool {
-	if _, err := e.notifyStore.receipt(letter); err != nil {
+	receipt, err := e.notifyStore.receipt(letter)
+	if err != nil || receipt.AcknowledgedAt != "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+		return true
+	}
+	if _, changed, err := e.markReceipt(letter, msg.UserName); err != nil || !changed {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
 	deleter, ok := p.(MessageDeleter)
 	if !ok || deleter.DeleteMessage(e.ctx, msg.ReplyCtx) != nil {
+		if err := e.notifyStore.restoreReceipt(letter, receipt); err != nil {
+			slog.Error("receipt: failed to restore after card delete failure", "letter", letter, "error", err)
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
-		return true
-	}
-	if _, changed, err := e.markReceipt(letter, msg.UserName); err != nil || !changed {
 		return true
 	}
 	return true
@@ -7412,7 +7420,7 @@ func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string
 		return true
 	}
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil {
+	if err != nil || receipt.AcknowledgedAt != "" {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
@@ -7421,17 +7429,25 @@ func (e *Engine) handoffReceiptToPrimary(p Platform, msg *Message, letter string
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
-	deleter, ok := p.(MessageDeleter)
-	if !ok || deleter.DeleteMessage(e.ctx, msg.ReplyCtx) != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
-		return true
-	}
 	_, changed, err := e.markReceipt(letter, msg.UserName)
 	if err != nil || !changed {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
 	_, forward, err := e.notifyStore.markForwarded(letter)
 	if err != nil || !forward {
+		if restoreErr := e.notifyStore.restoreReceipt(letter, receipt); restoreErr != nil {
+			slog.Error("receipt: failed to restore after forwarding error", "letter", letter, "error", restoreErr)
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+		return true
+	}
+	deleter, ok := p.(MessageDeleter)
+	if !ok || deleter.DeleteMessage(e.ctx, msg.ReplyCtx) != nil {
+		if restoreErr := e.notifyStore.restoreReceipt(letter, receipt); restoreErr != nil {
+			slog.Error("receipt: failed to restore after card delete failure", "letter", letter, "error", restoreErr)
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
 	msg.SessionKey = targetSession
