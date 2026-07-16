@@ -3474,3 +3474,46 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestConfigRunAsUsers(t *testing.T) {
+	tests := []struct {
+		name  string
+		users []string // run_as_user per project ("" = unset)
+		want  []string
+	}{
+		{
+			name:  "distinct users in config order, empty skipped",
+			users: []string{"alice", "", "bob"},
+			want:  []string{"alice", "bob"},
+		},
+		{
+			name:  "duplicates collapse to one",
+			users: []string{"claude", "claude"},
+			want:  []string{"claude"},
+		},
+		{
+			name:  "none set returns empty",
+			users: []string{"", ""},
+			want:  nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg Config
+			for i, u := range tt.users {
+				p := validProject("proj" + string(rune('0'+i)))
+				p.RunAsUser = u
+				cfg.Projects = append(cfg.Projects, p)
+			}
+			got := cfg.RunAsUsers()
+			if len(got) != len(tt.want) {
+				t.Fatalf("RunAsUsers() = %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("RunAsUsers()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

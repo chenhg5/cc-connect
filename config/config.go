@@ -1423,6 +1423,23 @@ func (cfg *Config) ResolveProviderRefs() {
 	}
 }
 
+// RunAsUsers returns the distinct, non-empty run_as_user values across all
+// projects, in first-seen config order. Consumers that need the set of OS
+// users the agents run as (startup preflight, API-socket access) share this
+// rather than re-deriving it.
+func (cfg *Config) RunAsUsers() []string {
+	var users []string
+	seen := make(map[string]bool)
+	for _, proj := range cfg.Projects {
+		if proj.RunAsUser == "" || seen[proj.RunAsUser] {
+			continue
+		}
+		seen[proj.RunAsUser] = true
+		users = append(users, proj.RunAsUser)
+	}
+	return users
+}
+
 // ResolveForAgent applies per-agent-type overrides (Endpoints, AgentModels,
 // AgentModelLists) to a copy of the provider and returns it.
 func (p ProviderConfig) ResolveForAgent(agentType string) ProviderConfig {
