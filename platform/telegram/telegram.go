@@ -1149,10 +1149,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
 	if strings.HasPrefix(data, "cmd:") {
 		command := strings.TrimPrefix(data, "cmd:")
-		choiceLabel := "> " + command
-		if strings.HasPrefix(command, "/receipt ") {
-			choiceLabel = "✅ 已收件 — " + strings.TrimSpace(strings.TrimPrefix(command, "/receipt "))
-		}
+		choiceLabel := receiptChoiceLabel(command)
 
 		origText := msg.Text
 		if origText == "" {
@@ -1273,6 +1270,15 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		ReplyCtx:             rctx,
 		IsPermissionResponse: true,
 	})
+}
+
+// receiptChoiceLabel is deliberately language-neutral because callback
+// handling runs below the engine layer and has no per-session i18n context.
+func receiptChoiceLabel(command string) string {
+	if strings.HasPrefix(command, "/receipt ") {
+		return "✅ Received — " + strings.TrimSpace(strings.TrimPrefix(command, "/receipt "))
+	}
+	return "> " + command
 }
 
 // isDirectedAtBot checks whether a group message is directed at this bot:

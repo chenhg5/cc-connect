@@ -510,14 +510,17 @@ const (
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
-	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
-	MsgCommandDisabled   MsgKey = "command_disabled"
-	MsgAdminRequired     MsgKey = "admin_required"
-	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent            MsgKey = "ps_sent"
-	MsgPsSendFailed      MsgKey = "ps_send_failed"
-	MsgPsEmpty           MsgKey = "ps_empty"
-	MsgPsNoSession       MsgKey = "ps_no_session"
+	MsgBannedWordBlocked  MsgKey = "banned_word_blocked"
+	MsgCommandDisabled    MsgKey = "command_disabled"
+	MsgAdminRequired      MsgKey = "admin_required"
+	MsgRateLimited        MsgKey = "rate_limited"
+	MsgPsSent             MsgKey = "ps_sent"
+	MsgPsSendFailed       MsgKey = "ps_send_failed"
+	MsgPsEmpty            MsgKey = "ps_empty"
+	MsgPsNoSession        MsgKey = "ps_no_session"
+	MsgReceiptUnavailable MsgKey = "receipt_unavailable"
+	MsgInboxUnavailable   MsgKey = "inbox_unavailable"
+	MsgReceiptInbox       MsgKey = "receipt_inbox"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -800,6 +803,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: %v",
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
+	},
+	MsgReceiptUnavailable: {
+		LangEnglish:            "❌ Receipt is unavailable.",
+		LangChinese:            "❌ 收件暂不可用。",
+		LangTraditionalChinese: "❌ 收件暫不可用。",
+		LangJapanese:           "❌ 受領は現在利用できません。",
+		LangSpanish:            "❌ El acuse de recibo no está disponible.",
+	},
+	MsgInboxUnavailable: {
+		LangEnglish:            "❌ Receipt inbox is unavailable.",
+		LangChinese:            "❌ 收件箱暂不可用。",
+		LangTraditionalChinese: "❌ 收件箱暫不可用。",
+		LangJapanese:           "❌ 受信箱は現在利用できません。",
+		LangSpanish:            "❌ La bandeja de recibos no está disponible.",
+	},
+	MsgReceiptInbox: {
+		LangEnglish:            "Pending receipts:%s\n\nReceived:%s",
+		LangChinese:            "待收件：%s\n\n已收件：%s",
+		LangTraditionalChinese: "待收件：%s\n\n已收件：%s",
+		LangJapanese:           "未受領：%s\n\n受領済み：%s",
+		LangSpanish:            "Recibos pendientes:%s\n\nRecibidos:%s",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",

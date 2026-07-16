@@ -24,6 +24,15 @@ type testLifecycleHandler struct {
 	onUnavailable func(core.Platform, error)
 }
 
+func TestReceiptChoiceLabelIsLanguageNeutral(t *testing.T) {
+	if got, want := receiptChoiceLabel("/receipt L-0430"), "✅ Received — L-0430"; got != want {
+		t.Fatalf("receipt label = %q, want %q", got, want)
+	}
+	if got, want := receiptChoiceLabel("/lang en"), "> /lang en"; got != want {
+		t.Fatalf("ordinary command label = %q, want %q", got, want)
+	}
+}
+
 func (h testLifecycleHandler) OnPlatformReady(p core.Platform) {
 	if h.onReady != nil {
 		h.onReady(p)

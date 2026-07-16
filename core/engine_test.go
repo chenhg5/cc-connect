@@ -739,6 +739,41 @@ func newTestEngine() *Engine {
 	return NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 }
 
+func TestEngineReceiptCommandsUseReceiptEnvelopeAndLocalizedReplies(t *testing.T) {
+	e := newTestEngine()
+	e.notifyStore = newNotifyStore(t.TempDir())
+	if err := e.notifyStore.recordArrival(indexResultRow{
+		Letter: "L-0430", Thread: "cc-connect-maintenance", Status: "DONE", Summary: "ready",
+		Path: "F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md",
+	}); err != nil {
+		t.Fatalf("record arrival: %v", err)
+	}
+	p := &stubPlatformEngine{n: "test"}
+	msg := &Message{UserName: "jay", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, "/receipt L-0430"); handled {
+		t.Fatal("receipt should fall through to the agent")
+	}
+	if !strings.Contains(msg.Content, "[RECEIPT L-0430]") || !strings.Contains(msg.Content, "L-0430.result.md") {
+		t.Fatalf("receipt message = %q", msg.Content)
+	}
+
+	if handled := e.handleCommand(p, msg, "/receipt L-missing"); !handled {
+		t.Fatal("missing receipt should be handled locally")
+	}
+	if got, want := p.getSent()[0], "❌ Receipt is unavailable."; got != want {
+		t.Fatalf("missing receipt reply = %q, want %q", got, want)
+	}
+	p.clearSent()
+
+	if handled := e.handleCommand(p, msg, "/receipt"); !handled {
+		t.Fatal("receipt without an ID should render inbox locally")
+	}
+	if got, want := p.getSent()[0], "Pending receipts:\n\nReceived:\n✅ L-0430 · cc-connect-maintenance"; got != want {
+		t.Fatalf("inbox reply = %q, want %q", got, want)
+	}
+}
+
 func TestEngineSendToSessionWithAttachments(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

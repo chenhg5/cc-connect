@@ -252,14 +252,29 @@ func extractResultSummary(path string) string {
 	return ""
 }
 
-// extractResultStatus reads the front-matter status so the receipt can give
-// the secretary enough context without another INDEX lookup.
+// extractResultStatus reads Status from the RESULT header (before its closing
+// --- separator) so body prose cannot override the receipt context.
 func extractResultStatus(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	lines := strings.Split(string(data), "\n")
+	start := 0
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
+		start = 1
+	}
+	end := -1
+	for i := start; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			end = i
+			break
+		}
+	}
+	if end == -1 {
+		return ""
+	}
+	for _, line := range lines[start:end] {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "Status:") {
 			return strings.TrimSpace(strings.TrimPrefix(line, "Status:"))
@@ -415,7 +430,7 @@ func (e *Engine) notifyLetterArrived(row indexResultRow) {
 					replyCtx = reconstructed
 				}
 			}
-			if buttons, ok := p.(InlineButtonSender); ok {
+			if buttons, ok := p.(InlineButtonSender); ok && e.notifyStore != nil {
 				if err := buttons.SendWithButtons(ctx, replyCtx, content, [][]ButtonOption{{{Text: "✅ 收件", Data: "cmd:/receipt " + row.Letter}}}); err != nil {
 					slog.Warn("notify: failed to send receipt button", "letter", row.Letter, "error", err)
 					if err := p.Send(ctx, replyCtx, content); err != nil {

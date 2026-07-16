@@ -7282,7 +7282,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		}
 		receipt, err := e.markReceipt(args[0], msg.UserName)
 		if err != nil {
-			e.reply(p, msg.ReplyCtx, "无法标记收件："+err.Error())
+			slog.Warn("receipt: acknowledge failed", "letter", args[0], "error", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 			return true
 		}
 		if receipt.ResultPath == "" && receipt.Thread != "" {
@@ -7335,7 +7336,8 @@ func (e *Engine) markReceipt(letter, user string) (receiptRecord, error) {
 func (e *Engine) cmdInbox(p Platform, msg *Message) {
 	ledger, err := e.notifyStore.load()
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, "无法读取收件箱："+err.Error())
+		slog.Warn("receipt: inbox unavailable", "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgInboxUnavailable))
 		return
 	}
 	var pending, done []string
@@ -7349,7 +7351,14 @@ func (e *Engine) cmdInbox(p Platform, msg *Message) {
 	}
 	sort.Strings(pending)
 	sort.Strings(done)
-	e.reply(p, msg.ReplyCtx, "待收件：\n"+strings.Join(pending, "\n")+"\n\n已收件：\n"+strings.Join(done, "\n"))
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReceiptInbox, receiptInboxSection(pending), receiptInboxSection(done)))
+}
+
+func receiptInboxSection(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return "\n" + strings.Join(items, "\n")
 }
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {

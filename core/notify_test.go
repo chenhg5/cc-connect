@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,15 @@ func TestExtractResultSummary(t *testing.T) {
 	}
 	if got := extractResultStatus(stuckPath); got != "STUCK" {
 		t.Errorf("STUCK status = %q, want STUCK", got)
+	}
+
+	bodyStatusPath := writeResultFile(t, root, "alpha", "L-0102", "ID: L-0102\nStatus: DONE\n---\n\n## Conclusion\nready\n\nStatus: STUCK\n")
+	if got := extractResultStatus(bodyStatusPath); got != "DONE" {
+		t.Errorf("header status = %q, want DONE", got)
+	}
+	noHeaderStatusPath := writeResultFile(t, root, "alpha", "L-0103", "ID: L-0103\n---\n\n## Conclusion\nready\n\nStatus: STUCK\n")
+	if got := extractResultStatus(noHeaderStatusPath); got != "" {
+		t.Errorf("body status = %q, want empty", got)
 	}
 }
 
@@ -260,5 +270,25 @@ func TestNotifyLetterArrivedSendsShortPlatformMessageWithoutAgentTurn(t *testing
 	}
 	if strings.Contains(sent[0], "[LETTER_ARRIVED]") {
 		t.Fatalf("notification must not use agent-injected marker: %q", sent[0])
+	}
+}
+
+func TestNotifyLetterArrivedDoesNotAdvertiseReceiptWithoutStore(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.configureNotify(NotifyConfig{
+		TelegramEnabled: true,
+		ToastEnabled:    false,
+		Platform:        "telegram",
+		SessionKey:      "telegram:123:123",
+	})
+
+	e.notifyLetterArrived(indexResultRow{Letter: "L-0430", Thread: "cc-connect-maintenance"})
+
+	if len(p.buttonRows) != 0 {
+		t.Fatalf("receipt button advertised without store: %#v", p.buttonRows)
+	}
+	if got, want := p.getSent(), []string{"📬 L-0430 到货"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("plain notification = %#v, want %#v", got, want)
 	}
 }
