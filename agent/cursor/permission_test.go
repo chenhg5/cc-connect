@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 // newTestSession creates a cursorSession suitable for unit tests (no real CLI process).

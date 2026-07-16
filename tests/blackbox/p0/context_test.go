@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
+	"github.com/JayGarland/cc-connect/tests/blackbox/helper"
 )
 
 // ── P0-11: 上下文保持（最核心场景）──────────────────────────────────────────

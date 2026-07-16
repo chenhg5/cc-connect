@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/chenhg5/cc-connect/config"
+	"github.com/JayGarland/cc-connect/config"
 )
 
 func runWorktree(args []string) {

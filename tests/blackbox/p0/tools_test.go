@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
+	"github.com/JayGarland/cc-connect/tests/blackbox/helper"
 )
 
 // ── P0-14: 工具调用 ───────────────────────────────────────────────────────────

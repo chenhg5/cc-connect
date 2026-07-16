@@ -2,4 +2,4 @@
 
 package main
 
-import _ "github.com/chenhg5/cc-connect/platform/wps-xiezuo"
+import _ "github.com/JayGarland/cc-connect/platform/wps-xiezuo"

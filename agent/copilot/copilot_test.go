@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 func TestNew_MissingBinary(t *testing.T) {

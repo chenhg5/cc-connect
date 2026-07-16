@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
+	"github.com/JayGarland/cc-connect/tests/blackbox/helper"
 )
 
 // ── P0-1: 基础消息收发 ────────────────────────────────────────────────────────

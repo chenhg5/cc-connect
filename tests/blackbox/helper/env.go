@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
-	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
+	"github.com/JayGarland/cc-connect/core"
+	bbplatform "github.com/JayGarland/cc-connect/tests/blackbox/platform"
 
 )
 

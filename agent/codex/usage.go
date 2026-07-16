@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 const codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"

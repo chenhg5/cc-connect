@@ -4,7 +4,7 @@ package mocks
 import (
 	"context"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 	"github.com/stretchr/testify/mock"
 )
 

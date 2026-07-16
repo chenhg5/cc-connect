@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 // sanitizeFileName mirrors the logic in geminiSession.Send for file name sanitization.

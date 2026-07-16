@@ -11,12 +11,22 @@ import (
 )
 
 const (
-	defaultPresetsURL         = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
-	fallbackPresetsURL        = "https://gitee.com/chenhg5/cc-connect/raw/main/provider-presets.json"
+	// Empty by design: this build is independent of chenhg5/cc-connect and must never
+	// fetch presets from it. Providers are declared in config.toml. Remote fetch stays
+	// off unless an operator injects a URL via SetPresetsURL.
+	defaultPresetsURL         = ""
+	fallbackPresetsURL        = ""
 	presetsCacheTTL           = 6 * time.Hour
 	presetsHTTPTimeout        = 15 * time.Second
 	presetsFallbackHTTPTimeout = 10 * time.Second
 )
+
+// emptyPresets is served when no presets URL is configured. An empty list is the truthful
+// answer — this build has no remote presets — and it keeps the management endpoint working
+// instead of surfacing a 502 to callers that treat a fetch error as fatal.
+func emptyPresets() *ProviderPresetsResponse {
+	return &ProviderPresetsResponse{Version: 1, Providers: []ProviderPreset{}}
+}
 
 // ProviderPreset describes a recommended provider available from the remote presets list.
 type ProviderPreset struct {
@@ -113,9 +123,12 @@ func (c *presetsCache) fetch() (*ProviderPresetsResponse, error) {
 	if primaryURL == "" {
 		primaryURL = defaultPresetsURL
 	}
+	if primaryURL == "" {
+		return emptyPresets(), nil
+	}
 
 	result, err := fetchPresetsFromURL(primaryURL, presetsHTTPTimeout)
-	if err != nil {
+	if err != nil && fallbackPresetsURL != "" {
 		slog.Warn("primary presets fetch failed, trying fallback", "url", primaryURL, "error", err)
 		result, err = fetchPresetsFromURL(fallbackPresetsURL, presetsFallbackHTTPTimeout)
 	}

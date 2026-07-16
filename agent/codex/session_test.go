@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 func TestNormalizeReasoningEffort_RejectsMinimal(t *testing.T) {

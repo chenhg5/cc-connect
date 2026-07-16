@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/config"
+	"github.com/JayGarland/cc-connect/config"
 )
 
 const (

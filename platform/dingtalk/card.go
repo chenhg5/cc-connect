@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 // aiCard implements core.StreamingCard for DingTalk AI Card streaming.

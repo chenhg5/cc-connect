@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 // formatAesKeyForAPI encodes a raw AES key as base64(hex_string),

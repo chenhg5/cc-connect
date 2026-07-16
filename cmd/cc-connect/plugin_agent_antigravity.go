@@ -2,4 +2,4 @@
 
 package main
 
-import _ "github.com/chenhg5/cc-connect/agent/antigravity"
+import _ "github.com/JayGarland/cc-connect/agent/antigravity"

@@ -17,12 +17,18 @@ import (
 	"time"
 )
 
+// Self-update is disabled in this build. These endpoints previously resolved to
+// chenhg5/cc-connect and the cg33 Gitee mirror, so the boot-time background check and
+// `cc-connect update` reached upstream and could replace this independent fork's binary
+// with an upstream one. Endpoints are blank and the guards below fail closed; binaries are
+// built from this repository and deployed manually (F:\nexus\HANDOFF.md).
 const (
-	githubRepo   = "chenhg5/cc-connect"
-	githubAPI    = "https://api.github.com/repos/" + githubRepo + "/releases/latest"
-	githubAllAPI = "https://api.github.com/repos/" + githubRepo + "/releases"
-	downloadBase = "https://github.com/" + githubRepo + "/releases/download"
-	giteeAPI     = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases/latest"
+	selfUpdateDisabled = true
+	githubRepo         = ""
+	githubAPI          = ""
+	githubAllAPI       = ""
+	downloadBase       = ""
+	giteeAPI           = ""
 )
 
 // cachedLatestVersion 缓存最新版本信息，避免频繁请求API
@@ -44,6 +50,9 @@ type githubRelease struct {
 // fetchLatestStableReleaseAsync 异步获取最新稳定版本（非pre-release）
 // 优先使用Gitee，如果失败则回退到GitHub
 func fetchLatestStableReleaseAsync() {
+	if selfUpdateDisabled {
+		return
+	}
 	go func() {
 		release, err := fetchLatestStableFromGitee()
 		if err != nil || release == nil || release.TagName == "" {
@@ -90,6 +99,9 @@ func fetchLatestStableFromGitee() (*githubRelease, error) {
 
 // checkUpdateAsync 启动异步版本检查（不阻塞）
 func checkUpdateAsync() {
+	if selfUpdateDisabled {
+		return
+	}
 	// dev版本不检查
 	if version == "dev" || version == "" {
 		return
@@ -122,6 +134,14 @@ func getUpdateHintIfAvailable() string {
 }
 
 func runUpdate() {
+	if selfUpdateDisabled {
+		fmt.Printf("cc-connect %s\n", version)
+		fmt.Println("Self-update is disabled in this build.")
+		fmt.Println("This is an independent build; upstream releases are not compatible with it.")
+		fmt.Println("Build from source and deploy manually instead — see F:\\nexus\\HANDOFF.md.")
+		return
+	}
+
 	pre := false
 	for _, arg := range os.Args[2:] {
 		if arg == "--pre" || arg == "--beta" {
@@ -475,6 +495,10 @@ func copyFile(src, dst string) error {
 }
 
 func checkUpdate() {
+	if selfUpdateDisabled {
+		return
+	}
+
 	pre := false
 	for _, arg := range os.Args[2:] {
 		if arg == "--pre" || arg == "--beta" {

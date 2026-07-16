@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 func TestDefaultAuditDir_HomeSuffix(t *testing.T) {

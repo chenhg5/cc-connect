@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 // skipUnlessBinaryAvailable skips if the agent binary is not in PATH.

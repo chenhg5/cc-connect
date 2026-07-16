@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
+	"github.com/JayGarland/cc-connect/tests/blackbox/helper"
 )
 
 // ── P1-30: 历史会话全部可见 ───────────────────────────────────────────────────

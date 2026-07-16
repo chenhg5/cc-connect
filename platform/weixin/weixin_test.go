@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 func TestBodyFromItemList_Text(t *testing.T) {

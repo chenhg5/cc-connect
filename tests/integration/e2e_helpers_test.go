@@ -5,8 +5,8 @@ package integration
 import (
 	"strings"
 
-	"github.com/chenhg5/cc-connect/config"
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/config"
+	"github.com/JayGarland/cc-connect/core"
 )
 
 func joinMsgContent(msgs []mockMessage) string {

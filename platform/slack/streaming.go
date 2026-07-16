@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/JayGarland/cc-connect/core"
 
 	"github.com/slack-go/slack"
 )

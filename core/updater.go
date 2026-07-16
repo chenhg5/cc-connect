@@ -19,12 +19,21 @@ import (
 	"time"
 )
 
+// Self-update is disabled in this build. It previously resolved releases from
+// chenhg5/cc-connect (and the cg33 Gitee mirror), so an update would have replaced this
+// independent fork with an upstream binary. Nexus binaries are built from this repo and
+// deployed manually; see F:\nexus\HANDOFF.md. Endpoints are blank so no upstream release
+// URL is reachable from the binary.
 const (
-	githubReleasesAPI = "https://api.github.com/repos/chenhg5/cc-connect/releases"
-	giteeReleasesAPI  = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases"
-	githubDownload    = "https://github.com/chenhg5/cc-connect/releases/download"
-	giteeDownload     = "https://gitee.com/cg33/cc-connect/releases/download"
+	githubReleasesAPI = ""
+	giteeReleasesAPI  = ""
+	githubDownload    = ""
+	giteeDownload     = ""
 )
+
+// ErrSelfUpdateDisabled is returned by SelfUpdate. CheckForUpdate reports "no update"
+// instead, so a disabled feature does not surface as a fault in the upgrade UI.
+var ErrSelfUpdateDisabled = fmt.Errorf("self-update is disabled in this build; deploy binaries built from this repository")
 
 type ReleaseInfo struct {
 	TagName    string `json:"tag_name"`
@@ -37,6 +46,14 @@ type ReleaseInfo struct {
 // CheckForUpdate queries GitHub/Gitee for newer releases.
 // If preferGitee is true, tries Gitee first (faster in China); otherwise GitHub first.
 func CheckForUpdate(currentVersion string, preferGitee bool) (*ReleaseInfo, error) {
+	// No endpoints means no release can ever be newer, which is the same answer as "up to
+	// date" — report that rather than an error. Callers render a check failure straight to
+	// the user, so erroring here would turn a disabled feature into a visible fault.
+	// SelfUpdate still hard-fails, so nothing can install an upstream binary.
+	if githubReleasesAPI == "" && giteeReleasesAPI == "" {
+		return nil, nil
+	}
+
 	releases, err := fetchReleases(preferGitee)
 	if err != nil {
 		return nil, err
@@ -125,6 +142,10 @@ func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
 // SelfUpdate downloads and installs the given release version.
 // If preferGitee is true, tries Gitee download first.
 func SelfUpdate(tag string, preferGitee bool) error {
+	if githubDownload == "" && giteeDownload == "" {
+		return ErrSelfUpdateDisabled
+	}
+
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 

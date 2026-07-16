@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	ccconnect "github.com/chenhg5/cc-connect"
-	"github.com/chenhg5/cc-connect/config"
+	ccconnect "github.com/JayGarland/cc-connect"
+	"github.com/JayGarland/cc-connect/config"
 )
 
 func runConfig(args []string) {

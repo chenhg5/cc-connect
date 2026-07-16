@@ -17,7 +17,7 @@ export default function Footer() {
       {version && <span>{version.startsWith('v') ? version : `v${version}`}</span>}
       <span className="mx-1.5">·</span>
       <a
-        href="https://github.com/chenhg5/cc-connect"
+        href="https://github.com/JayGarland/cc-connect"
         target="_blank"
         rel="noopener noreferrer"
         className="hover:text-accent transition-colors"

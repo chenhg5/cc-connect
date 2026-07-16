@@ -5,7 +5,7 @@ package main
 import (
 	"context"
 
-	"github.com/chenhg5/cc-connect/config"
+	"github.com/JayGarland/cc-connect/config"
 )
 
 func runRunAsUserStartupChecks(_ context.Context, _ *config.Config) error {
