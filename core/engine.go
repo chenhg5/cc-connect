@@ -6944,6 +6944,7 @@ var builtinCommands = []struct {
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
 	{[]string{"receipt", "inbox"}, "receipt"},
+	{[]string{"letter"}, "letter"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -7301,6 +7302,24 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			letter = args[1]
 		}
 		return e.receiveReceipt(p, msg, letter)
+	case "letter":
+		if len(args) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+			return true
+		}
+		receipt, err := e.notifyStore.receipt(args[0])
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+			return true
+		}
+		snapshot, err := os.ReadFile(receipt.SnapshotPath)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+			return true
+		}
+		question := strings.TrimSpace(strings.Join(args[1:], " "))
+		msg.Content = fmt.Sprintf("[IMMUTABLE RESULT SOURCE]\nL-ID: %s\nSnapshot: %s\nSHA-256: %s\nThread: %s\n---\n%s\n---\nBoss question:\n%s", args[0], receipt.SnapshotPath, receipt.SnapshotSHA256, receipt.Thread, string(snapshot), question)
+		return false
 
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {

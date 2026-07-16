@@ -901,6 +901,28 @@ func TestEngineReceiptPrimaryDeleteFailureRestoresPendingReceipt(t *testing.T) {
 	}
 }
 
+func TestEngineLetterInjectsSnapshotAndQuestionWithoutAcknowledging(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0436", "ID: L-0436\nStatus: DONE\n---\n\nimmutable body\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0436", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{SessionKey: "test:current", ReplyCtx: "ctx"}
+	if handled := e.handleCommand(p, msg, "/letter L-0436 what remains"); handled {
+		t.Fatal("letter must fall through to current agent session")
+	}
+	if !strings.Contains(msg.Content, "immutable body") || !strings.Contains(msg.Content, "what remains") {
+		t.Fatalf("letter content = %q", msg.Content)
+	}
+	receipt, err := e.notifyStore.receipt("L-0436")
+	if err != nil || receipt.AcknowledgedAt != "" {
+		t.Fatalf("letter changed receipt: %+v, %v", receipt, err)
+	}
+}
+
 func TestEngineReceiptCommandsUseLocalizedReplies(t *testing.T) {
 	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
