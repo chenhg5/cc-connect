@@ -7395,14 +7395,17 @@ func (e *Engine) receiveReceipt(p Platform, msg *Message, letter string) bool {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
-	receipt, _, err := e.markReceipt(letter, msg.UserName)
-	if err != nil {
+	if _, err := e.notifyStore.receipt(letter); err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
 	deleter, ok := p.(MessageDeleter)
 	if !ok || deleter.DeleteMessage(e.ctx, msg.ReplyCtx) != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+		return true
+	}
+	receipt, changed, err := e.markReceipt(letter, msg.UserName)
+	if err != nil || !changed {
 		return true
 	}
 	receipt, forward, err := e.notifyStore.markForwarded(letter)

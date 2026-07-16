@@ -853,8 +853,8 @@ func TestEngineReceiptDeleteFailureKeepsCardAndDoesNotForward(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.ForwardedAt != "" {
-		t.Fatalf("failed delete forwarded receipt: %+v", record)
+	if record.AcknowledgedAt != "" || record.ForwardedAt != "" {
+		t.Fatalf("failed delete changed receipt state: %+v", record)
 	}
 	if p.deleted {
 		t.Fatal("failed delete must leave inbox card")
