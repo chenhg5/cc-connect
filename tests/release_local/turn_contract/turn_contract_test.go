@@ -86,7 +86,7 @@ func (s *turnSession) blockFirstResult() {
 	s.blockFirst = true
 }
 
-func (s *turnSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *turnSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.alive {
@@ -221,10 +221,10 @@ func (p *turnPlatform) SendFile(_ context.Context, replyCtx any, file core.FileA
 	return nil
 }
 
-func (p *turnPlatform) snapshot() (texts []string, images []core.ImageAttachment, files []core.FileAttachment, replyCtx []any) {
+func (p *turnPlatform) snapshot() (texts []string, messageID string, images []core.ImageAttachment, files []core.FileAttachment, replyCtx []any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]string(nil), p.texts...),
+	return append([]string(nil), p.texts...), "",
 		append([]core.ImageAttachment(nil), p.images...),
 		append([]core.FileAttachment(nil), p.files...),
 		append([]any(nil), p.replyCtx...)
@@ -234,7 +234,7 @@ func (p *turnPlatform) waitTextContaining(t *testing.T, substr string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		texts, _, _, _ := p.snapshot()
+		texts, _, _, _, _ := p.snapshot()
 		for _, text := range texts {
 			if strings.Contains(text, substr) {
 				return
@@ -242,7 +242,7 @@ func (p *turnPlatform) waitTextContaining(t *testing.T, substr string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	texts, _, _, _ := p.snapshot()
+	texts, _, _, _, _ := p.snapshot()
 	t.Fatalf("timeout waiting for text containing %q, got %#v", substr, texts)
 }
 
@@ -312,7 +312,7 @@ func TestBasicUserTurnContractAcrossInputModalities(t *testing.T) {
 			}
 
 			platform.waitTextContaining(t, "final answer")
-			texts, _, _, _ := platform.snapshot()
+			texts, _, _, _, _ := platform.snapshot()
 			if len(texts) != 1 {
 				t.Fatalf("texts = %#v, want exactly one final reply", texts)
 			}
@@ -375,7 +375,7 @@ func TestSideChannelDifferentFinalContract(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		texts, _, _, _ := platform.snapshot()
+		texts, _, _, _, _ := platform.snapshot()
 		if len(texts) >= 2 {
 			if !containsText(texts, sideText) || !containsText(texts, "separate final answer") {
 				t.Fatalf("texts = %#v, want side-channel and distinct final reply", texts)
@@ -384,7 +384,7 @@ func TestSideChannelDifferentFinalContract(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	texts, _, _, _ := platform.snapshot()
+	texts, _, _, _, _ := platform.snapshot()
 	t.Fatalf("texts = %#v, want side-channel plus distinct final reply", texts)
 }
 
@@ -410,7 +410,7 @@ func TestThinkingAndToolEventsContract(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		texts, _, _, _ := platform.snapshot()
+		texts, _, _, _, _ := platform.snapshot()
 		joined := strings.Join(texts, "\n")
 		if strings.Contains(joined, "planning the command") &&
 			strings.Contains(joined, "Bash") &&
@@ -423,7 +423,7 @@ func TestThinkingAndToolEventsContract(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	texts, _, _, _ := platform.snapshot()
+	texts, _, _, _, _ := platform.snapshot()
 	t.Fatalf("texts = %#v, want thinking, tool use/result, and final answer", texts)
 }
 
@@ -449,7 +449,7 @@ func TestHiddenToolEventsContractKeepsFinalAndHidesToolDetails(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		texts, _, _, _ := platform.snapshot()
+		texts, _, _, _, _ := platform.snapshot()
 		joined := strings.Join(texts, "\n")
 		if strings.Contains(joined, "final answer") {
 			if strings.Contains(joined, "Bash") || strings.Contains(joined, "cat secret.txt") || strings.Contains(joined, "secret-output") {
@@ -462,7 +462,7 @@ func TestHiddenToolEventsContractKeepsFinalAndHidesToolDetails(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	texts, _, _, _ := platform.snapshot()
+	texts, _, _, _, _ := platform.snapshot()
 	t.Fatalf("texts = %#v, want final answer even when tool messages are hidden", texts)
 }
 
@@ -517,7 +517,7 @@ func TestPermissionInteractionContractWhileAgentSendIsBlocked(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("agent sends = %#v, permission response should not start a second user turn", records)
 	}
-	texts, _, _, _ := platform.snapshot()
+	texts, _, _, _, _ := platform.snapshot()
 	if countContaining(texts, "write complete") != 1 {
 		t.Fatalf("texts = %#v, want exactly one final write completion", texts)
 	}
@@ -727,7 +727,7 @@ func TestReplyMetadataConfigurationMatrix(t *testing.T) {
 			engine.ReceiveMessage(platform, turnMessage("metadata matrix"))
 			platform.waitTextContaining(t, "answer")
 
-			texts, _, _, _ := platform.snapshot()
+			texts, _, _, _, _ := platform.snapshot()
 			if len(texts) != 1 {
 				t.Fatalf("texts = %#v, want exactly one final reply", texts)
 			}
@@ -758,7 +758,7 @@ func TestLongFinalResponseKeepsMetadataOnceAtTail(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		texts, _, _, _ := platform.snapshot()
+		texts, _, _, _, _ := platform.snapshot()
 		if len(texts) >= 2 {
 			joined := strings.Join(texts, "")
 			if strings.Count(joined, "[ctx:") != 1 || strings.Count(joined, "glm-5.1") != 1 {
@@ -771,7 +771,7 @@ func TestLongFinalResponseKeepsMetadataOnceAtTail(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	texts, _, _, _ := platform.snapshot()
+	texts, _, _, _, _ := platform.snapshot()
 	t.Fatalf("texts = %#v, want long response split into multiple chunks", texts)
 }
 
@@ -812,7 +812,7 @@ func TestDisplayVisibilityConfigurationMatrix(t *testing.T) {
 			agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: "matrix final", InputTokens: 52000, Done: true})
 			platform.waitTextContaining(t, "matrix final")
 
-			texts, _, _, _ := platform.snapshot()
+			texts, _, _, _, _ := platform.snapshot()
 			joined := strings.Join(texts, "\n")
 			if got := strings.Contains(joined, "matrix thinking"); got != tt.wantThinking {
 				t.Fatalf("thinking visibility = %v, want %v; texts=%#v", got, tt.wantThinking, texts)
@@ -950,7 +950,7 @@ func (p *previewLifecyclePlatform) waitPreviewUpdates(t *testing.T, n int) {
 }
 
 func (p *previewLifecyclePlatform) snapshotPreviewLifecycle() (texts []string, starts []string, updates []string, deletes []any) {
-	texts, _, _, _ = p.turnPlatform.snapshot()
+	texts, _, _, _, _ = p.turnPlatform.snapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return texts,
@@ -999,7 +999,7 @@ func assertStableSideChannelOnly(t *testing.T, platform *turnPlatform, sideText 
 	deadline := time.Now().Add(300 * time.Millisecond)
 	var lastTexts []string
 	for time.Now().Before(deadline) {
-		texts, _, _, _ := platform.snapshot()
+		texts, _, _, _, _ := platform.snapshot()
 		lastTexts = texts
 		count := 0
 		for _, text := range texts {

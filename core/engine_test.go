@@ -29,12 +29,14 @@ func (a *stubAgent) Stop() error                                                
 
 type stubAgentSession struct{}
 
-func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
-func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error         { return nil }
-func (s *stubAgentSession) Events() <-chan Event                                         { return make(chan Event) }
-func (s *stubAgentSession) CurrentSessionID() string                                     { return "stub-session" }
-func (s *stubAgentSession) Alive() bool                                                  { return true }
-func (s *stubAgentSession) Close() error                                                 { return nil }
+func (s *stubAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	return nil
+}
+func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *stubAgentSession) Events() <-chan Event                                 { return make(chan Event) }
+func (s *stubAgentSession) CurrentSessionID() string                             { return "stub-session" }
+func (s *stubAgentSession) Alive() bool                                          { return true }
+func (s *stubAgentSession) Close() error                                         { return nil }
 
 type recordingAgentSession struct {
 	stubAgentSession
@@ -182,7 +184,7 @@ func newResultAgentSession(result string) *resultAgentSession {
 	}
 }
 
-func (s *resultAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *resultAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.sentPrompts = append(s.sentPrompts, prompt)
 	s.sendOnce.Do(func() {
 		s.events <- Event{Type: EventResult, Content: s.result, Done: true}
@@ -6571,7 +6573,7 @@ func TestProcessInteractiveEvents_AskUserQuestionFromAgent_RendersRichCardPrompt
 
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- sess.Send("prompt", nil, nil)
+		sendDone <- sess.Send("prompt", "", nil, nil)
 	}()
 
 	done := make(chan struct{})
@@ -6640,7 +6642,7 @@ func TestProcessInteractiveEvents_AskUserQuestionFromAgent_RendersLegacyPrompt(t
 
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- sess.Send("prompt", nil, nil)
+		sendDone <- sess.Send("prompt", "", nil, nil)
 	}()
 
 	done := make(chan struct{})
@@ -7116,7 +7118,7 @@ func newControllableSession(id string) *controllableAgentSession {
 	}
 }
 
-func (s *controllableAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *controllableAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	return nil
 }
 func (s *controllableAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
@@ -8431,7 +8433,7 @@ func newQueuingSession(id string) *queuingAgentSession {
 	}
 }
 
-func (s *queuingAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *queuingAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.sendMu.Lock()
 	s.sendCalls = append(s.sendCalls, prompt)
 	s.sendMu.Unlock()
@@ -8459,7 +8461,7 @@ func newBlockingSendSession(id string) *blockingSendAgentSession {
 	}
 }
 
-func (s *blockingSendAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *blockingSendAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.sendStarted <- struct{}{}
 	<-s.unblock
 	return nil
@@ -8554,7 +8556,7 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- sess.Send("prompt", nil, nil)
+		sendDone <- sess.Send("prompt", "", nil, nil)
 	}()
 
 	done := make(chan struct{})
@@ -14942,7 +14944,7 @@ func newCodexLikeSession(threadID string) *codexLikeSession {
 	}
 }
 
-func (s *codexLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *codexLikeSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.hasSentID = true
 	s.events <- Event{Type: EventText, Content: "Agent reply to: " + prompt}
 	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
@@ -15045,7 +15047,7 @@ func newClaudeCodeLikeSession(threadID string) *claudeCodeLikeSession {
 	}
 }
 
-func (s *claudeCodeLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *claudeCodeLikeSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.hasSentID = true
 	// claudecode sends an early system event with SessionID (empty content)
 	s.events <- Event{Type: EventText, Content: "", SessionID: s.threadID}
@@ -15115,7 +15117,7 @@ func newACPLikeSession(threadID string) *acpLikeSession {
 	}
 }
 
-func (s *acpLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *acpLikeSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.events <- Event{Type: EventText, Content: "Reply", SessionID: s.threadID}
 	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
 	return nil

@@ -64,8 +64,8 @@ type cujAgent struct {
 	// Used by tests that need to drive a multi-event turn (text chunks +
 	// permission request + result) from a single Send call. See
 	// setNextSessionEvents on cujAgent.
-	nextSessionEvents    []Event
-	nextSessionDelayMs   int
+	nextSessionEvents  []Event
+	nextSessionDelayMs int
 }
 
 func (a *cujAgent) Name() string { return "cuj" }
@@ -146,7 +146,7 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
 	reply := s.reply
@@ -1130,8 +1130,8 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:img", Platform: "test", MessageID: "img1",
 		UserID: "img", UserName: "img",
-		Content: "what is in this image",
-		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
+		Content:  "what is in this image",
+		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -1194,8 +1194,8 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
 		UserID: "file", UserName: "file",
-		Content: "read this file",
-		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
+		Content:  "read this file",
+		Files:    []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -2325,4 +2325,3 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		}
 	}
 }
-

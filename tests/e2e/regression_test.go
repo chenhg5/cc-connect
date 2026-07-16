@@ -68,7 +68,7 @@ func TestRegression_FullMessagePipeline(t *testing.T) {
 	session, err := mockAgent.StartSession(ctx, "session-pipeline")
 	require.NoError(t, err)
 
-	err = session.Send("Analyze my code", nil, nil)
+	err = session.Send("Analyze my code", "", nil, nil)
 	require.NoError(t, err)
 
 	// Collect all events
@@ -123,7 +123,7 @@ func TestRegression_ConcurrentAgents(t *testing.T) {
 			session, err := mockAgent.StartSession(ctx, name+"-session")
 			assert.NoError(t, err)
 
-			err = session.Send("Message to "+name, nil, nil)
+			err = session.Send("Message to "+name, "", nil, nil)
 			assert.NoError(t, err)
 
 			// Collect events
@@ -171,7 +171,7 @@ func TestRegression_AgentTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	// Send message - should eventually timeout
-	err = started.Send("Slow request", nil, nil)
+	err = started.Send("Slow request", "", nil, nil)
 	// The error might be nil because we don't actually wait for response in Send
 
 	// Try to collect events
@@ -257,13 +257,13 @@ func TestRegression_PermissionDefault(t *testing.T) {
 
 	manager.Configure("member", []core.RoleInput{
 		{
-			Name:         "admin",
-			UserIDs:      []string{"admin-user"},
+			Name:             "admin",
+			UserIDs:          []string{"admin-user"},
 			DisabledCommands: []string{"rm", "delete"},
 		},
 		{
-			Name:         "member",
-			UserIDs:      []string{"regular-user", "*"},
+			Name:             "member",
+			UserIDs:          []string{"regular-user", "*"},
 			DisabledCommands: []string{},
 		},
 	})
@@ -487,7 +487,7 @@ func TestRegression_StreamingResponse(t *testing.T) {
 	started, err := mockAgent.StartSession(ctx, "stream-test")
 	require.NoError(t, err)
 
-	err = started.Send("Stream response", nil, nil)
+	err = started.Send("Stream response", "", nil, nil)
 	require.NoError(t, err)
 
 	// Collect streaming events
@@ -631,7 +631,7 @@ func TestRegression_CardButtons(t *testing.T) {
 		Build()
 
 	rows := card.CollectButtons()
-	assert.Len(t, rows, 1) // One row of buttons
+	assert.Len(t, rows, 1)    // One row of buttons
 	assert.Len(t, rows[0], 3) // Three buttons
 
 	// Verify button values
@@ -886,9 +886,9 @@ func TestRegression_SessionPersistence(t *testing.T) {
 	require.NotNil(t, sess1)
 
 	// Send some messages
-	err = sess1.Send("Message 1", nil, nil)
+	err = sess1.Send("Message 1", "", nil, nil)
 	require.NoError(t, err)
-	err = sess1.Send("Message 2", nil, nil)
+	err = sess1.Send("Message 2", "", nil, nil)
 	require.NoError(t, err)
 
 	// Verify prompts were recorded
@@ -947,10 +947,10 @@ func TestRegression_WorkspaceIsolation(t *testing.T) {
 	assert.NotEqual(t, sess1.CurrentSessionID(), sess2.CurrentSessionID())
 
 	// Send messages to each
-	err = sess1.Send("Message for workspace 1", nil, nil)
+	err = sess1.Send("Message for workspace 1", "", nil, nil)
 	require.NoError(t, err)
 
-	err = sess2.Send("Message for workspace 2", nil, nil)
+	err = sess2.Send("Message for workspace 2", "", nil, nil)
 	require.NoError(t, err)
 
 	// Each agent's session should only have its own messages
@@ -1095,7 +1095,7 @@ func TestRegression_DingtalkCrypto(t *testing.T) {
 			name:        "valid signature",
 			signature:   "test-signature",
 			timestamp:   "1234567890",
-			nonce:      "random-nonce",
+			nonce:       "random-nonce",
 			token:       "test-token",
 			expectValid: true,
 		},
@@ -1176,5 +1176,3 @@ func TestRegression_CronCancel(t *testing.T) {
 
 	t.Log("Cron cancel: PASS")
 }
-
-

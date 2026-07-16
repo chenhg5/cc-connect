@@ -102,7 +102,7 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	return args
 }
 
-func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (ks *kimiSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !ks.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

@@ -25,9 +25,9 @@ type FakeAgentSession struct {
 
 func NewFakeAgentSession(sessionID string) *FakeAgentSession {
 	return &FakeAgentSession{
-		sessionID: sessionID,
-		alive:     true,
-		events:    make([]core.Event, 0),
+		sessionID:   sessionID,
+		alive:       true,
+		events:      make([]core.Event, 0),
 		promptQueue: make([]string, 0),
 	}
 }
@@ -74,7 +74,7 @@ func (s *FakeAgentSession) AddPermissionRequest(requestID, toolName, toolInput s
 	return s
 }
 
-func (s *FakeAgentSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *FakeAgentSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -169,7 +169,7 @@ type FakeAgent struct {
 
 func NewFakeAgent(name string) *FakeAgent {
 	return &FakeAgent{
-		name:     name,
+		name:      name,
 		sessionID: "fake-session-001",
 		sessions: []core.AgentSessionInfo{
 			{ID: "fake-session-001", Summary: "Test session"},

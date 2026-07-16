@@ -56,24 +56,24 @@ type piSession struct {
 	extraArgs []string // extra args from cmd, prepended before pi args
 	workDir   string
 	model     string
-	mode      string   // permission mode: "default" | "yolo"
+	mode      string // permission mode: "default" | "yolo"
 	thinking  string
-	rpc       bool     // true = persistent RPC process, false = one-shot json mode
+	rpc       bool // true = persistent RPC process, false = one-shot json mode
 	extraEnv  []string
 	attachDir string
-	events  chan core.Event
+	events    chan core.Event
 	sessionID atomic.Value
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup // tracks readLoopRPC goroutine (RPC mode only)
-	sendWg  sync.WaitGroup // tracks in-flight Send() calls
-	alive   atomic.Bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup // tracks readLoopRPC goroutine (RPC mode only)
+	sendWg    sync.WaitGroup // tracks in-flight Send() calls
+	alive     atomic.Bool
 
-	thinkingBuf   strings.Builder
-	thinkingMu    sync.Mutex
-	modelsCW      map[string]int // cached from ~/.pi/agent/models.json
-	usageMu    sync.Mutex
-	lastUsage  *core.ContextUsage
+	thinkingBuf strings.Builder
+	thinkingMu  sync.Mutex
+	modelsCW    map[string]int // cached from ~/.pi/agent/models.json
+	usageMu     sync.Mutex
+	lastUsage   *core.ContextUsage
 
 	// RPC-only fields (nil/zero when rpc=false)
 	rpcCmd     *exec.Cmd
@@ -310,7 +310,7 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 // Send writes a prompt to the Pi agent.
 // In json mode (default): spawns a one-shot `pi --mode json` process.
 // In rpc mode: writes a "prompt" command to the persistent RPC process stdin.
-func (s *piSession) Send(msg string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *piSession) Send(msg string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	s.sendWg.Add(1)
 	defer s.sendWg.Done()
 
@@ -318,14 +318,18 @@ func (s *piSession) Send(msg string, images []core.ImageAttachment, files []core
 		return fmt.Errorf("session is closed")
 	}
 
-	cleanAttachments(s.attachDir)
+	attachDir := s.attachDir
+	if safeMessageID := sanitizePiAttachmentName(messageID); safeMessageID != "" {
+		attachDir = filepath.Join(attachDir, safeMessageID)
+	}
+	cleanAttachments(attachDir)
 
 	var atFiles []string
 	if len(images) > 0 {
-		atFiles = append(atFiles, saveImagesToDisk(s.attachDir, images)...)
+		atFiles = append(atFiles, saveImagesToDisk(attachDir, images)...)
 	}
 	if len(files) > 0 {
-		atFiles = append(atFiles, saveFilesToDisk(s.attachDir, files)...)
+		atFiles = append(atFiles, saveFilesToDisk(attachDir, files)...)
 	}
 
 	// Build the message with attachment contents embedded
@@ -615,9 +619,9 @@ func (s *piSession) forwardConfirm(id string, raw map[string]any) {
 	s.extPendingMu.Unlock()
 
 	evt := core.Event{
-		Type:     core.EventPermissionRequest,
+		Type:      core.EventPermissionRequest,
 		RequestID: requestID,
-		ToolName: "extension_confirm",
+		ToolName:  "extension_confirm",
 		ToolInput: fmt.Sprintf("%s: %s", title, truncStr(message, 200)),
 		ToolInputRaw: map[string]any{
 			"title":   title,
@@ -651,9 +655,9 @@ func (s *piSession) forwardInput(id string, raw map[string]any) {
 	s.extPendingMu.Unlock()
 
 	evt := core.Event{
-		Type:     core.EventPermissionRequest,
+		Type:      core.EventPermissionRequest,
 		RequestID: requestID,
-		ToolName: "extension_input",
+		ToolName:  "extension_input",
 		ToolInput: fmt.Sprintf("%s [%s]", title, placeholder),
 		ToolInputRaw: map[string]any{
 			"title":       title,
@@ -739,9 +743,9 @@ func (s *piSession) forwardSelect(id string, raw map[string]any) {
 		labelSummary = append(labelSummary, o.Label)
 	}
 	evt := core.Event{
-		Type:     core.EventPermissionRequest,
+		Type:      core.EventPermissionRequest,
 		RequestID: requestID,
-		ToolName: "extension_select",
+		ToolName:  "extension_select",
 		ToolInput: fmt.Sprintf("%s [%s]", title, strings.Join(labelSummary, ", ")),
 		ToolInputRaw: map[string]any{
 			"title":   title,
