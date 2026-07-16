@@ -2357,9 +2357,18 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 
 // knowledgeConfirmCardTokenRe matches the KNOWLEDGE_CACHE_DIR (case-insensitive) printed
 // by jinkela-query's save-alert-conclusion.js, used to offer a one-click
-// "write to knowledge base" button. Tolerates `=`/`:` separators, surrounding
-// whitespace, and optional quoting (single/double/backtick) around the path.
-var knowledgeConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:]\s*(\S+)`)
+// "write to knowledge base" button.
+//
+// Capture is an ASCII path allowlist ['"`]?([A-Za-z0-9/._:@%+=~-]+)['"`]? (NOT
+// greedy \S+). This is the fix for the "card never pops" bug: the agent echoed
+// `KNOWLEDGE_CACHE_DIR=/tmp/x`这是说明 in the reply body, and greedy \S+ swallowed
+// the closing backtick AND the trailing Chinese into the path, so os.Stat saw a
+// non-existent "/tmp/x`这是说明" and the §8.2 directory gate silently returned
+// without sending the card. The allowlist (a) stops at whitespace/quote/backtick,
+// (b) stops at any non-ASCII char (Chinese/emoji/full-width punctuation) since the
+// cache dir is always an ASCII temp path, and (c) tolerates optional wrapping
+// quote/backtick. The capture group therefore holds only the real path.
+var knowledgeConfirmCardTokenRe = regexp.MustCompile("(?i)KNOWLEDGE_CACHE_DIR[=:]\\s*['\"`]?([A-Za-z0-9/._:@%+=~-]+)['\"`]?")
 
 // ccDeliverFileTokenRe matches the CC_DELIVER_FILE line printed by deliverable
 // scripts (e.g. jinkela-md-builder.js). The script writes its user-facing
@@ -2370,7 +2379,14 @@ var knowledgeConfirmCardTokenRe = regexp.MustCompile(`(?i)KNOWLEDGE_CACHE_DIR[=:
 // and the group sees only an empty "已生成" claim (tool results are never
 // delivered to Feishu by cc-connect). Tolerates `=`/`:` separators, optional
 // surrounding quotes, and is matched case-insensitively.
-var ccDeliverFileTokenRe = regexp.MustCompile(`(?i)CC_DELIVER_FILE[=:]\s*(\S+)`)
+//
+// Same capture-group fix as knowledgeConfirmCardTokenRe: an ASCII path allowlist
+// ['"`]?([A-Za-z0-9/._:@%+=~-]+)['"`]? (NOT greedy \S+). It stops at a
+// quote/backtick/whitespace/non-ASCII, so a backtick-wrapped token with trailing
+// Chinese is not polluted into a non-existent path (which the allowedRoots guard
+// would then silently reject, dropping the delivery). The trailing .md extension
+// is preserved because '.' is in the allowlist.
+var ccDeliverFileTokenRe = regexp.MustCompile("(?i)CC_DELIVER_FILE[=:]\\s*['\"`]?([A-Za-z0-9/._:@%+=~-]+)['\"`]?")
 
 // maybeSendKnowledgeConfirmCard emits an interactive confirmation card with a
 // "写入知识库" button when the outgoing message carries a KNOWLEDGE_CACHE_DIR

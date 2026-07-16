@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -89,4 +90,65 @@ func TestDeliverableFileContents(t *testing.T) {
 			t.Fatalf("expected 2 deliverables, got %d", len(got))
 		}
 	})
+}
+
+// TestKnowledgeConfirmCardTokenRe locks the fix for the "card never pops" bug:
+// when the agent echoes `KNOWLEDGE_CACHE_DIR=/tmp/x`这是说明, the capture group
+// must stop at the closing backtick and NOT swallow it (or the trailing Chinese)
+// into the path, otherwise os.Stat fails and the §8.2 gate silently skips the card.
+func TestKnowledgeConfirmCardTokenRe(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    string // expected clean capture; "" means no match
+	}{
+		{
+			name: "backtick-wrapped with trailing Chinese",
+			body: "`KNOWLEDGE_CACHE_DIR=/tmp/kb_cache_abc`这是结论说明",
+			want: "/tmp/kb_cache_abc",
+		},
+		{
+			name: "single-quote wrapped with trailing Chinese",
+			body: "KNOWLEDGE_CACHE_DIR='/tmp/kb_cache_abc'这是结论说明",
+			want: "/tmp/kb_cache_abc",
+		},
+		{
+			name: "double-quote wrapped with trailing Chinese",
+			body: `KNOWLEDGE_CACHE_DIR="/tmp/kb_cache_abc"这是结论说明`,
+			want: "/tmp/kb_cache_abc",
+		},
+		{
+			name: "plain path separated by space from Chinese",
+			body: "KNOWLEDGE_CACHE_DIR=/tmp/kb_cache_abc 这是结论说明",
+			want: "/tmp/kb_cache_abc",
+		},
+		{
+			name: "no delimiter, path directly followed by Chinese",
+			body: "KNOWLEDGE_CACHE_DIR=/tmp/kb_cache_abc这是结论说明",
+			want: "/tmp/kb_cache_abc",
+		},
+		{
+			name: "no token",
+			body: "普通正文，没有 token",
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := knowledgeConfirmCardTokenRe.FindStringSubmatch(c.body)
+			if c.want == "" {
+				if m != nil {
+					t.Fatalf("expected no match, got %q", m[1])
+				}
+				return
+			}
+			if m == nil {
+				t.Fatalf("expected match, got none")
+			}
+			got := strings.Trim(m[1], "\"`'")
+			if got != c.want {
+				t.Fatalf("path polluted: got %q want %q", got, c.want)
+			}
+		})
+	}
 }
