@@ -13,10 +13,18 @@
 // it to exactly the configured agent user(s):
 //
 //   - one target  -> chown owner to that user, keep 0600 (only that user + root)
-//   - N targets    -> if they share a narrow (non-broad) primary group, chgrp to
-//                      it + 0660; otherwise refuse and leave the socket
-//                      restricted (never silently widen access)
+//   - N targets    -> if they share a group we can confirm is narrow (see
+//                      isNarrowSharedGroup), chgrp to it + 0660; otherwise
+//                      refuse and leave the socket 0600 (never silently widen)
 //   - no targets   -> leave untouched (default deployment is unchanged)
+//
+// Caveat on the N-target path: 0660 grants access to every member of the shared
+// group, and we cannot enumerate group membership portably. "Narrow" therefore
+// means "not a known system/shared group" (gid range + name denylist), not
+// "contains only the agent users" — an operator who adds another account to
+// that group grants it control-socket access. The single-target path (the
+// common case, and the one issue #1527 hits) has no such caveat: 0600 owned by
+// the agent restricts to that user plus root.
 package core
 
 import (
@@ -46,12 +54,37 @@ type socketAccess struct {
 	mode os.FileMode
 }
 
-// broadGroups are well-known shared groups that would over-expose a control
-// socket if used for 0660 group access. If configured run_as_users share one
-// of these as their primary group, we refuse rather than widen access.
+// minSharedGID is the lowest group id we treat as a plausibly-narrow,
+// application-created group. Groups below it are system/shared groups
+// (root=0, wheel, staff=20, users=100, ...) that must never gate a 0660
+// control socket. 1000 is the conventional Linux GID_MIN; on macOS an
+// operator wanting the multi-user path must likewise use a >=1000 group.
+const minSharedGID = 1000
+
+// broadGroups are well-known shared groups refused by name as a second line
+// of defence behind the gid-range check in isNarrowSharedGroup. Names are a
+// belt-and-suspenders signal, not the primary guard — see that function.
 var broadGroups = map[string]bool{
 	"root": true, "wheel": true, "sudo": true, "admin": true, "adm": true,
 	"staff": true, "users": true, "daemon": true, "bin": true, "sys": true,
+	"nogroup": true, "nobody": true, "docker": true, "www-data": true,
+}
+
+// isNarrowSharedGroup reports whether a group shared by multiple run_as_users
+// is safe to expose the socket to at 0660. It fails closed: we can only
+// positively confirm narrowness from the gid range and a name denylist, not
+// from membership (Go's os/user cannot enumerate group members portably), so
+// anything we cannot confirm is treated as broad and refused. This does NOT
+// prove the group contains only the agent users — an operator who adds a third
+// account to a narrow group grants it socket access (documented at file head).
+func isNarrowSharedGroup(gid int, group string) bool {
+	if group == "" {
+		return false // unresolved group name — cannot verify, refuse
+	}
+	if gid < minSharedGID || gid >= 65534 {
+		return false // system/shared groups and the nobody/nogroup sentinels
+	}
+	return !broadGroups[strings.ToLower(group)]
 }
 
 func lookupUnixUser(username string) (userIdent, error) {
@@ -106,8 +139,8 @@ func planSocketAccess(runAsUsers []string, lookup userLookupFunc) (socketAccess,
 				return none, fmt.Errorf("run_as_users do not share a primary group (%q vs gid %d); set a shared group and socket perms explicitly", name, gid)
 			}
 		}
-		if broadGroups[strings.ToLower(group)] || gid == 0 {
-			return none, fmt.Errorf("run_as_users share broad primary group %q (gid %d); refusing to expose control socket to it", group, gid)
+		if !isNarrowSharedGroup(gid, group) {
+			return none, fmt.Errorf("run_as_users share group %q (gid %d) that is not a confirmed narrow group; refusing to expose control socket to it — set socket perms explicitly", group, gid)
 		}
 		return socketAccess{uid: -1, gid: gid, mode: 0o660}, nil
 	}

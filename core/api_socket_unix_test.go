@@ -20,6 +20,15 @@ func TestPlanSocketAccess(t *testing.T) {
 		"b": {uid: 1002, gid: 3000, group: "cc-agents"},
 		"c": {uid: 1003, gid: 20, group: "staff"},
 		"d": {uid: 1004, gid: 4000, group: "d"},
+		// shared narrow gid but its name did not resolve (absent from /etc/group)
+		"e": {uid: 1005, gid: 3000, group: ""},
+		"f": {uid: 1006, gid: 3000, group: ""},
+		// shared but low system gid with a non-denylisted name
+		"g": {uid: 1007, gid: 500, group: "ops"},
+		"h": {uid: 1008, gid: 500, group: "ops"},
+		// shared nobody/nogroup sentinel gid
+		"i": {uid: 1009, gid: 65534, group: "nogroup"},
+		"j": {uid: 1010, gid: 65534, group: "nogroup"},
 	}
 	lookup := func(name string) (userIdent, error) {
 		id, ok := idents[name]
@@ -46,6 +55,10 @@ func TestPlanSocketAccess(t *testing.T) {
 			want:  socketAccess{uid: 1001, gid: -1, mode: 0},
 		},
 		{
+			// grantSocketAccess/NewAPIServer cannot exercise this end-to-end
+			// (needs two real users sharing a narrow group + privilege to
+			// chgrp), so this fake-lookup case is the only coverage of the
+			// 0660 branch — intentional, not a gap.
 			name:  "shared narrow group chgrps and relaxes to 0660",
 			users: []string{"a", "b"},
 			want:  socketAccess{uid: -1, gid: 3000, mode: 0o660},
@@ -58,6 +71,21 @@ func TestPlanSocketAccess(t *testing.T) {
 		{
 			name:    "distinct groups refuse",
 			users:   []string{"a", "d"},
+			wantErr: true,
+		},
+		{
+			name:    "shared but unresolved group name refuses (cannot verify narrow)",
+			users:   []string{"e", "f"},
+			wantErr: true,
+		},
+		{
+			name:    "shared low system gid refuses even with unlisted name",
+			users:   []string{"g", "h"},
+			wantErr: true,
+		},
+		{
+			name:    "shared nobody/nogroup sentinel gid refuses",
+			users:   []string{"i", "j"},
 			wantErr: true,
 		},
 		{
@@ -136,9 +164,13 @@ func TestGrantSocketAccess_NoUsersLeaves0600(t *testing.T) {
 	}
 }
 
-func TestGrantSocketAccess_SingleUserChownsOwner(t *testing.T) {
-	// chown to self is permitted without privileges; chown to a different
-	// uid needs root, so we use the current user as the single target.
+func TestGrantSocketAccess_SingleUserKeeps0600(t *testing.T) {
+	// The single-target path chowns the owner and keeps 0600. We can only
+	// chown to self without root, and the socket is already owned by the
+	// current euid, so the uid assertion below cannot fail here — the "compute
+	// the right uid" contract is proven by TestPlanSocketAccess. What this test
+	// meaningfully guards is that the single-user path does NOT relax the mode
+	// (stays owner-only 0600) and succeeds without error.
 	cur, err := user.Current()
 	if err != nil {
 		t.Skipf("cannot resolve current user: %v", err)
@@ -165,5 +197,56 @@ func TestGrantSocketAccess_UnknownUserErrors(t *testing.T) {
 	}
 	if mode := statMode(t, sock); mode != 0o600 {
 		t.Errorf("mode = %o, want 0600 (unchanged on failure)", mode)
+	}
+}
+
+// newTestAPIServer builds an APIServer in a short relative data dir (to stay
+// under the sun_path length limit) and registers cleanup.
+func newTestAPIServer(t *testing.T, runAsUsers []string) *APIServer {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	srv, err := NewAPIServer(".", runAsUsers)
+	if err != nil {
+		t.Fatalf("NewAPIServer: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	return srv
+}
+
+func TestNewAPIServer_NoRunAsUsersKeeps0600(t *testing.T) {
+	srv := newTestAPIServer(t, nil)
+	if mode := statMode(t, srv.SocketPath()); mode != 0o600 {
+		t.Errorf("mode = %o, want 0600", mode)
+	}
+}
+
+func TestNewAPIServer_SingleRunAsUserKeeps0600(t *testing.T) {
+	// As with TestGrantSocketAccess_SingleUserKeeps0600, the uid assertion
+	// cannot fail unprivileged (socket already owned by current euid); this
+	// guards that wiring run_as_users through NewAPIServer does not relax the
+	// mode away from owner-only 0600.
+	cur, err := user.Current()
+	if err != nil {
+		t.Skipf("cannot resolve current user: %v", err)
+	}
+	wantUID, _ := strconv.Atoi(cur.Uid)
+	srv := newTestAPIServer(t, []string{cur.Username})
+	if uid := statUID(t, srv.SocketPath()); uid != wantUID {
+		t.Errorf("owner uid = %d, want %d", uid, wantUID)
+	}
+	if mode := statMode(t, srv.SocketPath()); mode != 0o600 {
+		t.Errorf("mode = %o, want 0600", mode)
+	}
+}
+
+func TestNewAPIServer_GrantFailureIsNonFatal(t *testing.T) {
+	// An unresolvable run_as_user must not fail construction (R5): the socket
+	// still works for root, the agent just can't connect.
+	srv := newTestAPIServer(t, []string{"definitely-no-such-user-xyz"})
+	if srv == nil {
+		t.Fatal("NewAPIServer returned nil server on grant failure")
+	}
+	if mode := statMode(t, srv.SocketPath()); mode != 0o600 {
+		t.Errorf("mode = %o, want 0600 (unchanged on failed grant)", mode)
 	}
 }
