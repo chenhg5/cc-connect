@@ -209,6 +209,30 @@ func TestCheckNewResultsEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCheckNewResultsStoresParsedOpenPointsAndGenerationUpdate(t *testing.T) {
+	root := t.TempDir()
+	threadsDir := filepath.Join(root, "threads")
+	indexPath := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(indexPath, []byte("# Archive INDEX\n"), 0o644); err != nil { t.Fatal(err) }
+	e := NewEngine("secretary-seat", &stubAgent{}, nil, "", LangEnglish)
+	e.dataDir = root
+	e.configureNotify(NotifyConfig{Enabled: true, IndexPath: indexPath})
+	path := writeResultFile(t, threadsDir, "alpha", "L-0430", "## Conclusion\nfirst\n\n## Open Points\n- decide\n")
+	e.checkNewResults()
+	if err := os.WriteFile(path, []byte("## Conclusion\nsecond\n\n## Open Points\n- decide\n- ship\n"), 0o644); err != nil { t.Fatal(err) }
+	next := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, next, next); err != nil { t.Fatal(err) }
+	e.checkNewResults()
+	record, err := e.notifyStore.receipt("L-0430")
+	if err != nil { t.Fatal(err) }
+	if !reflect.DeepEqual(record.OpenPoints, []string{"decide", "ship"}) {
+		t.Fatalf("open points = %#v", record.OpenPoints)
+	}
+	if !reflect.DeepEqual(record.Update.Sections, []receiptSection{{Heading: "Conclusion", Body: "second"}, {Heading: "Open Points", Body: "- decide\n- ship"}}) {
+		t.Fatalf("update = %#v", record.Update)
+	}
+}
+
 func TestNotifyStoreRoundTrip(t *testing.T) {
 	store := newNotifyStore(t.TempDir())
 	ledger, err := store.load()

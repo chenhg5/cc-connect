@@ -470,7 +470,11 @@ func extractResultSummary(path string) string {
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(string(data), "\n")
+	return extractResultSummaryFromBody(string(data))
+}
+
+func extractResultSummaryFromBody(body string) string {
+	lines := strings.Split(body, "\n")
 	for _, heading := range []string{"## Conclusion", "## Blocker"} {
 		if s := firstNonEmptyAfter(lines, heading); s != "" {
 			return s
@@ -486,7 +490,11 @@ func extractResultStatus(path string) string {
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(string(data), "\n")
+	return extractResultStatusFromBody(string(data))
+}
+
+func extractResultStatusFromBody(body string) string {
+	lines := strings.Split(body, "\n")
 	start := 0
 	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
 		start = 1
@@ -666,6 +674,11 @@ func (e *Engine) checkNewResults() {
 	if !ledger.Seeded {
 		for _, f := range files {
 			ledger.Notified[f.Letter] = f.ModTime.Format(time.RFC3339Nano)
+			if body, readErr := os.ReadFile(f.Path); readErr != nil {
+				slog.Warn("notify: failed to seed diff base", "letter", f.Letter, "error", readErr)
+			} else if _, baseErr := e.notifyStore.updateDiffBase(f.Letter, body); baseErr != nil {
+				slog.Warn("notify: failed to seed diff base", "letter", f.Letter, "error", baseErr)
+			}
 		}
 		ledger.Seeded = true
 		if err := e.notifyStore.save(ledger); err != nil {
@@ -684,13 +697,25 @@ func (e *Engine) checkNewResults() {
 		return
 	}
 	for _, f := range fresh {
+		body, err := os.ReadFile(f.Path)
+		if err != nil {
+			slog.Warn("notify: failed to read result", "letter", f.Letter, "error", err)
+			continue
+		}
+		update, err := e.notifyStore.updateDiffBase(f.Letter, body)
+		if err != nil {
+			slog.Warn("notify: diff base unavailable", "letter", f.Letter, "error", err)
+			update = receiptUpdate{}
+		}
 		e.notifyLetterArrived(indexResultRow{
 			Letter:     f.Letter,
 			Thread:     f.Thread,
-			Summary:    extractResultSummary(f.Path),
+			Summary:    extractResultSummaryFromBody(string(body)),
 			Path:       f.Path,
-			Status:     extractResultStatus(f.Path),
+			Status:     extractResultStatusFromBody(string(body)),
 			Generation: f.ModTime.UTC().Format(time.RFC3339Nano),
+			OpenPoints: extractOpenPoints(string(body)),
+			Update:     update,
 		})
 	}
 }
