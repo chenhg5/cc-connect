@@ -117,13 +117,19 @@ func (c RehydrationConfig) fillDefaults() RehydrationConfig {
 // from the engine's dataDir. Convention:
 //
 //	dataDir = F:\nexus\data  →  archive = F:\nexus\docs\archive
+//	dataDir = /opt/nexus/data → archive = /opt/nexus/docs/archive
 //
+// Both / and \ are treated as separators so a Windows-style dataDir string
+// still derives correctly if the process later runs on Linux (migration/CI).
 // Returns "" when dataDir is empty.
 func DeriveArchiveDir(dataDir string) string {
 	if dataDir == "" {
 		return ""
 	}
-	nexusDir := filepath.Dir(dataDir)
+	// filepath.Dir only splits on the host OS separator. Normalize first so
+	// "F:\nexus\data" does not collapse to "." on Linux.
+	normalized := filepath.FromSlash(strings.ReplaceAll(dataDir, `\`, "/"))
+	nexusDir := filepath.Dir(normalized)
 	return filepath.Join(nexusDir, "docs", "archive")
 }
 
