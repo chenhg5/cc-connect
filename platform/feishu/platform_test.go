@@ -118,6 +118,44 @@ func TestNew_ProgressStyleRejectsInvalidValue(t *testing.T) {
 	}
 }
 
+func TestNew_ParsesWebSocketWatchdogTimeout(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"app_id":                   "cli_xxx",
+		"app_secret":               "secret",
+		"ws_watchdog_timeout_mins": 3,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := pAny.(*interactivePlatform).Platform
+	if got := p.wsWatchdogTimeout; got != 3*time.Minute {
+		t.Fatalf("wsWatchdogTimeout = %v, want 3m", got)
+	}
+}
+
+func TestFeishuWebSocketWatchdogRestartsWhenStale(t *testing.T) {
+	p := &Platform{
+		platformName:       "feishu",
+		wsWatchdogTimeout:  20 * time.Millisecond,
+		wsWatchdogInterval: 5 * time.Millisecond,
+	}
+	p.markWSActivity()
+	restarted := make(chan struct{}, 1)
+	p.restartWS = func() {
+		restarted <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.watchWebSocket(ctx)
+
+	select {
+	case <-restarted:
+	case <-time.After(time.Second):
+		t.Fatal("watchdog did not restart stale websocket")
+	}
+}
+
 func TestDetectFeishuFileMessageType(t *testing.T) {
 	tests := []struct {
 		name     string
