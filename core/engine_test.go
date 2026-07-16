@@ -11303,12 +11303,16 @@ func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
 	normalizedWsDir := normalizeWorkspacePath(wsDir)
 	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", normalizedWsDir)
 
+	shellCommand := "pwd"
+	if runtime.GOOS == "windows" {
+		shellCommand = "(Get-Location).Path"
+	}
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
-		Content:    "/shell (Get-Location).Path",
+		Content:    "/shell " + shellCommand,
 		ReplyCtx:   "ctx",
 	}
-	e.cmdShell(p, msg, "/shell (Get-Location).Path")
+	e.cmdShell(p, msg, "/shell "+shellCommand)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {

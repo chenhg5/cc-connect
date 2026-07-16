@@ -211,10 +211,12 @@ func TestPsToastEscape(t *testing.T) {
 }
 
 func TestNotifyStoreReceiptPersistsAndIsIdempotent(t *testing.T) {
-	store := newNotifyStore(t.TempDir())
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "cc-connect-maintenance", "L-0430", "ID: L-0430\nStatus: DONE\n---\n\nbody\n")
+	store := newNotifyStore(filepath.Join(root, "data"))
 	if err := store.recordArrival(indexResultRow{
 		Letter: "L-0430", Thread: "cc-connect-maintenance", Summary: "ready",
-		Path: "F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md", Status: "DONE",
+		Path: resultPath, Status: "DONE",
 	}); err != nil {
 		t.Fatalf("recordArrival: %v", err)
 	}
