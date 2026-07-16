@@ -26,9 +26,9 @@ type DispatchConfig struct {
 	Enabled             bool
 	SourceProject       string
 	DashboardSessionKey string
-	// DynamicDashboard, when true, routes the [DISPATCH] receipt and later
-	// [RESULT_READY] notification to the session that emitted [DISPATCH]
-	// instead of the static DashboardSessionKey, but only when that session
+	// DynamicDashboard, when true, routes the [DISPATCH] receipt to the
+	// session that emitted [DISPATCH] instead of the static DashboardSessionKey,
+	// but only when that session
 	// is a private (DM) Telegram chat. Group/Topic sessions always use the
 	// static DashboardSessionKey regardless of this flag, so default fleet
 	// behavior (General group dispatch) is unaffected (L-0429).
@@ -44,27 +44,72 @@ type dispatchRequest struct {
 }
 
 type DispatchExpectation struct {
-	Letter              string    `json:"letter"`
-	Thread              string    `json:"thread"`
-	To                  string    `json:"to"`
-	Path                string    `json:"path"`
-	ResultPath          string    `json:"result_path"`
-	IndexPath           string    `json:"index_path"`
-	TopicID             string    `json:"topic_id,omitempty"`
-	TopicName           string    `json:"topic_name,omitempty"`
-	TopicSessionKey     string    `json:"topic_session_key,omitempty"`
+	Letter          string `json:"letter"`
+	Thread          string `json:"thread"`
+	To              string `json:"to"`
+	Path            string `json:"path"`
+	ResultPath      string `json:"result_path"`
+	IndexPath       string `json:"index_path"`
+	TopicID         string `json:"topic_id,omitempty"`
+	TopicName       string `json:"topic_name,omitempty"`
+	TopicSessionKey string `json:"topic_session_key,omitempty"`
 	// BaseRepo is the git base repository the target seat's dynamic worktree is
 	// created from, resolved by the Secretary from ROUTING.md and carried in the
 	// letter front-matter (Base-Repo:). Empty means fall back to the seat's
 	// static work_dir. Enables one seat to serve multiple products/repos (L-0422).
-	BaseRepo            string    `json:"base_repo,omitempty"`
-	SourceProject       string    `json:"source_project"`
-	SourcePlatform      string    `json:"source_platform"`
-	SourceSessionKey    string    `json:"source_session_key"`
-	DashboardSessionKey string    `json:"dashboard_session_key"`
-	DispatchedAt        time.Time `json:"dispatched_at"`
-	ResultReadyAt       time.Time `json:"result_ready_at,omitempty"`
-	State               string    `json:"state"`
+	BaseRepo         string `json:"base_repo,omitempty"`
+	SourceProject    string `json:"source_project"`
+	SourcePlatform   string `json:"source_platform"`
+	SourceSessionKey string `json:"source_session_key"`
+	// ResultAgentSessionID and SourceSessionPath identify the target agent
+	// session that produced this RESULT. They are set by the target engine,
+	// never inferred by the notification watcher.
+	ResultAgentSessionID string    `json:"result_agent_session_id,omitempty"`
+	SourceSessionPath    string    `json:"source_session_path,omitempty"`
+	DashboardSessionKey  string    `json:"dashboard_session_key"`
+	DispatchedAt         time.Time `json:"dispatched_at"`
+	ResultReadyAt        time.Time `json:"result_ready_at,omitempty"`
+	State                string    `json:"state"`
+}
+
+func (s *dispatchStore) recordResultProvenance(letter, target, agentSessionID, transcriptPath string) error {
+	if s == nil || letter == "" || target == "" || agentSessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	for i := range ledger.Expectations {
+		exp := &ledger.Expectations[i]
+		if exp.Letter != letter || !strings.EqualFold(exp.To, target) {
+			continue
+		}
+		exp.ResultAgentSessionID = agentSessionID
+		exp.SourceSessionPath = transcriptPath
+		return s.saveLocked(ledger)
+	}
+	return nil
+}
+
+func (s *dispatchStore) resultProvenance(letter string) (agentSessionID, transcriptPath string) {
+	if s == nil || letter == "" {
+		return "", ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ledger, err := s.loadLocked()
+	if err != nil {
+		return "", ""
+	}
+	for _, exp := range ledger.Expectations {
+		if exp.Letter == letter && exp.ResultAgentSessionID != "" {
+			return exp.ResultAgentSessionID, exp.SourceSessionPath
+		}
+	}
+	return "", ""
 }
 
 type dispatchLedger struct {
@@ -362,8 +407,8 @@ func isPrivateTelegramSessionKey(sessionKey string) bool {
 }
 
 // resolveDashboardSessionKey picks the session that receives the [DISPATCH]
-// receipt and the later [RESULT_READY] notification. By default this is the
-// statically configured DashboardSessionKey (typically the General group).
+// receipt. By default this is the statically configured DashboardSessionKey
+// (typically the General group).
 // When DynamicDashboard is enabled and the emitting session is a private
 // Telegram chat, dispatch instead routes to that same DM so a Secretary
 // conversing one-on-one with Boss keeps the whole exchange in that DM
@@ -662,38 +707,13 @@ func (e *Engine) checkDispatchResults() {
 		if !dispatchResultReady(exp) {
 			continue
 		}
-		updated, changed, err := store.markResultReady(exp.Letter, exp.Thread, exp.To, time.Now())
+		_, changed, err := store.markResultReady(exp.Letter, exp.Thread, exp.To, time.Now())
 		if err != nil {
 			slog.Warn("dispatch: failed to mark result ready", "letter", exp.Letter, "error", err)
 			continue
 		}
 		if !changed {
 			continue
-		}
-		e.notifyDispatchResultReady(updated)
-	}
-}
-
-func (e *Engine) notifyDispatchResultReady(exp DispatchExpectation) {
-	content := fmt.Sprintf("[RESULT_READY]\nLetter: %s\nThread: %s\nPath: %s", exp.Letter, exp.Thread, exp.ResultPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := e.InjectSyntheticMessage(ctx, exp.SourcePlatform, exp.SourceSessionKey, "cc-connect-dispatch", "cc-connect dispatch", content); err != nil {
-		slog.Warn("dispatch: failed to inject RESULT_READY", "letter", exp.Letter, "error", err)
-	}
-	if exp.DashboardSessionKey != "" {
-		for _, p := range e.platforms {
-			if p.Name() != exp.SourcePlatform {
-				continue
-			}
-			replyCtx := any(exp.DashboardSessionKey)
-			if rc, ok := p.(ReplyContextReconstructor); ok {
-				if reconstructed, err := rc.ReconstructReplyCtx(exp.DashboardSessionKey); err == nil {
-					replyCtx = reconstructed
-				}
-			}
-			_ = p.Send(ctx, replyCtx, fmt.Sprintf("✅ RESULT received for %s from %s", exp.Letter, exp.To))
-			return
 		}
 	}
 }

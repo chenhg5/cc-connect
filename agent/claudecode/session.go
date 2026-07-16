@@ -1220,6 +1220,11 @@ func (cs *claudeSession) transcriptPath() string {
 	return filepath.Join(projectDir, sessionID+".jsonl")
 }
 
+// TranscriptPath exposes the Claude Code transcript for cc-connect provenance.
+// It returns empty when the CLI has not yet reported a session ID or its file
+// is not resolvable under this session's configured Claude root.
+func (cs *claudeSession) TranscriptPath() string { return cs.transcriptPath() }
+
 // GetModel returns the model id reported by the CLI's init event (e.g.
 // "claude-opus-4-7[1m]"). Returns "" until the init event has been seen.
 func (cs *claudeSession) GetModel() string {

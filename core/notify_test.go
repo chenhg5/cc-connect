@@ -89,6 +89,15 @@ func TestNotifyStorePersistsOpenPointsAndUpdateForNewGeneration(t *testing.T) {
 	}
 }
 
+func TestDeclaredSourceSessionPathReadsOnlyFrontMatter(t *testing.T) {
+	if got := declaredSourceSessionPath("---\nSource-Session-Path: F:\\external\\session.jsonl\n---\nbody"); got != `F:\external\session.jsonl` {
+		t.Fatalf("declaredSourceSessionPath() = %q", got)
+	}
+	if got := declaredSourceSessionPath("body\nSource-Session-Path: F:\\must-not-match.jsonl"); got != "" {
+		t.Fatalf("body text must not be treated as a declaration: %q", got)
+	}
+}
+
 func TestScanResultFiles(t *testing.T) {
 	root := t.TempDir()
 	threadsDir := filepath.Join(root, "threads")
@@ -149,11 +158,11 @@ func TestResolveLetterResultRequiresOneExactResult(t *testing.T) {
 }
 
 func TestFormatLetterSourceEnvelopeIncludesOnlySuppliedQuery(t *testing.T) {
-	withoutQuery := formatLetterSourceEnvelope("L-0430", "F:\\archive\\L-0430.result.md", []byte("source"), "")
+	withoutQuery := formatLetterSourceEnvelope("L-0430", "F:\\archive\\L-0430.result.md", "", []byte("source"), "")
 	if !strings.Contains(withoutQuery, "[LETTER SOURCE]") || strings.Contains(withoutQuery, "[Boss query]") {
 		t.Fatalf("envelope without query = %q", withoutQuery)
 	}
-	withQuery := formatLetterSourceEnvelope("L-0430", "F:\\archive\\L-0430.result.md", []byte("source"), "what changed?")
+	withQuery := formatLetterSourceEnvelope("L-0430", "F:\\archive\\L-0430.result.md", "", []byte("source"), "what changed?")
 	if !strings.Contains(withQuery, "[Boss query]\nwhat changed?") {
 		t.Fatalf("envelope with query = %q", withQuery)
 	}
@@ -187,7 +196,7 @@ func TestExtractResultSummary(t *testing.T) {
 	}
 }
 
-func TestScanNewResultFilesDedupesAndSkipsDispatchCovered(t *testing.T) {
+func TestScanNewResultFilesDeliversDispatchedResultsToInbox(t *testing.T) {
 	now := time.Now()
 	files := []resultFileInfo{
 		{Letter: "L-0100", Thread: "alpha", Path: "L-0100.result.md", ModTime: now},
@@ -195,18 +204,18 @@ func TestScanNewResultFilesDedupesAndSkipsDispatchCovered(t *testing.T) {
 	}
 	ledger := notifyLedger{Notified: map[string]string{}}
 
-	// L-0100 was dispatched: the dispatch watcher owns its notification.
-	fresh := scanNewResultFiles(files, &ledger, map[string]bool{"L-0100": true})
-	if len(fresh) != 1 || fresh[0].Letter != "L-0101" {
-		t.Fatalf("expected only L-0101 fresh, got %+v", fresh)
+	// Dispatched and manual RESULTS share the Inbox delivery path.
+	fresh := scanNewResultFiles(files, &ledger)
+	if len(fresh) != 2 || fresh[0].Letter != "L-0100" || fresh[1].Letter != "L-0101" {
+		t.Fatalf("expected both dispatched and manual RESULTS, got %+v", fresh)
 	}
-	// Covered letter must still be recorded so it never re-triggers.
+	// Both deliveries must be recorded so unchanged generations never re-trigger.
 	if _, ok := ledger.Notified["L-0100"]; !ok {
 		t.Error("dispatch-covered letter not recorded in ledger")
 	}
 
 	// Second scan with unchanged mtimes: nothing new.
-	fresh = scanNewResultFiles(files, &ledger, nil)
+	fresh = scanNewResultFiles(files, &ledger)
 	if len(fresh) != 0 {
 		t.Fatalf("expected no fresh files on rescan, got %+v", fresh)
 	}
@@ -214,7 +223,7 @@ func TestScanNewResultFilesDedupesAndSkipsDispatchCovered(t *testing.T) {
 	// A pursuit-mode edit bumps mtime: must re-fire even though the letter
 	// was seen before (L-0429 requires "created or changed").
 	files[1].ModTime = now.Add(1 * time.Hour)
-	fresh = scanNewResultFiles(files, &ledger, nil)
+	fresh = scanNewResultFiles(files, &ledger)
 	if len(fresh) != 1 || fresh[0].Letter != "L-0101" {
 		t.Fatalf("expected L-0101 to re-fire after modification, got %+v", fresh)
 	}
@@ -292,18 +301,26 @@ func TestCheckNewResultsStoresParsedOpenPointsAndGenerationUpdate(t *testing.T) 
 	root := t.TempDir()
 	threadsDir := filepath.Join(root, "threads")
 	indexPath := filepath.Join(root, "INDEX.md")
-	if err := os.WriteFile(indexPath, []byte("# Archive INDEX\n"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(indexPath, []byte("# Archive INDEX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	e := NewEngine("secretary-seat", &stubAgent{}, nil, "", LangEnglish)
 	e.dataDir = root
 	e.configureNotify(NotifyConfig{Enabled: true, IndexPath: indexPath})
 	path := writeResultFile(t, threadsDir, "alpha", "L-0430", "## Conclusion\nfirst\n\n## Open Points\n- decide\n")
 	e.checkNewResults()
-	if err := os.WriteFile(path, []byte("## Conclusion\nsecond\n\n## Open Points\n- decide\n- ship\n"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(path, []byte("## Conclusion\nsecond\n\n## Open Points\n- decide\n- ship\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	next := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(path, next, next); err != nil { t.Fatal(err) }
+	if err := os.Chtimes(path, next, next); err != nil {
+		t.Fatal(err)
+	}
 	e.checkNewResults()
 	record, err := e.notifyStore.receipt("L-0430")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(record.OpenPoints, []string{"decide", "ship"}) {
 		t.Fatalf("open points = %#v", record.OpenPoints)
 	}
@@ -472,7 +489,9 @@ func TestReceiptInboxCardRendersOpenPointsAndShortUpdateInline(t *testing.T) {
 	}
 	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0430", record, "", 0, 0)
 	for _, want := range []string{"📬 L-0430 · Updated", "Open points:", "• decide retention", "Changes:", "Conclusion\nnew text"} {
-		if !strings.Contains(content, want) { t.Fatalf("card missing %q: %s", want, content) }
+		if !strings.Contains(content, want) {
+			t.Fatalf("card missing %q: %s", want, content)
+		}
 	}
 	if len(buttons) != 1 || len(buttons[0]) != 3 {
 		t.Fatalf("short update buttons = %#v", buttons)
@@ -486,24 +505,44 @@ func TestReceiptInboxCardAddsUpdateButtonOnlyForLongUpdate(t *testing.T) {
 		t.Fatalf("long update leaked into compact card")
 	}
 	found := false
-	for _, row := range buttons { for _, button := range row { if button.Data == "cmd:/receipt update L-0430 g1 0" { found = true } } }
-	if !found { t.Fatalf("missing conditional update button: %#v", buttons) }
+	for _, row := range buttons {
+		for _, button := range row {
+			if button.Data == "cmd:/receipt update L-0430 g1 0" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing conditional update button: %#v", buttons)
+	}
 }
 
 func TestReceiptInboxCardUsesTotalCompactBudget(t *testing.T) {
 	record := receiptRecord{Summary: strings.Repeat("s", receiptCompactTextLimit), Generation: "g1", Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "short update"}}}}
 	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0430", record, "", 0, 0)
-	if strings.Contains(content, "short update") { t.Fatalf("update exceeded total compact budget: %q", content) }
+	if strings.Contains(content, "short update") {
+		t.Fatalf("update exceeded total compact budget: %q", content)
+	}
 	found := false
-	for _, row := range buttons { for _, button := range row { if button.Data == "cmd:/receipt update L-0430 g1 0" { found = true } } }
-	if !found { t.Fatal("missing update button after base card consumed budget") }
+	for _, row := range buttons {
+		for _, button := range row {
+			if button.Data == "cmd:/receipt update L-0430 g1 0" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing update button after base card consumed budget")
+	}
 }
 
 func TestReceiptInboxCardLocalizesUpdateLabels(t *testing.T) {
 	record := receiptRecord{Generation: "g1", OpenPoints: []string{"决定"}, Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "新内容"}}}}
 	content, _ := formatReceiptInboxCard(NewI18n(LangChinese), "L-0430", record, "", 0, 0)
 	for _, want := range []string{"📬 L-0430 · 已更新", "开放点：", "本次更新："} {
-		if !strings.Contains(content, want) { t.Fatalf("localized card missing %q: %s", want, content) }
+		if !strings.Contains(content, want) {
+			t.Fatalf("localized card missing %q: %s", want, content)
+		}
 	}
 }
 

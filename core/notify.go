@@ -21,10 +21,8 @@ import (
 // row only after already having seen and validated the result — so watching
 // INDEX.md can never notify the Secretary about its own inbox (it would be
 // the Secretary waiting on itself). Watching result.md files directly
-// removes that dependency (L-0429). Dispatched letters still get their
-// [RESULT_READY] from the dispatch watcher's own result.md polling
-// (L-0382); this watcher additionally covers non-dispatched manual letters
-// and is the sole channel for them.
+// removes that dependency (L-0429) and is the sole Inbox delivery channel
+// for both dispatched and manually written RESULT letters.
 //
 // IndexPath anchors the archive root: threads/ is resolved as its sibling
 // directory. The field name is kept for config-compatibility with existing
@@ -48,14 +46,16 @@ func (c NotifyConfig) threadsDir() string {
 }
 
 type indexResultRow struct {
-	Letter     string
-	Thread     string
-	Summary    string
-	Path       string
-	Status     string
-	Generation string
-	OpenPoints []string
-	Update     receiptUpdate
+	Letter               string
+	Thread               string
+	Summary              string
+	Path                 string
+	SourceAgentSessionID string
+	SourceSessionPath    string
+	Status               string
+	Generation           string
+	OpenPoints           []string
+	Update               receiptUpdate
 }
 
 type receiptSection struct {
@@ -171,10 +171,13 @@ func validLetterID(letter string) bool {
 	return true
 }
 
-func formatLetterSourceEnvelope(letter, path string, source []byte, query string) string {
+func formatLetterSourceEnvelope(letter, path, sourceSessionPath string, source []byte, query string) string {
 	var b strings.Builder
 	b.WriteString("[LETTER SOURCE]\n")
 	fmt.Fprintf(&b, "L-ID: %s\nResult path: %s\n", letter, path)
+	if sourceSessionPath != "" {
+		fmt.Fprintf(&b, "Source session: %s\n", sourceSessionPath)
+	}
 	b.WriteString("Instruction: Treat the following as the exact source for this L-ID. Do not search for another copy.\n---\n")
 	b.Write(source)
 	b.WriteString("\n---")
@@ -192,18 +195,20 @@ type notifyLedger struct {
 }
 
 type receiptRecord struct {
-	Thread         string          `json:"thread"`
-	Summary        string          `json:"summary"`
-	ResultPath     string          `json:"result_path"`
-	Generation     string          `json:"generation"`
-	Card           *MessageLocator `json:"card,omitempty"`
-	Status         string          `json:"status"`
-	ArrivedAt      string          `json:"arrived_at"`
-	AcknowledgedAt string          `json:"acknowledged_at,omitempty"`
-	AcknowledgedBy string          `json:"acknowledged_by,omitempty"`
-	ForwardedAt    string          `json:"forwarded_at,omitempty"`
-	OpenPoints     []string        `json:"open_points,omitempty"`
-	Update         receiptUpdate   `json:"update,omitempty"`
+	Thread               string          `json:"thread"`
+	Summary              string          `json:"summary"`
+	ResultPath           string          `json:"result_path"`
+	SourceAgentSessionID string          `json:"source_agent_session_id,omitempty"`
+	SourceSessionPath    string          `json:"source_session_path,omitempty"`
+	Generation           string          `json:"generation"`
+	Card                 *MessageLocator `json:"card,omitempty"`
+	Status               string          `json:"status"`
+	ArrivedAt            string          `json:"arrived_at"`
+	AcknowledgedAt       string          `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy       string          `json:"acknowledged_by,omitempty"`
+	ForwardedAt          string          `json:"forwarded_at,omitempty"`
+	OpenPoints           []string        `json:"open_points,omitempty"`
+	Update               receiptUpdate   `json:"update,omitempty"`
 }
 
 type notifyStore struct {
@@ -342,13 +347,17 @@ func (s *notifyStore) recordArrivalTransition(row indexResultRow) (receiptArriva
 	if !exists {
 		record = receiptRecord{
 			Thread: row.Thread, Summary: row.Summary, ResultPath: row.Path,
-			Status: row.Status, Generation: generation, ArrivedAt: generation,
+			SourceSessionPath:    row.SourceSessionPath,
+			SourceAgentSessionID: row.SourceAgentSessionID,
+			Status:               row.Status, Generation: generation, ArrivedAt: generation,
 			OpenPoints: row.OpenPoints, Update: row.Update,
 		}
 	} else if record.Generation == "" || generation > record.Generation {
 		record.Thread = row.Thread
 		record.Summary = row.Summary
 		record.ResultPath = row.Path
+		record.SourceSessionPath = row.SourceSessionPath
+		record.SourceAgentSessionID = row.SourceAgentSessionID
 		record.Status = row.Status
 		record.Generation = generation
 		record.ArrivedAt = generation
@@ -523,12 +532,10 @@ func scanResultFiles(threadsDir string) ([]resultFileInfo, error) {
 	return out, nil
 }
 
-// scanNewResultFiles returns files that are new or modified since last
-// notified, skipping letters covered by the dispatch ledger (those get
-// [RESULT_READY] from the dispatch watcher's own result.md polling).
-// Skipped-but-covered files are still recorded so the ledger stays tidy and
-// never re-fires for them later.
-func scanNewResultFiles(files []resultFileInfo, ledger *notifyLedger, dispatchCovered map[string]bool) []resultFileInfo {
+// scanNewResultFiles returns files that are new or modified since their last
+// Inbox delivery. Dispatch provenance enriches a receipt; it never changes
+// which RESULT delivery path is used.
+func scanNewResultFiles(files []resultFileInfo, ledger *notifyLedger) []resultFileInfo {
 	var fresh []resultFileInfo
 	for _, f := range files {
 		if last, seen := ledger.Notified[f.Letter]; seen {
@@ -537,9 +544,6 @@ func scanNewResultFiles(files []resultFileInfo, ledger *notifyLedger, dispatchCo
 			}
 		}
 		ledger.Notified[f.Letter] = f.ModTime.Format(time.RFC3339Nano)
-		if dispatchCovered[f.Letter] {
-			continue
-		}
 		fresh = append(fresh, f)
 	}
 	return fresh
@@ -602,11 +606,23 @@ func extractResultStatusFromBody(body string) string {
 	return ""
 }
 
+// declaredSourceSessionPath accepts only the exact RESULT front-matter key.
+// External harnesses may provide it; ordinary body text is never searched.
+func declaredSourceSessionPath(body string) string {
+	return strings.TrimSpace(parseArchiveFrontMatter(body)["Source-Session-Path"])
+}
+
 // formatReceiptEnvelope gives a secretary the original RESULT path without
 // asking it to locate the letter itself.
 func formatReceiptEnvelope(letter string, record receiptRecord) string {
-	return fmt.Sprintf("[RECEIPT %s]\n原信文件：%s\n线程：%s\n状态：%s\n\n请直接读取上述 RESULT 原信，并按正常译信流程处理。",
-		letter, record.ResultPath, record.Thread, record.Status)
+	path := ""
+	if record.SourceSessionPath != "" {
+		path = "\n来源会话：" + record.SourceSessionPath
+	} else if record.SourceAgentSessionID != "" {
+		path = "\n来源会话：unavailable"
+	}
+	return fmt.Sprintf("[RECEIPT %s]\n原信文件：%s\n线程：%s\n状态：%s%s\n\n请直接读取上述 RESULT 原信，并按正常译信流程处理。",
+		letter, record.ResultPath, record.Thread, record.Status, path)
 }
 
 func receiptOriginalPages(record receiptRecord, emptyText string) ([]string, error) {
@@ -644,12 +660,16 @@ func formatReceiptUpdateBody(update receiptUpdate) string {
 
 func receiptUpdatePages(update receiptUpdate) []string {
 	runes := []rune(formatReceiptUpdateBody(update))
-	if len(runes) == 0 { return nil }
+	if len(runes) == 0 {
+		return nil
+	}
 	const pageSize = 3000
 	var pages []string
 	for len(runes) > 0 {
 		n := pageSize
-		if len(runes) < n { n = len(runes) }
+		if len(runes) < n {
+			n = len(runes)
+		}
 		pages, runes = append(pages, string(runes[:n])), runes[n:]
 	}
 	return pages
@@ -662,6 +682,11 @@ const receiptCompactTextLimit = 3500
 // pageCount is the compact envelope; positive pageCount is an original page.
 func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, body string, page, pageCount int) (string, [][]ButtonOption) {
 	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt, record.ResultPath)
+	if record.SourceSessionPath != "" {
+		content += "\nSource session: " + record.SourceSessionPath
+	} else if record.SourceAgentSessionID != "" {
+		content += "\nSource session: unavailable"
+	}
 	if len(record.Update.Sections) > 0 {
 		content = strings.Replace(content, "📬 "+letter, "📬 "+letter+" · "+i18n.T(MsgReceiptUpdated), 1)
 	}
@@ -670,7 +695,9 @@ func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, bod
 	}
 	update := formatReceiptUpdateBody(record.Update)
 	inlineUpdate := update != "" && len([]rune(update)) < receiptCompactUpdateLimit && len([]rune(content))+len([]rune(i18n.T(MsgReceiptChanges)))+len([]rune(update))+2 <= receiptCompactTextLimit
-	if inlineUpdate { content += "\n\n" + i18n.T(MsgReceiptChanges) + "\n" + update }
+	if inlineUpdate {
+		content += "\n\n" + i18n.T(MsgReceiptChanges) + "\n" + update
+	}
 	generation := record.Generation
 	if generation == "" {
 		generation = record.ArrivedAt
@@ -815,7 +842,7 @@ func (e *Engine) checkNewResults() {
 		return
 	}
 
-	fresh := scanNewResultFiles(files, &ledger, e.dispatchStore.letters())
+	fresh := scanNewResultFiles(files, &ledger)
 	if len(fresh) == 0 {
 		return
 	}
@@ -834,15 +861,21 @@ func (e *Engine) checkNewResults() {
 			slog.Warn("notify: diff base unavailable", "letter", f.Letter, "error", err)
 			update = receiptUpdate{}
 		}
+		sourceAgentSessionID, sourceSessionPath := e.ensureDispatchStore().resultProvenance(f.Letter)
+		if sourceSessionPath == "" {
+			sourceSessionPath = declaredSourceSessionPath(string(body))
+		}
 		e.notifyLetterArrived(indexResultRow{
-			Letter:     f.Letter,
-			Thread:     f.Thread,
-			Summary:    extractResultSummaryFromBody(string(body)),
-			Path:       f.Path,
-			Status:     extractResultStatusFromBody(string(body)),
-			Generation: f.ModTime.UTC().Format(time.RFC3339Nano),
-			OpenPoints: extractOpenPoints(string(body)),
-			Update:     update,
+			Letter:               f.Letter,
+			Thread:               f.Thread,
+			Summary:              extractResultSummaryFromBody(string(body)),
+			Path:                 f.Path,
+			SourceAgentSessionID: sourceAgentSessionID,
+			SourceSessionPath:    sourceSessionPath,
+			Status:               extractResultStatusFromBody(string(body)),
+			Generation:           f.ModTime.UTC().Format(time.RFC3339Nano),
+			OpenPoints:           extractOpenPoints(string(body)),
+			Update:               update,
 		})
 	}
 }

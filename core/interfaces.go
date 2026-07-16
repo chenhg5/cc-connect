@@ -458,6 +458,13 @@ type AgentSession interface {
 	Close() error
 }
 
+// SessionTranscriptPathProvider is implemented by agent sessions that can
+// deterministically identify their local transcript. It is intentionally
+// optional: callers must preserve delivery when a harness cannot provide one.
+type SessionTranscriptPathProvider interface {
+	TranscriptPath() string
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

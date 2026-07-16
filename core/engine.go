@@ -5980,6 +5980,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							sessions.SetSessionName(event.SessionID, pendingName)
 						}
 					}
+					letter := e.resolveActiveLetterID(sessionKey, workspaceDir, "")
+					if pathProvider, ok := state.agentSession.(SessionTranscriptPathProvider); ok && letter != "" {
+						if err := e.ensureDispatchStore().recordResultProvenance(letter, e.name, event.SessionID, pathProvider.TranscriptPath()); err != nil {
+							slog.Warn("dispatch: failed to record result provenance", "letter", letter, "error", err)
+						}
+					}
 					sessions.Save()
 				}
 			}
@@ -7283,9 +7289,14 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		}
 		if args[0] == "update" && (len(args) == 3 || len(args) == 4) {
 			page, err := strconv.Atoi(args[len(args)-1])
-			if err != nil || page < 0 { e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable)); return true }
+			if err != nil || page < 0 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+				return true
+			}
 			generation := ""
-			if len(args) == 4 { generation = args[2] }
+			if len(args) == 4 {
+				generation = args[2]
+			}
 			e.showReceiptUpdatePage(p, msg, args[1], page, generation)
 			return true
 		}
@@ -7377,7 +7388,8 @@ func (e *Engine) cmdLetter(p Platform, msg *Message, args []string) bool {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
-	msg.Content = formatLetterSourceEnvelope(args[0], result.Path, source, strings.Join(args[1:], " "))
+	_, sourceSessionPath := e.ensureDispatchStore().resultProvenance(args[0])
+	msg.Content = formatLetterSourceEnvelope(args[0], result.Path, sourceSessionPath, source, strings.Join(args[1:], " "))
 	return false
 }
 
@@ -7411,19 +7423,36 @@ func (e *Engine) showReceiptPage(p Platform, msg *Message, letter string, page i
 
 func (e *Engine) showReceiptUpdatePage(p Platform, msg *Message, letter string, page int, generation ...string) {
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) { e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable)); return }
+	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+		return
+	}
 	pages := receiptUpdatePages(receipt.Update)
-	if page >= len(pages) { e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable)); return }
+	if page >= len(pages) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+		return
+	}
 	updater, ok := p.(InlineMessageUpdater)
-	if !ok { e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable)); return }
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+		return
+	}
 	content := e.i18n.Tf(MsgReceiptUpdatePage, page+1, len(pages), pages[page])
 	var nav []ButtonOption
-	if page > 0 { nav = append(nav, ButtonOption{Text: e.i18n.T(MsgCardPrev), Data: fmt.Sprintf("cmd:/receipt update %s %s %d", letter, receipt.Generation, page-1)}) }
-	if page+1 < len(pages) { nav = append(nav, ButtonOption{Text: e.i18n.T(MsgCardNext), Data: fmt.Sprintf("cmd:/receipt update %s %s %d", letter, receipt.Generation, page+1)}) }
+	if page > 0 {
+		nav = append(nav, ButtonOption{Text: e.i18n.T(MsgCardPrev), Data: fmt.Sprintf("cmd:/receipt update %s %s %d", letter, receipt.Generation, page-1)})
+	}
+	if page+1 < len(pages) {
+		nav = append(nav, ButtonOption{Text: e.i18n.T(MsgCardNext), Data: fmt.Sprintf("cmd:/receipt update %s %s %d", letter, receipt.Generation, page+1)})
+	}
 	buttons := [][]ButtonOption{}
-	if len(nav) > 0 { buttons = append(buttons, nav) }
+	if len(nav) > 0 {
+		buttons = append(buttons, nav)
+	}
 	buttons = append(buttons, []ButtonOption{{Text: e.i18n.T(MsgReceiptCollapse), Data: "cmd:/receipt collapse " + letter + " " + receipt.Generation}, {Text: e.i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter + " " + receipt.Generation}, {Text: e.i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter + " " + receipt.Generation}})
-	if err := updater.UpdateMessageWithButtons(e.ctx, msg.ReplyCtx, content, buttons); err != nil { e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable)) }
+	if err := updater.UpdateMessageWithButtons(e.ctx, msg.ReplyCtx, content, buttons); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
+	}
 }
 
 func (e *Engine) showReceiptCompact(p Platform, msg *Message, letter string, generation ...string) {
