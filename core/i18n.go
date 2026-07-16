@@ -646,6 +646,8 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
+	MsgPermissionTimeoutMsg     MsgKey = "permission_timeout_msg"
+	MsgPermissionTimeoutNotification MsgKey = "permission_timeout_notification"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -806,6 +808,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 後台任務請求使用工具 `%s` 的權限，但已自動拒絕（目前無活躍會話）。請發送訊息或使用 `/yolo` 授權後續請求。",
 		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/yolo` を使用して今後のリクエストを承認してください。",
 		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/yolo` para aprobar solicitudes futuras.",
+	},
+	MsgPermissionTimeoutMsg: {
+		LangEnglish:            "Permission request timed out.",
+		LangChinese:            "权限请求超时。",
+		LangTraditionalChinese: "權限請求超時。",
+		LangJapanese:           "権限リクエストがタイムアウトしました。",
+		LangSpanish:            "La solicitud de permiso ha caducado.",
+	},
+	MsgPermissionTimeoutNotification: {
+		LangEnglish:            "⏰ Permission request for `%s` timed out and was auto-denied. Please send your message again if you still want to proceed.",
+		LangChinese:            "⏰ 工具 `%s` 的权限请求超时，已自动拒绝。如需继续，请重新发送消息。",
+		LangTraditionalChinese: "⏰ 工具 `%s` 的權限請求超時，已自動拒絕。如需繼續，請重新發送訊息。",
+		LangJapanese:           "⏰ ツール `%s` の権限リクエストがタイムアウトし、自動拒否されました。続行する場合はメッセージを再度送信してください。",
+		LangSpanish:            "⏰ La solicitud de permiso para `%s` ha caducado y se ha denegado automáticamente. Envía tu mensaje de nuevo si deseas continuar.",
 	},
 	MsgSessionNotFound: {
 		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",

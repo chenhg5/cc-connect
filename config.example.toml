@@ -189,6 +189,15 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
 
+# Permission request timeout in minutes. When a permission prompt (Allow/Deny) is
+# sent to the user, the system waits this long for a response before auto-denying.
+# 0 or unset means no timeout (wait indefinitely).
+# Per-project [[projects]].permission_timeout_mins overrides this global value.
+# 权限请求超时时间（分钟）。当向用户发送权限弹窗（允许/拒绝）时，
+# 系统等待指定时长后自动拒绝。0 或不设置表示无限等待。
+# 项目级 [[projects]].permission_timeout_mins 可覆盖此全局设置。
+# permission_timeout_mins = 0
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
@@ -726,6 +735,11 @@ name = "my-backend"
 # filter_external_sessions = false
 # filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
+#
+# permission_timeout_mins: overrides the global permission_timeout_mins for this project.
+# 0 = no timeout. Default: use the global value.
+# permission_timeout_mins: 覆盖全局 permission_timeout_mins。0 = 不超时。默认使用全局设置。
+# permission_timeout_mins = 30
 #
 # shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
 # shell_profile = "source ~/.config/fish/config.fish"  # Per-project shell profile / 项目级 shell profile

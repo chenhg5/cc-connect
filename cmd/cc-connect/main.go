@@ -703,6 +703,22 @@ func main() {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
 		}
 
+		// Wire permission timeout: project-level overrides global, 0 = no timeout
+		permTimeoutMins := cfg.PermissionTimeoutMins
+		if proj.PermissionTimeoutMins != nil {
+			permTimeoutMins = proj.PermissionTimeoutMins
+		}
+		if permTimeoutMins != nil {
+			mins := *permTimeoutMins
+			if mins <= 0 {
+				engine.SetPermissionTimeout(0)
+			} else {
+				engine.SetPermissionTimeout(time.Duration(mins) * time.Minute)
+			}
+		} else {
+			engine.SetPermissionTimeout(0)
+		}
+
 		// Wire queue depth
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
 			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
@@ -1754,6 +1770,22 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		// A reload may remove this option after timers were scheduled; reset
 		// explicitly so those stale idle-close timers cannot fire later.
 		engine.SetAgentSessionIdleTimeout(0)
+	}
+
+	// Reload permission timeout: project-level overrides global, 0 = no timeout
+	permTimeoutMins := cfg.PermissionTimeoutMins
+	if proj.PermissionTimeoutMins != nil {
+		permTimeoutMins = proj.PermissionTimeoutMins
+	}
+	if permTimeoutMins != nil {
+		mins := *permTimeoutMins
+		if mins <= 0 {
+			engine.SetPermissionTimeout(0)
+		} else {
+			engine.SetPermissionTimeout(time.Duration(mins) * time.Minute)
+		}
+	} else {
+		engine.SetPermissionTimeout(0)
 	}
 
 	// Reload instant reply
