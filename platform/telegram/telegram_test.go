@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,10 +101,12 @@ type stubTelegramBot struct {
 	sendRichErr           error
 	createForumTopicErr   error
 	getFileErr            error
+	editMessageErrors     []error
 	file                  *models.File
 	createForumTopic      *models.ForumTopic
 	sendMessageParams     []*tgbot.SendMessageParams
 	sendRichMessageParams []*tgbot.SendRichMessageParams
+	editMessageParams     []*tgbot.EditMessageTextParams
 	createTopicParams     []*tgbot.CreateForumTopicParams
 	editTopicParams       []*tgbot.EditForumTopicParams
 }
@@ -193,14 +196,59 @@ func (b *stubTelegramBot) SendChatAction(_ context.Context, _ *tgbot.SendChatAct
 	return true, nil
 }
 
-func (b *stubTelegramBot) EditMessageText(_ context.Context, _ *tgbot.EditMessageTextParams) (*models.Message, error) {
+func (b *stubTelegramBot) EditMessageText(_ context.Context, params *tgbot.EditMessageTextParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.editMessageTextCalls++
+	b.editMessageParams = append(b.editMessageParams, params)
+	if len(b.editMessageErrors) > 0 {
+		err := b.editMessageErrors[0]
+		b.editMessageErrors = b.editMessageErrors[1:]
+		b.mu.Unlock()
+		return nil, err
+	}
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
 	}
 	return &models.Message{ID: 99}, nil
+}
+
+func TestUpdateMessageWithButtonsIgnoresUnchangedMessage(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.editMessageErrors = []error{errors.New("message is not modified")}
+	p := &Platform{bot: stubBot}
+	buttons := [][]core.ButtonOption{{{Text: "Open", Data: "open"}}}
+
+	if err := p.UpdateMessageWithButtons(context.Background(), replyContext{chatID: 1, messageID: 2}, "same", buttons); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stubBot.editMessageTextCalls, 1; got != want {
+		t.Fatalf("edit calls = %d, want %d", got, want)
+	}
+}
+
+func TestUpdateMessageWithButtonsRetriesPlainTextAfterHTMLParseFailure(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.editMessageErrors = []error{errors.New("can't parse entities")}
+	p := &Platform{bot: stubBot}
+	buttons := [][]core.ButtonOption{{{Text: "Open", Data: "open"}}}
+
+	if err := p.UpdateMessageWithButtons(context.Background(), replyContext{chatID: 1, messageID: 2}, "*plain*", buttons); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stubBot.editMessageTextCalls, 2; got != want {
+		t.Fatalf("edit calls = %d, want %d", got, want)
+	}
+	first, second := stubBot.editMessageParams[0], stubBot.editMessageParams[1]
+	if got := second.ParseMode; got != "" {
+		t.Fatalf("second ParseMode = %q, want empty", got)
+	}
+	if got, want := second.Text, "*plain*"; got != want {
+		t.Fatalf("second text = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(second.ReplyMarkup, first.ReplyMarkup) {
+		t.Fatalf("second ReplyMarkup = %#v, want %#v", second.ReplyMarkup, first.ReplyMarkup)
+	}
 }
 
 func (b *stubTelegramBot) DeleteMessage(_ context.Context, _ *tgbot.DeleteMessageParams) (bool, error) {

@@ -1925,11 +1925,26 @@ func (p *Platform) UpdateMessageWithButtons(ctx context.Context, rctx any, conte
 		}
 		rows = append(rows, out)
 	}
-	_, err = bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+	params := &tgbot.EditMessageTextParams{
 		ChatID: rc.chatID, MessageID: rc.messageID, Text: core.MarkdownToSimpleHTML(content), ParseMode: models.ParseModeHTML,
 		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: rows},
-	})
-	return err
+	}
+	if _, err := bot.EditMessageText(ctx, params); err != nil {
+		if strings.Contains(err.Error(), "not modified") {
+			return nil
+		}
+		if strings.Contains(err.Error(), "can't parse") {
+			params.Text, params.ParseMode = content, ""
+			_, err = bot.EditMessageText(ctx, params)
+			if err != nil && strings.Contains(err.Error(), "not modified") {
+				return nil
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("telegram: edit message: %w", err)
+		}
+	}
+	return nil
 }
 
 // DeleteMessage removes a receipt inbox card after it has been accepted.
