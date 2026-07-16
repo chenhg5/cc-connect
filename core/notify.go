@@ -191,6 +191,40 @@ func (s *notifyStore) updateDiffBase(letter string, current []byte) (receiptUpda
 	return update, nil
 }
 
+// pruneDiffBases removes rolling diff bases whose RESULT file no longer exists.
+// Acknowledging a receipt deliberately does not remove its base: a later RESULT
+// update must still be able to show what changed when it re-enters the Inbox.
+func (s *notifyStore) pruneDiffBases(files []resultFileInfo) error {
+	if s == nil {
+		return nil
+	}
+	active := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		active[file.Letter] = struct{}{}
+	}
+	dir := filepath.Dir(s.diffBasePath("placeholder"))
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		letter := strings.TrimSuffix(entry.Name(), ".md")
+		if _, exists := active[letter]; exists {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *notifyStore) load() (notifyLedger, error) {
 	ledger := notifyLedger{Notified: map[string]string{}, Receipts: map[string]receiptRecord{}}
 	if s == nil {
@@ -702,6 +736,9 @@ func (e *Engine) checkNewResults() {
 	if err != nil {
 		slog.Warn("notify: failed to scan result files", "path", threadsDir, "error", err)
 		return
+	}
+	if err := e.notifyStore.pruneDiffBases(files); err != nil {
+		slog.Warn("notify: failed to prune stale diff bases", "error", err)
 	}
 	ledger, err := e.notifyStore.load()
 	if err != nil {

@@ -58,6 +58,25 @@ func TestNotifyStoreUpdateDiffBaseKeepsOnlyPreviousGeneration(t *testing.T) {
 	}
 }
 
+func TestNotifyStorePruneDiffBasesRemovesOnlyAbsentResults(t *testing.T) {
+	store := newNotifyStore(filepath.Join(t.TempDir(), "data"))
+	if _, err := store.updateDiffBase("L-0430", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.updateDiffBase("L-0431", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.pruneDiffBases([]resultFileInfo{{Letter: "L-0430"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(store.diffBasePath("L-0430")); err != nil {
+		t.Fatalf("active diff base was removed: %v", err)
+	}
+	if _, err := os.Stat(store.diffBasePath("L-0431")); !os.IsNotExist(err) {
+		t.Fatalf("stale diff base still exists: %v", err)
+	}
+}
+
 func TestNotifyStorePersistsOpenPointsAndUpdateForNewGeneration(t *testing.T) {
 	store := newNotifyStore(filepath.Join(t.TempDir(), "data"))
 	row := indexResultRow{Letter: "L-0430", Thread: "alpha", Generation: "g1", OpenPoints: []string{"decide"}, Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "new"}}}}
@@ -206,6 +225,35 @@ func TestCheckNewResultsEndToEnd(t *testing.T) {
 	ledger, _ = e.notifyStore.load()
 	if _, seen := ledger.Notified["L-0101"]; !seen {
 		t.Fatal("new result was not recorded as notified")
+	}
+}
+
+func TestCheckNewResultsDeliversWhenDiffCacheIsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	threadsDir := filepath.Join(root, "threads")
+	indexPath := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(indexPath, []byte("# Archive INDEX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.dataDir = root
+	e.configureNotify(NotifyConfig{Enabled: true, TelegramEnabled: true, Platform: "telegram", SessionKey: "telegram:123:123", IndexPath: indexPath})
+
+	writeResultFile(t, threadsDir, "alpha", "L-0100", "## Conclusion\nseed\n")
+	e.checkNewResults()
+	cacheDir := filepath.Join(root, "notify_diff_cache")
+	if err := os.RemoveAll(cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeResultFile(t, threadsDir, "alpha", "L-0101", "## Conclusion\narrived despite cache failure\n")
+	e.checkNewResults()
+	if got := p.receiptCardsSent; got != 1 {
+		t.Fatalf("receipt cards sent = %d, want 1 when diff cache fails", got)
 	}
 }
 

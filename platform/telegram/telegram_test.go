@@ -254,6 +254,48 @@ func TestUpdateMessageWithButtonsRetriesPlainTextAfterHTMLParseFailure(t *testin
 	}
 }
 
+func TestReceiptCardRendersTaskListAsEditableHTML(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{bot: stubBot}
+	buttons := [][]core.ButtonOption{{{Text: "Receive", Data: "receipt receive L-0430"}}}
+	content := "## Tasks\n- [x] done"
+
+	card, err := p.SendReceiptCard(context.Background(), replyContext{chatID: 1, threadID: 7}, content, buttons)
+	if err != nil {
+		t.Fatalf("SendReceiptCard: %v", err)
+	}
+	if got, want := stubBot.sendMessageParams[0].ParseMode, models.ParseModeHTML; got != want {
+		t.Fatalf("send parse mode = %q, want %q", got, want)
+	}
+	if got := stubBot.sendMessageParams[0].Text; !strings.Contains(got, "☑ done") {
+		t.Fatalf("send text = %q, want checked task", got)
+	}
+	sentMarkup, ok := stubBot.sendMessageParams[0].ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok {
+		t.Fatalf("send reply markup = %T, want inline keyboard", stubBot.sendMessageParams[0].ReplyMarkup)
+	}
+	if got := sentMarkup.InlineKeyboard[0][0].CallbackData; got != buttons[0][0].Data {
+		t.Fatalf("send callback = %q, want %q", got, buttons[0][0].Data)
+	}
+
+	if err := p.UpdateReceiptCard(context.Background(), card, content, buttons); err != nil {
+		t.Fatalf("UpdateReceiptCard: %v", err)
+	}
+	if got, want := stubBot.editMessageParams[0].ParseMode, models.ParseModeHTML; got != want {
+		t.Fatalf("edit parse mode = %q, want %q", got, want)
+	}
+	if got := stubBot.editMessageParams[0].Text; !strings.Contains(got, "☑ done") {
+		t.Fatalf("edit text = %q, want checked task", got)
+	}
+	editedMarkup, ok := stubBot.editMessageParams[0].ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok {
+		t.Fatalf("edit reply markup = %T, want inline keyboard", stubBot.editMessageParams[0].ReplyMarkup)
+	}
+	if got := editedMarkup.InlineKeyboard[0][0].CallbackData; got != buttons[0][0].Data {
+		t.Fatalf("edit callback = %q, want %q", got, buttons[0][0].Data)
+	}
+}
+
 func (b *stubTelegramBot) DeleteMessage(_ context.Context, _ *tgbot.DeleteMessageParams) (bool, error) {
 	b.mu.Lock()
 	b.deleteMessageCalls++
