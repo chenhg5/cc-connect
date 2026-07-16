@@ -1714,6 +1714,44 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	return nil
 }
 
+// SendReceiptCard sends an Inbox card and returns its durable Telegram address.
+func (p *Platform) SendReceiptCard(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) (core.MessageLocator, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return core.MessageLocator{}, fmt.Errorf("telegram: invalid receipt reply context type %T", rctx)
+	}
+	bot, err := p.connectedBot("send receipt card")
+	if err != nil {
+		return core.MessageLocator{}, err
+	}
+	var rows [][]models.InlineKeyboardButton
+	for _, row := range buttons {
+		var out []models.InlineKeyboardButton
+		for _, b := range row {
+			out = append(out, models.InlineKeyboardButton{Text: b.Text, CallbackData: b.Data})
+		}
+		rows = append(rows, out)
+	}
+	params := &tgbot.SendMessageParams{ChatID: rc.chatID, MessageThreadID: rc.threadID, Text: core.MarkdownToSimpleHTML(content), ParseMode: models.ParseModeHTML, ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: rows}}
+	sent, err := sendMessageWithRetry(ctx, bot, params)
+	if err != nil && strings.Contains(err.Error(), "can't parse") {
+		params.Text, params.ParseMode = content, ""
+		sent, err = sendMessageWithRetry(ctx, bot, params)
+	}
+	if err != nil {
+		return core.MessageLocator{}, fmt.Errorf("telegram: send receipt card: %w", err)
+	}
+	return core.MessageLocator{Platform: p.Name(), ChatID: rc.chatID, ThreadID: rc.threadID, MessageID: sent.ID}, nil
+}
+
+// UpdateReceiptCard replaces a previously sent Inbox card in place.
+func (p *Platform) UpdateReceiptCard(ctx context.Context, card core.MessageLocator, content string, buttons [][]core.ButtonOption) error {
+	if card.Platform != p.Name() || card.ChatID == 0 || card.MessageID == 0 {
+		return fmt.Errorf("telegram: invalid receipt card locator")
+	}
+	return p.UpdateMessageWithButtons(ctx, replyContext{chatID: card.ChatID, threadID: card.ThreadID, messageID: card.MessageID}, content, buttons)
+}
+
 // DeletePreviewMessage deletes a stale preview message so the caller can send a fresh one.
 func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
 	h, ok := previewHandle.(*telegramPreviewHandle)

@@ -528,6 +528,11 @@ const (
 	MsgReceiptReceive        MsgKey = "receipt_receive"
 	MsgReceiptHandoffPrimary MsgKey = "receipt_handoff_primary"
 	MsgReceiptEmptyOriginal  MsgKey = "receipt_empty_original"
+	MsgReceiptUpdated        MsgKey = "receipt_updated"
+	MsgReceiptOpenPoints     MsgKey = "receipt_open_points"
+	MsgReceiptChanges        MsgKey = "receipt_changes"
+	MsgReceiptViewUpdate     MsgKey = "receipt_view_update"
+	MsgReceiptUpdatePage     MsgKey = "receipt_update_page"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -833,11 +838,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Recibos pendientes:%s",
 	},
 	MsgReceiptCardCompact: {
-		LangEnglish:            "📬 %s\nThread: %s\nStatus: %s\nSummary: %s\nArrived: %s\nSnapshot path: %s\nSnapshot SHA-256: %s",
-		LangChinese:            "📬 %s\n线程：%s\n状态：%s\n摘要：%s\n到货：%s\n快照路径：%s\n快照 SHA-256：%s",
-		LangTraditionalChinese: "📬 %s\n執行緒：%s\n狀態：%s\n摘要：%s\n送達：%s\n快照路徑：%s\n快照 SHA-256：%s",
-		LangJapanese:           "📬 %s\nスレッド: %s\nステータス: %s\n概要: %s\n到着: %s\nスナップショット: %s\nSHA-256: %s",
-		LangSpanish:            "📬 %s\nHilo: %s\nEstado: %s\nResumen: %s\nRecibido: %s\nRuta de instantánea: %s\nSHA-256 de instantánea: %s",
+		LangEnglish:            "📬 %s\nThread: %s\nStatus: %s\nSummary: %s\nArrived: %s\nResult path: %s",
+		LangChinese:            "📬 %s\n线程：%s\n状态：%s\n摘要：%s\n到货：%s\n原信路径：%s",
+		LangTraditionalChinese: "📬 %s\n執行緒：%s\n狀態：%s\n摘要：%s\n送達：%s\n原信路徑：%s",
+		LangJapanese:           "📬 %s\nスレッド: %s\nステータス: %s\n概要: %s\n到着: %s\n原信パス: %s",
+		LangSpanish:            "📬 %s\nHilo: %s\nEstado: %s\nResumen: %s\nRecibido: %s\nRuta del resultado: %s",
 	},
 	MsgReceiptCardPage: {
 		LangEnglish:            "Original (Page %d/%d)\n%s",
@@ -877,6 +882,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "（原文は空です）",
 		LangSpanish:            "(El original está vacío)",
 	},
+	MsgReceiptUpdated: {LangEnglish: "Updated", LangChinese: "已更新", LangTraditionalChinese: "已更新", LangJapanese: "更新済み", LangSpanish: "Actualizado"},
+	MsgReceiptOpenPoints: {LangEnglish: "Open points:", LangChinese: "开放点：", LangTraditionalChinese: "開放點：", LangJapanese: "未解決点:", LangSpanish: "Puntos abiertos:"},
+	MsgReceiptChanges: {LangEnglish: "Changes:", LangChinese: "本次更新：", LangTraditionalChinese: "本次更新：", LangJapanese: "今回の更新:", LangSpanish: "Cambios:"},
+	MsgReceiptViewUpdate: {LangEnglish: "View this update", LangChinese: "查看本次更新", LangTraditionalChinese: "查看本次更新", LangJapanese: "今回の更新を見る", LangSpanish: "Ver esta actualización"},
+	MsgReceiptUpdatePage: {LangEnglish: "This update (Page %d/%d)\n%s", LangChinese: "本次更新（第 %d/%d 页）\n%s", LangTraditionalChinese: "本次更新（第 %d/%d 頁）\n%s", LangJapanese: "今回の更新（%d/%dページ）\n%s", LangSpanish: "Esta actualización (página %d/%d)\n%s"},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
 		LangChinese:            "⚠️ 后台任务请求使用工具 `%s` 的权限，但已自动拒绝（当前无活跃会话）。请发送消息或使用 `/yolo` 授权后续请求。",

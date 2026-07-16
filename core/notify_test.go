@@ -1,8 +1,6 @@
 package core
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,6 +20,82 @@ func writeResultFile(t *testing.T, threadsDir, thread, letter, body string) stri
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestExtractOpenPointsUsesExactHeadingsOnly(t *testing.T) {
+	body := "## Conclusion\nready\n\n## Open Points\n- ship it\n- test it\n\n## Notes\ntext: open points are elsewhere\n"
+	if got := extractOpenPoints(body); !reflect.DeepEqual(got, []string{"ship it", "test it"}) {
+		t.Fatalf("open points = %#v", got)
+	}
+	legacy := "## Open Questions\n- legacy item\n"
+	if got := extractOpenPoints(legacy); !reflect.DeepEqual(got, []string{"legacy item"}) {
+		t.Fatalf("legacy open points = %#v", got)
+	}
+}
+
+func TestDiffResultSectionsReturnsCurrentChangedTextOnly(t *testing.T) {
+	previous := "## Conclusion\nold\n\n## Open Points\n- keep\n"
+	current := "## Conclusion\nnew\n\n## Open Points\n- keep\n- decide\n"
+	got := diffResultSections(previous, current)
+	want := []receiptSection{{Heading: "Conclusion", Body: "new"}, {Heading: "Open Points", Body: "- keep\n- decide"}}
+	if !reflect.DeepEqual(got.Sections, want) {
+		t.Fatalf("update = %#v, want %#v", got, want)
+	}
+}
+
+func TestNotifyStoreUpdateDiffBaseKeepsOnlyPreviousGeneration(t *testing.T) {
+	store := newNotifyStore(filepath.Join(t.TempDir(), "data"))
+	if got, err := store.updateDiffBase("L-0430", []byte("## Conclusion\nfirst\n")); err != nil || len(got.Sections) != 0 {
+		t.Fatalf("first base = %#v, %v", got, err)
+	}
+	got, err := store.updateDiffBase("L-0430", []byte("## Conclusion\nsecond\n"))
+	if err != nil || !reflect.DeepEqual(got.Sections, []receiptSection{{Heading: "Conclusion", Body: "second"}}) {
+		t.Fatalf("second base = %#v, %v", got, err)
+	}
+	data, err := os.ReadFile(store.diffBasePath("L-0430"))
+	if err != nil || string(data) != "## Conclusion\nsecond\n" {
+		t.Fatalf("rolling base = %q, %v", data, err)
+	}
+}
+
+func TestNotifyStorePruneDiffBasesRemovesOnlyAbsentResults(t *testing.T) {
+	store := newNotifyStore(filepath.Join(t.TempDir(), "data"))
+	if _, err := store.updateDiffBase("L-0430", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.updateDiffBase("L-0431", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.pruneDiffBases([]resultFileInfo{{Letter: "L-0430"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(store.diffBasePath("L-0430")); err != nil {
+		t.Fatalf("active diff base was removed: %v", err)
+	}
+	if _, err := os.Stat(store.diffBasePath("L-0431")); !os.IsNotExist(err) {
+		t.Fatalf("stale diff base still exists: %v", err)
+	}
+}
+
+func TestNotifyStorePersistsOpenPointsAndUpdateForNewGeneration(t *testing.T) {
+	store := newNotifyStore(filepath.Join(t.TempDir(), "data"))
+	row := indexResultRow{Letter: "L-0430", Thread: "alpha", Generation: "g1", OpenPoints: []string{"decide"}, Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "new"}}}}
+	if _, err := store.recordArrivalTransition(row); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.receipt("L-0430")
+	if err != nil || !reflect.DeepEqual(record.OpenPoints, row.OpenPoints) || !reflect.DeepEqual(record.Update, row.Update) {
+		t.Fatalf("receipt = %#v, %v", record, err)
+	}
+}
+
+func TestDeclaredSourceSessionPathReadsOnlyFrontMatter(t *testing.T) {
+	if got := declaredSourceSessionPath("---\nSource-Session-Path: F:\\external\\session.jsonl\n---\nbody"); got != `F:\external\session.jsonl` {
+		t.Fatalf("declaredSourceSessionPath() = %q", got)
+	}
+	if got := declaredSourceSessionPath("body\nSource-Session-Path: F:\\must-not-match.jsonl"); got != "" {
+		t.Fatalf("body text must not be treated as a declaration: %q", got)
+	}
 }
 
 func TestScanResultFiles(t *testing.T) {
@@ -63,6 +137,37 @@ func TestScanResultFilesMissingThreadsDir(t *testing.T) {
 	}
 }
 
+func TestResolveLetterResultRequiresOneExactResult(t *testing.T) {
+	root := t.TempDir()
+	threadsDir := filepath.Join(root, "threads")
+	path := writeResultFile(t, threadsDir, "alpha", "L-0430", "## Conclusion\nexact source\n")
+	got, body, err := resolveLetterResult(threadsDir, "L-0430")
+	if err != nil || got.Path != path || string(body) != "## Conclusion\nexact source\n" {
+		t.Fatalf("exact result = (%+v, %q, %v)", got, body, err)
+	}
+	if _, _, err := resolveLetterResult(threadsDir, "0430"); err == nil {
+		t.Fatal("accepted an invalid L-ID")
+	}
+	if _, _, err := resolveLetterResult(threadsDir, "L-9999"); err == nil {
+		t.Fatal("resolved a missing RESULT")
+	}
+	writeResultFile(t, threadsDir, "beta", "L-0430", "duplicate")
+	if _, _, err := resolveLetterResult(threadsDir, "L-0430"); err == nil {
+		t.Fatal("resolved an ambiguous RESULT")
+	}
+}
+
+func TestFormatLetterSourceEnvelopeIncludesOnlySuppliedQuery(t *testing.T) {
+	withoutQuery := formatLetterSourceEnvelope("L-0430", "F:\\archive\\L-0430.result.md", "", []byte("source"), "")
+	if !strings.Contains(withoutQuery, "[LETTER SOURCE]") || strings.Contains(withoutQuery, "[Boss query]") {
+		t.Fatalf("envelope without query = %q", withoutQuery)
+	}
+	withQuery := formatLetterSourceEnvelope("L-0430", "F:\\archive\\L-0430.result.md", "", []byte("source"), "what changed?")
+	if !strings.Contains(withQuery, "[Boss query]\nwhat changed?") {
+		t.Fatalf("envelope with query = %q", withQuery)
+	}
+}
+
 func TestExtractResultSummary(t *testing.T) {
 	root := t.TempDir()
 	donePath := writeResultFile(t, root, "alpha", "L-0100", "---\nID: L-0100\n---\n\n## Conclusion\nfirst answer.\n\n## Options for Boss\n...\n")
@@ -91,7 +196,7 @@ func TestExtractResultSummary(t *testing.T) {
 	}
 }
 
-func TestScanNewResultFilesDedupesAndSkipsDispatchCovered(t *testing.T) {
+func TestScanNewResultFilesDeliversDispatchedResultsToInbox(t *testing.T) {
 	now := time.Now()
 	files := []resultFileInfo{
 		{Letter: "L-0100", Thread: "alpha", Path: "L-0100.result.md", ModTime: now},
@@ -99,18 +204,18 @@ func TestScanNewResultFilesDedupesAndSkipsDispatchCovered(t *testing.T) {
 	}
 	ledger := notifyLedger{Notified: map[string]string{}}
 
-	// L-0100 was dispatched: the dispatch watcher owns its notification.
-	fresh := scanNewResultFiles(files, &ledger, map[string]bool{"L-0100": true})
-	if len(fresh) != 1 || fresh[0].Letter != "L-0101" {
-		t.Fatalf("expected only L-0101 fresh, got %+v", fresh)
+	// Dispatched and manual RESULTS share the Inbox delivery path.
+	fresh := scanNewResultFiles(files, &ledger)
+	if len(fresh) != 2 || fresh[0].Letter != "L-0100" || fresh[1].Letter != "L-0101" {
+		t.Fatalf("expected both dispatched and manual RESULTS, got %+v", fresh)
 	}
-	// Covered letter must still be recorded so it never re-triggers.
+	// Both deliveries must be recorded so unchanged generations never re-trigger.
 	if _, ok := ledger.Notified["L-0100"]; !ok {
 		t.Error("dispatch-covered letter not recorded in ledger")
 	}
 
 	// Second scan with unchanged mtimes: nothing new.
-	fresh = scanNewResultFiles(files, &ledger, nil)
+	fresh = scanNewResultFiles(files, &ledger)
 	if len(fresh) != 0 {
 		t.Fatalf("expected no fresh files on rescan, got %+v", fresh)
 	}
@@ -118,7 +223,7 @@ func TestScanNewResultFilesDedupesAndSkipsDispatchCovered(t *testing.T) {
 	// A pursuit-mode edit bumps mtime: must re-fire even though the letter
 	// was seen before (L-0429 requires "created or changed").
 	files[1].ModTime = now.Add(1 * time.Hour)
-	fresh = scanNewResultFiles(files, &ledger, nil)
+	fresh = scanNewResultFiles(files, &ledger)
 	if len(fresh) != 1 || fresh[0].Letter != "L-0101" {
 		t.Fatalf("expected L-0101 to re-fire after modification, got %+v", fresh)
 	}
@@ -160,6 +265,67 @@ func TestCheckNewResultsEndToEnd(t *testing.T) {
 	ledger, _ = e.notifyStore.load()
 	if _, seen := ledger.Notified["L-0101"]; !seen {
 		t.Fatal("new result was not recorded as notified")
+	}
+}
+
+func TestCheckNewResultsDeliversWhenDiffCacheIsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	threadsDir := filepath.Join(root, "threads")
+	indexPath := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(indexPath, []byte("# Archive INDEX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.dataDir = root
+	e.configureNotify(NotifyConfig{Enabled: true, TelegramEnabled: true, Platform: "telegram", SessionKey: "telegram:123:123", IndexPath: indexPath})
+
+	writeResultFile(t, threadsDir, "alpha", "L-0100", "## Conclusion\nseed\n")
+	e.checkNewResults()
+	cacheDir := filepath.Join(root, "notify_diff_cache")
+	if err := os.RemoveAll(cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeResultFile(t, threadsDir, "alpha", "L-0101", "## Conclusion\narrived despite cache failure\n")
+	e.checkNewResults()
+	if got := p.receiptCardsSent; got != 1 {
+		t.Fatalf("receipt cards sent = %d, want 1 when diff cache fails", got)
+	}
+}
+
+func TestCheckNewResultsStoresParsedOpenPointsAndGenerationUpdate(t *testing.T) {
+	root := t.TempDir()
+	threadsDir := filepath.Join(root, "threads")
+	indexPath := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(indexPath, []byte("# Archive INDEX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine("secretary-seat", &stubAgent{}, nil, "", LangEnglish)
+	e.dataDir = root
+	e.configureNotify(NotifyConfig{Enabled: true, IndexPath: indexPath})
+	path := writeResultFile(t, threadsDir, "alpha", "L-0430", "## Conclusion\nfirst\n\n## Open Points\n- decide\n")
+	e.checkNewResults()
+	if err := os.WriteFile(path, []byte("## Conclusion\nsecond\n\n## Open Points\n- decide\n- ship\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	next := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, next, next); err != nil {
+		t.Fatal(err)
+	}
+	e.checkNewResults()
+	record, err := e.notifyStore.receipt("L-0430")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(record.OpenPoints, []string{"decide", "ship"}) {
+		t.Fatalf("open points = %#v", record.OpenPoints)
+	}
+	if !reflect.DeepEqual(record.Update.Sections, []receiptSection{{Heading: "Conclusion", Body: "second"}, {Heading: "Open Points", Body: "- decide\n- ship"}}) {
+		t.Fatalf("update = %#v", record.Update)
 	}
 }
 
@@ -236,69 +402,172 @@ func TestNotifyStoreReceiptPersistsAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestNotifyStoreSnapshotsResultAtArrival(t *testing.T) {
+func TestNotifyStoreKeepsOriginalResultPathAtArrival(t *testing.T) {
 	root := t.TempDir()
 	resultPath := writeResultFile(t, root, "alpha", "L-0431", "ID: L-0431\nStatus: DONE\n---\n\n## Conclusion\noriginal\n")
 	store := newNotifyStore(filepath.Join(root, "data"))
 	if err := store.recordArrival(indexResultRow{Letter: "L-0431", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
 		t.Fatalf("record arrival: %v", err)
 	}
-	if err := os.WriteFile(resultPath, []byte("changed after arrival"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	ledger, err := store.load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	record := ledger.Receipts["L-0431"]
-	data, err := os.ReadFile(record.SnapshotPath)
-	if err != nil {
-		t.Fatalf("read snapshot: %v", err)
-	}
-	want := "ID: L-0431\nStatus: DONE\n---\n\n## Conclusion\noriginal\n"
-	if got := string(data); got != want {
-		t.Fatalf("snapshot = %q, want %q", got, want)
-	}
-	if got, want := record.SnapshotSHA256, fmt.Sprintf("%x", sha256.Sum256([]byte(want))); got != want {
-		t.Fatalf("snapshot hash = %q, want %q", got, want)
+	if got, want := record.ResultPath, resultPath; got != want {
+		t.Fatalf("result path = %q, want %q", got, want)
 	}
 }
 
-func TestReceiptEnvelopeGivesAgentDirectResultContext(t *testing.T) {
+func TestNotifyStoreReceiptGenerationReplacesPendingAndReopensAcknowledged(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", "body")
+	store := newNotifyStore(filepath.Join(root, "data"))
+	first := indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Summary: "first", Status: "DONE", Generation: "2026-07-16T20:00:00Z"}
+	if _, err := store.recordArrivalTransition(first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Summary, second.Generation = "second", "2026-07-16T20:01:00Z"
+	arrival, err := store.recordArrivalTransition(second)
+	if err != nil || !arrival.Replaced || arrival.Receipt.Summary != "second" || arrival.Receipt.AcknowledgedAt != "" {
+		t.Fatalf("pending replacement = %+v, %v", arrival, err)
+	}
+	if _, changed, err := store.acknowledge("L-0430", "jay"); err != nil || !changed {
+		t.Fatalf("acknowledge = (%v, %v)", changed, err)
+	}
+	third := second
+	third.Summary, third.Generation = "third", "2026-07-16T20:02:00Z"
+	arrival, err = store.recordArrivalTransition(third)
+	if err != nil || !arrival.Replaced || arrival.Receipt.AcknowledgedAt != "" || arrival.Receipt.Summary != "third" {
+		t.Fatalf("acknowledged re-entry = %+v, %v", arrival, err)
+	}
+}
+
+func TestNotifyStorePreservesFullReceiptSummaryWithoutCreatingSnapshot(t *testing.T) {
+	root := t.TempDir()
+	body := "ID: L-0430\nStatus: DONE\n---\n\nimmutable body\n"
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", body)
+	store := newNotifyStore(filepath.Join(root, "data"))
+	longSummary := strings.Repeat("legacy summary ", 40)
+	if err := store.save(notifyLedger{Receipts: map[string]receiptRecord{
+		"L-0430": {Thread: "alpha", ResultPath: resultPath, Summary: longSummary, Status: "DONE", ArrivedAt: "2026-07-16T16:15:01Z"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.recordArrival(indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Summary: longSummary, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.receipt("L-0430")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := record.ResultPath, resultPath; got != want {
+		t.Fatalf("legacy result path = %q, want %q", got, want)
+	}
+	if got, want := record.Summary, longSummary; got != want {
+		t.Fatalf("summary = %q, want full %q", got, want)
+	}
+}
+
+func TestReceiptEnvelopeGivesAgentOriginalResultPath(t *testing.T) {
 	got := formatReceiptEnvelope("L-0430", receiptRecord{
-		Thread:         "cc-connect-maintenance",
-		Status:         "DONE",
-		SnapshotPath:   "F:\\nexus\\data\\notify_snapshots\\L-0430.result.md",
-		SnapshotSHA256: "abc123",
+		Thread:     "cc-connect-maintenance",
+		Status:     "DONE",
+		ResultPath: "F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md",
 	})
-	want := "[RECEIPT L-0430]\n快照文件：F:\\nexus\\data\\notify_snapshots\\L-0430.result.md\nSHA-256：abc123\n线程：cc-connect-maintenance\n状态：DONE\n\n请直接读取上述 receipt snapshot，并按正常译信流程处理。"
+	want := "[RECEIPT L-0430]\n原信文件：F:\\nexus\\docs\\archive\\threads\\cc-connect-maintenance\\L-0430.result.md\n线程：cc-connect-maintenance\n状态：DONE\n\n请直接读取上述 RESULT 原信，并按正常译信流程处理。"
 	if got != want {
 		t.Errorf("receipt envelope = %q, want %q", got, want)
 	}
 }
 
-func TestReceiptInboxCardPaginatesSnapshotWithoutChangingItsContent(t *testing.T) {
+func TestReceiptInboxCardRendersOpenPointsAndShortUpdateInline(t *testing.T) {
+	record := receiptRecord{
+		Thread: "alpha", Status: "DONE", Summary: "ready", ArrivedAt: "2026-07-16T20:00:00Z", ResultPath: "C:\\x.md", Generation: "g1",
+		OpenPoints: []string{"decide retention"}, Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "new text"}}},
+	}
+	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0430", record, "", 0, 0)
+	for _, want := range []string{"📬 L-0430 · Updated", "Open points:", "• decide retention", "Changes:", "Conclusion\nnew text"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("card missing %q: %s", want, content)
+		}
+	}
+	if len(buttons) != 1 || len(buttons[0]) != 3 {
+		t.Fatalf("short update buttons = %#v", buttons)
+	}
+}
+
+func TestReceiptInboxCardAddsUpdateButtonOnlyForLongUpdate(t *testing.T) {
+	record := receiptRecord{Generation: "g1", Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: strings.Repeat("x", receiptCompactUpdateLimit)}}}}
+	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0430", record, "", 0, 0)
+	if strings.Contains(content, strings.Repeat("x", receiptCompactUpdateLimit)) {
+		t.Fatalf("long update leaked into compact card")
+	}
+	found := false
+	for _, row := range buttons {
+		for _, button := range row {
+			if button.Data == "cmd:/receipt update L-0430 g1 0" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing conditional update button: %#v", buttons)
+	}
+}
+
+func TestReceiptInboxCardUsesTotalCompactBudget(t *testing.T) {
+	record := receiptRecord{Summary: strings.Repeat("s", receiptCompactTextLimit), Generation: "g1", Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "short update"}}}}
+	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0430", record, "", 0, 0)
+	if strings.Contains(content, "short update") {
+		t.Fatalf("update exceeded total compact budget: %q", content)
+	}
+	found := false
+	for _, row := range buttons {
+		for _, button := range row {
+			if button.Data == "cmd:/receipt update L-0430 g1 0" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing update button after base card consumed budget")
+	}
+}
+
+func TestReceiptInboxCardLocalizesUpdateLabels(t *testing.T) {
+	record := receiptRecord{Generation: "g1", OpenPoints: []string{"决定"}, Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "新内容"}}}}
+	content, _ := formatReceiptInboxCard(NewI18n(LangChinese), "L-0430", record, "", 0, 0)
+	for _, want := range []string{"📬 L-0430 · 已更新", "开放点：", "本次更新："} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("localized card missing %q: %s", want, content)
+		}
+	}
+}
+
+func TestReceiptInboxCardPaginatesOriginalResultWithoutHash(t *testing.T) {
 	record := receiptRecord{
 		Thread: "alpha", Status: "DONE", Summary: "ready", ArrivedAt: "2026-07-16T16:20:00Z",
-		SnapshotPath: "F:\\data\\notify_snapshots\\L-0431.result.md", SnapshotSHA256: "abc123",
+		ResultPath: "F:\\nexus\\docs\\archive\\threads\\alpha\\L-0431.result.md",
 	}
 	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0431", record, "first page\nsecond page", 0, 2)
-	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "Thread: alpha") || !strings.Contains(content, "Snapshot path: F:\\data\\notify_snapshots\\L-0431.result.md") || !strings.Contains(content, "Snapshot SHA-256: abc123") || !strings.Contains(content, "Page 1/2") {
+	if !strings.Contains(content, "📬 L-0431") || !strings.Contains(content, "Thread: alpha") || !strings.Contains(content, "Result path: F:\\nexus\\docs\\archive\\threads\\alpha\\L-0431.result.md") || strings.Contains(content, "SHA-256") || !strings.Contains(content, "Page 1/2") {
 		t.Fatalf("inbox card content = %q", content)
 	}
 	if got := buttons[0][0].Text; got != "Next →" {
 		t.Fatalf("next button = %q", got)
 	}
-	if got := buttons[0][0].Data; got != "cmd:/receipt page L-0431 1" {
+	if got := buttons[0][0].Data; got != "cmd:/receipt page L-0431 2026-07-16T16:20:00Z 1" {
 		t.Fatalf("next button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt collapse L-0431" {
+	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt collapse L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("collapse button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431" {
+	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("receive button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][2].Data; got != "cmd:/receipt primary L-0431" {
+	if got := buttons[len(buttons)-1][2].Data; got != "cmd:/receipt primary L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("primary button = %q", got)
 	}
 
@@ -353,5 +622,25 @@ func TestNotifyLetterArrivedDoesNotAdvertiseReceiptWithoutStore(t *testing.T) {
 	}
 	if got, want := p.getSent(), []string{"📬 L-0430 到货"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plain notification = %#v, want %#v", got, want)
+	}
+}
+
+func TestNotifyLetterArrivedUpdatesPendingCardForNewGeneration(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", "body")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("secretary-seat", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.notifyConfig = NotifyConfig{TelegramEnabled: true, Platform: "telegram", SessionKey: "telegram:123:123"}
+	first := indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Status: "DONE", Summary: "first", Generation: "2026-07-16T20:00:00Z"}
+	e.notifyLetterArrived(first)
+	second := first
+	second.Summary, second.Generation = "second", "2026-07-16T20:01:00Z"
+	e.notifyLetterArrived(second)
+	if p.receiptCardsSent != 1 || p.receiptCardsUpdated != 1 {
+		t.Fatalf("card lifecycle = send %d update %d, want 1/1", p.receiptCardsSent, p.receiptCardsUpdated)
+	}
+	if !strings.Contains(p.updatedContent, "second") {
+		t.Fatalf("updated card = %q", p.updatedContent)
 	}
 }

@@ -239,7 +239,15 @@ func MarkdownToSimpleHTML(md string) string {
 			b.WriteString("——————————")
 		} else if m := reUnorderedList.FindStringSubmatch(line); m != nil {
 			indent := strings.Repeat("  ", len(m[1])/2)
-			b.WriteString(indent + "• " + convertInlineHTML(m[2]))
+			item := m[2]
+			if task := reTaskList.FindStringSubmatch(item); task != nil {
+				mark := "☐"
+				if task[1] == "x" || task[1] == "X" {
+					mark = "☑"
+				}
+				item = mark + " " + task[2]
+			}
+			b.WriteString(indent + "• " + convertInlineHTML(item))
 		} else if m := reOrderedList.FindStringSubmatch(line); m != nil {
 			indent := strings.Repeat("  ", len(m[1])/2)
 			numDot := strings.TrimSpace(line[:len(line)-len(m[2])])
@@ -279,6 +287,7 @@ var (
 	reLinkHTML       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	reWikilinkHTML   = regexp.MustCompile(`\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]`)
 	reUnorderedList  = regexp.MustCompile(`^(\s*)[-*]\s+(.*)$`)
+	reTaskList       = regexp.MustCompile(`^\[([ xX])\]\s*(.*)$`)
 	reOrderedList    = regexp.MustCompile(`^(\s*)\d+\.\s+(.*)$`)
 	reTableSep       = regexp.MustCompile(`^\|[\s:|-]+\|$`)
 	reCallout        = regexp.MustCompile(`^\[!(\w+)\]\s*(.*)$`)

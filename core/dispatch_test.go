@@ -27,6 +27,25 @@ Path: F:\nexus\docs\archive\threads\topology-reframe\L-0130.query.md`)
 	}
 }
 
+func TestDispatchStoreRecordsResultProvenanceForTargetOnly(t *testing.T) {
+	store := newDispatchStore(t.TempDir())
+	if err := store.upsert(DispatchExpectation{Letter: "L-0430", Thread: "thread", To: "dev-pro"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.recordResultProvenance("L-0430", "secretary-seat", "wrong-session", `F:\wrong.jsonl`); err != nil {
+		t.Fatal(err)
+	}
+	if id, path := store.resultProvenance("L-0430"); id != "" || path != "" {
+		t.Fatalf("non-target provenance = (%q, %q), want empty", id, path)
+	}
+	if err := store.recordResultProvenance("L-0430", "dev-pro", "producer-session", `F:\producer.jsonl`); err != nil {
+		t.Fatal(err)
+	}
+	if id, path := store.resultProvenance("L-0430"); id != "producer-session" || path != `F:\producer.jsonl` {
+		t.Fatalf("provenance = (%q, %q)", id, path)
+	}
+}
+
 func TestParseDispatchBlockRequiresStandaloneCompleteCommand(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -302,12 +321,12 @@ func TestIsPrivateTelegramSessionKey(t *testing.T) {
 		sessionKey string
 		want       bool
 	}{
-		{"telegram:-1003917051393:7664413698", false},                  // group (negative chat ID)
-		{"telegram:-1003917051393:7664413698:0", false},                 // group with thread
-		{"telegram:7664413698:7664413698", true},                        // DM (positive chat ID == user ID)
-		{"telegram:7664413698", true},                                   // bare DM chat ID
-		{"feishu:some-chat", false},                                     // non-telegram platform
-		{"telegram:not-a-number:1", false},                              // malformed
+		{"telegram:-1003917051393:7664413698", false},   // group (negative chat ID)
+		{"telegram:-1003917051393:7664413698:0", false}, // group with thread
+		{"telegram:7664413698:7664413698", true},        // DM (positive chat ID == user ID)
+		{"telegram:7664413698", true},                   // bare DM chat ID
+		{"feishu:some-chat", false},                     // non-telegram platform
+		{"telegram:not-a-number:1", false},              // malformed
 	}
 	for _, tt := range tests {
 		if got := isPrivateTelegramSessionKey(tt.sessionKey); got != tt.want {

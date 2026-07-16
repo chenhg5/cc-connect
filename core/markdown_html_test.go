@@ -285,6 +285,16 @@ func TestMarkdownToSimpleHTML_NestedList(t *testing.T) {
 	}
 }
 
+func TestMarkdownToSimpleHTML_TaskList(t *testing.T) {
+	out := MarkdownToSimpleHTML("- [ ] pending **review**\n  - [x] finished `build`")
+	if !strings.Contains(out, "• ☐ pending <b>review</b>") {
+		t.Errorf("expected unchecked task item, got %q", out)
+	}
+	if !strings.Contains(out, "  • ☑ finished <code>build</code>") {
+		t.Errorf("expected checked nested task item, got %q", out)
+	}
+}
+
 func TestMarkdownToSimpleHTML_GeminiTypicalOutput(t *testing.T) {
 	md := `## Analysis Results
 

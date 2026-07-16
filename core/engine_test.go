@@ -31,6 +31,50 @@ type stubAgentSession struct{}
 
 func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
 func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error         { return nil }
+
+func TestLetterCommandInjectsExactResultIntoCurrentMessage(t *testing.T) {
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(indexPath, []byte("# INDEX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeResultFile(t, filepath.Join(root, "threads"), "alpha", "L-0430", "## Conclusion\nsource text\n")
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("secretary", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig = NotifyConfig{IndexPath: indexPath}
+	msg := &Message{Content: "/letter L-0430 what changed?", SessionKey: "telegram:1:2", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, msg.Content); handled {
+		t.Fatal("/letter should continue into the current agent session")
+	}
+	for _, want := range []string{"[LETTER SOURCE]", "L-ID: L-0430", "source text", "[Boss query]\nwhat changed?"} {
+		if !strings.Contains(msg.Content, want) {
+			t.Fatalf("injected content missing %q: %q", want, msg.Content)
+		}
+	}
+	if msg.SessionKey != "telegram:1:2" || len(p.getSent()) != 0 {
+		t.Fatalf("/letter changed session or sent source to platform: session=%q sent=%#v", msg.SessionKey, p.getSent())
+	}
+}
+
+func TestLetterCommandMissingResultRepliesWithoutInjection(t *testing.T) {
+	root := t.TempDir()
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("secretary", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig = NotifyConfig{IndexPath: filepath.Join(root, "INDEX.md")}
+	msg := &Message{Content: "/letter L-9999", SessionKey: "telegram:1:2", ReplyCtx: "ctx"}
+
+	if handled := e.handleCommand(p, msg, msg.Content); !handled {
+		t.Fatal("missing RESULT must not reach the agent")
+	}
+	if msg.Content != "/letter L-9999" || len(p.getSent()) != 1 {
+		t.Fatalf("missing RESULT content/sent = %q/%#v", msg.Content, p.getSent())
+	}
+	invalid := &Message{Content: "/letter 0430", SessionKey: "telegram:1:2", ReplyCtx: "ctx"}
+	if handled := e.handleCommand(p, invalid, invalid.Content); !handled || len(p.getSent()) != 2 {
+		t.Fatalf("invalid L-ID must reply without injection: handled=%v sent=%#v", handled, p.getSent())
+	}
+}
 func (s *stubAgentSession) Events() <-chan Event                                         { return make(chan Event) }
 func (s *stubAgentSession) CurrentSessionID() string                                     { return "stub-session" }
 func (s *stubAgentSession) Alive() bool                                                  { return true }
@@ -291,13 +335,27 @@ type stubInlineButtonPlatform struct {
 
 type receiptActionPlatform struct {
 	stubPlatformEngine
-	updatedContent string
-	updatedButtons [][]ButtonOption
-	buttonContent  string
-	buttonRows     [][]ButtonOption
-	deleted        bool
-	deleteErr      error
-	reconstructed  string
+	updatedContent      string
+	updatedButtons      [][]ButtonOption
+	buttonContent       string
+	buttonRows          [][]ButtonOption
+	deleted             bool
+	deleteErr           error
+	reconstructed       string
+	receiptCardsSent    int
+	receiptCardsUpdated int
+}
+
+func (p *receiptActionPlatform) SendReceiptCard(_ context.Context, _ any, content string, buttons [][]ButtonOption) (MessageLocator, error) {
+	p.receiptCardsSent++
+	p.buttonContent, p.buttonRows = content, buttons
+	return MessageLocator{Platform: p.n, ChatID: 1, ThreadID: 2, MessageID: p.receiptCardsSent}, nil
+}
+
+func (p *receiptActionPlatform) UpdateReceiptCard(_ context.Context, _ MessageLocator, content string, buttons [][]ButtonOption) error {
+	p.receiptCardsUpdated++
+	p.updatedContent, p.updatedButtons = content, buttons
+	return nil
 }
 
 func (p *receiptActionPlatform) SendWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
@@ -822,10 +880,34 @@ func TestEngineReceiptManualAcknowledgesWithoutAgentTurn(t *testing.T) {
 	}
 }
 
-func TestEngineReceiptPrimaryHandsSnapshotToConfiguredSession(t *testing.T) {
+func TestEngineReceiptRejectsStaleGeneration(t *testing.T) {
 	root := t.TempDir()
-	snapshotBody := "ID: L-0430\nStatus: DONE\n---\n\n## Conclusion\noriginal body\n"
-	resultPath := writeResultFile(t, root, "cc-connect-maintenance", "L-0430", snapshotBody)
+	resultPath := writeResultFile(t, root, "alpha", "L-0430", "body")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	first := indexResultRow{Letter: "L-0430", Thread: "alpha", Path: resultPath, Status: "DONE", Generation: "2026-07-16T20:00:00Z"}
+	if err := e.notifyStore.recordArrival(first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Generation = "2026-07-16T20:01:00Z"
+	if err := e.notifyStore.recordArrival(second); err != nil {
+		t.Fatal(err)
+	}
+	if handled := e.receiveReceipt(p, &Message{UserName: "jay", ReplyCtx: "ctx"}, "L-0430", first.Generation); !handled {
+		t.Fatal("stale receipt must remain local")
+	}
+	record, err := e.notifyStore.receipt("L-0430")
+	if err != nil || record.AcknowledgedAt != "" || p.deleted {
+		t.Fatalf("stale receipt changed current generation: %+v, deleted=%v, err=%v", record, p.deleted, err)
+	}
+}
+
+func TestEngineReceiptPrimaryHandsCurrentOriginalToConfiguredSession(t *testing.T) {
+	root := t.TempDir()
+	originalBody := "ID: L-0430\nStatus: DONE\n---\n\n## Conclusion\noriginal body\n"
+	resultPath := writeResultFile(t, root, "cc-connect-maintenance", "L-0430", originalBody)
 	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.notifyConfig.ReceiptSessionKey = "test:secretary"
@@ -836,12 +918,16 @@ func TestEngineReceiptPrimaryHandsSnapshotToConfiguredSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record arrival: %v", err)
 	}
+	currentBody := "ID: L-0430\nStatus: DONE\n---\n\n## Conclusion\nupdated body\n"
+	if err := os.WriteFile(resultPath, []byte(currentBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	msg := &Message{UserName: "jay", ReplyCtx: "ctx"}
 
 	if handled := e.handoffReceiptToPrimary(p, msg, "L-0430"); handled {
 		t.Fatal("primary handoff must start one agent turn")
 	}
-	if !strings.Contains(msg.Content, snapshotBody) {
+	if !strings.Contains(msg.Content, currentBody) {
 		t.Fatalf("primary source missing from message: %q", msg.Content)
 	}
 	if msg.SessionKey != "test:secretary" || msg.ReplyCtx != "ctx:test:secretary" {
@@ -901,25 +987,25 @@ func TestEngineReceiptPrimaryDeleteFailureRestoresPendingReceipt(t *testing.T) {
 	}
 }
 
-func TestEngineLetterInjectsSnapshotAndQuestionWithoutAcknowledging(t *testing.T) {
+func TestEngineLetterInjectsCurrentOriginalAndQuestionWithoutAcknowledging(t *testing.T) {
 	root := t.TempDir()
-	resultPath := writeResultFile(t, root, "alpha", "L-0436", "ID: L-0436\nStatus: DONE\n---\n\nimmutable body\n")
-	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
-	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0436", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+	indexPath := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(indexPath, []byte("# INDEX\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeResultFile(t, filepath.Join(root, "threads"), "alpha", "L-0436", "ID: L-0436\nStatus: DONE\n---\n\ncurrent body\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig = NotifyConfig{IndexPath: indexPath}
 	msg := &Message{SessionKey: "test:current", ReplyCtx: "ctx"}
 	if handled := e.handleCommand(p, msg, "/letter L-0436 what remains"); handled {
 		t.Fatal("letter must fall through to current agent session")
 	}
-	if !strings.Contains(msg.Content, "immutable body") || !strings.Contains(msg.Content, "what remains") {
+	if !strings.Contains(msg.Content, "current body") || !strings.Contains(msg.Content, "what remains") {
 		t.Fatalf("letter content = %q", msg.Content)
 	}
-	receipt, err := e.notifyStore.receipt("L-0436")
-	if err != nil || receipt.AcknowledgedAt != "" {
-		t.Fatalf("letter changed receipt: %+v, %v", receipt, err)
+	if len(p.getSent()) != 0 {
+		t.Fatalf("letter sent source to platform: %#v", p.getSent())
 	}
 }
 
@@ -964,6 +1050,33 @@ func TestEngineReceiptPageUpdatesInboxCardWithoutAgentTurn(t *testing.T) {
 	if p.deleted {
 		t.Fatal("expand must not delete the inbox card")
 	}
+}
+
+func TestEngineReceiptUpdatePageUpdatesInboxCardWithoutAgentTurn(t *testing.T) {
+	root := t.TempDir()
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0432", Thread: "alpha", Generation: "g1", Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: strings.Repeat("x", receiptCompactUpdateLimit)}}}}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt update L-0432 g1 0"); !handled {
+		t.Fatal("update action must be handled without reaching the agent")
+	}
+	if !strings.Contains(p.updatedContent, "Conclusion") || !strings.Contains(p.updatedContent, "x") {
+		t.Fatalf("updated card = %q", p.updatedContent)
+	}
+}
+
+func TestEngineReceiptUpdatePageRejectsStaleGeneration(t *testing.T) {
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyStore = newNotifyStore(t.TempDir())
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0432", Generation: "current", Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "new"}}}}); err != nil { t.Fatal(err) }
+	if handled := e.handleCommand(p, &Message{ReplyCtx: "inbox"}, "/receipt update L-0432 stale 0"); !handled { t.Fatal("stale update must be handled locally") }
+	if p.updatedContent != "" { t.Fatalf("stale update edited card: %q", p.updatedContent) }
+	if got := p.getSent(); len(got) != 1 || got[0] != "❌ Receipt is unavailable." { t.Fatalf("stale reply = %#v", got) }
 }
 
 func TestEngineReceiptDeleteFailureKeepsCardAndDoesNotForward(t *testing.T) {
