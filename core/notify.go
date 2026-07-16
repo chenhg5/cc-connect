@@ -547,10 +547,30 @@ func receiptOriginalPages(record receiptRecord, emptyText string) ([]string, err
 	return pages, nil
 }
 
+func formatReceiptUpdateBody(update receiptUpdate) string {
+	if len(update.Sections) == 0 {
+		return ""
+	}
+	var blocks []string
+	for _, section := range update.Sections {
+		blocks = append(blocks, section.Heading+"\n"+section.Body)
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
 // formatReceiptInboxCard renders the Boss-facing inbox card. A non-positive
 // pageCount is the compact envelope; positive pageCount is an original page.
 func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, body string, page, pageCount int) (string, [][]ButtonOption) {
 	content := i18n.Tf(MsgReceiptCardCompact, letter, record.Thread, record.Status, record.Summary, record.ArrivedAt, record.ResultPath)
+	if len(record.Update.Sections) > 0 {
+		content = strings.Replace(content, "📬 "+letter, "📬 "+letter+" · Updated", 1)
+	}
+	if len(record.OpenPoints) > 0 {
+		content += "\n\nOpen points:\n• " + strings.Join(record.OpenPoints, "\n• ")
+	}
+	if update := formatReceiptUpdateBody(record.Update); update != "" {
+		content += "\n\nChanges:\n" + update
+	}
 	generation := record.Generation
 	if generation == "" {
 		generation = record.ArrivedAt

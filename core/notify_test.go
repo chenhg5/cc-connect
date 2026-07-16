@@ -386,6 +386,20 @@ func TestReceiptEnvelopeGivesAgentOriginalResultPath(t *testing.T) {
 	}
 }
 
+func TestReceiptInboxCardRendersOpenPointsAndShortUpdateInline(t *testing.T) {
+	record := receiptRecord{
+		Thread: "alpha", Status: "DONE", Summary: "ready", ArrivedAt: "2026-07-16T20:00:00Z", ResultPath: "C:\\x.md", Generation: "g1",
+		OpenPoints: []string{"decide retention"}, Update: receiptUpdate{Sections: []receiptSection{{Heading: "Conclusion", Body: "new text"}}},
+	}
+	content, buttons := formatReceiptInboxCard(NewI18n(LangEnglish), "L-0430", record, "", 0, 0)
+	for _, want := range []string{"📬 L-0430 · Updated", "Open points:", "• decide retention", "Changes:", "Conclusion\nnew text"} {
+		if !strings.Contains(content, want) { t.Fatalf("card missing %q: %s", want, content) }
+	}
+	if len(buttons) != 1 || len(buttons[0]) != 3 {
+		t.Fatalf("short update buttons = %#v", buttons)
+	}
+}
+
 func TestReceiptInboxCardPaginatesOriginalResultWithoutHash(t *testing.T) {
 	record := receiptRecord{
 		Thread: "alpha", Status: "DONE", Summary: "ready", ArrivedAt: "2026-07-16T16:20:00Z",
