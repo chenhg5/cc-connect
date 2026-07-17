@@ -2074,6 +2074,58 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Grok Build (xAI) / 项目：Grok Build (xAI)
+# =============================================================================
+# Prerequisites / 前置条件:
+#   1. Install Grok Build CLI: curl -fsSL https://x.ai/cli/install.sh | bash
+#      安装 Grok Build CLI（见 https://x.ai/cli ）
+#   2. Authenticate: `grok login`  OR  set XAI_API_KEY
+#      登录：`grok login` 或设置环境变量 XAI_API_KEY
+#
+# How it works / 工作原理:
+#   cc-connect drives headless Grok via:
+#     grok -p/--prompt-file ... --output-format streaming-json [--resume <id>]
+#   Streaming events (thought/text/end) are mapped to core.Event and delivered
+#   to your messaging platform. Sessions live under ~/.grok/sessions/.
+#   cc-connect 通过无头模式驱动 Grok，将 streaming-json 事件映射为 IM 消息；
+#   会话保存在 ~/.grok/sessions/。
+
+# [[projects]]
+# name = "my-grok-project"
+#
+# [projects.agent]
+# type = "grok"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "yolo"            # "default" | "accept_edits" | "yolo" | "plan" | "dont_ask"
+# cmd = "grok"             # CLI binary name (default: "grok")
+# model = "grok-4.5"       # optional; run `grok models` to list
+# # reasoning_effort = "high"  # optional: low | medium | high | ...
+# # max_turns = 50             # optional agent turn cap
+# timeout_mins = 30        # per-turn timeout; 0 = no limit
+# # env = { XAI_API_KEY = "xai-..." }
+#
+# Mode options / 模式说明:
+# - "default":      permission-mode default + --always-approve (headless-safe)
+# - "accept_edits": auto-approve edit tools
+# - "yolo":         bypass all permission prompts
+# - "plan":         read-only plan mode (no always-approve)
+# - "dont_ask":     dontAsk permission mode
+#
+# # Optional provider block (injects XAI_API_KEY) / 可选 Provider
+# # [[projects.agent.providers]]
+# # name = "xai"
+# # api_key = "xai-..."
+# # # base_url = "https://api.x.ai/v1"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: Using GitHub Copilot / 项目：使用 GitHub Copilot (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Prerequisites / 前置条件:
