@@ -817,11 +817,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "La solicitud de permiso ha caducado.",
 	},
 	MsgPermissionTimeoutNotification: {
-		LangEnglish:            "⏰ Permission request for `%s` timed out and was auto-denied. Please send your message again if you still want to proceed.",
-		LangChinese:            "⏰ 工具 `%s` 的权限请求超时，已自动拒绝。如需继续，请重新发送消息。",
-		LangTraditionalChinese: "⏰ 工具 `%s` 的權限請求超時，已自動拒絕。如需繼續，請重新發送訊息。",
-		LangJapanese:           "⏰ ツール `%s` の権限リクエストがタイムアウトし、自動拒否されました。続行する場合はメッセージを再度送信してください。",
-		LangSpanish:            "⏰ La solicitud de permiso para `%s` ha caducado y se ha denegado automáticamente. Envía tu mensaje de nuevo si deseas continuar.",
+		LangEnglish:            "⏰ Permission request for `%s` timed out and was auto-denied.",
+		LangChinese:            "⏰ 工具 `%s` 的权限请求超时，已自动拒绝。",
+		LangTraditionalChinese: "⏰ 工具 `%s` 的權限請求超時，已自動拒絕。",
+		LangJapanese:           "⏰ ツール `%s` の権限リクエストがタイムアウトし、自動拒否されました。",
+		LangSpanish:            "⏰ La solicitud de permiso para `%s` ha caducado y se ha denegado automáticamente.",
 	},
 	MsgSessionNotFound: {
 		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",
