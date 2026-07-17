@@ -238,24 +238,34 @@ func writeAtomicNoOverwrite(dir, name string, data []byte) bool {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		if cerr := tmp.Close(); cerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile close failed during write-failure cleanup", "tmp", tmpName, "error", cerr)
+		}
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile remove failed during write-failure cleanup", "tmp", tmpName, "error", rerr)
+		}
 		slog.Error("SaveFilesToDisk: tempfile write failed", "tmp", tmpName, "error", err)
 		return false
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile remove failed during close-failure cleanup", "tmp", tmpName, "error", rerr)
+		}
 		slog.Error("SaveFilesToDisk: tempfile close failed", "tmp", tmpName, "error", err)
 		return false
 	}
 	target := filepath.Join(dir, name)
 	if err := os.Link(tmpName, target); err != nil {
-		os.Remove(tmpName)
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile remove failed during link-failure cleanup", "tmp", tmpName, "error", rerr)
+		}
 		slog.Error("SaveFilesToDisk: refusing to overwrite existing file",
 			"path", target, "error", err)
 		return false
 	}
-	os.Remove(tmpName)
+	if err := os.Remove(tmpName); err != nil {
+		slog.Warn("SaveFilesToDisk: tempfile remove failed after successful link", "tmp", tmpName, "error", err)
+	}
 	return true
 }
 

@@ -950,7 +950,7 @@ func (p *previewLifecyclePlatform) waitPreviewUpdates(t *testing.T, n int) {
 }
 
 func (p *previewLifecyclePlatform) snapshotPreviewLifecycle() (texts []string, starts []string, updates []string, deletes []any) {
-	texts, _, _, _, _ = p.turnPlatform.snapshot()
+	texts, _, _, _, _ = p.snapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return texts,
