@@ -136,7 +136,7 @@ type Platform struct {
 	client           *lark.Client
 	replayClient     *lark.Client
 	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
+	wsClient         wsClientIface
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
@@ -567,6 +567,20 @@ func (p *Platform) shouldUseWebhookMode() bool {
 	return strings.TrimSpace(p.encryptKey) != ""
 }
 
+// wsClientIface is the minimal surface cc-connect needs from a Feishu
+// WebSocket client. The real *larkws.Client satisfies it; tests substitute a
+// fake to drive Start/Stop behavior without hitting the network (issue
+// #1562 regression tests).
+type wsClientIface interface {
+	Start(ctx context.Context) error
+}
+
+// wsClientFactory builds a wsClientIface. Default is the real larkws.NewClient;
+// tests override it to capture construction args and inject fakes.
+var wsClientFactory = func(appID, appSecret string, opts ...larkws.ClientOption) wsClientIface {
+	return larkws.NewClient(appID, appSecret, opts...)
+}
+
 // fanOutP2MessageReceiveV1 is the dispatcher callback for inbound P2 messages.
 // Extracted as a method so tests can invoke it directly without driving the
 // full SDK dispatcher (issue #1562 regression coverage).
@@ -629,7 +643,7 @@ func (p *Platform) startWebSocketMode() error {
 	if p.domain != lark.FeishuBaseUrl {
 		wsOpts = append(wsOpts, larkws.WithDomain(p.domain))
 	}
-	p.wsClient = larkws.NewClient(p.appID, p.appSecret, wsOpts...)
+	p.wsClient = wsClientFactory(p.appID, p.appSecret, wsOpts...)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
