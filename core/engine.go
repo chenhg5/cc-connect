@@ -5445,7 +5445,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 					if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
 						Behavior: "deny",
-						Message:  e.i18n.T(MsgPermissionTimeoutMsg),
+						Message:  "Permission request timed out -- the user is away or inactive. Try safer approaches that don't require user approval.",
 					}); err != nil {
 						slog.Error("failed to auto-deny permission on timeout",
 							"request_id", event.RequestID, "error", err)

@@ -646,7 +646,6 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
-	MsgPermissionTimeoutMsg     MsgKey = "permission_timeout_msg"
 	MsgPermissionTimeoutNotification MsgKey = "permission_timeout_notification"
 )
 
@@ -809,13 +808,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/yolo` を使用して今後のリクエストを承認してください。",
 		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/yolo` para aprobar solicitudes futuras.",
 	},
-	MsgPermissionTimeoutMsg: {
-		LangEnglish:            "Permission request timed out.",
-		LangChinese:            "权限请求超时。",
-		LangTraditionalChinese: "權限請求超時。",
-		LangJapanese:           "権限リクエストがタイムアウトしました。",
-		LangSpanish:            "La solicitud de permiso ha caducado.",
-	},
+
 	MsgPermissionTimeoutNotification: {
 		LangEnglish:            "⏰ Permission request for `%s` timed out and was auto-denied.",
 		LangChinese:            "⏰ 工具 `%s` 的权限请求超时，已自动拒绝。",
