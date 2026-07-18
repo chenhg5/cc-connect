@@ -163,3 +163,72 @@ func TestKimiFlagSupport_ModernWithoutWorkDir(t *testing.T) {
 	assert.False(t, support.WorkDir,
 		"probe must NOT surface work-dir support on CLI builds that dropped it (#1476)")
 }
+
+// kimiCodeHelpV026 is the verbatim `kimi --help` output of the Kimi Code CLI
+// v0.26.0 (Node.js, commander.js layout) — the build whose incompatibility
+// with the kimi agent dialect is tracked in #1561. It advertises neither
+// --print, nor --work-dir, nor --quiet, nor --resume.
+const kimiCodeHelpV026 = `
+Usage: kimi [options] [command]
+
+The Starting Point for Next-Gen Agents
+
+Options:
+  -V, --version                 output the version number
+  -S, --session [id]            Resume a session. With ID: resume that session. Without ID:
+                                interactively pick.
+  -c, --continue                Continue the previous session for the working directory. (default:
+                                false)
+  -y, --yolo                    Automatically approve all actions. (default: false)
+  --auto                        Start in auto permission mode. (default: false)
+  -m, --model <model>           LLM model alias to use for this invocation. Defaults to
+                                default_model in config.toml.
+  -p, --prompt <prompt>         Run one prompt non-interactively and print the response.
+  --output-format <format>      Output format for prompt mode. Defaults to text. (choices: "text",
+                                "stream-json")
+  --skills-dir <dir>            Load skills from this directory instead of auto-discovered user and
+                                project directories. Can be repeated. (default: [])
+  --add-dir <dir>               Add an additional workspace directory for this session. Can be
+                                repeated. (default: [])
+  --plan                        Start in plan mode. (default: false)
+  -h, --help                    Show help.
+
+Commands:
+  export [options] [sessionId]  Export a session as a ZIP archive.
+  provider                      Manage LLM providers non-interactively.
+  acp [options]                 Run kimi-code as an Agent Client Protocol (ACP) server over stdio.
+`
+
+// TestParseKimiHelpFlags_KimiCodeV026 anchors the probe to the real Kimi
+// Code CLI v0.26.0 help surface (#1561): none of the legacy-only flags may
+// be detected.
+func TestParseKimiHelpFlags_KimiCodeV026(t *testing.T) {
+	flags := parseKimiHelpFlags(kimiCodeHelpV026)
+	assert.False(t, flags["--print"], "kimi-code does not advertise --print")
+	assert.False(t, flags["--work-dir"], "kimi-code does not advertise --work-dir")
+	assert.False(t, flags["--quiet"], "kimi-code does not advertise --quiet")
+	assert.False(t, flags["--resume"], "kimi-code does not advertise --resume")
+	assert.True(t, flags["--prompt"], "kimi-code advertises --prompt")
+	assert.True(t, flags["--output-format"], "kimi-code advertises --output-format")
+	assert.True(t, flags["--plan"], "kimi-code advertises --plan")
+	assert.True(t, flags["--session"], "kimi-code advertises --session")
+}
+
+// TestKimiFlagSupport_QuietMapping covers the --quiet probe-mapping added in
+// #1561: legacy kimi-cli advertises --quiet, Kimi Code CLI does not.
+func TestKimiFlagSupport_QuietMapping(t *testing.T) {
+	legacy := parseKimiHelpFlags(legacyKimiHelp)
+	assert.True(t, legacy["--quiet"], "legacy help advertises --quiet")
+
+	modern := parseKimiHelpFlags(kimiCodeHelpV026)
+	assert.False(t, modern["--quiet"], "kimi-code help must not advertise --quiet")
+}
+
+// TestKimiFlagSupport_IsModernFlavor pins the family discriminator: presence
+// of --print means legacy kimi-cli dialect, absence means Kimi Code dialect.
+func TestKimiFlagSupport_IsModernFlavor(t *testing.T) {
+	assert.False(t, kimiFlagSupport{Print: true}.isModernFlavor(),
+		"--print advertised => legacy kimi-cli flavor")
+	assert.True(t, kimiFlagSupport{}.isModernFlavor(),
+		"no --print (incl. probe failure fallback) => modern Kimi Code flavor")
+}
