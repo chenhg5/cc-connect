@@ -711,7 +711,8 @@ func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, bod
 		if update != "" && !inlineUpdate {
 			buttons = append([]ButtonOption{{Text: i18n.T(MsgReceiptViewUpdate), Data: "cmd:/receipt update " + letter + " " + generation + " 0"}}, buttons...)
 		}
-		return content, [][]ButtonOption{buttons}
+		closeRow := []ButtonOption{{Text: i18n.T(MsgReceiptClose), Data: "cmd:/receipt close " + letter + " " + generation}}
+		return content, [][]ButtonOption{buttons, closeRow}
 	}
 	content += "\n\n" + i18n.Tf(MsgReceiptCardPage, page+1, pageCount, body)
 	var buttons [][]ButtonOption
@@ -730,6 +731,7 @@ func formatReceiptInboxCard(i18n *I18n, letter string, record receiptRecord, bod
 		{Text: i18n.T(MsgReceiptReceive), Data: "cmd:/receipt receive " + letter + " " + generation},
 		{Text: i18n.T(MsgReceiptHandoffPrimary), Data: "cmd:/receipt primary " + letter + " " + generation},
 	})
+	buttons = append(buttons, []ButtonOption{{Text: i18n.T(MsgReceiptClose), Data: "cmd:/receipt close " + letter + " " + generation}})
 	return content, buttons
 }
 

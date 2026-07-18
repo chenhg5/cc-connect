@@ -493,8 +493,11 @@ func TestReceiptInboxCardRendersOpenPointsAndShortUpdateInline(t *testing.T) {
 			t.Fatalf("card missing %q: %s", want, content)
 		}
 	}
-	if len(buttons) != 1 || len(buttons[0]) != 3 {
+	if len(buttons) != 2 || len(buttons[0]) != 3 || len(buttons[1]) != 1 {
 		t.Fatalf("short update buttons = %#v", buttons)
+	}
+	if got := buttons[1][0].Data; got != "cmd:/receipt close L-0430 g1" {
+		t.Fatalf("close button = %q", got)
 	}
 }
 
@@ -561,13 +564,17 @@ func TestReceiptInboxCardPaginatesOriginalResultWithoutHash(t *testing.T) {
 	if got := buttons[0][0].Data; got != "cmd:/receipt page L-0431 2026-07-16T16:20:00Z 1" {
 		t.Fatalf("next button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt collapse L-0431 2026-07-16T16:20:00Z" {
+	if got := buttons[len(buttons)-1][0].Data; got != "cmd:/receipt close L-0431 2026-07-16T16:20:00Z" {
+		t.Fatalf("close button = %q", got)
+	}
+	actionRow := buttons[len(buttons)-2]
+	if got := actionRow[0].Data; got != "cmd:/receipt collapse L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("collapse button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][1].Data; got != "cmd:/receipt receive L-0431 2026-07-16T16:20:00Z" {
+	if got := actionRow[1].Data; got != "cmd:/receipt receive L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("receive button = %q", got)
 	}
-	if got := buttons[len(buttons)-1][2].Data; got != "cmd:/receipt primary L-0431 2026-07-16T16:20:00Z" {
+	if got := actionRow[2].Data; got != "cmd:/receipt primary L-0431 2026-07-16T16:20:00Z" {
 		t.Fatalf("primary button = %q", got)
 	}
 

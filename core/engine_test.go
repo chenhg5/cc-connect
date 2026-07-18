@@ -341,6 +341,7 @@ type receiptActionPlatform struct {
 	buttonRows          [][]ButtonOption
 	deleted             bool
 	deleteErr           error
+	updateErr           error
 	reconstructed       string
 	receiptCardsSent    int
 	receiptCardsUpdated int
@@ -365,6 +366,9 @@ func (p *receiptActionPlatform) SendWithButtons(_ context.Context, _ any, conten
 }
 
 func (p *receiptActionPlatform) UpdateMessageWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
+	if p.updateErr != nil {
+		return p.updateErr
+	}
 	p.updatedContent = content
 	p.updatedButtons = buttons
 	return nil
@@ -1102,6 +1106,208 @@ func TestEngineReceiptDeleteFailureKeepsCardAndDoesNotForward(t *testing.T) {
 	}
 	if p.deleted {
 		t.Fatal("failed delete must leave inbox card")
+	}
+}
+
+// writeFakeArchiveDailyScript installs a stand-in for archive-daily.ps1 under
+// <root>/scripts so closeReceiptFromInbox's exec.Command call has something
+// to run without touching the real nexus-archive repo. It only needs to
+// print the JSON receipt shape runArchiveClose parses.
+func writeFakeArchiveDailyScript(t *testing.T, root, body string) {
+	t.Helper()
+	if _, err := exec.LookPath("powershell"); err != nil {
+		t.Skip("powershell not available in this environment")
+	}
+	dir := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "archive-daily.ps1"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEngineReceiptCloseRequiresAdmin(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"close", "closeconfirm", "closecancel"} {
+		msg := &Message{UserID: "not-boss", UserName: "intruder", ReplyCtx: "inbox"}
+		if handled := e.handleCommand(p, msg, "/receipt "+sub+" L-0449"); !handled {
+			t.Fatalf("%s: non-admin call must not start an agent turn", sub)
+		}
+		if p.updatedContent != "" || p.deleted {
+			t.Fatalf("%s: non-admin call must not touch the inbox card (updated=%q deleted=%v)", sub, p.updatedContent, p.deleted)
+		}
+	}
+	record, err := e.notifyStore.receipt("L-0449")
+	if err != nil || record.AcknowledgedAt != "" {
+		t.Fatalf("non-admin close must not change receipt state: %+v, err=%v", record, err)
+	}
+}
+
+func TestEngineReceiptCloseShowsConfirmThenCancelRestoresCard(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserID: "boss-id", UserName: "boss", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt close L-0449"); !handled {
+		t.Fatal("close confirm must not start an agent turn")
+	}
+	if len(p.updatedButtons) != 1 || len(p.updatedButtons[0]) != 2 {
+		t.Fatalf("confirm card buttons = %#v", p.updatedButtons)
+	}
+	if !strings.Contains(p.updatedButtons[0][0].Data, "closeconfirm") || !strings.Contains(p.updatedButtons[0][1].Data, "closecancel") {
+		t.Fatalf("confirm card buttons wired wrong: %#v", p.updatedButtons)
+	}
+
+	if handled := e.handleCommand(p, msg, "/receipt closecancel L-0449"); !handled {
+		t.Fatal("close cancel must not start an agent turn")
+	}
+	found := false
+	for _, row := range p.updatedButtons {
+		for _, btn := range row {
+			if strings.Contains(btn.Data, "receive") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("cancel must restore the normal inbox card, got %#v", p.updatedButtons)
+	}
+	if p.deleted {
+		t.Fatal("cancel must not delete the inbox card")
+	}
+	record, err := e.notifyStore.receipt("L-0449")
+	if err != nil || record.AcknowledgedAt != "" {
+		t.Fatalf("cancel must not change receipt state: %+v, err=%v", record, err)
+	}
+}
+
+func TestEngineReceiptCloseConfirmSuccessPushesAndDeletesCard(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	writeFakeArchiveDailyScript(t, root, `Write-Output '{"status":"ready","ids":["L-0449"],"pushed":true,"push_error":""}'`)
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Summary: "ready", Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserID: "boss-id", UserName: "boss", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt closeconfirm L-0449"); !handled {
+		t.Fatal("close confirm execution must not start an agent turn")
+	}
+	if !p.deleted {
+		t.Fatal("successful close+push must delete the inbox card")
+	}
+	record, err := e.notifyStore.receipt("L-0449")
+	if err != nil || record.AcknowledgedAt == "" {
+		t.Fatalf("successful close must acknowledge the receipt: %+v, err=%v", record, err)
+	}
+}
+
+func TestEngineReceiptCloseConfirmPushFailureKeepsCardWithRetry(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	writeFakeArchiveDailyScript(t, root, `Write-Output '{"status":"ready","ids":["L-0449"],"pushed":false,"push_error":"non-fast-forward"}'`)
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Summary: "ready", Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserID: "boss-id", UserName: "boss", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt closeconfirm L-0449"); !handled {
+		t.Fatal("close confirm execution must not start an agent turn")
+	}
+	if p.deleted {
+		t.Fatal("a committed-but-unpushed close must leave the card in place for retry")
+	}
+	if len(p.updatedButtons) == 0 || !strings.Contains(p.updatedButtons[0][0].Data, "closeconfirm") {
+		t.Fatalf("pending-sync card must offer a retry button: %#v", p.updatedButtons)
+	}
+	if !strings.Contains(p.updatedContent, "non-fast-forward") {
+		t.Fatalf("pending-sync card must surface archive-daily.ps1's actual push_error, not a placeholder: %q", p.updatedContent)
+	}
+	record, err := e.notifyStore.receipt("L-0449")
+	if err != nil || record.AcknowledgedAt != "" {
+		t.Fatalf("unsynced close must not acknowledge the receipt yet: %+v, err=%v", record, err)
+	}
+}
+
+// TestEngineReceiptCloseConfirmUpdateFailureFallsBackToReply covers the
+// Copilot review finding on PR #37: if the inline card update itself fails
+// (not the archive close), the admin must still get a plain-text message
+// instead of silence.
+func TestEngineReceiptCloseConfirmUpdateFailureFallsBackToReply(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	writeFakeArchiveDailyScript(t, root, `Write-Error 'correspondence error: boom'; exit 1`)
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}, updateErr: errors.New("telegram edit failed")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Summary: "ready", Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserID: "boss-id", UserName: "boss", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt closeconfirm L-0449"); !handled {
+		t.Fatal("close confirm execution must not start an agent turn")
+	}
+	if p.updatedContent != "" {
+		t.Fatalf("a failed card update must not report itself as applied: %q", p.updatedContent)
+	}
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "boom") {
+		t.Fatalf("a failed card update must fall back to a plain reply describing the failure, got %#v", sent)
+	}
+}
+
+func TestEngineReceiptCloseConfirmHardFailureKeepsCardWithRetry(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	writeFakeArchiveDailyScript(t, root, `Write-Error 'correspondence error: boom'; exit 1`)
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	if err := e.notifyStore.recordArrival(indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Summary: "ready", Status: "DONE"}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserID: "boss-id", UserName: "boss", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt closeconfirm L-0449"); !handled {
+		t.Fatal("close confirm execution must not start an agent turn")
+	}
+	if p.deleted {
+		t.Fatal("a hard close failure must leave the card in place for retry")
+	}
+	if len(p.updatedButtons) == 0 || !strings.Contains(p.updatedButtons[0][0].Data, "closeconfirm") {
+		t.Fatalf("failure card must offer a retry button: %#v", p.updatedButtons)
+	}
+	record, err := e.notifyStore.receipt("L-0449")
+	if err != nil || record.AcknowledgedAt != "" {
+		t.Fatalf("failed close must not acknowledge the receipt: %+v, err=%v", record, err)
 	}
 }
 
