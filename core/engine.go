@@ -500,6 +500,7 @@ type Engine struct {
 	notifyWatcherStarted bool
 
 	outboxConfig         OutboxConfig
+	outboxMu             sync.RWMutex
 	outboxRecords        map[string]outboxRecord
 	outboxManual         map[string]bool
 	outboxWatcherStarted bool

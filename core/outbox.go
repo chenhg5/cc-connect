@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -48,7 +49,7 @@ func scanOutboxQueries(threadsDir, indexPath string, dispatched map[string]bool)
 }
 
 func formatOutboxCard(i18n *I18n, record outboxRecord, letter, body string, page, pageCount int) (string, [][]ButtonOption) {
-	content := fmt.Sprintf("📤 %s\nThread: %s\nTo: %s\nRoute: %s\nSummary: %s\nQuery path: %s", letter, record.Thread, record.To, record.Route, record.Summary, record.QueryPath)
+	content := fmt.Sprintf("📤 %s\nThread: %s\nTo: %s\nRoute: %s\nSummary: %s\nQuery: %s", letter, record.Thread, record.To, record.Route, record.Summary, filepath.Base(record.QueryPath))
 	if pageCount <= 0 { return content, [][]ButtonOption{{
 		{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/outbox page " + letter + " " + record.Generation + " 0"},
 		{Text: "🙋 我自己发", Data: "cmd:/outbox manual " + letter + " " + record.Generation},
@@ -77,6 +78,7 @@ func (e *Engine) configureOutbox(cfg OutboxConfig) {
 }
 
 func (e *Engine) checkOutbox() {
+	e.outboxMu.Lock(); defer e.outboxMu.Unlock()
 	if !e.outboxConfig.Enabled { return }
 	dispatched := e.ensureDispatchStore().letters(); for letter := range e.outboxManual { dispatched[letter] = true }
 	queries, err := scanOutboxQueries(e.outboxConfig.threadsDir(), e.outboxConfig.IndexPath, dispatched)
@@ -105,6 +107,7 @@ func (e *Engine) publishOutbox(q queryFileInfo) {
 }
 
 func (e *Engine) handleOutboxCommand(p Platform, msg *Message, args []string) bool {
+	e.outboxMu.Lock(); defer e.outboxMu.Unlock()
 	if len(args) == 0 { var lines []string; for letter, record := range e.outboxRecords { lines = append(lines, fmt.Sprintf("%s · %s · %s · %s", letter, record.To, record.Route, record.Thread)) }; if len(lines) == 0 { e.reply(p,msg.ReplyCtx,"Outbox is empty.") } else { e.reply(p,msg.ReplyCtx,"Pending outbox:\n"+strings.Join(lines,"\n")) }; return true }
 	if (args[0] != "page" && args[0] != "collapse" && args[0] != "manual" && args[0] != "secretary") || len(args) < 3 { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
 	record, ok := e.outboxRecords[args[1]]; if !ok || record.Generation != args[2] { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
@@ -112,9 +115,9 @@ func (e *Engine) handleOutboxCommand(p Platform, msg *Message, args []string) bo
 	if args[0] == "secretary" { receipt, err := e.executeDispatch(p,msg.SessionKey,dispatchRequest{Letter:args[1],Thread:record.Thread,To:record.To,Path:record.QueryPath}); if err != nil { e.reply(p,msg.ReplyCtx,"⚠️ Dispatch rejected: "+err.Error()) } else { delete(e.outboxRecords,args[1]); if d,ok:=p.(MessageDeleter); ok { _=d.DeleteMessage(e.ctx,msg.ReplyCtx) }; e.reply(p,msg.ReplyCtx,receipt) }; return true }
 	updater, ok := p.(InlineMessageUpdater); if !ok { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
 	if args[0] == "collapse" { content, buttons := formatOutboxCard(e.i18n,record,args[1],"",0,0); _ = updater.UpdateMessageWithButtons(e.ctx,msg.ReplyCtx,content,buttons); return true }
-	data, err := os.ReadFile(record.QueryPath); if err != nil { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
+	page := 0; if len(args) == 4 { if parsed, err := strconv.Atoi(args[3]); err != nil || parsed < 0 { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true } else { page = parsed } }
 	pages, err := receiptOriginalPages(receiptRecord{ResultPath: record.QueryPath}, "(Query is empty)"); if err != nil || len(pages)==0 { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
-	content, buttons := formatOutboxCard(e.i18n,record,args[1],pages[0],0,len(pages)); _ = updater.UpdateMessageWithButtons(e.ctx,msg.ReplyCtx,content,buttons); _ = data
+	if page >= len(pages) { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }; content, buttons := formatOutboxCard(e.i18n,record,args[1],pages[page],page,len(pages)); _ = updater.UpdateMessageWithButtons(e.ctx,msg.ReplyCtx,content,buttons)
 	return true
 }
 
