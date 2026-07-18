@@ -63,6 +63,9 @@ build/
 bin/
 release/
 # Keep web/dist directory (for embedded admin UI) but ignore build artifacts
+# NOTE: the blanket `dist/` rule above excludes web/dist itself; a file's negation
+# below is a no-op unless the parent directory is un-ignored first (git limitation).
+!web/dist/
 web/dist/*
 !web/dist/.keep
 # TypeScript incremental build cache — generated locally, should not be committed
