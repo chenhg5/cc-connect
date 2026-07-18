@@ -6918,6 +6918,7 @@ var builtinCommands = []struct {
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
+	{[]string{"mail"}, "mail"},
 	{[]string{"usage", "quota"}, "usage"},
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
@@ -7130,6 +7131,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCurrent(p, msg)
 	case "status":
 		e.cmdStatus(p, msg)
+	case "mail":
+		e.cmdMail(p, msg, args)
 	case "usage":
 		e.cmdUsage(p, msg)
 	case "history":
@@ -10469,6 +10472,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpSystemSection,
 			items: []helpCardItem{
 				{command: "/status", action: "nav:/status"},
+				{command: "/mail", action: "cmd:/mail"},
 				{command: "/doctor", action: "nav:/doctor"},
 				{command: "/usage", action: "cmd:/usage"},
 				{command: "/config", action: "nav:/config"},

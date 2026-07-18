@@ -243,6 +243,17 @@ func extractStuckBlocked(indexTail string) []string {
 	return out
 }
 
+// indexRow is one parsed letter-archive INDEX.md table row.
+type indexRow struct {
+	id      string
+	typ     string
+	thread  string
+	parent  string
+	summary string
+	date    string
+	raw     string
+}
+
 // extractOpenStuckBlocked summarizes unresolved rows from the bounded INDEX
 // tail. A QUERY is open when the same tail does not contain a RESULT/CLOSED row
 // for the same letter; STUCK/BLOCKED rows are always included.
@@ -250,15 +261,7 @@ func extractOpenStuckBlocked(indexTail string, maxEntries int) []string {
 	if maxEntries <= 0 {
 		return nil
 	}
-	type row struct {
-		id      string
-		typ     string
-		thread  string
-		parent  string
-		summary string
-		raw     string
-	}
-	var rows []row
+	var rows []indexRow
 	closed := map[string]bool{}
 	for _, line := range strings.Split(indexTail, "\n") {
 		r, ok := parseIndexRow(line)
@@ -283,22 +286,8 @@ func extractOpenStuckBlocked(indexTail string, maxEntries int) []string {
 	return out
 }
 
-func parseIndexRow(line string) (struct {
-	id      string
-	typ     string
-	thread  string
-	parent  string
-	summary string
-	raw     string
-}, bool) {
-	var r struct {
-		id      string
-		typ     string
-		thread  string
-		parent  string
-		summary string
-		raw     string
-	}
+func parseIndexRow(line string) (indexRow, bool) {
+	var r indexRow
 	trimmed := strings.TrimSpace(line)
 	if !strings.HasPrefix(trimmed, "|") || strings.Contains(trimmed, "---") {
 		return r, false
@@ -312,6 +301,7 @@ func parseIndexRow(line string) (struct {
 	r.thread = strings.TrimSpace(parts[3])
 	r.parent = strings.TrimSpace(parts[4])
 	r.summary = strings.TrimSpace(parts[5])
+	r.date = strings.TrimSpace(parts[6])
 	r.raw = trimmed
 	if !dispatchLetterRe.MatchString(r.id) {
 		return r, false
