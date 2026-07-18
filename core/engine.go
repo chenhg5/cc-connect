@@ -7354,11 +7354,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			return e.showReceiptCloseConfirm(p, msg, args[1], generation)
 		}
 		if args[0] == "closecancel" && (len(args) == 2 || len(args) == 3) {
-			generation := ""
-			if len(args) == 3 {
-				generation = args[2]
-			}
-			return e.cancelReceiptClose(p, msg, args[1], generation)
+			return e.cancelReceiptClose(p, msg, args[1])
 		}
 		if args[0] == "closeconfirm" && (len(args) == 2 || len(args) == 3) {
 			generation := ""
@@ -7615,14 +7611,22 @@ func (e *Engine) showReceiptCloseConfirm(p Platform, msg *Message, letter string
 }
 
 // cancelReceiptClose restores the normal inbox card after Boss backs out of
-// the close confirmation.
-func (e *Engine) cancelReceiptClose(p Platform, msg *Message, letter string, generation ...string) bool {
+// the close confirmation. Unlike close/closeconfirm, it deliberately ignores
+// the generation the confirm card was built with: a background notify poll
+// can silently overwrite an open confirm dialog back to the plain card (see
+// notifyLetterArrived, which redraws in place on any new arrival generation
+// for the same letter), which invalidates the generation the Cancel button
+// was stamped with even though nothing about Boss's intent changed. Since
+// cancelling never mutates anything, there is no correctness reason to block
+// it on a stale generation — doing so previously left the admin with no
+// visible card and no explanation (reported as "the card just disappeared").
+func (e *Engine) cancelReceiptClose(p Platform, msg *Message, letter string) bool {
 	if !e.isAdmin(msg.UserID) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/receipt close"))
 		return true
 	}
 	receipt, err := e.notifyStore.receipt(letter)
-	if err != nil || receipt.AcknowledgedAt != "" || (len(generation) > 0 && generation[0] != "" && receipt.Generation != generation[0]) {
+	if err != nil || receipt.AcknowledgedAt != "" {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReceiptUnavailable))
 		return true
 	}
