@@ -10,6 +10,9 @@ import (
 // enrichReplyContent extracts the quoted/original message from a Telegram reply
 // and formats it so the AI agent can see the context of what the user is replying to.
 // Returns the enriched content string, or empty string if this is not a reply.
+//
+// Prefer msg.Quote (Bot API text_quote / 划词引用) when present; otherwise fall
+// back to the full reply_to_message text/caption and media markers.
 func enrichReplyContent(msg *models.Message) string {
 	if msg.ReplyToMessage == nil {
 		return ""
@@ -18,8 +21,10 @@ func enrichReplyContent(msg *models.Message) string {
 	original := msg.ReplyToMessage
 	var parts []string
 
-	// Extract text content from the original message
-	if original.Text != "" {
+	// Prefer partial quote selection over the full original body.
+	if msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "" {
+		parts = append(parts, msg.Quote.Text)
+	} else if original.Text != "" {
 		parts = append(parts, original.Text)
 	} else if original.Caption != "" {
 		parts = append(parts, original.Caption)
@@ -44,6 +49,10 @@ func enrichReplyContent(msg *models.Message) string {
 
 	if original.Audio != nil {
 		parts = append(parts, fmt.Sprintf("[Audio: %s]", original.Audio.FileName))
+	}
+
+	if original.Sticker != nil {
+		parts = append(parts, "[Sticker]")
 	}
 
 	if len(parts) == 0 {
