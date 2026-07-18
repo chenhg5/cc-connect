@@ -610,6 +610,15 @@ func main() {
 				PollInterval:      time.Duration(pollSecs) * time.Second,
 			})
 		}
+		if enabled, _ := proj.Agent.Options["outbox_enabled"].(bool); enabled {
+			indexPath, _ := proj.Agent.Options["notify_index_path"].(string)
+			sessionKey, _ := proj.Agent.Options["outbox_session_key"].(string)
+			if strings.TrimSpace(sessionKey) == "" { sessionKey, _ = proj.Agent.Options["notify_session_key"].(string) }
+			platform, _ := proj.Agent.Options["outbox_platform"].(string)
+			pollSecs := 10
+			switch v := proj.Agent.Options["outbox_poll_secs"].(type) { case int: if v > 0 { pollSecs = v }; case int64: if v > 0 { pollSecs = int(v) }; case float64: if v > 0 { pollSecs = int(v) } }
+			engine.SetOutboxConfig(core.OutboxConfig{Enabled:true, IndexPath:indexPath, SessionKey:sessionKey, Platform:platform, TelegramEnabled:true, PollInterval:time.Duration(pollSecs)*time.Second})
+		}
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" || proj.WorkspacePattern != "" || proj.DispatchTopicIsolation {
