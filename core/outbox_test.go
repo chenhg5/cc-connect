@@ -30,5 +30,16 @@ func TestScanOutboxQueriesRequiresRegisteredUndispatchedQuery(t *testing.T) {
 func TestFormatOutboxCardShowsMetadataAndReadOnlyButtons(t *testing.T) {
 	content, buttons := formatOutboxCard(NewI18n(LangEnglish), outboxRecord{Thread: "alpha", To: "dev-pro", Route: "heavy", QueryPath: "F:\\archive\\L-0100.query.md", Generation: "g1", Summary: "Ship it"}, "L-0100", "", 0, 0)
 	for _, want := range []string{"📤 L-0100", "To: dev-pro", "Route: heavy", "Ship it"} { if !strings.Contains(content, want) { t.Fatalf("missing %q in %q", want, content) } }
-	if len(buttons) != 1 || len(buttons[0]) != 1 || buttons[0][0].Data != "cmd:/outbox page L-0100 g1 0" { t.Fatalf("buttons = %#v", buttons) }
+	if len(buttons) != 1 || len(buttons[0]) != 3 || buttons[0][0].Data != "cmd:/outbox page L-0100 g1 0" || buttons[0][1].Data != "cmd:/outbox manual L-0100 g1" || buttons[0][2].Data != "cmd:/outbox secretary L-0100 g1" { t.Fatalf("buttons = %#v", buttons) }
+}
+
+func TestOutboxManualStatePersistsAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	e := NewEngine("secretary-seat", &stubAgent{}, nil, "", LangEnglish)
+	e.dataDir = root
+	e.outboxManual = map[string]bool{"L-0100": true}
+	if err := e.saveOutboxManual(); err != nil { t.Fatal(err) }
+	restarted := NewEngine("secretary-seat", &stubAgent{}, nil, "", LangEnglish)
+	restarted.dataDir = root
+	if !restarted.loadOutboxManual()["L-0100"] { t.Fatal("manual outbox state was not persisted") }
 }

@@ -501,6 +501,7 @@ type Engine struct {
 
 	outboxConfig         OutboxConfig
 	outboxRecords        map[string]outboxRecord
+	outboxManual         map[string]bool
 	outboxWatcherStarted bool
 }
 

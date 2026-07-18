@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -48,7 +49,11 @@ func scanOutboxQueries(threadsDir, indexPath string, dispatched map[string]bool)
 
 func formatOutboxCard(i18n *I18n, record outboxRecord, letter, body string, page, pageCount int) (string, [][]ButtonOption) {
 	content := fmt.Sprintf("📤 %s\nThread: %s\nTo: %s\nRoute: %s\nSummary: %s\nQuery path: %s", letter, record.Thread, record.To, record.Route, record.Summary, record.QueryPath)
-	if pageCount <= 0 { return content, [][]ButtonOption{{{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/outbox page " + letter + " " + record.Generation + " 0"}}} }
+	if pageCount <= 0 { return content, [][]ButtonOption{{
+		{Text: i18n.T(MsgReceiptViewOriginal), Data: "cmd:/outbox page " + letter + " " + record.Generation + " 0"},
+		{Text: "🙋 我自己发", Data: "cmd:/outbox manual " + letter + " " + record.Generation},
+		{Text: "🧑‍💼 交秘书发", Data: "cmd:/outbox secretary " + letter + " " + record.Generation},
+	}} }
 	content += "\n\n" + i18n.Tf(MsgReceiptCardPage, page+1, pageCount, body)
 	buttons := [][]ButtonOption{}
 	if page > 0 { buttons = append(buttons, []ButtonOption{{Text: i18n.T(MsgCardPrev), Data: fmt.Sprintf("cmd:/outbox page %s %s %d", letter, record.Generation, page-1)}}) }
@@ -65,6 +70,7 @@ func (e *Engine) configureOutbox(cfg OutboxConfig) {
 	e.outboxConfig = cfg
 	if cfg.Enabled && cfg.IndexPath != "" && !e.outboxWatcherStarted {
 		e.outboxRecords = map[string]outboxRecord{}
+		e.outboxManual = e.loadOutboxManual()
 		e.outboxWatcherStarted = true
 		go func() { ticker := time.NewTicker(cfg.PollInterval); defer ticker.Stop(); for { select { case <-e.ctx.Done(): return; case <-ticker.C: e.checkOutbox() } } }()
 	}
@@ -72,7 +78,8 @@ func (e *Engine) configureOutbox(cfg OutboxConfig) {
 
 func (e *Engine) checkOutbox() {
 	if !e.outboxConfig.Enabled { return }
-	queries, err := scanOutboxQueries(e.outboxConfig.threadsDir(), e.outboxConfig.IndexPath, e.ensureDispatchStore().letters())
+	dispatched := e.ensureDispatchStore().letters(); for letter := range e.outboxManual { dispatched[letter] = true }
+	queries, err := scanOutboxQueries(e.outboxConfig.threadsDir(), e.outboxConfig.IndexPath, dispatched)
 	if err != nil { slog.Warn("outbox: scan failed", "error", err); return }
 	current := map[string]bool{}
 	for _, q := range queries { current[q.Letter] = true; e.publishOutbox(q) }
@@ -99,8 +106,10 @@ func (e *Engine) publishOutbox(q queryFileInfo) {
 
 func (e *Engine) handleOutboxCommand(p Platform, msg *Message, args []string) bool {
 	if len(args) == 0 { var lines []string; for letter, record := range e.outboxRecords { lines = append(lines, fmt.Sprintf("%s · %s · %s · %s", letter, record.To, record.Route, record.Thread)) }; if len(lines) == 0 { e.reply(p,msg.ReplyCtx,"Outbox is empty.") } else { e.reply(p,msg.ReplyCtx,"Pending outbox:\n"+strings.Join(lines,"\n")) }; return true }
-	if (args[0] != "page" && args[0] != "collapse") || len(args) < 3 { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
+	if (args[0] != "page" && args[0] != "collapse" && args[0] != "manual" && args[0] != "secretary") || len(args) < 3 { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
 	record, ok := e.outboxRecords[args[1]]; if !ok || record.Generation != args[2] { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
+	if args[0] == "manual" { e.outboxManual[args[1]] = true; _ = e.saveOutboxManual(); delete(e.outboxRecords,args[1]); if d, ok := p.(MessageDeleter); ok { _ = d.DeleteMessage(e.ctx,msg.ReplyCtx) }; return true }
+	if args[0] == "secretary" { receipt, err := e.executeDispatch(p,msg.SessionKey,dispatchRequest{Letter:args[1],Thread:record.Thread,To:record.To,Path:record.QueryPath}); if err != nil { e.reply(p,msg.ReplyCtx,"⚠️ Dispatch rejected: "+err.Error()) } else { delete(e.outboxRecords,args[1]); if d,ok:=p.(MessageDeleter); ok { _=d.DeleteMessage(e.ctx,msg.ReplyCtx) }; e.reply(p,msg.ReplyCtx,receipt) }; return true }
 	updater, ok := p.(InlineMessageUpdater); if !ok { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
 	if args[0] == "collapse" { content, buttons := formatOutboxCard(e.i18n,record,args[1],"",0,0); _ = updater.UpdateMessageWithButtons(e.ctx,msg.ReplyCtx,content,buttons); return true }
 	data, err := os.ReadFile(record.QueryPath); if err != nil { e.reply(p,msg.ReplyCtx,"❌ Outbox item is unavailable."); return true }
@@ -108,3 +117,7 @@ func (e *Engine) handleOutboxCommand(p Platform, msg *Message, args []string) bo
 	content, buttons := formatOutboxCard(e.i18n,record,args[1],pages[0],0,len(pages)); _ = updater.UpdateMessageWithButtons(e.ctx,msg.ReplyCtx,content,buttons); _ = data
 	return true
 }
+
+func (e *Engine) outboxManualPath() string { return filepath.Join(e.dataDir, "outbox_manual.json") }
+func (e *Engine) loadOutboxManual() map[string]bool { out:=map[string]bool{}; data,err:=os.ReadFile(e.outboxManualPath()); if err==nil { _=json.Unmarshal(data,&out) }; return out }
+func (e *Engine) saveOutboxManual() error { data,err:=json.Marshal(e.outboxManual); if err!=nil{return err}; return os.WriteFile(e.outboxManualPath(),data,0o644) }
