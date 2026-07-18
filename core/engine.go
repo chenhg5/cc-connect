@@ -498,6 +498,10 @@ type Engine struct {
 	notifyConfig         NotifyConfig
 	notifyStore          *notifyStore
 	notifyWatcherStarted bool
+
+	outboxConfig         OutboxConfig
+	outboxRecords        map[string]outboxRecord
+	outboxWatcherStarted bool
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -7107,6 +7111,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
+	case "outbox":
+		return e.handleOutboxCommand(p, msg, args)
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
