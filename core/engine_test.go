@@ -1198,6 +1198,68 @@ func TestEngineReceiptCloseShowsConfirmThenCancelRestoresCard(t *testing.T) {
 	}
 }
 
+// TestEngineReceiptCloseCancelSurvivesConcurrentGenerationBump is a
+// regression test for a real bug reported after L-0449 shipped: Boss opened
+// the close confirmation, a background notify poll picked up an unrelated
+// edit to the same letter's RESULT file (notifyLetterArrived redraws the
+// card in place on any new arrival generation — see that function), which
+// silently overwrote the confirm dialog and invalidated the generation its
+// buttons were built with. Clicking Cancel then hit the stale-generation
+// guard and did nothing, which Boss experienced as "the card just
+// disappeared." Cancel must succeed regardless of what happened to the
+// generation in the meantime, since it never mutates anything.
+func TestEngineReceiptCloseCancelSurvivesConcurrentGenerationBump(t *testing.T) {
+	root := t.TempDir()
+	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
+	p := &receiptActionPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.notifyConfig.IndexPath = filepath.Join(root, "INDEX.md")
+	e.notifyStore = newNotifyStore(filepath.Join(root, "data"))
+	e.SetAdminFrom("boss-id")
+	first := indexResultRow{Letter: "L-0449", Thread: "alpha", Path: resultPath, Summary: "ready", Status: "DONE", Generation: "2026-07-18T17:55:47Z"}
+	if err := e.notifyStore.recordArrival(first); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{UserID: "boss-id", UserName: "boss", ReplyCtx: "inbox"}
+	if handled := e.handleCommand(p, msg, "/receipt close L-0449"); !handled {
+		t.Fatal("close confirm must not start an agent turn")
+	}
+	confirmGeneration := first.Generation
+	if !strings.Contains(p.updatedButtons[0][0].Data, confirmGeneration) {
+		t.Fatalf("confirm card must be stamped with the generation at confirm time: %#v", p.updatedButtons)
+	}
+
+	// Simulate the concurrent background poll: same letter, new mtime, same
+	// (still-unacknowledged) receipt — exactly what happens when the RESULT
+	// file gets a pursuit-note edit while a confirm dialog is open.
+	bumped := first
+	bumped.Generation = "2026-07-18T18:10:00Z"
+	if err := e.notifyStore.recordArrival(bumped); err != nil {
+		t.Fatal(err)
+	}
+
+	if handled := e.handleCommand(p, msg, "/receipt closecancel L-0449 "+confirmGeneration); !handled {
+		t.Fatal("close cancel must not start an agent turn")
+	}
+	found := false
+	for _, row := range p.updatedButtons {
+		for _, btn := range row {
+			if strings.Contains(btn.Data, "receipt receive") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("cancel with a stale generation must still restore the normal inbox card, got %#v", p.updatedButtons)
+	}
+	sent := p.getSent()
+	for _, s := range sent {
+		if strings.Contains(s, "unavailable") {
+			t.Fatalf("cancel with a stale generation must not fall through to an unavailable reply: %#v", sent)
+		}
+	}
+}
+
 func TestEngineReceiptCloseConfirmSuccessPushesAndDeletesCard(t *testing.T) {
 	root := t.TempDir()
 	resultPath := writeResultFile(t, root, "alpha", "L-0449", "ID: L-0449\nStatus: DONE\n---\n")
