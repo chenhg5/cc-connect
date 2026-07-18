@@ -83,6 +83,13 @@ func (e *Engine) checkOutbox() {
 	dispatched := e.ensureDispatchStore().letters(); for letter := range e.outboxManual { dispatched[letter] = true }
 	queries, err := scanOutboxQueries(e.outboxConfig.threadsDir(), e.outboxConfig.IndexPath, dispatched)
 	if err != nil { slog.Warn("outbox: scan failed", "error", err); return }
+	// First scan establishes a quiet baseline. Existing archive history remains
+	// available through /outbox, but must never be emitted as a burst of cards.
+	if !e.outboxSeeded {
+		for _, q := range queries { e.outboxRecords[q.Letter] = outboxRecord{Thread:q.Thread, To:q.To, Route:q.Route, QueryPath:q.Path, Generation:q.ModTime.UTC().Format(time.RFC3339Nano), Summary:q.Summary} }
+		e.outboxSeeded = true
+		return
+	}
 	current := map[string]bool{}
 	for _, q := range queries { current[q.Letter] = true; e.publishOutbox(q) }
 	for letter, record := range e.outboxRecords {

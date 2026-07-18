@@ -503,6 +503,7 @@ type Engine struct {
 	outboxMu             sync.RWMutex
 	outboxRecords        map[string]outboxRecord
 	outboxManual         map[string]bool
+	outboxSeeded         bool
 	outboxWatcherStarted bool
 }
 

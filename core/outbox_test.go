@@ -43,3 +43,12 @@ func TestOutboxManualStatePersistsAcrossRestart(t *testing.T) {
 	restarted.dataDir = root
 	if !restarted.loadOutboxManual()["L-0100"] { t.Fatal("manual outbox state was not persisted") }
 }
+
+func TestOutboxFirstScanIsQuietBaseline(t *testing.T) {
+	root := t.TempDir(); threads := filepath.Join(root, "threads"); index := filepath.Join(root, "INDEX.md")
+	if err := os.WriteFile(index, []byte("| L-0100 | QUERY | alpha | ROOT | queued | 2026-07-18 |\n"), 0o644); err != nil { t.Fatal(err) }
+	writeQueryFile(t, threads, "alpha", "L-0100", "---\nID: L-0100\nThread: alpha\nType: QUERY\nTo: dev-pro\nRoute: heavy\nDate: 2026-07-18\n---\n\n## Query\nold\n")
+	e := NewEngine("secretary-seat", &stubAgent{}, nil, "", LangEnglish); e.dataDir=root; e.outboxConfig=OutboxConfig{Enabled:true,IndexPath:index}; e.outboxRecords=map[string]outboxRecord{}; e.outboxManual=map[string]bool{}
+	e.checkOutbox()
+	if !e.outboxSeeded || len(e.outboxRecords)!=1 { t.Fatalf("baseline = seeded:%v records:%#v", e.outboxSeeded,e.outboxRecords) }
+}
