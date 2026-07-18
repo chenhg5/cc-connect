@@ -45,7 +45,12 @@ func scanOutboxQueries(threadsDir, indexPath string, dispatched map[string]bool)
 		out = append(out, queryFileInfo{Letter: letter, Thread: h["Thread"], Path: path, To: h["To"], Route: h["Route"], Summary: firstNonEmptyAfter(strings.Split(string(body), "\n"), "## Query"), ModTime: info.ModTime()})
 		return nil
 	})
-	return out, err
+	// Historical archives may contain duplicate L-IDs. The Outbox lifecycle is
+	// keyed by L-ID, so ambiguity must be rejected rather than oscillating cards.
+	counts := map[string]int{}; for _, q := range out { counts[q.Letter]++ }
+	unique := out[:0]
+	for _, q := range out { if counts[q.Letter] == 1 { unique = append(unique, q) } else { slog.Warn("outbox: skipping ambiguous duplicate letter", "letter", q.Letter) } }
+	return unique, err
 }
 
 func formatOutboxCard(i18n *I18n, record outboxRecord, letter, body string, page, pageCount int) (string, [][]ButtonOption) {
