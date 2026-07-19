@@ -554,7 +554,7 @@ func sendAndRespond(t *testing.T, s *appServerSession, stdin *lockedWriteCloser,
 	t.Helper()
 	done := make(chan error, 1)
 	go func() {
-		done <- s.Send(prompt, nil, nil)
+		done <- s.Send(prompt, "", nil, nil)
 	}()
 	request := waitForClientRequest(t, stdin)
 	resultJSON, err := json.Marshal(result)
