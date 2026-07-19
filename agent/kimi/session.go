@@ -14,11 +14,18 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// killGracePeriod is how long readLoop waits after SIGTERMing the kimi
+// process group (on ctx cancel/timeout) before escalating to SIGKILL of the
+// whole group. Kimi runs handlers/subprocesses that need a moment to shut
+// down; 10s matches the grace window used elsewhere in cc-connect.
+const killGracePeriod = 10 * time.Second
 
 // kimSession manages multi-turn conversations with the Kimi CLI.
 // Each Send() launches a new `kimi --print --output-format stream-json` process
@@ -51,7 +58,7 @@ func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir
 		model:     model,
 		mode:      mode,
 		timeout:   timeout,
-	extraEnv:  extraEnv,
+		extraEnv:  extraEnv,
 		events:    make(chan core.Event, 64),
 		ctx:       sessionCtx,
 		cancel:    cancel,
@@ -165,7 +172,19 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 	}()
 
 	slog.Debug("kimiSession: launching", "resume", sid != "", "args", core.RedactArgs(args))
-	cmd := exec.CommandContext(ctx, ks.cmd, args...)
+	// Note: exec.Command, not exec.CommandContext. CommandContext's default
+	// Cancel SIGKILLs only the direct child (the kimi launcher), orphaning
+	// the real Kimi process beneath it (SIGKILL cannot be forwarded).
+	// Cancellation is managed manually in readLoop instead: SIGTERM the
+	// whole process group, then SIGKILL the group after killGracePeriod.
+	cmd := exec.Command(ks.cmd, args...)
+	// Put the child into its own process group so the entire descendant
+	// tree (kimi launcher → real Kimi process → ...) can be terminated
+	// with a single group signal.
+	prepareCmdForKill(cmd)
+	// Backstop for Wait when the process exits but a descendant keeps the
+	// stdout pipe open (no Context here, so the timer starts at process
+	// exit, not at cancellation).
 	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = ks.workDir
 	env := os.Environ()
@@ -204,9 +223,28 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 		}
 	}()
 
+	// waitDone is closed once cmd.Wait() returns so the shutdown watcher
+	// below can skip the SIGKILL escalation for an already-dead group.
+	waitDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
+		// Unblock the scanner so Wait can observe the process exit.
 		stdout.Close()
+		// Graceful shutdown: SIGTERM the whole process group first (the
+		// real Kimi process is a child of the launcher, so signaling only
+		// the direct child would orphan it), then escalate to SIGKILL of
+		// the group if anything is still alive after the grace period.
+		if err := signalProcessGroup(cmd, syscall.SIGTERM); err != nil {
+			slog.Warn("kimiSession: signal SIGTERM", "error", err)
+		}
+		select {
+		case <-waitDone:
+		case <-time.After(killGracePeriod):
+			slog.Warn("kimiSession: SIGTERM grace expired, sending SIGKILL to process group")
+			if err := forceKillCmd(cmd); err != nil {
+				slog.Warn("kimiSession: force kill", "error", err)
+			}
+		}
 	}()
 
 	scanner := bufio.NewScanner(stdout)
@@ -243,6 +281,7 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	// Wait for process exit before sending any terminal event so the engine
 	// never sees EventError after EventResult from the same turn.
 	waitErr := cmd.Wait()
+	close(waitDone)
 
 	// Kimi writes "To resume this session: kimi -r <uuid>" to stderr (not stdout),
 	// so the scanner above never sees it. Extract it from the captured stderr
