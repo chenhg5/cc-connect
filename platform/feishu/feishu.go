@@ -2419,6 +2419,16 @@ var internalTagBlacklist = []*regexp.Regexp{
 // stripInternalTags 按黑名单移除 AI 内部标签，返回清洗后的文本。
 func stripInternalTags(s string) string {
 	for _, re := range internalTagBlacklist {
+		if matches := re.FindAllString(s, -1); len(matches) > 0 {
+			samples := make([]string, 0, len(matches))
+			for _, m := range matches {
+				if len(m) > 120 {
+					m = m[:120] + "...(truncated)"
+				}
+				samples = append(samples, m)
+			}
+			slog.Debug("stripInternalTags: removed blacklisted tag(s)", "count", len(matches), "samples", samples)
+		}
 		s = re.ReplaceAllString(s, "")
 	}
 	// <--- 包裹标记行整行删除（开/闭标记行删，两行之间的内部内容保留）
@@ -2426,13 +2436,18 @@ func stripInternalTags(s string) string {
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if strings.Contains(line, "<---") {
+			slog.Info("stripInternalTags: removed wrapper marker line", "line", line)
 			continue
 		}
 		kept = append(kept, line)
 	}
 	s = strings.Join(kept, "\n")
 	// 脚本处理过程提示（GLOBAL-RULES 213）
-	s = strings.ReplaceAll(s, "（格式已通过 feishu-markdown-fix.js 修复）", "")
+	const fixHint = "（格式已通过 feishu-markdown-fix.js 修复）"
+	if strings.Contains(s, fixHint) {
+		slog.Debug("stripInternalTags: removed script-process hint")
+	}
+	s = strings.ReplaceAll(s, fixHint, "")
 	return s
 }
 
