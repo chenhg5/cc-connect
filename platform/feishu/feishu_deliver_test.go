@@ -174,6 +174,24 @@ func TestStripInternalTags(t *testing.T) {
 			in:   "<think>secret</think>**结论**: <font color='green'>**已恢复**</font>",
 			want: "**结论**: <font color='green'>**已恢复**</font>",
 		},
+		{
+			name: "new-format wrapper kept inner + KNOWLEDGE_CACHE_DIR",
+			in: "<--- 以下整块原样贴入正文（自我进化步骤·严禁手写替代）--->\n" +
+				"可复用知识：Redis 连接池耗尽导致查询超时\n" +
+				"KNOWLEDGE_CACHE_DIR=/tmp/knowledge-write-AbC123\n" +
+				"<--- 原样贴入正文结束 --->",
+			want: "可复用知识：Redis 连接池耗尽导致查询超时\n" +
+				"KNOWLEDGE_CACHE_DIR=/tmp/knowledge-write-AbC123",
+		},
+		{
+			name: "mixed: think + new-format wrapper + legit font kept",
+			in:   "<think>根因是 Redis</think>**结论**: <font color='red'>**当前仍异常**</font>\n" +
+				"<--- 以下整块原样贴入正文（自我进化步骤·严禁手写替代）--->\n" +
+				"内部可复用知识\n" +
+				"<--- 原样贴入正文结束 --->",
+			want: "**结论**: <font color='red'>**当前仍异常**</font>\n" +
+				"内部可复用知识",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
