@@ -156,7 +156,7 @@ func TestStripInternalTags(t *testing.T) {
 		},
 		{
 			name: "wrapper markers lines removed, inner kept",
-			in:   "<--- 以下整块原样贴入正文（自我进化步骤·严禁手写替代）<---\n可复用知识内容\n<--- 原样贴入正文结束 <---",
+			in:   "<--- 以下整块原样贴入正文（自我进化步骤·严禁手写替代）--->\n可复用知识内容\n<--- 原样贴入正文结束 --->",
 			want: "可复用知识内容",
 		},
 		{
