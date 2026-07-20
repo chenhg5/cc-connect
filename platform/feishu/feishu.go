@@ -2319,6 +2319,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
+	content = stripInternalTags(content)
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 
@@ -2342,6 +2343,8 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+
+	content = stripInternalTags(content)
 
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.Reply(ctx, rctx, content)
@@ -2394,6 +2397,43 @@ func isDeliverPathTerm(c byte) bool {
 		return true
 	}
 	return false
+}
+
+// internalTagBlacklist 是严禁出现在飞书群里的「AI 内部标签/标记」黑名单：
+// 命中即删除，其余内容（含 <font>/<at>/表格/代码块）一律保留，避免误伤。
+// 覆盖（GLOBAL-RULES 211-213 + save-alert-conclusion.js 包裹标记）：
+//   - 模型推理链 <think>...</think>（含残缺 </think_never_used_xxx> 片段）
+//   - auto-compact 的 <conversation-history-summary>...</conversation-history-summary>
+//   - save-alert-conclusion.js 的 ---8<--- 原样贴入正文 ---8<--- 包裹标记行
+//   - 脚本处理过程提示（如「（格式已通过 feishu-markdown-fix.js 修复）」）
+// 这些都是固定字面串，正常告警结论中不会出现，故黑名单方式无误伤。
+// 仅对两个固定标签块用正则跨行删除整段；残缺片段与字面量标记用精确匹配，
+// 不进入正则，进一步降低误伤风险。
+var internalTagBlacklist = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)<think[^>]*>.*?</think[^>]*>`),
+	regexp.MustCompile(`(?is)<think[^>]*>`),
+	regexp.MustCompile(`(?is)</think[^>]*>`),
+	regexp.MustCompile(`(?is)<conversation-history-summary[^>]*>.*?</conversation-history-summary[^>]*>`),
+}
+
+// stripInternalTags 按黑名单移除 AI 内部标签，返回清洗后的文本。
+func stripInternalTags(s string) string {
+	for _, re := range internalTagBlacklist {
+		s = re.ReplaceAllString(s, "")
+	}
+	// ---8<--- 包裹标记行整行删除（开/闭标记行删，两行之间的内部内容保留）
+	lines := strings.Split(s, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(line, "---8<---") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	s = strings.Join(kept, "\n")
+	// 脚本处理过程提示（GLOBAL-RULES 213）
+	s = strings.ReplaceAll(s, "（格式已通过 feishu-markdown-fix.js 修复）", "")
+	return s
 }
 
 // maybeSendKnowledgeConfirmCard emits an interactive confirmation card with a

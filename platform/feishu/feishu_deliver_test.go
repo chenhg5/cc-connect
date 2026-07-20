@@ -130,6 +130,61 @@ func TestDeliverableFileContents(t *testing.T) {
 	})
 }
 
+// TestStripInternalTags verifies the AI-internal-tag blacklist removes forbidden
+// markers while leaving legitimate Feishu content (e.g. <font>/<at>) untouched —
+// i.e. it must not误伤 real output.
+func TestStripInternalTags(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "think block removed",
+			in:   "结论：已恢复\n<think>我在想根因是 Redis 超时</think>\n详情见下",
+			want: "结论：已恢复\n\n详情见下",
+		},
+		{
+			name: "think fragments removed",
+			in:   "a</think>b</think_never_used_xxx>c<think class='x'>d",
+			want: "abcd",
+		},
+		{
+			name: "conversation-history-summary block removed",
+			in:   "x<conversation-history-summary>old ctx</conversation-history-summary>y",
+			want: "xy",
+		},
+		{
+			name: "wrapper markers lines removed, inner kept",
+			in:   "---8<--- 以下整块原样贴入正文（自我进化步骤·严禁手写替代）---8<---\n可复用知识内容\n---8<--- 原样贴入正文结束 ---8<---",
+			want: "可复用知识内容",
+		},
+		{
+			name: "script-process hint removed",
+			in:   "结论（格式已通过 feishu-markdown-fix.js 修复）已生成",
+			want: "结论已生成",
+		},
+		{
+			name: "legit font/at untouched (no误伤)",
+			in:   "**结论**: <font color='red'>**当前仍异常**</font> @<at user_id=\"u123\">张三</at>",
+			want: "**结论**: <font color='red'>**当前仍异常**</font> @<at user_id=\"u123\">张三</at>",
+		},
+		{
+			name: "mixed: think + legit font kept",
+			in:   "<think>secret</think>**结论**: <font color='green'>**已恢复**</font>",
+			want: "**结论**: <font color='green'>**已恢复**</font>",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := stripInternalTags(c.in)
+			if got != c.want {
+				t.Fatalf("stripInternalTags mismatch:\n got %q\nwant %q", got, c.want)
+			}
+		})
+	}
+}
+
 // TestKnowledgeConfirmCardTokenRe locks the fix for the "card never pops" bug:
 // when the agent echoes `KNOWLEDGE_CACHE_DIR=/tmp/x`这是说明, the capture group
 // must stop at the closing backtick and NOT swallow it (or the trailing Chinese)
