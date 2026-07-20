@@ -2370,23 +2370,31 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // quote/backtick. The capture group therefore holds only the real path.
 var knowledgeConfirmCardTokenRe = regexp.MustCompile("(?i)KNOWLEDGE_CACHE_DIR[=:]\\s*['\"`]?([A-Za-z0-9/._:@%+=~-]+)['\"`]?")
 
-// ccDeliverFileTokenRe matches the CC_DELIVER_FILE line printed by deliverable
-// scripts (e.g. jinkela-md-builder.js). The script writes its user-facing
-// payload to a temp file and prints `CC_DELIVER_FILE=<path>` so the agent only
-// has to echo that single short line into its reply instead of copying a large
-// markdown block — cc-connect then reads the file and delivers its content to
-// Feishu. This eliminates the recurring failure where the model drops the block
-// and the group sees only an empty "已生成" claim (tool results are never
-// delivered to Feishu by cc-connect). Tolerates `=`/`:` separators, optional
-// surrounding quotes, and is matched case-insensitively.
+// deliverFilePrefixes 是脚本可打印的投递行前缀（按文档顺序最靠前优先命中）。
+// 末尾等号后是临时文件路径。root-cause / alert-summary 各自类型化前缀便于区分；
+// 保留历史兜底 CC_DELIVER_FILE= 以兼容旧脚本输出。
 //
-// Same capture-group fix as knowledgeConfirmCardTokenRe: an ASCII path allowlist
-// ['"`]?([A-Za-z0-9/._:@%+=~-]+)['"`]? (NOT greedy \S+). It stops at a
-// quote/backtick/whitespace/non-ASCII, so a backtick-wrapped token with trailing
-// Chinese is not polluted into a non-existent path (which the allowedRoots guard
-// would then silently reject, dropping the delivery). The trailing .md extension
-// is preserved because '.' is in the allowlist.
-var ccDeliverFileTokenRe = regexp.MustCompile("(?i)CC_DELIVER_FILE[=:]\\s*['\"`]?([A-Za-z0-9/._:@%+=~-]+)['\"`]?")
+// 解析改用全文本字面匹配（不再使用正则，见 deliverableFileContents）：扫描回复
+// 正文命中已知前缀即取其后的路径。等价地保留原「防路径污染」语义——路径在遇到
+// 空白/引号/反引号即截断，避免把尾随中文或正文吞进路径（与 KNOWLEDGE_CACHE_DIR
+// 同一思路），allowedRoots 守卫再兜底拒绝越权路径。
+var deliverFilePrefixes = []string{
+	"CC_DELIVER_FILE_ROOT_CAUSE=",
+	"CC_DELIVER_FILE_ALERT_SUMMARY=",
+	"CC_DELIVER_FILE=",
+}
+
+// isDeliverPathTerm reports whether c terminates a CC_DELIVER_FILE path: any
+// whitespace or quote/backtick boundary. Paths never contain these, so stopping
+// here keeps trailing prose (e.g. " 结尾" or a backtick-wrapped line) out of the
+// captured path.
+func isDeliverPathTerm(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', '"', '\'', '`':
+		return true
+	}
+	return false
+}
 
 // maybeSendKnowledgeConfirmCard emits an interactive confirmation card with a
 // "写入知识库" button when the outgoing message carries a KNOWLEDGE_CACHE_DIR
@@ -2505,22 +2513,53 @@ func (p *Platform) writeKnowledgeCardMarker(cacheDir string) {
 	}
 }
 
-// deliverableFileContents scans the outgoing reply for CC_DELIVER_FILE lines,
-// reads each referenced temp file, and returns their contents for delivery.
-// Only absolute paths under the platform temp dir or the fixed /tmp root are
-// accepted, so a malicious or buggy line cannot make cc-connect read arbitrary
-// files. This mirrors the knowledge-base write convention (save-alert-conclusion.js),
-// which stages files under /tmp. Files are removed after a successful read.
-// Failures (missing file, unsafe path) are logged and skipped, never aborting
-// delivery of the remaining lines.
+// deliverableFileContents scans the outgoing reply for CC_DELIVER_FILE_<type>=
+// lines via full-text literal prefix matching (no regex), reads each referenced
+// temp file, and returns their contents for delivery. Paths are extracted in
+// document order, so multiple tokens (and the two distinct types) appear in the
+// chat in the same order the agent emitted them. Only absolute paths under the
+// platform temp dir or the fixed /tmp root are accepted, so a malformed or
+// malicious line cannot make cc-connect read arbitrary files. This mirrors the
+// knowledge-base write convention (save-alert-conclusion.js), which stages files
+// under /tmp. Files are removed after a successful read. Failures (missing file,
+// unsafe path) are logged and skipped, never aborting delivery of the remaining
+// tokens.
 func (p *Platform) deliverableFileContents(content string) []string {
 	var out []string
 	// Allowed roots: the platform temp dir (e.g. /var/folders/.../T) and the
 	// fixed /tmp used by the deliverable scripts, so CC_DELIVER_FILE stays
 	// consistent with the knowledge-base write staging under /tmp.
 	allowedRoots := []string{filepath.Clean(os.TempDir()), "/tmp"}
-	for _, m := range ccDeliverFileTokenRe.FindAllStringSubmatch(content, -1) {
-		raw := strings.Trim(m[1], "\"`'")
+
+	lower := strings.ToLower(content)
+	off := 0
+	for off < len(content) {
+		// 选定当前位置起最靠前的已知前缀命中（保持文档顺序，而非按前缀分组）。
+		best := -1
+		bestLen := 0
+		for _, prefix := range deliverFilePrefixes {
+			i := strings.Index(lower[off:], strings.ToLower(prefix))
+			if i < 0 {
+				continue
+			}
+			abs := off + i
+			if best < 0 || abs < best {
+				best = abs
+				bestLen = len(prefix)
+			}
+		}
+		if best < 0 {
+			break
+		}
+		// 路径从前缀之后开始，直到遇到空白/引号/反引号或文末（截断，避免吞入
+		// 尾随中文或正文）。
+		start := best + bestLen
+		end := start
+		for end < len(content) && !isDeliverPathTerm(content[end]) {
+			end++
+		}
+		raw := strings.Trim(content[start:end], "\"`'")
+		off = end
 		if raw == "" {
 			continue
 		}

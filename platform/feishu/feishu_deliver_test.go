@@ -90,6 +90,44 @@ func TestDeliverableFileContents(t *testing.T) {
 			t.Fatalf("expected 2 deliverables, got %d", len(got))
 		}
 	})
+
+	t.Run("root-cause typed token", func(t *testing.T) {
+		f, _ := os.CreateTemp("", "cc-deliver-*.md")
+		f.WriteString("RC")
+		f.Close()
+		defer os.Remove(f.Name())
+		got := p.deliverableFileContents("CC_DELIVER_FILE_ROOT_CAUSE=" + f.Name())
+		if len(got) != 1 || got[0] != "RC" {
+			t.Fatalf("expected root-cause token accepted, got %d (%q)", len(got), got)
+		}
+	})
+
+	t.Run("alert-summary typed token", func(t *testing.T) {
+		f, _ := os.CreateTemp("", "cc-deliver-*.md")
+		f.WriteString("AS")
+		f.Close()
+		defer os.Remove(f.Name())
+		got := p.deliverableFileContents("CC_DELIVER_FILE_ALERT_SUMMARY=" + f.Name())
+		if len(got) != 1 || got[0] != "AS" {
+			t.Fatalf("expected alert-summary token accepted, got %d (%q)", len(got), got)
+		}
+	})
+
+	t.Run("mixed typed tokens in one line preserve document order", func(t *testing.T) {
+		fA, _ := os.CreateTemp("", "cc-deliver-*.md")
+		fR, _ := os.CreateTemp("", "cc-deliver-*.md")
+		fA.WriteString("A")
+		fR.WriteString("R")
+		fA.Close()
+		fR.Close()
+		defer os.Remove(fA.Name())
+		defer os.Remove(fR.Name())
+		// alert-summary 先出现，root-cause 后出现 → 期望按文档顺序 [A, R]
+		got := p.deliverableFileContents("x CC_DELIVER_FILE_ALERT_SUMMARY=" + fA.Name() + " y CC_DELIVER_FILE_ROOT_CAUSE=" + fR.Name())
+		if len(got) != 2 || got[0] != "A" || got[1] != "R" {
+			t.Fatalf("expected 2 deliverables in document order [A,R], got %d (%q)", len(got), got)
+		}
+	})
 }
 
 // TestKnowledgeConfirmCardTokenRe locks the fix for the "card never pops" bug:
