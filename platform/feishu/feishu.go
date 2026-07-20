@@ -2404,7 +2404,7 @@ func isDeliverPathTerm(c byte) bool {
 // 覆盖（GLOBAL-RULES 211-213 + save-alert-conclusion.js 包裹标记）：
 //   - 模型推理链 <think>...</think>（含残缺 </think_never_used_xxx> 片段）
 //   - auto-compact 的 <conversation-history-summary>...</conversation-history-summary>
-//   - save-alert-conclusion.js 的 ---8<--- 原样贴入正文 ---8<--- 包裹标记行
+//   - save-alert-conclusion.js 的 <--- 原样贴入正文 <--- 包裹标记行
 //   - 脚本处理过程提示（如「（格式已通过 feishu-markdown-fix.js 修复）」）
 // 这些都是固定字面串，正常告警结论中不会出现，故黑名单方式无误伤。
 // 仅对两个固定标签块用正则跨行删除整段；残缺片段与字面量标记用精确匹配，
@@ -2421,11 +2421,11 @@ func stripInternalTags(s string) string {
 	for _, re := range internalTagBlacklist {
 		s = re.ReplaceAllString(s, "")
 	}
-	// ---8<--- 包裹标记行整行删除（开/闭标记行删，两行之间的内部内容保留）
+	// <--- 包裹标记行整行删除（开/闭标记行删，两行之间的内部内容保留）
 	lines := strings.Split(s, "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.Contains(line, "---8<---") {
+		if strings.Contains(line, "<---") {
 			continue
 		}
 		kept = append(kept, line)
