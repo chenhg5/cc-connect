@@ -55,7 +55,7 @@ func newGeminiSession(ctx context.Context, cmd string, extraArgs []string, workD
 		extraEnv:  extraEnv,
 		events:    make(chan core.Event, 64),
 		ctx:       sessionCtx,
-		cancel:   cancel,
+		cancel:    cancel,
 	}
 	gs.alive.Store(true)
 
@@ -66,7 +66,7 @@ func newGeminiSession(ctx context.Context, cmd string, extraArgs []string, workD
 	return gs, nil
 }
 
-func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) (err error) {
+func (gs *geminiSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (err error) {
 	if !gs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

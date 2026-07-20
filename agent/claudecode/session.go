@@ -940,7 +940,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 // Images are sent as base64 in the multimodal content array.
 // Files are saved to local temp files and referenced in the text prompt
 // so Claude Code can read them with its built-in tools.
-func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *claudeSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
@@ -987,7 +987,7 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	}
 
 	// Save files to disk so Claude Code can read them
-	filePaths := core.SaveFilesToDisk(cs.workDir, files)
+	filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 
 	// Build text part: user prompt + file path references
 	textPart := prompt

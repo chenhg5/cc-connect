@@ -83,24 +83,55 @@ type FileAttachment struct {
 	FileName string // original filename
 }
 
-// SaveFilesToDisk saves file attachments to workDir/.cc-connect/attachments/
-// and returns the list of absolute file paths. Agents can reference these paths
-// in their prompts so the CLI can read them with built-in tools.
+// SaveFilesToDisk saves file attachments to disk and returns the list of
+// absolute file paths. Agents can reference these paths in their prompts so
+// the CLI can read them with built-in tools.
 //
-// workDir may be absolute or relative; the returned paths are always absolute.
-// When workDir is relative, filepath.Abs resolves it against the cc-connect
-// process's current working directory, so callers running from different cwd
-// contexts (especially those where the agent's "workDir" is itself relative
-// to the user's home, like "~/project") still get paths the agent can
-// actually open. An empty workDir falls back to the process cwd, which is
-// a reasonable last-resort default for misconfigured deploys.
+// Layout:
 //
-// The attachment FileName is treated as untrusted user input (it comes from
-// the IM/HTTP upload metadata) and is sanitized to a basename before being
-// joined into attachDir. Without this, FileName="../../escape.txt" was
-// written to workDir/escape.txt — outside the intended attachments
+//	messageID == "": <workDir>/.cc-connect/attachments/<sanitized_name>
+//	messageID != "": <workDir>/.cc-connect/attachments/<messageID>/<sanitized_name>
+//
+// Scoping files to a per-message subdirectory (issue #1552) prevents the
+// silent-overwrite data loss that occurred when two different messages
+// happened to carry attachments with the same filename: under the old flat
+// layout, the second os.WriteFile truncated the first file while the
+// returned paths slice still referenced the (now overwritten) target by
+// name — leaving callers with N path entries pointing at 1 surviving file.
+// With messageID-scoped subdirs, two uploads with the same filename land
+// in different directories and both survive. Duplicate names within one message
+// receive a numeric suffix rather than replacing an earlier attachment.
+//
+// workDir may be absolute or relative; the returned paths are always
+// absolute. When workDir is relative, filepath.Abs resolves it against
+// the cc-connect process's current working directory, so callers running
+// from different cwd contexts (especially those where the agent's
+// "workDir" is itself relative to the user's home, like "~/project") still
+// get paths the agent can actually open. An empty workDir falls back to
+// the process cwd, which is a reasonable last-resort default for
+// misconfigured deploys.
+//
+// The attachment FileName is treated as untrusted user input (it comes
+// from the IM/HTTP upload metadata) and is sanitized to a basename before
+// being joined into the attachments directory. Without this,
+// FileName="../../escape.txt" was written outside the intended attachments
 // directory.
-func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
+//
+// messageID is also treated as untrusted: it is sanitized to a basename
+// (same rules as FileName) before being joined into the attachments dir.
+// Real platform message IDs are alphanumeric / dash / underscore, but a
+// hostile or buggy platform could send anything.
+//
+// Fallback (messageID == ""):
+//
+//	Used by older callers that have not been updated to thread messageID
+//	through. Each file is written to a unique tempfile in the attachments
+//	dir, then atomically linked (os.Link) to the final sanitized name. If
+//	the final name already exists, the link fails loudly (no silent
+//	overwrite) and the file is skipped. This protects against within-call
+//	collisions but does not protect against concurrent calls racing on the
+//	same name — that case is fixed only when messageID is provided.
+func SaveFilesToDisk(workDir, messageID string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
 	}
@@ -119,6 +150,16 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 		slog.Warn("SaveFilesToDisk: filepath.Abs failed, using raw workDir", "workDir", workDir, "error", err)
 	}
 	attachDir := filepath.Join(absWorkDir, ".cc-connect", "attachments")
+	scoped := false
+	if messageID != "" {
+		safeMid := sanitizeAttachmentFileName(messageID)
+		if safeMid == "" {
+			slog.Warn("SaveFilesToDisk: messageID sanitized to empty, falling back to flat layout", "messageID", messageID)
+		} else {
+			attachDir = filepath.Join(attachDir, safeMid)
+			scoped = true
+		}
+	}
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
 	}
@@ -127,17 +168,105 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	for i, f := range files {
 		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
+			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixNano(), i)
 		}
 		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Error("SaveFilesToDisk: write failed", "error", err)
-			continue
+		if scoped {
+			var ok bool
+			fpath, ok = writeUniqueNoOverwrite(attachDir, fname, f.Data)
+			if !ok {
+				continue
+			}
+		} else {
+			// Fallback: write to a unique tempfile, then atomic-link to
+			// the final name. If the final name already exists, refuse to
+			// overwrite — fail loudly rather than silently truncating the
+			// previous upload.
+			if !writeAtomicNoOverwrite(attachDir, fname, f.Data) {
+				continue
+			}
 		}
 		paths = append(paths, fpath)
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
 	return paths
+}
+
+// writeUniqueNoOverwrite creates a new file without replacing an existing name.
+// A numeric suffix is added when the sanitized name is already present.
+func writeUniqueNoOverwrite(dir, name string, data []byte) (string, bool) {
+	for i := 0; ; i++ {
+		candidate := name
+		if i > 0 {
+			ext := filepath.Ext(name)
+			stem := strings.TrimSuffix(name, ext)
+			candidate = fmt.Sprintf("%s_%d%s", stem, i, ext)
+		}
+		path := filepath.Join(dir, candidate)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			slog.Error("SaveFilesToDisk: create failed", "path", path, "error", err)
+			return "", false
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			slog.Error("SaveFilesToDisk: write failed", "path", path, "error", err)
+			return "", false
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			slog.Error("SaveFilesToDisk: close failed", "path", path, "error", err)
+			return "", false
+		}
+		return path, true
+	}
+}
+
+// writeAtomicNoOverwrite writes data to a unique tempfile in dir, then
+// hard-links it to dir/name. If dir/name already exists, the link step
+// fails and the function returns false without writing — no silent
+// overwrite. Returns true on success.
+func writeAtomicNoOverwrite(dir, name string, data []byte) bool {
+	tmp, err := os.CreateTemp(dir, ".tmp_*")
+	if err != nil {
+		slog.Error("SaveFilesToDisk: CreateTemp failed", "dir", dir, "error", err)
+		return false
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		if cerr := tmp.Close(); cerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile close failed during write-failure cleanup", "tmp", tmpName, "error", cerr)
+		}
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile remove failed during write-failure cleanup", "tmp", tmpName, "error", rerr)
+		}
+		slog.Error("SaveFilesToDisk: tempfile write failed", "tmp", tmpName, "error", err)
+		return false
+	}
+	if err := tmp.Close(); err != nil {
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile remove failed during close-failure cleanup", "tmp", tmpName, "error", rerr)
+		}
+		slog.Error("SaveFilesToDisk: tempfile close failed", "tmp", tmpName, "error", err)
+		return false
+	}
+	target := filepath.Join(dir, name)
+	if err := os.Link(tmpName, target); err != nil {
+		if rerr := os.Remove(tmpName); rerr != nil {
+			slog.Warn("SaveFilesToDisk: tempfile remove failed during link-failure cleanup", "tmp", tmpName, "error", rerr)
+		}
+		slog.Error("SaveFilesToDisk: refusing to overwrite existing file",
+			"path", target, "error", err)
+		return false
+	}
+	if err := os.Remove(tmpName); err != nil {
+		slog.Warn("SaveFilesToDisk: tempfile remove failed after successful link", "tmp", tmpName, "error", err)
+	}
+	return true
 }
 
 // sanitizeAttachmentFileName reduces a user-supplied attachment filename to a
@@ -223,6 +352,7 @@ type Message struct {
 	Audio        *AudioAttachment    // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	OnAccepted   func()              // called once when the engine accepts this message for an agent turn
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
 	// LegacyChannelKey is the platform-provided channel identifier used by an
 	// older workspace-binding scope. When both keys are set, multi-workspace

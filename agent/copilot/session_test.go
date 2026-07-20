@@ -547,7 +547,7 @@ func TestSession_SendWithFiles(t *testing.T) {
 	// Send returns error because rpc.call tries to write to nopBuf then
 	// the goroutine gets a nil channel. Just check it doesn't panic.
 	// The file should still be saved before Send tries to contact the process.
-	_ = cs.Send("please review", nil, files)
+	_ = cs.Send("please review", "", nil, files)
 }
 
 func TestSession_SendWithImages(t *testing.T) {
@@ -571,7 +571,7 @@ func TestSession_SendWithImages(t *testing.T) {
 	}
 
 	// Just ensure no panic and images dir gets created
-	_ = cs.Send("describe image", images, nil)
+	_ = cs.Send("describe image", "", images, nil)
 	imgDir := tmpDir + "/.cc-connect/images"
 	entries, _ := os.ReadDir(imgDir)
 	if len(entries) != 1 {

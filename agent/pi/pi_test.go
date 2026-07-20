@@ -243,7 +243,7 @@ func TestReadSettingsModels(t *testing.T) {
 			"provider-a/family-a/model-beta",
 			"provider-b/family-b/model-gamma",
 		},
-		"defaultModel":  "family-a/model-beta",
+		"defaultModel":    "family-a/model-beta",
 		"defaultProvider": "provider-a",
 	}
 	data, _ := json.Marshal(settings)
@@ -1371,17 +1371,17 @@ func newFakeRPCSession(t *testing.T, sessionID, cmd, workDir string) *piSession 
 	}
 
 	s := &piSession{
-		cmd:       rpcCmd[0],
-		workDir:   workDir,
-		events:    make(chan core.Event, 64),
-		extraEnv:  nil,
-		modelsCW:  nil,
-		rpcReady:  make(chan struct{}),
-		rpc:       true,
+		cmd:           rpcCmd[0],
+		workDir:       workDir,
+		events:        make(chan core.Event, 64),
+		extraEnv:      nil,
+		modelsCW:      nil,
+		rpcReady:      make(chan struct{}),
+		rpc:           true,
 		extPending:    make(map[string]string),
 		extPendingRev: make(map[string]string),
 		extMethod:     make(map[string]string),
-		attachDir: filepath.Join(workDir, ".cc-connect", "attachments", "pi-"+sessionID),
+		attachDir:     filepath.Join(workDir, ".cc-connect", "attachments", "pi-"+sessionID),
 	}
 	s.alive.Store(true)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -1594,7 +1594,7 @@ func TestPiSession_SendWhenClosed(t *testing.T) {
 	s, _ := newPiSession(context.Background(), "echo", nil, "/tmp", "", "default", "", false, "", nil)
 	s.Close()
 
-	err := s.Send("hello", nil, nil)
+	err := s.Send("hello", "", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Errorf("expected 'closed' error, got %v", err)
 	}
@@ -1938,7 +1938,7 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	// Create a process that emits Pi RPC JSONL: session, text delta, agent_end.
 	sessionJSON, _ := json.Marshal(map[string]any{"type": "session", "id": "echo-sess"})
 	textJSON, _ := json.Marshal(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "hi"},
 	})
 	agentEndJSON, _ := json.Marshal(map[string]any{"type": "agent_end"})
@@ -1950,11 +1950,11 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	defer cancel()
 
 	s := &piSession{
-		cmd:       "echo",
-		workDir:   t.TempDir(),
-		rpc:       true,
-		events:    make(chan core.Event, 64),
-		rpcReady:  make(chan struct{}),
+		cmd:           "echo",
+		workDir:       t.TempDir(),
+		rpc:           true,
+		events:        make(chan core.Event, 64),
+		rpcReady:      make(chan struct{}),
 		extPending:    make(map[string]string),
 		extPendingRev: make(map[string]string),
 		extMethod:     make(map[string]string),

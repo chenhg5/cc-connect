@@ -1611,6 +1611,29 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-telegram-bot-token"
 
+# =============================================================================
+# TuiTui Platform / 推推平台
+# =============================================================================
+# Uses the official robot WebSocket callback and REST APIs documented at
+# https://im.live.360.cn:8282/robot.
+# 使用推推机器人 WebSocket 长连接和 REST API，无需公网回调地址。
+#
+# [[projects.platforms]]
+# type = "tuitui"
+#
+# [projects.platforms.options]
+# app_id = "${TUITUI_APP_ID}"
+# app_secret = "${TUITUI_APP_SECRET}"
+# allow_from = "*"                         # Direct-message users / 单聊用户
+# group_allow_from = "7652669649132694"   # Group, team, or channel IDs / 群、团队或频道 ID
+# group_policy = "allowlist"               # allowlist | open | disabled
+# require_mention = true                    # Unmentioned messages are cached but do not trigger the agent
+# history_limit = 50                        # Pending unmentioned messages kept per chat; 0 disables caching
+# receive_reaction = "收到"                 # Empty string disables the immediate reaction
+# share_session_in_channel = false          # Share one session among group members
+# api_base = "https://im.live.360.cn:8282"  # Optional override
+# ws_base = "wss://im.live.360.cn:8282"     # Optional override
+
 # QQ (via NapCat / OneBot v11) (uncomment to enable / 取消注释以启用)
 # Requires a OneBot v11 implementation running alongside your QQ client:
 # 需要一个 OneBot v11 实现配合 QQ 客户端运行：
@@ -2186,4 +2209,3 @@ app_secret = "your-feishu-app-secret"
 # wps_sid = "your-wps-sid"             # WPS登录凭证 (Cookie中的wps_sid)
 # device_name = "cc-connect"           # 设备名称（可选）
 # device_uuid = ""                     # 设备UUID（可选，留空自动生成）
-

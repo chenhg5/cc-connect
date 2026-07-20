@@ -407,8 +407,13 @@ type Agent interface {
 
 // AgentSession represents a running interactive agent session with a persistent process.
 type AgentSession interface {
-	// Send sends a user message (with optional images and files) to the running agent process.
-	Send(prompt string, images []ImageAttachment, files []FileAttachment) error
+	// Send sends a user message (with optional images and files) to the running
+	// agent process. messageID is the platform message ID; agents thread it
+	// into SaveFilesToDisk so attachments from different messages land in
+	// distinct per-message subdirectories (issue #1552). It may be empty for
+	// synthesized messages, in which case SaveFilesToDisk falls back to a
+	// best-effort atomic-write path that refuses to overwrite.
+	Send(prompt string, messageID string, images []ImageAttachment, files []FileAttachment) error
 	// RespondPermission sends a permission decision back to the agent process.
 	RespondPermission(requestID string, result PermissionResult) error
 	// Events returns the channel that emits agent events (kept open across turns).

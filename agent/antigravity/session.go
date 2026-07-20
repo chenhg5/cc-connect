@@ -68,7 +68,7 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 	return as, nil
 }
 
-func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (as *antigravitySession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !as.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

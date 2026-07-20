@@ -246,6 +246,9 @@ func main() {
 		case "feishu":
 			runFeishu(os.Args[2:])
 			return
+		case "tuitui":
+			runTuiTui(os.Args[2:])
+			return
 		case "weixin":
 			runWeixin(os.Args[2:])
 			return
@@ -1567,7 +1570,7 @@ func printUsage() {
 
   Bridge your messaging platforms to local AI coding agents.
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
-  Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
+  Platforms: Feishu, TuiTui, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
   GitHub:  https://github.com/chenhg5/cc-connect
   Docs:    https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md
@@ -1620,6 +1623,12 @@ Commands:
     setup            Smart setup (QR create or bind when --app is provided)
     new              Force QR onboarding to create a new bot
     bind             Bind existing app_id/app_secret
+
+  tuitui             Access TuiTui history, posts, and attachments
+    messages         Read chat history
+    search           Search chat history
+    post             Post a channel message
+    download         Download a message attachment
 
   weixin             Setup Weixin personal (ilink) via QR or token
     setup            QR login, or bind when --token is provided

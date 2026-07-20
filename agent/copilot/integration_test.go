@@ -36,7 +36,7 @@ func TestIntegration_CopilotFlow(t *testing.T) {
 	defer func() { _ = session.Close() }()
 
 	// Send a deterministic prompt
-	err = session.Send("Reply with exactly 'integration-ok' and nothing else", nil, nil)
+	err = session.Send("Reply with exactly 'integration-ok' and nothing else", "", nil, nil)
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
