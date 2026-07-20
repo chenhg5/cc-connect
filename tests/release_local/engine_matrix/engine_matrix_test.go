@@ -103,7 +103,7 @@ type matrixSession struct {
 	counter int
 }
 
-func (s *matrixSession) Send(prompt string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
+func (s *matrixSession) Send(prompt string, _ string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
 	s.mu.Lock()
 	id := s.id
 	s.counter++

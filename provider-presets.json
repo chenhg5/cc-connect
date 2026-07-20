@@ -1,7 +1,35 @@
 {
   "version": 2,
-  "updated_at": "2026-06-03",
+  "updated_at": "2026-07-03",
   "providers": [
+    {
+      "name": "kimi",
+      "display_name": "Kimi",
+      "invite_url": "https://www.kimi.com/code/?aff=cc-connect",
+      "description": "Kimi K2.7 Code — coding-focused open-source agentic model from Moonshot AI. Reduces thinking-token usage by ~30% vs K2.6. cc-connect brings Kimi CLI to Feishu/DingTalk/Telegram/Slack/Discord/WeChat Work.",
+      "description_zh": "Kimi K2.7 Code — Moonshot AI 推出的编程专用开源智能体模型,相比 K2.6 平均减少约 30% 的推理 Token 消耗。cc-connect 可将本地 Kimi CLI 接入飞书/钉钉/Telegram/Slack/Discord/企业微信。",
+      "features": ["K2.7 Code", "30% Less Tokens", "Sponsor", "cc-connect Native"],
+      "tier": 1,
+      "website": "https://www.kimi.com/",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.moonshot.cn/v1",
+          "model": "kimi-k2-7-code",
+          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"]
+        },
+        "codex": {
+          "base_url": "https://api.moonshot.cn/v1",
+          "model": "kimi-k2-7-code",
+          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"],
+          "codex_config": {"wire_api": "responses"}
+        },
+        "opencode": {
+          "base_url": "https://api.moonshot.cn/v1",
+          "model": "kimi-k2-7-code",
+          "models": ["kimi-k2-7-code", "kimi-k2-7", "kimi-k2-6"]
+        }
+      }
+    },
     {
       "name": "minimax",
       "display_name": "MiniMax",

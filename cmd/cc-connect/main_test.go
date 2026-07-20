@@ -41,7 +41,7 @@ func (a *stubMainAgent) GetWorkDir() string {
 
 type stubMainAgentSession struct{}
 
-func (s *stubMainAgentSession) Send(string, []core.ImageAttachment, []core.FileAttachment) error {
+func (s *stubMainAgentSession) Send(string, string, []core.ImageAttachment, []core.FileAttachment) error {
 	return nil
 }
 func (s *stubMainAgentSession) RespondPermission(string, core.PermissionResult) error { return nil }

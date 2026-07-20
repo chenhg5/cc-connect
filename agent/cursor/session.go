@@ -39,8 +39,8 @@ type cursorSession struct {
 
 	// Permission handling: each Send() creates a new process whose stdin is used
 	// to respond to interaction_query permission requests.
-	stdinMu  sync.Mutex
-	stdin    io.WriteCloser // current process stdin; nil when no process is running
+	stdinMu sync.Mutex
+	stdin   io.WriteCloser // current process stdin; nil when no process is running
 
 	pendingMu sync.Mutex
 	pending   *pendingInteractionQuery // most recent unresolved interaction_query/request
@@ -75,12 +75,12 @@ func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workD
 	return cs, nil
 }
 
-func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {

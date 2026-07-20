@@ -407,7 +407,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 		Data:     []byte("png-bytes"),
 		FileName: "sample.png",
 	}
-	if err := cs.Send("", []core.ImageAttachment{img}, nil); err != nil {
+	if err := cs.Send("", "", []core.ImageAttachment{img}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -463,7 +463,7 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	}
 	defer cs.Close()
 
-	if err := cs.Send("describe this", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
+	if err := cs.Send("describe this", "", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -517,7 +517,7 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	defer cs.Close()
 
 	prompt := "line1\nline2"
-	if err := cs.Send(prompt, nil, nil); err != nil {
+	if err := cs.Send(prompt, "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -559,7 +559,7 @@ func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
 	}
 	defer func() { _ = cs.Close() }()
 
-	if err := cs.Send("Create a Chat issue.", nil, nil); err != nil {
+	if err := cs.Send("Create a Chat issue.", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -611,7 +611,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 	defer cs.Close()
 
-	if err := cs.Send("hello", nil, nil); err != nil {
+	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -872,7 +872,7 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 
-	if err := cs.Send("hello", nil, nil); err != nil {
+	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -939,13 +939,13 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 
-	if err := cs.Send("first", nil, nil); err != nil {
+	if err := cs.Send("first", "", nil, nil); err != nil {
 		t.Fatalf("Send(first): %v", err)
 	}
 	waitForThreadID(t, cs, "thread-overlap")
 	waitForDoneResult(t, cs.Events())
 
-	if err := cs.Send("second", nil, nil); err != nil {
+	if err := cs.Send("second", "", nil, nil); err != nil {
 		t.Fatalf("Send(second): %v", err)
 	}
 	waitForFileLines(t, startsFile, 2)

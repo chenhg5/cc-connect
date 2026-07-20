@@ -64,8 +64,8 @@ type cujAgent struct {
 	// Used by tests that need to drive a multi-event turn (text chunks +
 	// permission request + result) from a single Send call. See
 	// setNextSessionEvents on cujAgent.
-	nextSessionEvents    []Event
-	nextSessionDelayMs   int
+	nextSessionEvents  []Event
+	nextSessionDelayMs int
 }
 
 func (a *cujAgent) Name() string { return "cuj" }
@@ -146,7 +146,7 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
 	reply := s.reply
@@ -1130,8 +1130,8 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:img", Platform: "test", MessageID: "img1",
 		UserID: "img", UserName: "img",
-		Content: "what is in this image",
-		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
+		Content:  "what is in this image",
+		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -1194,8 +1194,8 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
 		UserID: "file", UserName: "file",
-		Content: "read this file",
-		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
+		Content:  "read this file",
+		Files:    []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -2325,33 +2325,6 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		}
 	}
 }
-
-// ===========================================================================
-// CUJ-G7 · Custom prompt command keeps active session on disk-vs-live mismatch
-//
-// SPOTLIGHT: This is the user-perspective regression test for issue #1470.
-// The user reported that ANY prompt-typed custom command (their /cmp, but
-// also /skill, /timer reusing session, cron, heartbeat) silently landed in
-// the wrong session when disk state was stale or corrupted. The engine
-// killed the live agent process holding the user's in-flight conversation
-// and spawned a fresh one against disk, producing a "Nothing to compact
-// (session too small)" failure for commands that needed context.
-//
-// This test asserts that on a custom command prompt:
-//
-//   1. The live agent process is NOT recycled — exactly one agent session
-//      is spawned across the whole journey.
-//   2. The custom command's prompt reaches the SAME live session, not a
-//      newly spawned one.
-//   3. The Session the user is chatting in remains the one that handles
-//      the command (matters in multi-workspace mode, where executeCustomCommand
-//      previously looked up the wrong SessionManager key — see fix commit
-//      "fix(core): route custom commands and skills to user's chat session").
-//
-// The user perspective matters here because per-function unit tests passed
-// for years while every custom command prompt silently broke in production.
-// ===========================================================================
-
 func TestCUJ_G7_CustomCommandKeepsActiveSession(t *testing.T) {
 	env := newCUJEnv(t)
 	// Register a prompt-typed custom command so handleCommand routes through

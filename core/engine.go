@@ -2999,6 +2999,7 @@ sessionLocked:
 	// reset because cleanupInteractiveState may remove the early placeholder.
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	runMessageAccepted(msg)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
 		"session", msg.SessionKey,
@@ -3014,6 +3015,15 @@ sessionLocked:
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+}
+
+func runMessageAccepted(msg *Message) {
+	if msg == nil || msg.OnAccepted == nil {
+		return
+	}
+	callback := msg.OnAccepted
+	msg.OnAccepted = nil
+	callback()
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -3127,6 +3137,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
 	})
+	runMessageAccepted(msg)
 	queueDepth := len(state.pendingMessages)
 
 	slog.Debug("user message accepted into queue",
@@ -3751,7 +3762,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -5859,7 +5870,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						nextSend <- fmt.Errorf("agent session became nil")
 						return
 					}
-					nextSend <- as.Send(queuedPrompt, queued.images, queued.files)
+					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
 
@@ -6187,7 +6198,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
 			}
-			sendDone <- as.Send(prompt, queued.images, queued.files)
+			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
 		}()
 
 		var stopTyping func()
@@ -6278,7 +6289,7 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, nil, nil); err != nil {
+	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
@@ -10176,7 +10187,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	}
 
 	cmd := compressor.CompressCommand()
-	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
+	if err := state.agentSession.Send(cmd, "", nil, nil); err != nil {
 		if !auto {
 			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		}
@@ -15713,7 +15724,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 
 	saveRelaySessionID(agentSession.CurrentSessionID(), false)
 
-	if err := agentSession.Send(message, nil, nil); err != nil {
+	if err := agentSession.Send(message, "", nil, nil); err != nil {
 		agentSession.Close()
 		return "", fmt.Errorf("send relay message: %w", err)
 	}
