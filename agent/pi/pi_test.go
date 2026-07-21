@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -712,6 +713,164 @@ func TestPiSessionAttachmentDirsAreIsolated(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(s2.attachDir, "two.txt")); err != nil {
 		t.Fatalf("cleaning one session removed another session's attachment: %v", err)
+	}
+}
+
+// TestPiSession_BuildPrompt_FilesDoNotEmbedBytes is the regression test for
+// the bug where pi's Send() inlined the raw bytes of every uploaded file
+// into the RPC prompt string. A user sending a 45KB DOCX from Feishu ended up
+// with the model literally seeing the file's binary body in its context,
+// which both wasted tokens and left the model unable to recover any text.
+//
+// The fix routes file attachments through core.SaveFilesToDisk +
+// core.AppendFileRefs so the prompt only references the on-disk path. This
+// test asserts three invariants that would all be violated by the old code:
+//   1. The constructed prompt does NOT contain the raw attachment bytes.
+//   2. The prompt DOES contain the standard "(Files saved locally, please
+//      read them: …)" reference with the saved path.
+//   3. The file is actually written to disk at the expected location with
+//      byte-for-byte fidelity, so the agent can later open and parse it.
+//
+// If anyone reverts the refactor and brings back the back-into-prompt loop,
+// this test will fail loudly with a clear message naming the bug.
+func TestPiSession_BuildPrompt_FilesDoNotEmbedBytes(t *testing.T) {
+	workDir := t.TempDir()
+	s := &piSession{
+		workDir:   workDir,
+		attachDir: filepath.Join(workDir, ".cc-connect", "attachments", "pi_test_session"),
+	}
+
+	// A distinctive 4 KiB binary blob that mimics a DOCX/PDF/zip header.
+	// Using a non-UTF-8 pattern makes the substring assertion unambiguous:
+	// valid UTF-8 text would also match bytes.Contains trivially.
+	binaryData := bytes.Repeat([]byte{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE}, 512)
+
+	// attachDir in the original Send() is s.attachDir + a messageID-scoped
+	// subdir; buildPrompt is the pure helper so we pass attachDir in
+	// directly.
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments", "msg-binary-bug")
+	prompt := s.buildPrompt(
+		"convert this to pdf",
+		"msg-binary-bug",
+		attachDir,
+		nil,
+		[]core.FileAttachment{{
+			FileName: "西格尔正念.docx",
+			MimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			Data:     binaryData,
+		}},
+	)
+
+	// Invariant 1: no raw attachment bytes leak into the prompt.
+	if bytes.Contains([]byte(prompt), binaryData) {
+		t.Fatalf("pi bug regressed: prompt contains raw attachment bytes\nprompt: %q", prompt)
+	}
+
+	// Invariant 2: the prompt references the saved file so the model can
+	// read it with its built-in tools.
+	if !strings.Contains(prompt, "西格尔正念.docx") {
+		t.Errorf("prompt missing attachment filename reference\nprompt: %q", prompt)
+	}
+	if !strings.Contains(prompt, "(Files saved locally, please read them:") {
+		t.Errorf("prompt missing standard core.AppendFileRefs reference text\nprompt: %q", prompt)
+	}
+	if !strings.Contains(prompt, "convert this to pdf") {
+		t.Errorf("prompt missing original user text\nprompt: %q", prompt)
+	}
+
+	// Invariant 3: the file is on disk at the messageID-scoped location
+	// core.SaveFilesToDisk writes to, with byte-for-byte fidelity.
+	matches, err := filepath.Glob(filepath.Join(workDir, ".cc-connect", "attachments", "msg-binary-bug", "*"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 saved file under msg-binary-bug/, got %d: %v", len(matches), matches)
+	}
+	saved, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("read saved: %v", err)
+	}
+	if !bytes.Equal(saved, binaryData) {
+		t.Errorf("saved file content mismatch (got %d bytes, want %d)", len(saved), len(binaryData))
+	}
+}
+
+// TestPiSession_BuildPrompt_EmptyMsgGetsFileRef covers the case where the
+// user uploads a file with no caption text. The shared AppendFileRefs helper
+// substitutes a default "Please analyze the attached file(s)." so the model
+// has something to act on.
+func TestPiSession_BuildPrompt_EmptyMsgGetsFileRef(t *testing.T) {
+	workDir := t.TempDir()
+	s := &piSession{
+		workDir:   workDir,
+		attachDir: filepath.Join(workDir, ".cc-connect", "attachments", "pi_test_session"),
+	}
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments", "msg-no-caption")
+	prompt := s.buildPrompt(
+		"",
+		"msg-no-caption",
+		attachDir,
+		nil,
+		[]core.FileAttachment{{
+			FileName: "report.pdf",
+			MimeType: "application/pdf",
+			Data:     []byte("%PDF-1.4 fake body"),
+		}},
+	)
+	if !strings.Contains(prompt, "Please analyze the attached file(s).") {
+		t.Errorf("empty msg should be replaced with default instruction\nprompt: %q", prompt)
+	}
+	if !strings.Contains(prompt, "report.pdf") {
+		t.Errorf("prompt missing file name reference\nprompt: %q", prompt)
+	}
+	if bytes.Contains([]byte(prompt), []byte("%PDF-1.4")) {
+		t.Errorf("empty-msg case must still not embed raw file bytes\nprompt: %q", prompt)
+	}
+}
+
+// TestPiSession_BuildPrompt_ImagesStillInline is a guard for the half of
+// buildPrompt we deliberately left alone: images are still saved to disk
+// and their bytes are inlined in the prompt (because the pi CLI does not
+// yet consume image-path references from a plain text prompt). The fix for
+// the file-bytes bug must NOT regress image handling.
+func TestPiSession_BuildPrompt_ImagesStillInline(t *testing.T) {
+	workDir := t.TempDir()
+	s := &piSession{
+		workDir:   workDir,
+		attachDir: filepath.Join(workDir, ".cc-connect", "attachments", "pi_test_session"),
+	}
+	attachDir := filepath.Join(workDir, ".cc-connect", "attachments", "msg-img")
+
+	// 32-byte "PNG" blob (not a real PNG, just a recognizable pattern).
+	imgBytes := bytes.Repeat([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 4)
+
+	prompt := s.buildPrompt(
+		"what's in this image",
+		"msg-img",
+		attachDir,
+		[]core.ImageAttachment{{
+			MimeType: "image/png",
+			Data:     imgBytes,
+			FileName: "shot.png",
+		}},
+		nil,
+	)
+	if !bytes.Contains([]byte(prompt), imgBytes) {
+		t.Errorf("image bytes should still be embedded (multimodal input); prompt: %q", prompt)
+	}
+	if !strings.Contains(prompt, "shot.png") {
+		t.Errorf("image should be referenced by filename in the prompt\nprompt: %q", prompt)
+	}
+
+	// And the image should be on disk too (so any future vision-pipe that
+	// prefers paths over inline bytes has something to read).
+	matches, err := filepath.Glob(filepath.Join(attachDir, "shot.png"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 saved image, got %d: %v", len(matches), matches)
 	}
 }
 
