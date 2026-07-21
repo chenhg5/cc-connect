@@ -266,6 +266,8 @@
     "port": "Puerto",
     "wsUrl": "URL de WebSocket",
     "appId": "App ID",
+    "tenantId": "ID de inquilino",
+    "sessionScope": "Ámbito de sesión",
     "appSecret": "App Secret",
     "sandboxMode": "Modo sandbox",
     "channelSecret": "Channel Secret",
