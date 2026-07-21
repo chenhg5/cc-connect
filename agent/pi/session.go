@@ -318,37 +318,75 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 		return fmt.Errorf("session is closed")
 	}
 
+	// attachDir is the per-message subdir used for IMAGE attachments.
+	//
+	// File attachments are written by core.SaveFilesToDisk into a
+	// separate tree (<workDir>/.cc-connect/attachments/<messageID>/).
+	// That tree is messageID-scoped, so collisions between turns are
+	// impossible (see issue #1552), and files survive across turns
+	// until reaped by a future prune job — per-Send cleanup of files
+	// is therefore unnecessary. The old behaviour of wiping the entire
+	// session dir on every Send was additionally racy: it deleted files
+	// the agent process could still be reading from earlier messages.
 	attachDir := s.attachDir
 	if safeMessageID := sanitizePiAttachmentName(messageID); safeMessageID != "" {
 		attachDir = filepath.Join(attachDir, safeMessageID)
 	}
 	cleanAttachments(attachDir)
 
-	var atFiles []string
-	if len(images) > 0 {
-		atFiles = append(atFiles, saveImagesToDisk(attachDir, images)...)
-	}
-	if len(files) > 0 {
-		atFiles = append(atFiles, saveFilesToDisk(attachDir, files)...)
-	}
-
-	// Build the message with attachment contents embedded
-	var promptText strings.Builder
-	promptText.WriteString(msg)
-	for _, f := range atFiles {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			slog.Warn("piSession: cannot read attachment", "file", f, "error", err)
-			continue
-		}
-		promptText.WriteString("\n\n--- " + filepath.Base(f) + " ---\n")
-		promptText.Write(data)
-	}
+	prompt := s.buildPrompt(msg, messageID, attachDir, images, files)
 
 	if s.rpc {
-		return s.sendRPC(promptText.String())
+		return s.sendRPC(prompt)
 	}
-	return s.sendJSON(promptText.String())
+	return s.sendJSON(prompt)
+}
+
+// buildPrompt constructs the message that will be sent to the pi CLI from the
+// user prompt and any attachments.
+//
+// File attachments (PDF, DOCX, archives, …) are saved to disk via the shared
+// core.SaveFilesToDisk helper and referenced by absolute path in the prompt
+// text via core.AppendFileRefs. Their raw bytes are intentionally NOT
+// inlined — the previous behaviour stuffed the full binary of every uploaded
+// file into the prompt string, which both wasted context and, more
+// importantly, left the model staring at raw DOCX/ZIP bytes it could not
+// recover meaningful text from. Files land in
+// <workDir>/.cc-connect/attachments/<messageID>/.
+//
+// Image attachments are saved to attachDir (a per-messageID subdir of
+// s.attachDir) and their bytes are inlined for multimodal input. The pi CLI
+// does not yet consume image-path references from a plain text prompt, so
+// embedding is the only way to feed vision-capable models. Images and files
+// therefore live in two distinct directory trees — see Send for the cleanup
+// implications. Image handling is kept out of scope for this refactor;
+// unifying it would require deciding on a wire format per agent.
+func (s *piSession) buildPrompt(msg, messageID, attachDir string, images []core.ImageAttachment, files []core.FileAttachment) string {
+	var filePaths []string
+	if len(files) > 0 {
+		filePaths = core.SaveFilesToDisk(s.workDir, messageID, files)
+	}
+
+	// Build the prompt with a strings.Builder to avoid O(n^2) reallocation
+	// when several images are inlined: each += would otherwise copy the
+	// whole prompt so far for every byte appended.
+	var b strings.Builder
+	b.WriteString(core.AppendFileRefs(msg, filePaths))
+
+	if len(images) > 0 {
+		imgPaths := saveImagesToDisk(attachDir, images)
+		for _, f := range imgPaths {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				slog.Warn("piSession: cannot read attachment", "file", f, "error", err)
+				continue
+			}
+			b.WriteString("\n\n--- " + filepath.Base(f) + " ---\n")
+			b.Write(data)
+		}
+	}
+
+	return b.String()
 }
 
 // sendJSON spawns `pi --mode json -p <prompt>` as a one-shot process,
@@ -1173,30 +1211,6 @@ func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string 
 		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
 			slog.Error("piSession: save image failed", "error", err)
-			continue
-		}
-		paths = append(paths, fpath)
-	}
-	return paths
-}
-
-func saveFilesToDisk(attachDir string, files []core.FileAttachment) []string {
-	if len(files) == 0 {
-		return nil
-	}
-	if err := os.MkdirAll(attachDir, 0o755); err != nil {
-		slog.Error("piSession: failed to create attachments dir", "error", err)
-		return nil
-	}
-	var paths []string
-	for i, f := range files {
-		fname := sanitizePiAttachmentName(f.FileName)
-		if fname == "" {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Error("piSession: save file failed", "error", err)
 			continue
 		}
 		paths = append(paths, fpath)
