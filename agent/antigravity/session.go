@@ -231,7 +231,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			_ = os.Remove(f)
 		}
 
-		// Detect conversation ID if this was the first turn of a fresh session
+		err := cmd.Wait()
+
+		// Detect conversation ID if this was the first turn of a fresh session.
+		// agy may flush the chat file only while the process is exiting, so wait
+		// for process reaping before scanning the chat directory.
 		if as.CurrentSessionID() == "" {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
@@ -244,7 +248,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			if sid != "" {
 				as.chatID.Store(sid)
 				slog.Debug("antigravitySession: detected session ID", "session_id", sid)
-				// Emit an EventText carrying the session ID back to core
+				// Emit an EventText carrying the session ID back to core.
 				select {
 				case as.events <- core.Event{Type: core.EventText, SessionID: sid}:
 				case <-as.ctx.Done():
@@ -252,7 +256,6 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 		}
 
-		err := cmd.Wait()
 		sid := as.CurrentSessionID()
 		if err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
@@ -265,7 +268,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 		}
 
-		// Finalize turn
+		// Finalize turn.
 		select {
 		case as.events <- core.Event{Type: core.EventResult, SessionID: sid, Done: true}:
 		case <-as.ctx.Done():
