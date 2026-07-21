@@ -112,16 +112,14 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		}
 	}
 
-	var fileRefs []string
-	for i, f := range files {
-		fname := filepath.Base(f.FileName)
-		if fname == "" || fname == "." || fname == ".." {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o600); err == nil {
-			fileRefs = append(fileRefs, fpath)
-		}
+	// File attachments go through the shared core helper so we get
+	// messageID-scoped subdirectories, sanitized filenames, and a
+	// consistent "(Files saved locally, please read them: …)" reference
+	// wording shared with the other agents. See issue #1552 for the
+	// collision-protection guarantees this brings.
+	var filePaths []string
+	if len(files) > 0 {
+		filePaths = core.SaveFilesToDisk(as.workDir, messageID, files)
 	}
 
 	chatID := as.CurrentSessionID()
@@ -135,12 +133,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		}
 		fullPrompt += "\n\n[Attached images saved at: " + strings.Join(imageRefs, ", ") + "]"
 	}
-	if len(fileRefs) > 0 {
-		if fullPrompt == "" {
-			fullPrompt = "Please analyze the attached file(s)."
-		}
-		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
-	}
+	fullPrompt = core.AppendFileRefs(fullPrompt, filePaths)
 	args := as.buildAntigravityArgs(chatID, isResume, as.mode, fullPrompt)
 	if strings.TrimSpace(as.model) != "" {
 		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
@@ -197,7 +190,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	as.wg.Add(1)
 	go func() {
 		defer cancel()
-		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...), preEntries, time.Now())
+		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, filePaths...), preEntries, time.Now())
 	}()
 
 	return nil

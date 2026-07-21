@@ -133,18 +133,13 @@ func (ks *kimiSession) Send(prompt string, messageID string, images []core.Image
 		imageRefs = append(imageRefs, fpath)
 	}
 
-	var fileRefs []string
-	for i, f := range files {
-		fname := filepath.Base(f.FileName)
-		if fname == "" || fname == "." || fname == ".." {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Warn("kimiSession: failed to save file", "error", err)
-			continue
-		}
-		fileRefs = append(fileRefs, fpath)
+	// File attachments go through the shared core helper for
+	// messageID-scoped subdirs, sanitized filenames, and a consistent
+	// "(Files saved locally, please read them: …)" reference wording. See
+	// issue #1552 for the collision-protection guarantees this brings.
+	var filePaths []string
+	if len(files) > 0 {
+		filePaths = core.SaveFilesToDisk(ks.workDir, messageID, files)
 	}
 
 	fullPrompt := prompt
@@ -154,12 +149,7 @@ func (ks *kimiSession) Send(prompt string, messageID string, images []core.Image
 		}
 		fullPrompt += "\n\n[Attached images saved at: " + strings.Join(imageRefs, ", ") + "]"
 	}
-	if len(fileRefs) > 0 {
-		if fullPrompt == "" {
-			fullPrompt = "Please analyze the attached file(s)."
-		}
-		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
-	}
+	fullPrompt = core.AppendFileRefs(fullPrompt, filePaths)
 
 	args := ks.buildArgs(fullPrompt)
 
@@ -207,7 +197,7 @@ func (ks *kimiSession) Send(prompt string, messageID string, images []core.Image
 	ks.wg.Add(1)
 	go func() {
 		defer cancel()
-		ks.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...))
+		ks.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, filePaths...))
 	}()
 
 	return nil
