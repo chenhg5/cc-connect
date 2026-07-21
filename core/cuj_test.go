@@ -1049,7 +1049,7 @@ func TestCUJ_I5_AskUserQuestionCardButtonsResolveToLabel(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	sendDone := make(chan error, 1)
-	go func() { sendDone <- sess.Send("initial prompt", nil, nil) }()
+	go func() { sendDone <- sess.Send("initial prompt", "", nil, nil) }()
 
 	done := make(chan struct{})
 	go func() {
@@ -1227,8 +1227,8 @@ type recordingPermCall struct {
 	Result    PermissionResult
 }
 
-func (s *recordingSessionWrapper) Send(prompt string, imgs []ImageAttachment, files []FileAttachment) error {
-	return s.inner.Send(prompt, imgs, files)
+func (s *recordingSessionWrapper) Send(prompt string, messageID string, imgs []ImageAttachment, files []FileAttachment) error {
+	return s.inner.Send(prompt, messageID, imgs, files)
 }
 func (s *recordingSessionWrapper) RespondPermission(id string, res PermissionResult) error {
 	s.mu.Lock()
