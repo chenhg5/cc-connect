@@ -648,6 +648,26 @@ func TestNewFeishu_InvalidCustomDomain(t *testing.T) {
 	}
 }
 
+func TestNewFeishu_ThreadIsolationGroupLists(t *testing.T) {
+	pAny, err := New(map[string]any{
+		"app_id":                       "cli_xxx",
+		"app_secret":                   "secret",
+		"thread_isolation_black_group": "oc_plain_a, oc_plain_b",
+		"thread_isolation_white_group": "oc_thread_a, oc_thread_b",
+		"enable_feishu_card":           false,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := pAny.(*Platform)
+	if p.threadIsolationBlackGroup != "oc_plain_a, oc_plain_b" {
+		t.Fatalf("threadIsolationBlackGroup = %q", p.threadIsolationBlackGroup)
+	}
+	if p.threadIsolationWhiteGroup != "oc_thread_a, oc_thread_b" {
+		t.Fatalf("threadIsolationWhiteGroup = %q", p.threadIsolationWhiteGroup)
+	}
+}
+
 func TestLark_SessionKeyPrefix(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true,
@@ -827,6 +847,122 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 	}
 }
 
+func TestFeishu_MakeSessionKeyThreadIsolationGroupLists(t *testing.T) {
+	chatID := "oc_chat"
+	userID := "ou_user"
+	messageID := "om_msg"
+	rootID := "om_root"
+	threadID := "omt_thread"
+
+	tests := []struct {
+		name string
+		p    *Platform
+		msg  *larkim.EventMessage
+		want string
+	}{
+		{
+			name: "global on regular group uses thread key",
+			p:    &Platform{platformName: "feishu", threadIsolation: true},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				ChatType:  stringPtr("group"),
+			},
+			want: "feishu:oc_chat:root:om_msg",
+		},
+		{
+			name: "global on blacklist regular group uses direct key",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				threadIsolationBlackGroup: "oc_chat",
+				threadIsolationWhiteGroup: "oc_other",
+				shareSessionInChannel:     false,
+			},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				ChatType:  stringPtr("group"),
+			},
+			want: "feishu:oc_chat:ou_user",
+		},
+		{
+			name: "global off whitelist regular group uses thread key",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           false,
+				threadIsolationWhiteGroup: "oc_chat",
+			},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				ChatType:  stringPtr("group"),
+			},
+			want: "feishu:oc_chat:root:om_msg",
+		},
+		{
+			name: "global off non-whitelist regular group uses direct key",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           false,
+				threadIsolationWhiteGroup: "oc_other",
+			},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				ChatType:  stringPtr("group"),
+			},
+			want: "feishu:oc_chat:ou_user",
+		},
+		{
+			name: "native topic uses thread key even when global off and not whitelisted",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           false,
+				threadIsolationWhiteGroup: "oc_other",
+			},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				RootId:    &rootID,
+				ThreadId:  &threadID,
+				ChatType:  stringPtr("group"),
+			},
+			want: "feishu:oc_chat:root:om_root",
+		},
+		{
+			name: "private chat unaffected by whitelist",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           false,
+				threadIsolationWhiteGroup: "oc_chat",
+			},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				ChatType:  stringPtr("p2p"),
+			},
+			want: "feishu:oc_chat:ou_user",
+		},
+		{
+			name: "blacklisted regular group still honors shared channel session",
+			p: &Platform{
+				platformName:              "feishu",
+				threadIsolation:           true,
+				threadIsolationBlackGroup: "oc_chat",
+				shareSessionInChannel:     true,
+			},
+			msg: &larkim.EventMessage{
+				MessageId: &messageID,
+				ChatType:  stringPtr("group"),
+			},
+			want: "feishu:oc_chat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.p.makeSessionKey(tt.msg, chatID, userID); got != tt.want {
+				t.Fatalf("makeSessionKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -838,6 +974,40 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 			name:          "thread isolation enabled",
 			platform:      &Platform{threadIsolation: true},
 			replyCtx:      replyContext{messageID: "om_reply", sessionKey: "feishu:oc_chat:root:om_root"},
+			wantThreading: true,
+		},
+		{
+			name: "thread isolation enabled but blacklisted chat remains non-threaded",
+			platform: &Platform{
+				threadIsolation:           true,
+				threadIsolationBlackGroup: "oc_chat",
+			},
+			replyCtx:      replyContext{messageID: "om_reply", chatID: "oc_chat", sessionKey: "feishu:oc_chat:root:om_root"},
+			wantThreading: false,
+		},
+		{
+			name: "thread isolation disabled but whitelisted chat replies in thread",
+			platform: &Platform{
+				threadIsolation:           false,
+				threadIsolationWhiteGroup: "oc_chat",
+			},
+			replyCtx:      replyContext{messageID: "om_reply", chatID: "oc_chat", sessionKey: "feishu:oc_chat:root:om_root"},
+			wantThreading: true,
+		},
+		{
+			name:          "native topic replies in thread even when global isolation is off",
+			platform:      &Platform{threadIsolation: false},
+			replyCtx:      replyContext{messageID: "om_reply", chatID: "oc_chat", sessionKey: "feishu:oc_chat:root:om_root", nativeThreadMsg: true},
+			wantThreading: true,
+		},
+		{
+			name: "previously seen native topic replies in thread after context reconstruction",
+			platform: func() *Platform {
+				p := &Platform{threadIsolation: false}
+				p.markNativeThreadSession("feishu:oc_chat:root:om_root", true)
+				return p
+			}(),
+			replyCtx:      replyContext{messageID: "om_root", chatID: "oc_chat", sessionKey: "feishu:oc_chat:root:om_root"},
 			wantThreading: true,
 		},
 		{

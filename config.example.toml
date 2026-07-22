@@ -415,6 +415,16 @@ level = "info" # debug, info, warn, error
 #   error              — an error occurs / 发生错误
 #   *                  — match all events / 匹配所有事件
 #
+# Hook payloads include stable session metadata in extra.cc_session_id and
+# extra.agent_session_id when available. message.received and session.started
+# also include trigger message metadata such as extra.message_id, channel_id,
+# channel_key and chat_name. message.sent includes extra.trigger_message_id
+# so consumers can correlate an agent reply with the user message that caused it.
+# Hook payload 会在可用时通过 extra.cc_session_id 和 extra.agent_session_id
+# 提供稳定会话信息。message.received 与 session.started 还会带上触发消息的
+# extra.message_id、channel_id、channel_key、chat_name 等信息。message.sent
+# 会带上 extra.trigger_message_id，便于消费方把 Agent 回复关联到触发它的用户消息。
+#
 # Handler types / 处理器类型:
 #   command — run a shell command; event context in CC_HOOK_* env vars
 #           — 执行 Shell 命令；事件上下文通过 CC_HOOK_* 环境变量传递
@@ -432,6 +442,28 @@ level = "info" # debug, info, warn, error
 # event = "error"
 # type = "http"
 # url = "https://my-server.com/cc-connect/on-error"
+#
+# =============================================================================
+# Preflight Checks (Decision Gates / 前置检查)
+# =============================================================================
+# Preflight checks run before normal message hooks and before the agent receives
+# an inbound message. They are intended for deployment-specific gates such as
+# entitlement checks, required user authorization, quota, or service readiness.
+# 前置检查会在普通消息 hook 和 Agent 收到消息之前执行，适合做可用范围、
+# 用户授权、额度或服务状态等部署侧校验。
+#
+# Response JSON / 返回 JSON:
+#   {"decision":"continue"}                         # allow normal processing / 放行
+#   {"decision":"block","message":"Please authorize"} # reply and stop / 回复并阻断
+#   {"decision":"ignore"}                           # silently stop / 静默丢弃
+#
+# [[preflight_checks]]
+# event = "message.preflight"                 # default message.preflight
+# type = "http"
+# url = "http://127.0.0.1:17860/api/cc-connect/preflight"
+# timeout = 3
+# on_error = "block"                          # block, continue, or ignore; default block
+# include_content = false                     # default false; avoid sending user text unless required
 #
 # [[hooks]]
 # event = "*"
@@ -1023,6 +1055,10 @@ app_secret = "your-feishu-app-secret"
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
+# thread_isolation_black_group = ""  # When thread_isolation=true, comma-separated group chat_ids that should keep normal replies
+#                                    # thread_isolation=true 时，逗号分隔的群聊 chat_id 黑名单；命中后仍使用普通回复
+# thread_isolation_white_group = ""  # When thread_isolation=false, comma-separated group chat_ids that should use threaded replies
+#                                    # thread_isolation=false 时，逗号分隔的群聊 chat_id 白名单；命中后使用话题回复
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card

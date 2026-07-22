@@ -58,6 +58,76 @@ func previewText(s string, maxRunes int) string {
 	return out
 }
 
+func hookExtraForSession(session *Session) map[string]any {
+	if session == nil {
+		return nil
+	}
+	extra := map[string]any{
+		"cc_session_id": session.ID,
+	}
+	if name := session.GetName(); name != "" {
+		extra["cc_session_name"] = name
+	}
+	if agentSessionID := session.GetAgentSessionID(); agentSessionID != "" {
+		extra["agent_session_id"] = agentSessionID
+	}
+	return extra
+}
+
+func hookExtraForSessionMessage(session *Session, msg *Message) map[string]any {
+	extra := hookExtraForSession(session)
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	if msg == nil {
+		return extra
+	}
+	if msg.MessageID != "" {
+		extra["message_id"] = msg.MessageID
+	}
+	if msg.ChannelID != "" {
+		extra["channel_id"] = msg.ChannelID
+	} else if channelID := effectiveChannelID(msg); channelID != "" {
+		extra["channel_id"] = channelID
+	}
+	if msg.ChannelKey != "" {
+		extra["channel_key"] = msg.ChannelKey
+	}
+	if msg.ChatName != "" {
+		extra["chat_name"] = msg.ChatName
+	}
+	if msg.UserMessageTimeMs != 0 {
+		extra["user_message_time_ms"] = msg.UserMessageTimeMs
+	}
+	if len(msg.Images) > 0 {
+		extra["has_images"] = true
+	}
+	if len(msg.Files) > 0 {
+		extra["has_files"] = true
+	}
+	if msg.Audio != nil {
+		extra["has_audio"] = true
+	}
+	if msg.Location != nil {
+		extra["has_location"] = true
+	}
+	if msg.FromVoice {
+		extra["from_voice"] = true
+	}
+	return extra
+}
+
+func hookExtraForSentMessage(session *Session, triggerMessageID string) map[string]any {
+	extra := hookExtraForSession(session)
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	if triggerMessageID != "" {
+		extra["trigger_message_id"] = triggerMessageID
+	}
+	return extra
+}
+
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
@@ -360,6 +430,7 @@ type Engine struct {
 	configReloadFunc func() (*ConfigReloadResult, error)
 
 	hooks              *HookManager
+	preflight          *PreflightManager
 	cronScheduler      *CronScheduler
 	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
@@ -838,6 +909,11 @@ func (e *Engine) reapIdleWorkspaces() {
 // SetHooks configures the lifecycle event hook manager.
 func (e *Engine) SetHooks(hm *HookManager) {
 	e.hooks = hm
+}
+
+// SetPreflight configures decision-capable preflight checks.
+func (e *Engine) SetPreflight(pm *PreflightManager) {
+	e.preflight = pm
 }
 
 // SetShell configures the shell binary, flag, and shell profile used for exec.
@@ -2736,6 +2812,38 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 	return cancel
 }
 
+func (e *Engine) evaluateMessagePreflight(msg *Message) PreflightDecision {
+	if e.preflight == nil {
+		return PreflightDecision{Decision: PreflightContinue}
+	}
+	extra := map[string]any{
+		"has_images":           len(msg.Images) > 0,
+		"has_files":            len(msg.Files) > 0,
+		"has_audio":            msg.Audio != nil,
+		"has_location":         msg.Location != nil,
+		"from_voice":           msg.FromVoice,
+		"user_message_time_ms": msg.UserMessageTimeMs,
+	}
+	if msg.ExtraContent != "" {
+		extra["has_extra_content"] = true
+	}
+	if msg.ChannelKey != "" {
+		extra["channel_key"] = msg.ChannelKey
+	}
+	return e.preflight.Evaluate(PreflightEvent{
+		Event:      PreflightEventMessage,
+		SessionKey: msg.SessionKey,
+		Platform:   msg.Platform,
+		MessageID:  msg.MessageID,
+		ChannelID:  effectiveChannelID(msg),
+		UserID:     msg.UserID,
+		UserName:   msg.UserName,
+		ChatName:   msg.ChatName,
+		Content:    msg.Content,
+		Extra:      extra,
+	})
+}
+
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
@@ -2758,6 +2866,28 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		)
 	}
 
+	if decision := e.evaluateMessagePreflight(msg); decision.Decision != PreflightContinue {
+		slog.Info("message stopped by preflight",
+			"platform", msg.Platform,
+			"msg_id", msg.MessageID,
+			"session", msg.SessionKey,
+			"user", msg.UserName,
+			"decision", decision.Decision,
+			"code", decision.Code,
+			"reason", decision.Reason,
+		)
+		if decision.Decision == PreflightBlock {
+			reply := strings.TrimSpace(decision.Message)
+			if reply == "" {
+				reply = e.i18n.T(MsgPreflightBlocked)
+			}
+			e.reply(p, msg.ReplyCtx, reply)
+		}
+		return
+	}
+
+	_, hookSessions := e.sessionContextForKey(msg.SessionKey)
+	hookSession := hookSessions.GetOrCreateActive(msg.SessionKey)
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventMessageReceived,
 		SessionKey: msg.SessionKey,
@@ -2765,6 +2895,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		UserID:     msg.UserID,
 		UserName:   msg.UserName,
 		Content:    msg.Content,
+		Extra:      hookExtraForSessionMessage(hookSession, msg),
 	})
 
 	// Voice message: transcribe to text first
@@ -3663,7 +3794,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWithTrigger(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -3933,6 +4064,10 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+	return e.getOrCreateInteractiveStateWithTrigger(sessionKey, p, replyCtx, session, sessions, agentOverride, ccSessionKey, nil)
+}
+
+func (e *Engine) getOrCreateInteractiveStateWithTrigger(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, triggerMsg *Message) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -4127,17 +4262,40 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
 
+	startedExtra := hookExtraForSessionMessage(session, triggerMsg)
+	startedExtra["is_resume"] = isResume
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventSessionStarted,
 		SessionKey: sessionKey,
 		Platform:   p.Name(),
-		Extra: map[string]any{
-			"agent_session_id": session.GetAgentSessionID(),
-			"is_resume":        isResume,
-		},
+		UserID:     triggerMessageUserID(triggerMsg),
+		UserName:   triggerMessageUserName(triggerMsg),
+		Content:    triggerMessageContent(triggerMsg),
+		Extra:      startedExtra,
 	})
 
 	return state
+}
+
+func triggerMessageUserID(msg *Message) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.UserID
+}
+
+func triggerMessageUserName(msg *Message) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.UserName
+}
+
+func triggerMessageContent(msg *Message) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.Content
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
@@ -5535,6 +5693,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					SessionKey: sessionKey,
 					Platform:   p.Name(),
 					Content:    baseResponse,
+					Extra:      hookExtraForSentMessage(session, msgID),
 				})
 			}
 
@@ -6038,6 +6197,7 @@ channelClosed:
 			SessionKey: sessionKey,
 			Platform:   p.Name(),
 			Content:    fullResponse,
+			Extra:      hookExtraForSentMessage(session, msgID),
 		})
 
 		if toolCount > 0 && segmentStart > 0 {

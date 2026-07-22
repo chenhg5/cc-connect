@@ -702,6 +702,77 @@ func TestLoad_MissingEnvPlaceholderBecomesEmptyString(t *testing.T) {
 	}
 }
 
+func TestLoad_PreflightChecks(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+[[preflight_checks]]
+event = "message.preflight"
+type = "http"
+url = "http://127.0.0.1:17860/api/cc-connect/preflight"
+timeout = 3
+on_error = "block"
+include_content = true
+
+[[projects]]
+name = "demo"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/demo"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "token"
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.PreflightChecks) != 1 {
+		t.Fatalf("PreflightChecks len = %d, want 1", len(cfg.PreflightChecks))
+	}
+	check := cfg.PreflightChecks[0]
+	if check.Event != "message.preflight" || check.Type != "http" || check.URL == "" {
+		t.Fatalf("unexpected preflight check: %+v", check)
+	}
+	if check.Timeout != 3 || check.OnError != "block" || !check.IncludeContent {
+		t.Fatalf("unexpected preflight options: %+v", check)
+	}
+}
+
+func TestLoad_PreflightChecksRejectInvalidOnError(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+[[preflight_checks]]
+type = "http"
+url = "http://127.0.0.1:17860/api/cc-connect/preflight"
+on_error = "retry"
+
+[[projects]]
+name = "demo"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/demo"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "token"
+`)
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), `preflight_checks[0].on_error`) {
+		t.Fatalf("Load() error = %v, want invalid preflight on_error", err)
+	}
+}
+
 func TestListProjects(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 

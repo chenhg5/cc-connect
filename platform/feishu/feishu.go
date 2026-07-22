@@ -107,9 +107,10 @@ func init() {
 }
 
 type replyContext struct {
-	messageID  string
-	chatID     string
-	sessionKey string
+	messageID       string
+	chatID          string
+	sessionKey      string
+	nativeThreadMsg bool
 }
 
 type Platform struct {
@@ -130,6 +131,8 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	threadIsolationBlackGroup  string
+	threadIsolationWhiteGroup  string
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -168,6 +171,7 @@ type Platform struct {
 	// without requiring another @bot mention. Value is the last-seen time so
 	// stale entries can be expired by a future TTL sweep if needed.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+	nativeThreadSessions sync.Map // sessionKey -> time.Time
 
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
@@ -310,6 +314,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	threadIsolationBlackGroup, _ := opts["thread_isolation_black_group"].(string)
+	threadIsolationWhiteGroup, _ := opts["thread_isolation_white_group"].(string)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -401,6 +407,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		threadIsolationBlackGroup:  threadIsolationBlackGroup,
+		threadIsolationWhiteGroup:  threadIsolationWhiteGroup,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1340,7 +1348,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// through without re-mentioning the bot. Plain text and rich-text
 			// posts still require an explicit @bot to avoid pulling in
 			// unrelated chatter.
-			case p.threadIsolation && isAttachmentMsgType(msgType) && p.isActiveThreadSession(sessionKey):
+			case isAttachmentMsgType(msgType) && p.isActiveThreadSession(sessionKey):
 				slog.Debug(p.tag()+": passing attachment through active thread without mention",
 					"chat_id", chatID, "session_key", sessionKey, "msg_type", msgType, "message_id", messageID)
 			default:
@@ -1378,7 +1386,8 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, nativeThreadMsg: isNativeThreadMessage(msg)}
+	p.markNativeThreadSession(sessionKey, rctx.nativeThreadMsg)
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
@@ -1387,7 +1396,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	// Mark this thread as bot-engaged so subsequent attachment-only messages
 	// in the same thread can pass through without re-mentioning the bot.
-	p.markThreadSessionActive(sessionKey)
+	p.markThreadSessionActiveForContext(sessionKey, rctx.nativeThreadMsg)
 
 	// Dispatch message handling asynchronously so the SDK event loop is not
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
@@ -1429,7 +1438,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// inside a thread — the thread already provides conversational context, and
 	// long quoted prefixes can drown out the user's actual text (issue #764).
 	var quoted quotedMessage
-	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
+	if parentID != "" && !p.shouldUseThreadContext(sessionKey) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
@@ -3305,9 +3314,16 @@ func isAttachmentMsgType(msgType string) bool {
 
 // markThreadSessionActive records that a thread sessionKey has been engaged
 // by an @bot message, enabling attachment-only follow-ups inside the thread.
-// No-op when thread isolation is disabled or sessionKey is not a thread key.
+// No-op when this chat should not use thread isolation or sessionKey is not a thread key.
 func (p *Platform) markThreadSessionActive(sessionKey string) {
-	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+	p.markThreadSessionActiveForContext(sessionKey, false)
+}
+
+func (p *Platform) markThreadSessionActiveForContext(sessionKey string, nativeThreadMsg bool) {
+	if !nativeThreadMsg && !p.shouldTreatSessionAsThread(sessionKey) {
+		return
+	}
+	if !isThreadSessionKey(sessionKey) {
 		return
 	}
 	p.activeThreadSessions.Store(sessionKey, time.Now())
@@ -3316,10 +3332,25 @@ func (p *Platform) markThreadSessionActive(sessionKey string) {
 // isActiveThreadSession reports whether the given sessionKey corresponds to a
 // thread that has previously been engaged by an @bot message.
 func (p *Platform) isActiveThreadSession(sessionKey string) bool {
-	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+	if !p.shouldTreatSessionAsThread(sessionKey) && !p.isNativeThreadSession(sessionKey) {
 		return false
 	}
 	_, ok := p.activeThreadSessions.Load(sessionKey)
+	return ok
+}
+
+func (p *Platform) markNativeThreadSession(sessionKey string, nativeThreadMsg bool) {
+	if !nativeThreadMsg || !isThreadSessionKey(sessionKey) {
+		return
+	}
+	p.nativeThreadSessions.Store(sessionKey, time.Now())
+}
+
+func (p *Platform) isNativeThreadSession(sessionKey string) bool {
+	if !isThreadSessionKey(sessionKey) {
+		return false
+	}
+	_, ok := p.nativeThreadSessions.Load(sessionKey)
 	return ok
 }
 
@@ -3348,7 +3379,7 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
-	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
+	if msg != nil && stringValue(msg.ChatType) == "group" && p.shouldUseThreadIsolationForMessage(msg, chatID) {
 		rootID := stringValue(msg.RootId)
 		if rootID == "" {
 			rootID = stringValue(msg.MessageId)
@@ -3361,6 +3392,49 @@ func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID strin
 		return fmt.Sprintf("%s:%s", p.tag(), chatID)
 	}
 	return fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
+}
+
+func (p *Platform) shouldUseThreadIsolationForMessage(msg *larkim.EventMessage, chatID string) bool {
+	if msg == nil || stringValue(msg.ChatType) != "group" {
+		return false
+	}
+	if isNativeThreadMessage(msg) {
+		return true
+	}
+	return p.shouldUseThreadIsolationForChat(chatID)
+}
+
+func isNativeThreadMessage(msg *larkim.EventMessage) bool {
+	if msg == nil {
+		return false
+	}
+	return stringValue(msg.ThreadId) != "" || stringValue(msg.RootId) != ""
+}
+
+func (p *Platform) shouldUseThreadIsolationForChat(chatID string) bool {
+	if p.threadIsolation {
+		return !configuredListContains(p.threadIsolationBlackGroup, chatID)
+	}
+	return configuredListContains(p.threadIsolationWhiteGroup, chatID)
+}
+
+func configuredListContains(list, value string) bool {
+	return strings.TrimSpace(list) != "" && core.AllowList(list, value)
+}
+
+func (p *Platform) shouldTreatSessionAsThread(sessionKey string) bool {
+	if !isThreadSessionKey(sessionKey) {
+		return false
+	}
+	chatID, ok := chatIDFromSessionKey(sessionKey)
+	if !ok {
+		return false
+	}
+	return p.shouldUseThreadIsolationForChat(chatID)
+}
+
+func (p *Platform) shouldUseThreadContext(sessionKey string) bool {
+	return p.isNativeThreadSession(sessionKey) || p.shouldTreatSessionAsThread(sessionKey)
 }
 
 func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[string]any) string {
@@ -3379,7 +3453,7 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
+	return rc.nativeThreadMsg || p.shouldUseThreadContext(rc.sessionKey)
 }
 
 // shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
@@ -3657,6 +3731,14 @@ func isThreadSessionKey(sessionKey string) bool {
 	}
 	_, ok := parseThreadRootID(parts[2])
 	return ok
+}
+
+func chatIDFromSessionKey(sessionKey string) (string, bool) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) < 2 || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.

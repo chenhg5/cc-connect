@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3354,6 +3357,290 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+func TestHandleMessage_PreflightBlockSkipsHookAndAgent(t *testing.T) {
+	hookCalls := atomic.Int32{}
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hookCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hookSrv.Close()
+
+	preflightSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"decision":"block","code":"missing_scope","message":"请先完成飞书授权"}`))
+	}))
+	defer preflightSrv.Close()
+
+	p := &stubPlatformEngine{n: "feishu"}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: string(HookEventMessageReceived), Type: "http", URL: hookSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+	e.SetPreflight(NewPreflightManager("test", []PreflightCheckConfig{
+		{Type: "http", URL: preflightSrv.URL, Timeout: 1},
+	}))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "feishu:oc_group",
+		Platform:   "feishu",
+		MessageID:  "om_1",
+		UserID:     "ou_user",
+		UserName:   "张三",
+		ChatName:   "售后群",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "请先完成飞书授权" {
+		t.Fatalf("sent = %v, want exactly the preflight block message", sent)
+	}
+	if hookCalls.Load() != 0 {
+		t.Fatalf("message.received hook calls = %d, want 0", hookCalls.Load())
+	}
+	if len(agentSession.sentPrompts) != 0 {
+		t.Fatalf("agent prompts = %v, want none", agentSession.sentPrompts)
+	}
+}
+
+func TestHandleMessage_ReceivedHookIncludesMessageContext(t *testing.T) {
+	eventCh := make(chan HookEvent, 1)
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			t.Errorf("decode hook event: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		eventCh <- ev
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hookSrv.Close()
+
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: string(HookEventMessageReceived), Type: "http", URL: hookSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "feishu:oc_group:ou_user",
+		Platform:   "feishu",
+		MessageID:  "om_received",
+		ChannelID:  "oc_group",
+		ChannelKey: "feishu:oc_group",
+		UserID:     "ou_user",
+		UserName:   "张三",
+		ChatName:   "售后群",
+		Content:    "/help",
+		ReplyCtx:   "ctx",
+	})
+
+	select {
+	case ev := <-eventCh:
+		if ev.Event != HookEventMessageReceived {
+			t.Fatalf("event = %s, want %s", ev.Event, HookEventMessageReceived)
+		}
+		if ev.SessionKey != "feishu:oc_group:ou_user" || ev.Platform != "feishu" {
+			t.Fatalf("session/platform = %q/%q", ev.SessionKey, ev.Platform)
+		}
+		if got := ev.Extra["message_id"]; got != "om_received" {
+			t.Fatalf("message_id = %#v, want om_received", got)
+		}
+		if got := ev.Extra["channel_id"]; got != "oc_group" {
+			t.Fatalf("channel_id = %#v, want oc_group", got)
+		}
+		if got := ev.Extra["channel_key"]; got != "feishu:oc_group" {
+			t.Fatalf("channel_key = %#v, want feishu:oc_group", got)
+		}
+		if got := ev.Extra["chat_name"]; got != "售后群" {
+			t.Fatalf("chat_name = %#v, want 售后群", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for message.received hook")
+	}
+}
+
+func TestHandleMessage_HookIncludesActiveCCSessionIDAcrossNew(t *testing.T) {
+	var eventsMu sync.Mutex
+	var events []HookEvent
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			t.Errorf("decode hook event: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		eventsMu.Lock()
+		events = append(events, ev)
+		eventsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hookSrv.Close()
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: string(HookEventMessageReceived), Type: "http", URL: hookSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:chat:user",
+		Platform:   "test",
+		MessageID:  "m_new",
+		UserID:     "user",
+		UserName:   "张三",
+		Content:    "/new first",
+		ReplyCtx:   "ctx-new",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:chat:user",
+		Platform:   "test",
+		MessageID:  "m_help",
+		UserID:     "user",
+		UserName:   "张三",
+		Content:    "/help",
+		ReplyCtx:   "ctx-help",
+	})
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if len(events) != 2 {
+		t.Fatalf("hook events = %d, want 2: %#v", len(events), events)
+	}
+	if got := events[0].Extra["cc_session_id"]; got != "s1" {
+		t.Fatalf("first cc_session_id = %#v, want s1", got)
+	}
+	if got := events[1].Extra["cc_session_id"]; got != "s2" {
+		t.Fatalf("second cc_session_id = %#v, want s2 after /new", got)
+	}
+}
+
+func TestProcessInteractiveEvents_MessageSentHookIncludesCCSessionID(t *testing.T) {
+	var eventsMu sync.Mutex
+	var events []HookEvent
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			t.Errorf("decode hook event: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		eventsMu.Lock()
+		events = append(events, ev)
+		eventsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hookSrv.Close()
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: string(HookEventMessageSent), Type: "http", URL: hookSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+
+	sessionKey := "test:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	session.SetAgentSessionID("agent-session-1", "stub")
+	agentSession := newControllableSession("agent-session-1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventResult, Content: "assistant reply", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, "ctx-1")
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("hook events = %d, want 1: %#v", len(events), events)
+	}
+	if got := events[0].Extra["cc_session_id"]; got != "s1" {
+		t.Fatalf("cc_session_id = %#v, want s1", got)
+	}
+	if got := events[0].Extra["agent_session_id"]; got != "agent-session-1" {
+		t.Fatalf("agent_session_id = %#v, want agent-session-1", got)
+	}
+	if got := events[0].Extra["trigger_message_id"]; got != "m1" {
+		t.Fatalf("trigger_message_id = %#v, want m1", got)
+	}
+}
+
+func TestSessionStartedHookIncludesTriggerMessageContext(t *testing.T) {
+	eventCh := make(chan HookEvent, 1)
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			t.Errorf("decode hook event: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		eventCh <- ev
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hookSrv.Close()
+
+	p := &stubPlatformEngine{n: "feishu"}
+	agent := &resultAgent{session: newResultAgentSession("assistant reply")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: string(HookEventSessionStarted), Type: "http", URL: hookSrv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+
+	e.handleMessage(p, &Message{
+		SessionKey: "feishu:oc_group:ou_user",
+		Platform:   "feishu",
+		MessageID:  "om_trigger",
+		ChannelID:  "oc_group",
+		UserID:     "ou_user",
+		UserName:   "张三",
+		ChatName:   "售后群",
+		Content:    "帮我看这个售后单",
+		ReplyCtx:   "ctx",
+	})
+
+	select {
+	case ev := <-eventCh:
+		if ev.Event != HookEventSessionStarted {
+			t.Fatalf("event = %s, want %s", ev.Event, HookEventSessionStarted)
+		}
+		if ev.SessionKey != "feishu:oc_group:ou_user" {
+			t.Fatalf("session_key = %q", ev.SessionKey)
+		}
+		if ev.Platform != "feishu" {
+			t.Fatalf("platform = %q", ev.Platform)
+		}
+		if ev.UserID != "ou_user" || ev.UserName != "张三" || ev.Content != "帮我看这个售后单" {
+			t.Fatalf("trigger message context missing: user_id=%q user_name=%q content=%q", ev.UserID, ev.UserName, ev.Content)
+		}
+		if got := ev.Extra["cc_session_id"]; got != "s1" {
+			t.Fatalf("cc_session_id = %#v, want s1", got)
+		}
+		if got := ev.Extra["agent_session_id"]; got != "result-session" {
+			t.Fatalf("agent_session_id = %#v, want result-session", got)
+		}
+		if got := ev.Extra["is_resume"]; got != false {
+			t.Fatalf("is_resume = %#v, want false", got)
+		}
+		if got := ev.Extra["message_id"]; got != "om_trigger" {
+			t.Fatalf("message_id = %#v, want om_trigger", got)
+		}
+		if got := ev.Extra["channel_id"]; got != "oc_group" {
+			t.Fatalf("channel_id = %#v, want oc_group", got)
+		}
+		if got := ev.Extra["chat_name"]; got != "售后群" {
+			t.Fatalf("chat_name = %#v, want 售后群", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for session.started hook")
 	}
 }
 
