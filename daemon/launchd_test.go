@@ -512,3 +512,61 @@ func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
 		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
 	}
 }
+
+// TestBuildPlist_IncludesHOME regresses the "Append system prompt file not
+// found" bug: launchd LaunchAgents do not always propagate HOME, so the
+// daemon (and Claude / Codex / etc. subprocesses it spawns) would call
+// os.UserHomeDir(), get an error, and config.Load would fall back to a
+// relative data_dir that agent subprocesses resolved against work_dir.
+func TestBuildPlist_IncludesHOME(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		HomeDir:    "/home/app",
+	}
+	out := buildPlist(cfg)
+	if !strings.Contains(out, "<key>HOME</key>\n\t\t<string>/home/app</string>") {
+		t.Fatalf("plist should include HOME=/home/app; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_OmitsHOMEWhenEmpty ensures we do not emit an empty
+// <string></string> for HOME when the caller could not determine one.
+func TestBuildPlist_OmitsHOMEWhenEmpty(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "<key>HOME</key>") {
+		t.Fatalf("plist should omit HOME when HomeDir empty; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_EnvExtraHOMEDoesNotOverrideTemplateHOME pins that the
+// template-owned HOME wins over any HOME leaking in through EnvExtra —
+// the same guarantee we make for PATH and CC_LOG_FILE.
+func TestBuildPlist_EnvExtraHOMEDoesNotOverrideTemplateHOME(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		HomeDir:    "/home/app",
+		EnvExtra:   map[string]string{"HOME": "/should-not-override"},
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "/should-not-override") {
+		t.Fatalf("EnvExtra HOME leaked past template ownership: %s", out)
+	}
+	if !strings.Contains(out, "<string>/home/app</string>") {
+		t.Fatalf("expected template HOME /home/app to survive; got:\n%s", out)
+	}
+}
