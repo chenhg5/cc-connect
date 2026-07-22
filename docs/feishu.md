@@ -155,7 +155,6 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 |---------|---------|------|
 | 获取与更新用户基本信息 | `contact:user.base:readonly` | 获取用户信息 |
 | 获取群组中用户@机器人消息 | `im:message.group_at_msg:readonly` | 接收群消息 |
-| 读取用户发给机器人的单聊消息 | `im:message.p2p_msg:readonly` | 接收私聊消息 |
 | 获取群组中所有消息（敏感权限） | `im:message.group_msg` | 读取群消息内容 |
 | 读取单聊消息 | `im:message.p2p_msg:readonly` | 读取私聊内容 |
 | 以应用身份发送群消息 | `im:message:send_as_bot` | 发送消息回复用户 |
