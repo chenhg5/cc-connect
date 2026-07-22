@@ -400,7 +400,10 @@ type Agent interface {
 	Name() string
 	// StartSession creates or resumes an interactive session with a persistent process.
 	StartSession(ctx context.Context, sessionID string) (AgentSession, error)
-	// ListSessions returns sessions known to the agent backend.
+	// ListSessions returns sessions known to the agent backend, sorted by
+	// ModifiedAt descending (newest first). Callers depend on this ordering:
+	// `/attach latest` and `/resume-latest` adopt index 0, and numeric
+	// `/attach N` indexes into this order.
 	ListSessions(ctx context.Context) ([]AgentSessionInfo, error)
 	Stop() error
 }

@@ -6,6 +6,10 @@
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 - **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+- **Continue terminal Claude Code sessions from IM** (`/attach`, `/resume-latest`, `/detach`): privileged commands that explicitly bind an external Claude Code session (started from a local terminal) to the current IM thread, and release it again symmetrically. Beyond plain `/switch` (#666):
+  - 30-second concurrent-write guard — refuses to adopt a jsonl a terminal `claude` may still be writing; `--force` / `-f` overrides.
+  - 5-message history preview before binding (best-effort, when the agent backend exposes history).
+  - Symmetric `/detach` — stops the live subprocess, clears the agent binding, and prints the exact `claude --resume <uuid>` command for the terminal. Pair with `reset_on_idle_mins` as an automatic safety net. Full i18n coverage (en/zh/zh-TW/ja/es).
 
 ## Unreleased
 
@@ -270,7 +274,6 @@ Patch release with critical bug fixes for session management, config preservatio
 - **Weibo image & file support**: send and receive images and files in Weibo DMs via base64 encoding within the WebSocket `send_message` payload. Implements `ImageSender` and `FileSender` interfaces.
 - **Comprehensive session tests**: 12 new `SessionManager` unit tests covering `PastAgentSessionIDs`, legacy data migration, and version-based schema detection. 9 new `Engine` integration tests covering `/list` visibility across `/new`, provider switch, and real-world legacy data scenarios, plus end-to-end session name mapping tests for all three agent ID patterns (immediate, EventText, EventResult).
 - **Config preservation tests**: 8 new tests verifying comment and field preservation for `SaveActiveProvider`, `SaveAgentModel`, `SaveProviderModel`, `SaveLanguage`, `SaveDisplayConfig`, `SaveTTSMode`, multi-project config, and global provider refs.
-
 ## v1.3.0 (2026-04-19)
 
 First stable release of the 1.3 series. 555 commits since v1.2.1 with major new features, platform improvements, and broad community contributions.
@@ -341,7 +344,6 @@ Thanks to all contributors who made this release possible:
 - [@sidney061212-ai](https://github.com/sidney061212-ai) — Agent session ID persistence
 - [@zkunzhu](https://github.com/zkunzhu) — Daemon proxy env preservation
 - [@Yuri0314](https://github.com/Yuri0314) — TTS language type fix
-
 ## v1.2.2-beta.5 (2026-03-31)
 
 Beta release with embedded web admin, Discord proxy support, multimodal fixes, and major platform improvements.
