@@ -276,6 +276,91 @@ High-level view of what each **built-in platform** can do in cc-connect.
 </p>
 
 
+## 📋 Prerequisites
+
+> **Install in this exact order** — cc-connect is a bridge for local AI coding agents, so the agent CLI must be installed and authenticated *before* cc-connect starts. Skipping ahead will cause `cc-connect` to exit with `claudecode: claude CLI not found in PATH` (or similar for your chosen agent), and the Web UI on `:9820` will never come up.
+
+### 1️⃣ Install your AI Agent CLI
+
+Pick the agent you want to bridge. You need **at least one**.
+
+```bash
+# Claude Code (most common)
+brew install --cask claude-code            # macOS / Linux Homebrew
+# or
+npm install -g @anthropic-ai/claude-code   # any platform via npm
+
+# OpenAI Codex
+npm install -g @openai/codex
+
+# Google Gemini CLI
+npm install -g @google/gemini-cli
+
+# iFlow CLI
+npm install -g @iflow-ai/iflow-cli
+
+# Qoder CLI
+curl -fsSL https://qoder.com/install | bash
+```
+
+For **Cursor Agent** and **OpenCode**, follow the official install pages:
+- Cursor Agent: <https://docs.cursor.com/agent>
+- OpenCode: <https://github.com/opencode-ai/opencode>
+
+Verify the binary is on your `PATH`:
+
+```bash
+claude --version       # or: codex / gemini / opencode / qodercli / cursor-agent ...
+```
+
+### 2️⃣ Authenticate the agent
+
+Each agent has its own login flow — run the agent once interactively so it stores credentials in your home directory:
+
+```bash
+claude login           # opens a browser to authenticate
+# or
+codex login            # /gemini / opencode auth — see the agent's docs
+```
+
+If you skip this step, `cc-connect` will still start, but the agent will reject every prompt with an auth error.
+
+### 3️⃣ Install cc-connect
+
+```bash
+# npm (any platform)
+npm install -g cc-connect
+
+# Homebrew (macOS / Linux)
+brew install cc-connect
+
+# Or download a binary from https://github.com/chenhg5/cc-connect/releases
+```
+
+### 4️⃣ Start cc-connect and open the Web UI
+
+```bash
+cc-connect             # starts the service; first run auto-creates ~/.cc-connect/config.toml
+```
+
+On first launch, cc-connect prints something like:
+
+```
+Web admin:  http://localhost:9820
+```
+
+Open that URL in your browser. If `9820` is already in use, pass `--web-port 9821` or set `web_port` in `config.toml`.
+
+> **Note:** `cc-connect web` *only* opens the browser and the config UI — it does **not** start the service. You still need `cc-connect` running in another terminal.
+
+### 5️⃣ Configure platform bot tokens in the Web UI
+
+In the Web UI, create a project, then add at least one platform (Feishu / Telegram / Discord / Slack / DingTalk / WeChat Work / QQ / LINE / Weixin) and paste the bot token from that platform's developer console. Save and cc-connect will hot-reload.
+
+That's it — send a message to your bot and cc-connect will relay it to your local agent.
+
+---
+
 ## 🚀 Quick Start
 
 ### 🤖 Install & Configure via AI Agent (Recommended)
