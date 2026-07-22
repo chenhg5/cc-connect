@@ -1583,7 +1583,21 @@ app_secret = "your-feishu-app-secret"
 # 追加在 system_prompt 之后，包含在同一段注入的前导内容中。可单独使用，也可与
 # system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
-#
+
+# Optional: timeout (in minutes) for AskUserQuestion approvals forwarded to
+# remote IM users. When the user does not reply in time, the request resolves
+# to deny (fail-closed) and Codex proceeds without that decision. Default 5
+# (matches legacy hard-coded behavior). Set 0 to wait indefinitely — the
+# approval stays pending until the user replies, the session cancels, or the
+# agent shuts down. Negative or unparseable values log a startup warning and
+# fall back to 5. Has no effect on the exec backend (which has no IPC channel).
+# 可选：转发到 IM 远程用户的 AskUserQuestion 审批超时时间（分钟）。用户在超时内未
+# 回复时，请求按 deny 失败关闭处理，Codex 将在缺少该决策的情况下继续。默认 5
+# （与旧版硬编码行为一致）。设为 0 表示无限等待 — 审批将一直挂起，直到用户回复、
+# 会话被取消、或 agent 关闭。负数或不可解析的值会在启动时打 warning 并回退到 5。
+# 对 exec 后端无效（exec 后端没有 IPC 通道）。
+# request_user_input_timeout_mins = 5
+
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
 #

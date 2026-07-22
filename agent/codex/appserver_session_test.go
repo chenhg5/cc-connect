@@ -451,3 +451,201 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 		}
 	}
 }
+
+// waitForNoWrittenJSONLine polls for up to `wait` and fails if any non-empty
+// JSON line is written. Used to verify indefinite-wait (timeout=0) paths
+// do not produce an early deny response.
+func waitForNoWrittenJSONLine(t *testing.T, w *lockedWriteCloser, wait time.Duration) {
+	t.Helper()
+	deadline := time.After(wait)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			if got := strings.TrimSpace(w.String()); got != "" {
+				t.Fatalf("expected no JSON written during %s, got %q", wait, got)
+			}
+			return
+		case <-ticker.C:
+			if got := strings.TrimSpace(w.String()); got != "" {
+				t.Fatalf("expected no JSON written during %s, got %q", wait, got)
+			}
+		}
+	}
+}
+
+// TestParseRequestUserInputTimeoutMins covers the request_user_input_timeout_mins
+// config helper (issue #1484): defaults, explicit values, the 0=indefinite sentinel,
+// and the warning+fallback path for negative / unparseable / wrong-type values.
+func TestParseRequestUserInputTimeoutMins(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  any
+		want time.Duration
+	}{
+		{name: "nil uses default", raw: nil, want: defaultAppServerRequestUserInputTimeout},
+		{name: "empty string uses default", raw: "", want: defaultAppServerRequestUserInputTimeout},
+		{name: "explicit int 5", raw: int(5), want: 5 * time.Minute},
+		{name: "explicit int64 10", raw: int64(10), want: 10 * time.Minute},
+		{name: "explicit float64 7", raw: float64(7), want: 7 * time.Minute},
+		{name: "string 15", raw: "15", want: 15 * time.Minute},
+		{name: "string 0 means indefinite", raw: "0", want: 0},
+		{name: "int 0 means indefinite", raw: int(0), want: 0},
+		{name: "negative int falls back to default", raw: int(-3), want: defaultAppServerRequestUserInputTimeout},
+		{name: "negative string falls back to default", raw: "-2", want: defaultAppServerRequestUserInputTimeout},
+		{name: "unparseable string falls back to default", raw: "abc", want: defaultAppServerRequestUserInputTimeout},
+		{name: "unsupported type falls back to default", raw: []string{"x"}, want: defaultAppServerRequestUserInputTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseRequestUserInputTimeoutMins(tt.raw)
+			if got != tt.want {
+				t.Fatalf("parseRequestUserInputTimeoutMins(%#v) = %s, want %s", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleRequestUserInput_TimeoutReturnsDeny verifies that when the user
+// never replies within the configured timeout, the approval goroutine resolves
+// to deny (fail-closed) and writes an empty-answer response back to Codex
+// (issue #1484).
+func TestHandleRequestUserInput_TimeoutReturnsDeny(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		events:                  make(chan core.Event, 4),
+		ctx:                     ctx,
+		pendingApprovals:        make(map[string]chan core.PermissionResult),
+		stdin:                   stdin,
+		requestUserInputTimeout: 50 * time.Millisecond,
+	}
+
+	s.handleServerRequest(serverRequestProbe(t, `"rui-timeout"`, "item/tool/requestUserInput", map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"itemId":   "call-timeout",
+		"questions": []any{
+			map[string]any{
+				"id":       "database",
+				"header":   "Database",
+				"question": "Which database should we use?",
+				"options": []any{
+					map[string]any{"label": "Postgres", "description": ""},
+				},
+			},
+		},
+	}))
+
+	// Drain the AskUserQuestion event so the goroutine proceeds.
+	select {
+	case <-s.events:
+	case <-time.After(time.Second):
+		t.Fatal("expected AskUserQuestion event")
+	}
+
+	line := waitForWrittenJSONLine(t, stdin)
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      string `json:"id"`
+		Result  struct {
+			Answers map[string]struct {
+				Answers []string `json:"answers"`
+			} `json:"answers"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+		t.Fatalf("decode response %q: %v", line, err)
+	}
+	if envelope.JSONRPC != "2.0" || envelope.ID != "rui-timeout" {
+		t.Fatalf("envelope = %#v", envelope)
+	}
+	if len(envelope.Result.Answers) != 0 {
+		t.Fatalf("expected empty answers on timeout (fail-closed), got %#v", envelope.Result.Answers)
+	}
+}
+
+// TestHandleRequestUserInput_ZeroTimeoutWaitsIndefinitely verifies that
+// requestUserInputTimeout=0 disables the timer entirely — the approval
+// goroutine must block until the user replies or the session cancels
+// (issue #1484). We assert nothing is written within a generous wait window
+// when no reply is sent, then verify the user reply still produces the
+// expected response.
+func TestHandleRequestUserInput_ZeroTimeoutWaitsIndefinitely(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		events:                  make(chan core.Event, 4),
+		ctx:                     ctx,
+		pendingApprovals:        make(map[string]chan core.PermissionResult),
+		stdin:                   stdin,
+		requestUserInputTimeout: 0, // 0 = indefinite wait, no timer
+	}
+
+	s.handleServerRequest(serverRequestProbe(t, `"rui-indef"`, "item/tool/requestUserInput", map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"itemId":   "call-indef",
+		"questions": []any{
+			map[string]any{
+				"id":       "database",
+				"header":   "Database",
+				"question": "Which database should we use?",
+				"options": []any{
+					map[string]any{"label": "Postgres", "description": ""},
+				},
+			},
+		},
+	}))
+
+	var event core.Event
+	select {
+	case event = <-s.events:
+	case <-time.After(time.Second):
+		t.Fatal("expected AskUserQuestion event")
+	}
+
+	// With timeout=0 the goroutine must NOT write any response yet.
+	// Wait 200ms (much longer than the legacy 5-min would imply nothing
+	// happens here anyway) and confirm the stdin is still empty.
+	waitForNoWrittenJSONLine(t, stdin, 200*time.Millisecond)
+
+	// Now send the user reply and verify the goroutine wakes up and writes
+	// the expected answer.
+	if err := s.RespondPermission(event.RequestID, core.PermissionResult{
+		Behavior: "allow",
+		UpdatedInput: map[string]any{
+			"answers": map[string]any{
+				"Which database should we use?": "Postgres",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("RespondPermission() error = %v", err)
+	}
+
+	line := waitForWrittenJSONLine(t, stdin)
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      string `json:"id"`
+		Result  struct {
+			Answers map[string]struct {
+				Answers []string `json:"answers"`
+			} `json:"answers"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+		t.Fatalf("decode response %q: %v", line, err)
+	}
+	if envelope.ID != "rui-indef" {
+		t.Fatalf("envelope id = %q, want rui-indef", envelope.ID)
+	}
+	got := envelope.Result.Answers["database"].Answers
+	if len(got) != 1 || got[0] != "Postgres" {
+		t.Fatalf("answers[database] = %#v, want [Postgres]", got)
+	}
+}

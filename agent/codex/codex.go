@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -48,7 +49,10 @@ type Agent struct {
 	activeIdx       int      // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
-	mu              sync.RWMutex
+	// requestUserInputTimeout bounds how long app-server AskUserQuestion waits
+	// for a remote user reply (issue #1484). 0 = indefinite wait, positive = use it.
+	requestUserInputTimeout time.Duration
+	mu                      sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -92,19 +96,20 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		systemPrompt:    strings.TrimSpace(systemPrompt),
-		appendPrompt:    strings.TrimSpace(appendPrompt),
-		cmd:             cmd,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
+		workDir:                 workDir,
+		model:                   model,
+		reasoningEffort:         normalizeReasoningEffort(reasoningEffort),
+		mode:                    mode,
+		backend:                 backend,
+		appServerURL:            appServerURL,
+		codexHome:               strings.TrimSpace(codexHome),
+		systemPrompt:            strings.TrimSpace(systemPrompt),
+		appendPrompt:            strings.TrimSpace(appendPrompt),
+		cmd:                     cmd,
+		cliExtraArgs:            cliExtraArgs,
+		configEnv:               configEnv,
+		requestUserInputTimeout: parseRequestUserInputTimeoutMins(opts["request_user_input_timeout_mins"]),
+		activeIdx:               -1,
 	}, nil
 }
 
@@ -353,7 +358,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +402,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -474,6 +477,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cliBin := a.cmd
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
+	requestUserInputTimeout := a.requestUserInputTimeout
 	// Order matters for MergeEnv override semantics (later wins):
 	//   1. configEnv — static env from [projects.agent.options.env]
 	//   2. providerEnv — per-provider keys (OPENAI_API_KEY etc.)
@@ -501,7 +505,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, requestUserInputTimeout)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
