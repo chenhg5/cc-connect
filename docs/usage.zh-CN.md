@@ -62,6 +62,21 @@ reset_on_idle_mins = 60
 
 开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
 
+### 空闲退出：回收空闲 agent 进程的内存
+
+每个会话会常驻一个 agent 子进程（以 Claude Code 为例约 300 MB，还带一组 MCP server 子进程）。小内存机器可以让 cc-connect 在回合正常结束后自动关闭空闲的 agent 子进程、下次需要时再拉起：
+
+```toml
+[[projects]]
+name = "demo"
+agent_session_idle_timeout_mins = 30   # 0 或不设置表示禁用（默认）
+```
+
+回合结束后空闲 30 分钟，agent 子进程（连同它的 MCP 子进程）会被关闭、内存立即释放。对话不会丢失：下一条消息会用已保存的 agent session ID 透明地恢复会话，代价是几秒钟的冷启动。正在执行任务（前台或后台）、等待权限确认、或有排队消息的会话不会被关闭。
+
+它与 `reset_on_idle_mins` 的区别：空闲退出释放的是*进程*、保留对话；空闲重置则是切换到*新对话*。它按聊天会话生效，也不同于按整个 workspace 回收的 `workspace_idle_timeout_mins`。三者可以组合使用。
+
+
 ### 切换模型时保留历史
 
 `/model` 切换模型时保留当前会话——agent 会在新模型下继续对话（不额外消耗 token）。注意模型切换作用于共享的 agent 实例——如果多个平台使用同一个 project，模型变更会影响所有平台。

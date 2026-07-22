@@ -64,6 +64,21 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+### Idle exit: reclaim memory from idle agent processes
+
+Each session keeps a resident agent subprocess (for Claude Code, ~300 MB plus its MCP server children). On small-RAM machines you can let cc-connect close idle agent subprocesses after a clean turn and resume them on demand:
+
+```toml
+[[projects]]
+name = "demo"
+agent_session_idle_timeout_mins = 30   # 0 or unset disables (default)
+```
+
+After 30 minutes with no activity following a completed turn, the agent subprocess (and its MCP children) is closed and its memory released. The conversation is not lost: the next message transparently resumes it via the saved agent session ID, at the cost of a few seconds of cold start. Sessions with a running turn (foreground or background), a pending permission request, or queued messages are never closed.
+
+This differs from `reset_on_idle_mins`: idle exit frees the *process* but keeps the conversation; reset-on-idle rotates to a *new conversation*. It is also per chat session, unlike `workspace_idle_timeout_mins` which reaps a whole workspace. They can be combined.
+
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
