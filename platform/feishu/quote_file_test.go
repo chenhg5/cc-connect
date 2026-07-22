@@ -234,7 +234,6 @@ func TestDispatchMessageQuotedFileAcceptance(t *testing.T) {
 		parentID         string
 		mentions         []*larkim.MentionEvent
 		expectFiles      int
-		expectFileName   string
 		expectFileNameIs string // matcher: "report.txt" or "" (none)
 	}
 
