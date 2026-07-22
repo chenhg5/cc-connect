@@ -24,6 +24,11 @@
 
 - **core**: prevent same-name file attachments from overwriting each other. `SaveFilesToDisk` now scopes files by message ID, keeps duplicate names distinct within one message, and uses an atomic no-overwrite fallback for legacy callers without a message ID (#1552).
 
+## Unreleased
+
+### Fixed
+- **DingTalk message list title**: derive the `markdown.title` field on outgoing DingTalk messages from the message content (markdown stripped, first non-empty line, truncated to 20 runes) instead of the hardcoded `"reply"`. The DingTalk chat list now shows the actual reply preview instead of "reply" on every entry. Empty / pure-format / pure-emoji messages still fall back to "reply" so the title is never blank (#1269).
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5
