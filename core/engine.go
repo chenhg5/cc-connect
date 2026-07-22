@@ -4578,10 +4578,24 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+				outbound := fullResponse
+				if len(textParts) > 0 {
+					if textResponse := joinTextSegments(textParts); textResponse != "" {
+						outbound = textResponse
+					}
+				}
+				if isSilentReply(outbound) {
+					outbound = ""
+				} else if stripped, ok := stripTrailingSilent(outbound); ok {
+					outbound = stripped
+				}
+
+				if outbound != "" {
+					for _, chunk := range splitMessage(outbound, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
+				} else if fullResponse != "" {
+					slog.Info("unsolicited silent reply suppressed", "session", sessionKey)
 				}
 
 				// Safety note: concurrent writes to session.History by the
@@ -4976,7 +4990,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						sp.freeze()
 						sp.detachPreview()
 					} else {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := joinTextSegments(textParts[segmentStart:])
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -4999,7 +5013,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
 					if !previewActive {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := joinTextSegments(textParts[segmentStart:])
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5063,7 +5077,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						sp.freeze()
 						sp.detachPreview()
 					} else {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := joinTextSegments(textParts[segmentStart:])
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5107,7 +5121,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
 					if !previewActive {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := joinTextSegments(textParts[segmentStart:])
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5355,7 +5369,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			previewActive := sp.canPreview()
 			if len(textParts) > segmentStart {
 				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
+					segment := joinTextSegments(textParts[segmentStart:])
 					if segment != "" {
 						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 							sendWorkspace(p, replyCtx, chunk)
@@ -5472,9 +5486,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
 			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				fullResponse = strings.Join(textParts, "")
+				fullResponse = joinTextSegments(textParts)
+				if fullResponse == "" {
+					fullResponse = strings.Join(textParts, "")
+				}
 			} else if fullResponse == "" && len(textParts) > 0 {
-				fullResponse = strings.Join(textParts, "")
+				fullResponse = joinTextSegments(textParts)
+				if fullResponse == "" {
+					fullResponse = strings.Join(textParts, "")
+				}
 			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
@@ -5651,8 +5671,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// orphaned shell. Finalizing-in-place avoids the "撤回了一条消息"
 				// gray bar that DeletePreviewMessage would leave in Lark.
 				if hasRichCard && cardMessageID != nil {
-					silentBody := partialText
-					if stripped, ok := stripTrailingSilent(partialText); ok {
+					silentBody := joinTextSegments(textParts)
+					if stripped, ok := stripTrailingSilent(silentBody); ok {
 						silentBody = strings.TrimRight(stripped, " \t\r\n")
 					}
 					if silentBody != "" || len(toolSteps) > 0 {
@@ -5724,7 +5744,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
 				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
+					unsent := joinTextSegments(textParts[segmentStart:])
 					if unsent != "" {
 						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
 							return
@@ -6012,7 +6032,10 @@ channelClosed:
 		p := state.platform
 		state.mu.Unlock()
 
-		fullResponse := strings.Join(textParts, "")
+		fullResponse := joinTextSegments(textParts)
+		if fullResponse == "" {
+			fullResponse = strings.Join(textParts, "")
+		}
 		session.AddHistory("assistant", fullResponse)
 		// Persist immediately — this path runs on abnormal channel close,
 		// so deferring the save until the next foreground turn risks losing
@@ -6043,7 +6066,7 @@ channelClosed:
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
 			if segmentStart < len(textParts) {
-				unsent := strings.Join(textParts[segmentStart:], "")
+				unsent := joinTextSegments(textParts[segmentStart:])
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
@@ -16783,6 +16806,17 @@ func couldBeSilentPrefix(text string) bool {
 		return true
 	}
 	return strings.HasPrefix("NO_REPLY", strings.ToUpper(t))
+}
+
+// joinTextSegments 拼接待投递的文本块，并移除末尾独立的 NO_REPLY 标记。
+// 该标记可能单独作为一个 EventText 到达；直接拼接会让前一块文本与
+// NO_REPLY 紧邻，导致仅依赖文本边界的 stripTrailingSilent 无法识别。
+func joinTextSegments(parts []string) string {
+	end := len(parts)
+	for end > 0 && isSilentReply(parts[end-1]) {
+		end--
+	}
+	return strings.Join(parts[:end], "")
 }
 
 func isEllipsisOnly(text string) bool {
