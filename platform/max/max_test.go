@@ -120,7 +120,7 @@ func TestDefaultFilename(t *testing.T) {
 }
 
 func TestReconstructReplyCtx(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	cases := []struct {
 		key     string
 		chatID  string
@@ -310,8 +310,9 @@ func (m *mockAPI) handleCDN(w http.ResponseWriter, r *http.Request) {
 func newTestPlatform(t *testing.T, apiBase string) *Platform {
 	t.Helper()
 	p, err := New(map[string]any{
-		"token":    "test-token",
-		"api_base": apiBase,
+		"token":      "test-token",
+		"api_base":   apiBase,
+		"allow_from": "*",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -237,6 +237,7 @@ func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	me := &models.User{ID: 42, Username: "mybot"}
 
 	p := &Platform{
+		allowFrom: "*",
 		token:      "token",
 		httpClient: &http.Client{},
 		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
@@ -281,6 +282,7 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 	me := &models.User{ID: 42, Username: "mybot"}
 
 	p := &Platform{
+		allowFrom: "*",
 		token:      "token",
 		httpClient: &http.Client{},
 		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
@@ -321,7 +323,7 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 }
 
 func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
+	p := &Platform{allowFrom: "*", token: "token", httpClient: &http.Client{}}
 	ctx := context.Background()
 	rctx := replyContext{chatID: 1, threadID: 0, messageID: 2}
 
@@ -377,6 +379,7 @@ func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {
 	me := &models.User{ID: 42, Username: "latebot"}
 
 	p := &Platform{
+		allowFrom: "*",
 		token:      "token",
 		httpClient: &http.Client{},
 		newBot: func(_ string, _ func(context.Context, *models.Update), _ *http.Client) (telegramBot, *models.User, func(context.Context), error) {
@@ -421,6 +424,7 @@ func TestPlatformStartTypingSwitchesToCurrentBotAfterReconnect(t *testing.T) {
 	ticker := newStubTypingTicker()
 
 	p := &Platform{
+		allowFrom: "*",
 		token:      "token",
 		httpClient: &http.Client{},
 		newTypingTicker: func(time.Duration) typingTicker {
@@ -549,7 +553,7 @@ func TestExtractEntityText(t *testing.T) {
 }
 
 func TestSendAudioRejectsInvalidReplyContext(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 
 	err := p.SendAudio(context.Background(), "bad-context", []byte("data"), "mp3")
 	if err == nil {
@@ -569,7 +573,7 @@ func TestSendAudioReturnsConversionErrorForWAV(t *testing.T) {
 	}
 
 	stubBot := newStubTelegramBot()
-	p := &Platform{}
+	p := &Platform{allowFrom: "*"}
 	p.bot = stubBot
 	p.selfUser = &models.User{ID: 1, Username: "testbot"}
 
@@ -717,7 +721,7 @@ func TestBuildSessionKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &Platform{shareSessionInChannel: tt.shared}
+			p := &Platform{allowFrom: "*", shareSessionInChannel: tt.shared}
 			got := p.buildSessionKey(tt.chatID, tt.thread, tt.userID)
 			if got != tt.want {
 				t.Fatalf("buildSessionKey(%d, %d, %d) = %q, want %q", tt.chatID, tt.thread, tt.userID, got, tt.want)
@@ -745,7 +749,7 @@ func TestReconstructReplyCtx(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &Platform{shareSessionInChannel: tt.shared}
+			p := &Platform{allowFrom: "*", shareSessionInChannel: tt.shared}
 			rctx, err := p.ReconstructReplyCtx(tt.key)
 			if tt.wantErr {
 				if err == nil {
@@ -768,7 +772,7 @@ func TestReconstructReplyCtx(t *testing.T) {
 }
 
 func TestIsDirectedAtBot(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
+	p := &Platform{allowFrom: "*", token: "token", httpClient: &http.Client{}}
 	p.selfUser = &models.User{ID: 42, Username: "mybot"}
 
 	tests := []struct {
@@ -857,6 +861,7 @@ func TestHandleMessageWithForumTopic(t *testing.T) {
 		token:         "token",
 		httpClient:    &http.Client{},
 		groupReplyAll: true,
+		allowFrom:     "*",
 	}
 	p.handler = func(_ core.Platform, msg *core.Message) {
 		handled <- msg
@@ -901,6 +906,7 @@ func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 		token:         "token",
 		httpClient:    &http.Client{},
 		groupReplyAll: true,
+		allowFrom:     "*",
 	}
 	p.handler = func(_ core.Platform, msg *core.Message) {
 		handled <- msg
@@ -959,6 +965,7 @@ func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *ht
 	}
 
 	return &Platform{
+		allowFrom: "*",
 		bot:        b,
 		selfUser:   &models.User{ID: 1, Username: "testbot"},
 		httpClient: server.Client(),
