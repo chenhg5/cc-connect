@@ -33,6 +33,7 @@ type claudeSession struct {
 	stdinMu         sync.Mutex
 	events          chan core.Event
 	sessionID       atomic.Value // stores string
+	cwd             atomic.Value // stores string — working dir the CLI reports in its init event
 	permissionMode  atomic.Value // stores string
 	autoApprove     atomic.Bool
 	acceptEditsOnly atomic.Bool
@@ -616,6 +617,13 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
+	// The CLI reports its actual working directory in the init event. Capture it
+	// so resume validation can locate the transcript under the real cwd's project
+	// dir rather than assuming cwd == the configured work_dir (a custom agent cmd
+	// may cd to any directory). Read defensively — absent on older CLIs.
+	if cwd, ok := raw["cwd"].(string); ok && cwd != "" {
+		cs.cwd.Store(cwd)
+	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 		evt := core.Event{Type: core.EventText, SessionID: sid}
@@ -1108,6 +1116,11 @@ func (cs *claudeSession) Events() <-chan core.Event {
 
 func (cs *claudeSession) CurrentSessionID() string {
 	v, _ := cs.sessionID.Load().(string)
+	return v
+}
+
+func (cs *claudeSession) CurrentCwd() string {
+	v, _ := cs.cwd.Load().(string)
 	return v
 }
 

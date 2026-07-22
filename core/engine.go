@@ -4039,7 +4039,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// can detect the mismatch and we should clear the ID rather than
 	// resume a conversation that has nothing to do with this project.
 	if startSessionID != "" {
-		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID) {
+		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID, session.GetAgentCwd()) {
 			slog.Warn("session ID does not belong to this project, clearing it",
 				"session_key", sessionKey, "invalid_session_id", startSessionID)
 			session.SetAgentSessionID("", agent.Name())
@@ -5454,6 +5454,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								sessions.SetSessionName(currentID, pendingName)
 							}
 						}
+					}
+					// Persist the agent's real cwd every turn, not only when the session
+					// id changes: the id is often set earlier (event path / initial
+					// create) while the cwd is known only after the CLI init event, so
+					// gating cwd capture on an id change would miss it. SetAgentCwd
+					// ignores empty and is idempotent, so running it each turn is safe.
+					// Resume validation reads it back (issue #599 + restart resume).
+					if c, ok := state.agentSession.(interface{ CurrentCwd() string }); ok {
+						session.SetAgentCwd(c.CurrentCwd())
 					}
 					sessions.Save()
 				}
