@@ -214,10 +214,10 @@ func TestBuildArgs_PlanMode(t *testing.T) {
 }
 
 // TestBuildArgs_ResumeSession ensures session continuity flags are emitted
-// regardless of the --print probe result.
+// via --resume for the legacy CLI surface that advertises it.
 func TestBuildArgs_ResumeSession(t *testing.T) {
 	ctx := context.Background()
-	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "sess-xyz", nil, 0, kimiFlagSupport{Print: false})
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "sess-xyz", nil, 0, kimiFlagSupport{Print: false, Resume: true})
 	require.NoError(t, err)
 	defer func() { _ = ks.Close() }()
 
@@ -232,6 +232,159 @@ func TestBuildArgs_ResumeSession(t *testing.T) {
 	require.GreaterOrEqual(t, resumeIdx, 0, "args should include --resume; got %v", args)
 	require.Less(t, resumeIdx+1, len(args), "--resume should be followed by an id")
 	assert.Equal(t, "sess-xyz", args[resumeIdx+1])
+}
+
+// TestBuildArgs_ModernCLISurface is the regression test for the Kimi Code
+// CLI 0.28.1 incompatibility: with a probe result of all-false (the 0.28.1
+// help surface), buildArgs must not emit --work-dir / --resume / --quiet /
+// --print (0.28.1 rejects them with `error: unknown option`), and must
+// resume sessions via the hidden `-r` alias instead.
+func TestBuildArgs_ModernCLISurface(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp/work", "kimi-k2", "quiet", "session_3062f47b", nil, 0, kimiFlagSupport{})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	args := ks.buildArgs("hello")
+	for _, banned := range []string{"--work-dir", "--resume", "--quiet", "--print"} {
+		assert.NotContains(t, args, banned, "0.28.1 rejects %s; args=%v", banned, args)
+	}
+	// Resume must fall back to the hidden -r alias.
+	rIdx := -1
+	for i, a := range args {
+		if a == "-r" {
+			rIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, rIdx, 0, "args should include -r for resume; got %v", args)
+	require.Less(t, rIdx+1, len(args), "-r should be followed by the session id")
+	assert.Equal(t, "session_3062f47b", args[rIdx+1])
+	// Working directory is handled via cmd.Dir instead of --work-dir.
+	assert.Equal(t, "/tmp/work", ks.workDir)
+	// Non-interactive turn still uses --prompt + --output-format.
+	assert.Contains(t, args, "--prompt")
+	assert.Contains(t, args, "--output-format")
+	assert.Contains(t, args, "stream-json")
+}
+
+// TestBuildArgs_LegacyCLISurface pins the legacy kimi-cli behaviour: when
+// the probe reports full support, every legacy flag must still be emitted
+// exactly as before the version-aware change.
+func TestBuildArgs_LegacyCLISurface(t *testing.T) {
+	ctx := context.Background()
+	legacy := kimiFlagSupport{Print: true, WorkDir: true, Resume: true, Quiet: true}
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp/work", "kimi-k2", "quiet", "sess-abc", nil, 0, legacy)
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	args := ks.buildArgs("hello")
+	assert.Contains(t, args, "--print")
+	assert.Contains(t, args, "--quiet")
+	assert.Contains(t, args, "--resume")
+	assert.Contains(t, args, "sess-abc")
+	assert.Contains(t, args, "--work-dir")
+	assert.Contains(t, args, "/tmp/work")
+	assert.Contains(t, args, "--prompt")
+	assert.NotContains(t, args, "-r")
+}
+
+// TestHandleEvent_MetaResumeHint is the regression test for session-ID
+// capture on Kimi Code CLI 0.28.1, which reports the session via a JSON
+// meta line instead of the legacy plain-text "To resume this session:".
+func TestHandleEvent_MetaResumeHint(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	ks.handleEvent(map[string]any{
+		"role":       "meta",
+		"type":       "session.resume_hint",
+		"session_id": "session_3062f47b-aaaa",
+		"command":    "kimi -r session_3062f47b-aaaa",
+		"content":    "To resume this session: kimi -r session_3062f47b-aaaa",
+	})
+
+	assert.Equal(t, "session_3062f47b-aaaa", ks.CurrentSessionID())
+
+	// Meta lines with other types must not clobber the session ID.
+	ks.handleEvent(map[string]any{"role": "meta", "type": "other", "session_id": "bogus"})
+	assert.Equal(t, "session_3062f47b-aaaa", ks.CurrentSessionID())
+}
+
+// TestHandleAssistant_StringContent is the regression test for 0.28.1's
+// NDJSON shape where assistant content is a plain string, not a block
+// array. Previously the []any assertion failed and the whole assistant
+// message was silently dropped.
+func TestHandleAssistant_StringContent(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	ks.handleEvent(map[string]any{
+		"role":    "assistant",
+		"content": "ok",
+	})
+
+	require.Len(t, ks.pendingMsgs, 1, "string content must be buffered as text")
+	assert.Equal(t, "ok", ks.pendingMsgs[0])
+
+	ks.flushPendingAsText()
+	events := drainEvents(ks.events, 1)
+	require.Len(t, events, 1)
+	assert.Equal(t, core.EventText, events[0].Type)
+	assert.Equal(t, "ok", events[0].Content)
+}
+
+// TestHandleAssistant_StringContentWithToolCalls ensures tool_calls are
+// still honoured when assistant content is a plain string (0.28.1 shape):
+// the string text must be flushed as thinking before the tool event.
+func TestHandleAssistant_StringContentWithToolCalls(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	ks.handleEvent(map[string]any{
+		"role":    "assistant",
+		"content": "Let me check",
+		"tool_calls": []any{
+			map[string]any{
+				"id":       "tool_1",
+				"function": map[string]any{"name": "Shell", "arguments": `{"command":"ls"}`},
+			},
+		},
+	})
+
+	events := drainEvents(ks.events, 3)
+	require.Len(t, events, 2)
+	assert.Equal(t, core.EventThinking, events[0].Type)
+	assert.Equal(t, "Let me check", events[0].Content)
+	assert.Equal(t, core.EventToolUse, events[1].Type)
+	assert.Equal(t, "Shell", events[1].ToolName)
+}
+
+// TestHandleTool_StringContent ensures tool results survive 0.28.1's
+// plain-string content shape too.
+func TestHandleTool_StringContent(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	ks.handleEvent(map[string]any{
+		"role":         "tool",
+		"tool_call_id": "tool_1",
+		"content":      "file.txt\n",
+	})
+
+	events := drainEvents(ks.events, 1)
+	require.Len(t, events, 1)
+	assert.Equal(t, core.EventToolResult, events[0].Type)
+	assert.Equal(t, "tool_1", events[0].ToolName)
+	assert.Contains(t, events[0].ToolResult, "file.txt")
 }
 
 func drainEvents(ch <-chan core.Event, max int) []core.Event {

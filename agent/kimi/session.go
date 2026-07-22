@@ -74,6 +74,10 @@ func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir
 // tested without launching the CLI. The `--print` flag is only emitted when
 // the locally installed binary advertises it in `kimi --help`; the newer Kimi
 // Code CLI dropped that flag and rejects it outright (see issue #1456).
+// The same probing gates `--work-dir` (dropped by 0.28.1 — cmd.Dir covers the
+// working directory instead), `--quiet` (degraded to a debug log) and
+// `--resume` (falling back to the hidden `-r` alias the modern CLI still
+// honours).
 func (ks *kimiSession) buildArgs(prompt string) []string {
 	args := append([]string{}, ks.extraArgs...)
 	if ks.flagSupport.Print {
@@ -85,17 +89,28 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	case "plan":
 		args = append(args, "--plan")
 	case "quiet":
-		args = append(args, "--quiet")
+		if ks.flagSupport.Quiet {
+			args = append(args, "--quiet")
+		} else {
+			slog.Debug("kimiSession: --quiet not supported by installed CLI, degrading to default mode")
+		}
 	}
 
 	if sid := ks.CurrentSessionID(); sid != "" {
-		args = append(args, "--resume", sid)
+		if ks.flagSupport.Resume {
+			args = append(args, "--resume", sid)
+		} else {
+			args = append(args, "-r", sid)
+		}
 	}
 	if ks.model != "" {
 		args = append(args, "--model", ks.model)
 	}
 	if ks.workDir != "" {
-		args = append(args, "--work-dir", ks.workDir)
+		if ks.flagSupport.WorkDir {
+			args = append(args, "--work-dir", ks.workDir)
+		}
+		// Otherwise rely on cmd.Dir, which Send() sets to ks.workDir.
 	}
 
 	args = append(args, "--prompt", prompt)
@@ -321,6 +336,9 @@ func extractResumeSessionID(line string) string {
 // Kimi CLI stream-json message roles:
 //   - "assistant": content (think + text), tool_calls
 //   - "tool":      content (tool execution result), tool_call_id
+//   - "meta":      session hints; the newer Kimi Code CLI (0.28.1) emits
+//     {"role":"meta","type":"session.resume_hint","session_id":"..."}
+//     instead of the legacy plain-text "To resume this session:" line.
 func (ks *kimiSession) handleEvent(raw map[string]any) {
 	role, _ := raw["role"].(string)
 
@@ -329,32 +347,48 @@ func (ks *kimiSession) handleEvent(raw map[string]any) {
 		ks.handleAssistant(raw)
 	case "tool":
 		ks.handleTool(raw)
+	case "meta":
+		if t, _ := raw["type"].(string); t == "session.resume_hint" {
+			if id, _ := raw["session_id"].(string); id != "" {
+				ks.sessionID.Store(id)
+				slog.Debug("kimiSession: session id from meta resume_hint", "session_id", id)
+			}
+		}
 	default:
 		slog.Debug("kimiSession: unhandled role", "role", role)
 	}
 }
 
 func (ks *kimiSession) handleAssistant(raw map[string]any) {
-	content, _ := raw["content"].([]any)
-	for _, item := range content {
-		block, ok := item.(map[string]any)
-		if !ok {
-			continue
+	// The newer Kimi Code CLI (0.28.1) emits content as a plain string
+	// ({"role":"assistant","content":"ok"}), while the legacy kimi-cli emits
+	// a block array. Accept both so string content is not silently dropped.
+	if text, ok := raw["content"].(string); ok {
+		if text != "" {
+			ks.pendingMsgs = append(ks.pendingMsgs, text)
 		}
-		blockType, _ := block["type"].(string)
-		switch blockType {
-		case "think", "thinking":
-			if think, ok := block["think"].(string); ok && think != "" {
-				evt := core.Event{Type: core.EventThinking, Content: think}
-				select {
-				case ks.events <- evt:
-				case <-ks.ctx.Done():
-					return
-				}
+	} else {
+		content, _ := raw["content"].([]any)
+		for _, item := range content {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
 			}
-		case "text":
-			if text, ok := block["text"].(string); ok && text != "" {
-				ks.pendingMsgs = append(ks.pendingMsgs, text)
+			blockType, _ := block["type"].(string)
+			switch blockType {
+			case "think", "thinking":
+				if think, ok := block["think"].(string); ok && think != "" {
+					evt := core.Event{Type: core.EventThinking, Content: think}
+					select {
+					case ks.events <- evt:
+					case <-ks.ctx.Done():
+						return
+					}
+				}
+			case "text":
+				if text, ok := block["text"].(string); ok && text != "" {
+					ks.pendingMsgs = append(ks.pendingMsgs, text)
+				}
 			}
 		}
 	}
@@ -391,21 +425,27 @@ func (ks *kimiSession) handleAssistant(raw map[string]any) {
 
 func (ks *kimiSession) handleTool(raw map[string]any) {
 	toolCallID, _ := raw["tool_call_id"].(string)
-	content, _ := raw["content"].([]any)
-	var outputParts []string
-	for _, item := range content {
-		block, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		blockType, _ := block["type"].(string)
-		if blockType == "text" {
-			if text, ok := block["text"].(string); ok {
-				outputParts = append(outputParts, text)
+	var output string
+	if text, ok := raw["content"].(string); ok {
+		// Newer Kimi Code CLI: tool content is a plain string.
+		output = text
+	} else {
+		content, _ := raw["content"].([]any)
+		var outputParts []string
+		for _, item := range content {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			if blockType == "text" {
+				if text, ok := block["text"].(string); ok {
+					outputParts = append(outputParts, text)
+				}
 			}
 		}
+		output = strings.Join(outputParts, "")
 	}
-	output := strings.Join(outputParts, "")
 
 	if output != "" {
 		slog.Debug("kimiSession: tool result", "tool_call_id", toolCallID)
