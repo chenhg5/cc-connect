@@ -629,6 +629,28 @@
           "codex_config": { "wire_api": "responses" }
         }
       }
+    },
+    {
+      "name": "atlascloud",
+      "display_name": "Atlas Cloud",
+      "description": "Atlas Cloud OpenAI-compatible LLM API with large-context text models for coding agents.",
+      "description_zh": "Atlas Cloud OpenAI 兼容 LLM API，提供适用于编码智能体的大上下文文本模型。",
+      "features": ["OpenAI Compatible", "1M Context", "Text Models"],
+      "tier": 3,
+      "website": "https://atlascloud.ai",
+      "agents": {
+        "codex": {
+          "base_url": "https://api.atlascloud.ai/v1",
+          "model": "qwen/qwen3.5-flash",
+          "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://api.atlascloud.ai/v1",
+          "model": "qwen/qwen3.5-flash",
+          "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"]
+        }
+      }
     }
   ]
 }
