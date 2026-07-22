@@ -1918,6 +1918,17 @@ app_secret = "your-feishu-app-secret"
 # For Devin specifically, prefer the dedicated `type = "devin"` section above.
 # 针对 Devin 建议直接使用上面的 type = "devin"；下面的 type = "acp" 主要给其他
 # 通用 ACP 工具使用。
+#
+# /model and /mode work automatically for ACP agents that expose model or
+# mode selectors. cc-connect reads the available list from the agent —
+# both the ACP `models`/`modes` blocks and the newer `configOptions`
+# mechanism are supported — and switches live via the matching ACP request,
+# with no extra config. Agents that expose neither simply have those
+# commands report "not supported".
+# 对于通过 ACP 暴露模型 / 模式选择器的 Agent，/model 与 /mode 开箱即用：
+# cc-connect 会自动从 Agent 读取可用列表（同时支持 ACP 的 models/modes 块与较新的
+# configOptions 机制），并通过对应的 ACP 请求实时切换，无需额外配置；两者都不暴露的
+# Agent 则会提示 "not supported"。
 
 # --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
 # [[projects]]

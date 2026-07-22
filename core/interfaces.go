@@ -651,6 +651,12 @@ type LiveModeSwitcher interface {
 	SetLiveMode(mode string) bool
 }
 
+// LiveModelSwitcher is an optional interface for running agent sessions that
+// can apply a model change immediately without restarting the process.
+type LiveModelSwitcher interface {
+	SetLiveModel(model string) bool
+}
+
 // StartupWarner is an optional interface for agent sessions that need to surface
 // a one-time warning to the IM user at session start (e.g. when a requested
 // permission mode was silently downgraded due to OS constraints). The engine
