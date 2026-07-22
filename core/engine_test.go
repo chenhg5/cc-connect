@@ -6473,6 +6473,31 @@ func TestResolveAskQuestionAnswer_FreeText(t *testing.T) {
 	}
 }
 
+func TestAskqButtonsPerRowFor(t *testing.T) {
+	// Typical prompts (≤5 options) render all buttons in a single row.
+	// Larger option sets (>5) cap at 5 per row with a trailing partial row.
+	cases := []struct {
+		n, want int
+	}{
+		{0, 0},   // no buttons, no row
+		{1, 1},   // 1 button, 1 row
+		{2, 2},   // 2 buttons, 1 row
+		{3, 3},   // 3 buttons, 1 row
+		{4, 4},   // 4 buttons, 1 row (improved from old 3+1 split)
+		{5, 5},   // 5 buttons, 1 row (single row max)
+		{6, 5},   // 6 buttons → 5+1 (2 rows)
+		{7, 5},   // 7 buttons → 5+2 (2 rows)
+		{10, 5},  // 10 buttons → 5+5 (2 rows)
+		{11, 5},  // 11 buttons → 5+5+1 (3 rows)
+		{100, 5}, // pathological: many rows of 5
+	}
+	for _, c := range cases {
+		if got := askqButtonsPerRowFor(c.n); got != c.want {
+			t.Errorf("askqButtonsPerRowFor(%d) = %d, want %d", c.n, got, c.want)
+		}
+	}
+}
+
 func TestResolveAskQuestionAnswer_MultiSelect(t *testing.T) {
 	e := newTestEngine()
 	q := testQuestions()[0]
@@ -6529,6 +6554,126 @@ func TestSendAskQuestionPrompt_CardPlatform(t *testing.T) {
 	if askqCount != 3 {
 		t.Errorf("expected 3 askq buttons, got %d", askqCount)
 	}
+
+	// Options must NOT be rendered as CardListItem: that layout squeezes long
+	// descriptions into a narrow 5/12-weighted column and wraps excessively.
+	for _, elem := range card.Elements {
+		if _, ok := elem.(CardListItem); ok {
+			t.Errorf("card must not use CardListItem for AskUserQuestion options")
+		}
+	}
+
+	// Each option's description must appear in a full-width markdown block so
+	// long descriptions wrap across the whole card width, not a narrow column.
+	joined := concatCardMarkdown(card)
+	if !strings.Contains(joined, "Recommended for production") {
+		t.Errorf("expected option description in markdown, got %q", joined)
+	}
+}
+
+// TestSendAskQuestionPrompt_CardPlatform_ManyOptions_SplitsButtonRows verifies
+// that when an agent offers more than 3 options, buttons are split into rows
+// of at most 3 equal-width buttons rather than being squeezed into a single row.
+func TestSendAskQuestionPrompt_CardPlatform_ManyOptions_SplitsButtonRows(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	qs := []UserQuestion{{
+		Question: "Pick five databases",
+		Options: []UserQuestionOption{
+			{Label: "PostgreSQL"},
+			{Label: "MySQL"},
+			{Label: "SQLite"},
+			{Label: "MongoDB"},
+			{Label: "Redis"},
+			{Label: "Cassandra"},
+			{Label: "DynamoDB"},
+		},
+	}}
+	e.sendAskQuestionPrompt(p, "ctx", qs, 0)
+
+	card := p.sentCards[0]
+	if card == nil {
+		t.Fatal("expected 1 card")
+	}
+
+	// Collect every CardActions row and assert at most 3 buttons per row.
+	var rows []CardActions
+	for _, elem := range card.Elements {
+		if a, ok := elem.(CardActions); ok {
+			rows = append(rows, a)
+		}
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected CardActions rows for option buttons")
+	}
+	for i, row := range rows {
+		if len(row.Buttons) > 5 {
+			t.Errorf("row %d has %d buttons, want at most 5", i, len(row.Buttons))
+		}
+		if row.Layout != CardActionLayoutEqualColumns {
+			t.Errorf("row %d layout = %q, want %q", i, row.Layout, CardActionLayoutEqualColumns)
+		}
+	}
+
+	// 7 options should split into rows of 5 + 2 (askqButtonsPerRowFor caps
+	// at 5 per row; >5 options get a trailing partial row).
+	if len(rows) != 2 {
+		t.Errorf("expected 2 button rows for 7 options (5+2), got %d", len(rows))
+	}
+	if len(rows[0].Buttons) != 5 {
+		t.Errorf("row 0 buttons = %d, want 5", len(rows[0].Buttons))
+	}
+	if len(rows[1].Buttons) != 2 {
+		t.Errorf("row 1 buttons = %d, want 2", len(rows[1].Buttons))
+	}
+	if got := len(rows[0].Buttons) + len(rows[1].Buttons); got != 7 {
+		t.Errorf("total buttons = %d, want 7", got)
+	}
+
+	// Every askq: button value must still be present (no data loss on split).
+	if got := countCardActionValues(card, "askq:"); got != 7 {
+		t.Errorf("askq button count = %d, want 7", got)
+	}
+
+	// Per-button VALUE/TEXT integrity (regression guard for the
+	// `row = row[:0]` slice aliasing bug: a reused backing array would
+	// make earlier rows point at later buttons' data).
+	wantValues := []string{
+		"askq:0:1", "askq:0:2", "askq:0:3",
+		"askq:0:4", "askq:0:5", "askq:0:6",
+		"askq:0:7",
+	}
+	wantTexts := []string{
+		"1", "2", "3",
+		"4", "5", "6",
+		"7",
+	}
+	idx := 0
+	for r, row := range rows {
+		for b, btn := range row.Buttons {
+			if idx >= len(wantValues) {
+				t.Fatalf("row %d btn %d: too many buttons", r, b)
+			}
+			if btn.Value != wantValues[idx] {
+				t.Errorf("row %d btn %d Value = %q, want %q", r, b, btn.Value, wantValues[idx])
+			}
+			if btn.Text != wantTexts[idx] {
+				t.Errorf("row %d btn %d Text = %q, want %q", r, b, btn.Text, wantTexts[idx])
+			}
+			idx++
+		}
+	}
+}
+
+func concatCardMarkdown(card *Card) string {
+	var sb strings.Builder
+	for _, elem := range card.Elements {
+		if m, ok := elem.(CardMarkdown); ok {
+			sb.WriteString(m.Content)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 func TestSendAskQuestionPrompt_CardPlatform_MultiQuestion_ShowsIndex(t *testing.T) {
