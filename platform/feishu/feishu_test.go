@@ -397,6 +397,94 @@ func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 	}
 }
 
+func TestOnMessageDropsUnauthorizedOverheardGroupMessage(t *testing.T) {
+	const appID = "cli_unauthorized_silent"
+	const appSecret = "secret-unauthorized-silent"
+	const botOpenID = "ou_bot"
+	const userOpenID = "ou_blocked"
+
+	replyBodies := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read reply body: %v", err)
+			}
+			replyBodies <- string(body)
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_reply_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:  "feishu",
+		domain:        srv.URL,
+		appID:         appID,
+		appSecret:     appSecret,
+		allowFrom:     "ou_allowed",
+		botOpenID:     botOpenID,
+		groupReplyAll: true,
+		dedup:         &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	// A group message with no @bot mention: the platform only sees it because
+	// group_reply_all is enabled. Unauthorized senders must be dropped
+	// silently here — replying would announce the rejection for every single
+	// message in the chat.
+	chatType := "group"
+	msgType := "text"
+	senderType := "user"
+	content := `{"text":"hello"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_unauthorized_silent"),
+				ChatId:      stringPtr("oc_group"),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case got := <-replyBodies:
+		t.Fatalf("unexpected reply to overheard unauthorized message: %q", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"
