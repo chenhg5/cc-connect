@@ -177,6 +177,96 @@ func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) 
 	}
 }
 
+func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan rpcResponseEnvelope, 1)
+	s := &appServerSession{
+		ctx:     ctx,
+		events:  make(chan core.Event, 1),
+		pending: map[int64]chan rpcResponseEnvelope{1: ch},
+	}
+
+	var input bytes.Buffer
+	input.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"cwd":"/tmp/project","model":"gpt-test","reasoningEffort":"high","thread":{"id":"thread-large"},"initialTurnsPage":{"data":"`)
+	input.WriteString(strings.Repeat("x", 11*1024*1024))
+	input.WriteString(`"}}}` + "\n")
+
+	s.wg.Add(1)
+	go s.readLoop(&input)
+
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			t.Fatalf("response error = %v", resp.Error)
+		}
+		var decoded threadResumeResponse
+		if err := json.Unmarshal(resp.Result, &decoded); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if decoded.Thread.ID != "thread-large" {
+			t.Fatalf("thread id = %q, want thread-large", decoded.Thread.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for large response")
+	}
+
+	s.wg.Wait()
+}
+
+func TestAppServerSession_ResumeDoesNotRequestExtendedHistory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx:     ctx,
+		stdin:   stdin,
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.ensureThread("thread-existing")
+	}()
+
+	line := waitForWrittenJSONLine(t, stdin)
+	var request struct {
+		ID     int64          `json:"id"`
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		t.Fatalf("decode request %q: %v", line, err)
+	}
+	if request.Method != "thread/resume" {
+		t.Fatalf("method = %q, want thread/resume", request.Method)
+	}
+	if got := request.Params["threadId"]; got != "thread-existing" {
+		t.Fatalf("threadId = %#v, want thread-existing", got)
+	}
+	if got := request.Params["persistExtendedHistory"]; got != false {
+		t.Fatalf("persistExtendedHistory = %#v, want false", got)
+	}
+
+	s.handleResponse(rpcResponseEnvelope{
+		ID: request.ID,
+		Result: json.RawMessage(
+			`{"cwd":"/tmp/project","model":"gpt-test","thread":{"id":"thread-existing"}}`,
+		),
+	})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ensureThread() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for thread resume")
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
