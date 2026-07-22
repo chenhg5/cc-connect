@@ -3,7 +3,6 @@
 package pi
 
 import (
-	"os"
 	"os/exec"
 	"syscall"
 )
