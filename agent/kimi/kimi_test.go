@@ -2,7 +2,9 @@ package kimi
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -160,4 +162,57 @@ func TestAgentAvailableModels(t *testing.T) {
 
 	models := a.AvailableModels(context.Background())
 	require.True(t, len(models) > 0)
+}
+
+// TestListKimiSessions_BothFlavors is the #1561 session-listing regression
+// test: sessions created by legacy kimi-cli (~/.kimi/sessions) and by the
+// Kimi Code CLI (~/.kimi-code/sessions) must both be visible, and the
+// Kimi Code state.json schema ({"title","workDir"}) must be understood.
+func TestListKimiSessions_BothFlavors(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+
+	// Legacy kimi-cli session.
+	legacyDir := filepath.Join(home, ".kimi", "sessions", "proj-hash", "legacy-uuid-1")
+	require.NoError(t, os.MkdirAll(legacyDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyDir, "state.json"),
+		[]byte(`{"custom_title":"legacy chat","archived":false}`), 0o644))
+
+	// Kimi Code CLI session in the same workDir.
+	modernDir := filepath.Join(home, ".kimi-code", "sessions", "wd_proj_ab12", "session_modern-1")
+	require.NoError(t, os.MkdirAll(modernDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modernDir, "state.json"),
+		[]byte(`{"title":"modern chat","workDir":"`+workDir+`"}`), 0o644))
+
+	// Kimi Code CLI session belonging to a DIFFERENT workDir — filtered out.
+	otherDir := filepath.Join(home, ".kimi-code", "sessions", "wd_proj_ab12", "session_other-1")
+	require.NoError(t, os.MkdirAll(otherDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(otherDir, "state.json"),
+		[]byte(`{"title":"elsewhere","workDir":"/somewhere/else"}`), 0o644))
+
+	sessions, err := listKimiSessions(workDir)
+	require.NoError(t, err)
+
+	byID := make(map[string]core.AgentSessionInfo, len(sessions))
+	for _, s := range sessions {
+		byID[s.ID] = s
+	}
+
+	legacy, ok := byID["legacy-uuid-1"]
+	require.True(t, ok, "legacy kimi-cli session should be listed")
+	assert.Equal(t, "legacy chat", legacy.Summary)
+
+	modern, ok := byID["session_modern-1"]
+	require.True(t, ok, "Kimi Code session should be listed")
+	assert.Equal(t, "modern chat", modern.Summary)
+
+	_, ok = byID["session_other-1"]
+	assert.False(t, ok, "Kimi Code session from another workDir must be filtered out")
+
+	// findKimiSessionDir must locate sessions in both roots.
+	assert.NotEmpty(t, findKimiSessionDir("legacy-uuid-1"))
+	assert.NotEmpty(t, findKimiSessionDir("session_modern-1"))
+	assert.Empty(t, findKimiSessionDir("does-not-exist"))
 }

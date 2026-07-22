@@ -35,7 +35,8 @@ func init() {
 //   - "default": standard mode (non-interactive `--prompt` auto-approves tools)
 //   - "yolo":    auto-approve all tool calls
 //   - "plan":    read-only plan mode
-//   - "quiet":   alias for --quiet (print + text + final-message-only)
+//   - "quiet":   final-message-only; uses --quiet on legacy kimi-cli, local
+//     event suppression on the Kimi Code CLI (which dropped --quiet, #1561)
 type Agent struct {
 	workDir      string
 	model        string
@@ -325,12 +326,19 @@ func (a *Agent) providerEnvLocked() []string {
 
 // ── Session listing ─────────────────────────────────────────────
 
-func kimiSessionsBaseDir() string {
+// kimiSessionsBaseDirs returns the session storage roots of both CLI
+// flavors: legacy kimi-cli keeps sessions under ~/.kimi/sessions, the Kimi
+// Code CLI uses ~/.kimi-code/sessions (#1561). Both are scanned so /list and
+// /delete work no matter which binary produced the session.
+func kimiSessionsBaseDirs() []string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return nil
 	}
-	return filepath.Join(homeDir, ".kimi", "sessions")
+	return []string{
+		filepath.Join(homeDir, ".kimi", "sessions"),
+		filepath.Join(homeDir, ".kimi-code", "sessions"),
+	}
 }
 
 func listKimiSessions(workDir string) ([]core.AgentSessionInfo, error) {
@@ -339,37 +347,34 @@ func listKimiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 		absWorkDir = workDir
 	}
 
-	sessionsBase := kimiSessionsBaseDir()
-	if sessionsBase == "" {
-		return nil, nil
-	}
-
-	entries, err := os.ReadDir(sessionsBase)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("kimi: read sessions dir: %w", err)
-	}
-
 	var sessions []core.AgentSessionInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(sessionsBase, entry.Name())
-		sessionEntries, err := os.ReadDir(projectDir)
+	for _, sessionsBase := range kimiSessionsBaseDirs() {
+		entries, err := os.ReadDir(sessionsBase)
 		if err != nil {
-			continue
-		}
-		for _, se := range sessionEntries {
-			if !se.IsDir() {
+			if os.IsNotExist(err) {
 				continue
 			}
-			sessionDir := filepath.Join(projectDir, se.Name())
-			info := parseKimiSessionDir(sessionDir, absWorkDir)
-			if info != nil {
-				sessions = append(sessions, *info)
+			return nil, fmt.Errorf("kimi: read sessions dir: %w", err)
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			projectDir := filepath.Join(sessionsBase, entry.Name())
+			sessionEntries, err := os.ReadDir(projectDir)
+			if err != nil {
+				continue
+			}
+			for _, se := range sessionEntries {
+				if !se.IsDir() {
+					continue
+				}
+				sessionDir := filepath.Join(projectDir, se.Name())
+				info := parseKimiSessionDir(sessionDir, absWorkDir)
+				if info != nil {
+					sessions = append(sessions, *info)
+				}
 			}
 		}
 	}
@@ -388,15 +393,33 @@ func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 		return nil
 	}
 
+	// Two state.json schemas (#1561): legacy kimi-cli stores
+	// {"custom_title","archived"}; the Kimi Code CLI stores
+	// {"title","workDir","updatedAt",...} with no archived flag.
 	var state struct {
 		CustomTitle string `json:"custom_title"`
+		Title       string `json:"title"`
 		Archived    bool   `json:"archived"`
+		WorkDir     string `json:"workDir"`
 	}
 	if json.Unmarshal(stateData, &state) != nil {
 		return nil
 	}
 	if state.Archived {
 		return nil
+	}
+
+	// The Kimi Code CLI records the session's workDir, so unlike the legacy
+	// flavor (which stores no cwd and is always listed) we can honor the
+	// caller's workDir filter for it.
+	if state.WorkDir != "" && filterWorkDir != "" {
+		absStateDir, err := filepath.Abs(state.WorkDir)
+		if err != nil {
+			absStateDir = state.WorkDir
+		}
+		if absStateDir != filterWorkDir {
+			return nil
+		}
 	}
 
 	sessionID := filepath.Base(sessionDir)
@@ -430,10 +453,11 @@ func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 		}
 	}
 
-	_ = filterWorkDir // Kimi does not store cwd in session metadata; list all sessions.
-
 	if summary == "" {
 		summary = state.CustomTitle
+	}
+	if summary == "" {
+		summary = state.Title
 	}
 	if utf8.RuneCountInString(summary) > 60 {
 		summary = string([]rune(summary)[:60]) + "..."
@@ -448,30 +472,27 @@ func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 }
 
 func findKimiSessionDir(sessionID string) string {
-	sessionsBase := kimiSessionsBaseDir()
-	if sessionsBase == "" {
-		return ""
-	}
-
-	entries, err := os.ReadDir(sessionsBase)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(sessionsBase, entry.Name())
-		sessionEntries, err := os.ReadDir(projectDir)
+	for _, sessionsBase := range kimiSessionsBaseDirs() {
+		entries, err := os.ReadDir(sessionsBase)
 		if err != nil {
 			continue
 		}
-		for _, se := range sessionEntries {
-			if !se.IsDir() {
+		for _, entry := range entries {
+			if !entry.IsDir() {
 				continue
 			}
-			if se.Name() == sessionID {
-				return filepath.Join(projectDir, se.Name())
+			projectDir := filepath.Join(sessionsBase, entry.Name())
+			sessionEntries, err := os.ReadDir(projectDir)
+			if err != nil {
+				continue
+			}
+			for _, se := range sessionEntries {
+				if !se.IsDir() {
+					continue
+				}
+				if se.Name() == sessionID {
+					return filepath.Join(projectDir, se.Name())
+				}
 			}
 		}
 	}
