@@ -1950,6 +1950,51 @@ func TestCUJ_I4_StreamingToggleLinkedToIntegration(t *testing.T) {
 	t.Log("CUJ-I4: covered by release-gate TestCC_STREAM_01_off + TestCC_STREAM_02_on + core/streaming_test.go (14 unit tests)")
 }
 
+// CUJ-I5 · 后台 agent 事件中的 NO_REPLY 是协议控制标记，用户不应看到它。
+//
+// 用户动作：先发起一次普通对话，等待后台 agent 回合，再继续两次对话。
+// 这覆盖 runUnsolicitedReader 的实际平台投递路径，而不只测试内部事件处理。
+func TestCUJ_I5_UnsolicitedNoReplyIsNotSentToUser(t *testing.T) {
+	env := newCUJEnv(t)
+	key := env.userSends("i5", "first visible turn")
+	env.waitFor("first visible reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) == 1
+	})
+
+	env.agent.mu.Lock()
+	if len(env.agent.sessions) != 1 {
+		env.agent.mu.Unlock()
+		t.Fatalf("agent sessions = %d, want 1", len(env.agent.sessions))
+	}
+	agentSession := env.agent.sessions[0]
+	env.agent.mu.Unlock()
+
+	session := env.activeSession(key)
+	historyLen := session.HistoryLen()
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	env.waitFor("unsolicited silent turn to finish", 2*time.Second, func() bool {
+		return session.HistoryLen() == historyLen+1
+	})
+	if sent := env.plat.getSent(); len(sent) != 1 {
+		t.Fatalf("silent unsolicited turn sent %d messages, want 0 additional: %v", len(sent)-1, sent)
+	}
+
+	// 用户动作 2：后台静默回合后仍可正常继续对话。
+	env.userSends("i5", "second visible turn")
+	env.waitFor("second visible reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) == 2
+	})
+
+	// 用户动作 3：再次对话，确认协议标记未污染后续用户可见消息。
+	env.userSends("i5", "third visible turn")
+	env.waitFor("third visible reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) == 3
+	})
+	if env.sentContains("NO_REPLY") {
+		t.Fatalf("user-visible messages leaked NO_REPLY: %v", env.plat.getSent())
+	}
+}
+
 // ===========================================================================
 // CUJ-H2 · Two platforms attached to the same engine handle concurrent
 // messages without bleeding state into each other.
@@ -2325,4 +2370,3 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		}
 	}
 }
-

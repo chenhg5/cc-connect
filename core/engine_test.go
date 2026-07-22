@@ -2275,6 +2275,65 @@ func TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody(t *test
 	}
 }
 
+// TestProcessInteractiveEvents_RichCard_TextThenBareNoReplyPart_PreservesBody
+// 覆盖 agent 将 NO_REPLY 作为无前置换行的独立 EventText 块输出的情况。
+// 最终卡片应保留可见正文，同时移除协议标记。
+func TestProcessInteractiveEvents_RichCard_TextThenBareNoReplyPart_PreservesBody(t *testing.T) {
+	starts, _, updates, deletes := runRichCardSilentScenario(t, "bare-noreply-part", []string{"已发给业务回填。", "NO_REPLY"}, "NO_REPLY")
+	if len(starts) == 0 {
+		t.Fatal("expected SendPreviewStart for the visible text chunk, got 0")
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+	if len(updates) == 0 {
+		t.Fatal("expected final rich-card update")
+	}
+	last := updates[len(updates)-1]
+	if !strings.Contains(last, "已发给业务回填。") {
+		t.Fatalf("final card should preserve pre-NO_REPLY text, got %q", last)
+	}
+	if strings.Contains(last, "NO_REPLY") {
+		t.Fatalf("final card should not contain NO_REPLY marker, got %q", last)
+	}
+}
+
+// TestProcessInteractiveEvents_DoesNotFlushNoReplyBeforeTool 验证工具调用前
+// 的裸 NO_REPLY EventText 不会在渲染工具消息时作为文本分段投递。
+func TestProcessInteractiveEvents_DoesNotFlushNoReplyBeforeTool(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		ThinkingMessages: true,
+		ToolMessages:     true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+	})
+
+	sessionKey := "test:noreply-before-tool"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("noreply-before-tool")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "true"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-noreply-before-tool", time.Now(), nil, nil, state.replyCtx)
+
+	for _, message := range p.getSent() {
+		if strings.Contains(message, "NO_REPLY") {
+			t.Fatalf("tool-boundary flush leaked NO_REPLY marker: %q", message)
+		}
+	}
+}
+
 // TestProcessInteractiveEvents_RichCard_ToolThenNoReply verifies that when a
 // turn issues tool calls (creating the rich card with visible tool steps) and
 // then resolves to NO_REPLY, the card is finalized to Done — not deleted.
@@ -13841,6 +13900,46 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	state.mu.Unlock()
 	if resync {
 		t.Error("expected eventsNeedResync=false after clean unsolicited EventResult")
+	}
+}
+
+// TestUnsolicitedReader_SuppressesNoReply 验证后台 agent turn 与前台 turn
+// 一样遵守 NO_REPLY 静默协议。
+func TestUnsolicitedReader_SuppressesNoReply(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-noreply")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:noreply")
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch1:noreply"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	sess.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+
+	deadline := time.After(time.Second)
+	for session.HistoryLen() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("unsolicited reader did not process NO_REPLY result")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("NO_REPLY must be suppressed for unsolicited turns, got %v", sent)
 	}
 }
 
