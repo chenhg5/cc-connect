@@ -15900,3 +15900,116 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+// --- channelClosed fallback: spawn-death notification tests ---
+
+// exitErrorSession wraps controllableAgentSession with a canned ExitError so
+// tests can simulate a process that died right after spawn (e.g. macOS TCC
+// EPERM) before emitting a single event. Close is overridden because the
+// tests close the events channel themselves to simulate the death.
+type exitErrorSession struct {
+	*controllableAgentSession
+	exitErr string
+}
+
+func (s *exitErrorSession) ExitError() string { return s.exitErr }
+func (s *exitErrorSession) Close() error {
+	s.alive = false
+	return nil
+}
+
+func TestProcessInteractiveEvents_SpawnDeathNotifiesUserWithExitError(t *testing.T) {
+	p := &stubPlatformEngine{n: "stub"}
+	inner := newControllableSession("dead-on-arrival")
+	sess := &exitErrorSession{controllableAgentSession: inner, exitErr: "error: An internal error occurred (EPERM)"}
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+
+	key := "test:chat:u-spawn-death"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Simulate the process dying immediately after spawn: the events channel
+	// closes without emitting a single event.
+	close(inner.events)
+	inner.alive = false
+
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-spawn-death", time.Now(), nil, nil, "ctx")
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected an abnormal-exit notification to be sent to the user, got none")
+	}
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "EPERM") {
+		t.Errorf("expected notification to include the exit error detail, got: %q", joined)
+	}
+	if !strings.Contains(joined, "exited unexpectedly") {
+		t.Errorf("expected the abnormal-exit message text, got: %q", joined)
+	}
+}
+
+func TestProcessInteractiveEvents_SpawnDeathWithoutDetailStillNotifies(t *testing.T) {
+	p := &stubPlatformEngine{n: "stub"}
+	inner := newControllableSession("dead-no-detail")
+	sess := &exitErrorSession{controllableAgentSession: inner} // no ExitError detail
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+
+	key := "test:chat:u-spawn-death-nodetail"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	close(inner.events)
+	inner.alive = false
+
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-nodetail", time.Now(), nil, nil, "ctx")
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected an abnormal-exit notification even without exit detail, got none")
+	}
+	if !strings.Contains(strings.Join(sent, "\n"), "exited unexpectedly") {
+		t.Errorf("expected the generic abnormal-exit message, got: %q", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_UserStoppedExitStaysSilent(t *testing.T) {
+	p := &stubPlatformEngine{n: "stub"}
+	inner := newControllableSession("stopped-by-user")
+	sess := &exitErrorSession{controllableAgentSession: inner}
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+
+	key := "test:chat:u-user-stop"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	state.markStopped()
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	close(inner.events)
+	inner.alive = false
+
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-user-stop", time.Now(), nil, nil, "ctx")
+
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no notification after a user-initiated stop, got: %v", sent)
+	}
+}
