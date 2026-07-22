@@ -490,6 +490,20 @@ func validateSessionIDInProject(homeDir, workDir, sessionID string) bool {
 
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, "")
+}
+
+// StartSessionWithModel implements core.ModelOverrideStarter: identical to
+// StartSession, but the spawned CLI runs with modelOverride instead of the
+// configured model. The agent's stored model is not mutated, so concurrent
+// sessions of the same project keep their configured model. The override also
+// wins over the active provider's model — an explicit per-job model is the
+// most specific intent.
+func (a *Agent) StartSessionWithModel(ctx context.Context, sessionID string, modelOverride string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, modelOverride)
+}
+
+func (a *Agent) startSession(ctx context.Context, sessionID string, modelOverride string) (core.AgentSession, error) {
 	a.mu.Lock()
 	tools := make([]string, len(a.allowedTools))
 	copy(tools, a.allowedTools)
@@ -511,6 +525,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		if m := a.providers[activeIdx].Model; m != "" {
 			model = m
 		}
+	}
+	if modelOverride != "" {
+		model = modelOverride
 	}
 	slog.Debug("claudecode: StartSession provider state",
 		"activeIdx", activeIdx,

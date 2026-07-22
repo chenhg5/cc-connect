@@ -7506,7 +7506,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -7543,7 +7543,7 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 
 	session := &Session{AgentSessionID: ""}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent to be recycled when AgentSessionID was cleared")
 	}
@@ -7578,7 +7578,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -7596,7 +7596,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	got := session.GetAgentSessionID()
 
@@ -7617,7 +7617,7 @@ func TestSessionIDWriteback_MapsSessionName(t *testing.T) {
 	key := "test:user1"
 	session := e.sessions.NewSession(key, "我的自定义会话")
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	got := e.sessions.GetSessionName("agent-uuid-456")
 	if got != "我的自定义会话" {
@@ -7639,7 +7639,7 @@ func TestSessionIDWriteback_TracksLiveForkedID(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	got := session.GetAgentSessionID()
 
@@ -7665,7 +7665,7 @@ func TestInteractiveWriteBack_TracksForkedSessionID(t *testing.T) {
 	// Session already holds the original (now stale) ID from a prior turn.
 	session := &Session{AgentSessionID: "orig-id", AgentType: "controllable"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	if got := session.GetAgentSessionID(); got != "forked-id" {
 		t.Fatalf("AgentSessionID = %q, want %q — must track the live forked ID", got, "forked-id")
@@ -7687,7 +7687,7 @@ func TestInteractiveWriteBack_NamingBindsOnlyOnFirstAssignment(t *testing.T) {
 	session := &Session{Name: "my-feature", AgentType: "controllable"}
 
 	// First assignment: name should bind to first-id.
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 	if got := e.sessions.GetSessionName("first-id"); got != "my-feature" {
 		t.Fatalf("first-id name = %q, want %q on first assignment", got, "my-feature")
 	}
@@ -7700,7 +7700,7 @@ func TestInteractiveWriteBack_NamingBindsOnlyOnFirstAssignment(t *testing.T) {
 	delete(e.interactiveStates, key) // force a fresh start path
 	e.interactiveMu.Unlock()
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 	if got := session.GetAgentSessionID(); got != "forked-id" {
 		t.Fatalf("AgentSessionID = %q, want %q after fork", got, "forked-id")
 	}
@@ -7767,7 +7767,7 @@ func TestResumeFallback_ClearsStaleSessionID(t *testing.T) {
 	// Session has a stale AgentSessionID from a previously killed agent.
 	session := &Session{AgentSessionID: "stale-id", AgentType: "controllable"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "", "")
 
 	// The new agent session should be the fresh one.
 	if state.agentSession != freshSess {
@@ -7808,7 +7808,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "")
+	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "", "")
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()
@@ -8286,7 +8286,7 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	session.SetAgentSessionID("old-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil after fallback")
@@ -8324,7 +8324,7 @@ func TestFreshSessionWithoutSavedSessionIDStartsFresh(t *testing.T) {
 	session := e.sessions.GetOrCreateActive("test:user2")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
@@ -8361,7 +8361,7 @@ func TestWorkspaceReconnectWithSavedSessionIDUsesExactResume(t *testing.T) {
 	session.SetAgentSessionID("saved-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "", "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")

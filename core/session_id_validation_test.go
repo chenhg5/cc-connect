@@ -50,7 +50,7 @@ func TestIssue599_InvalidSessionIDClearedBeforeResume(t *testing.T) {
 	// Simulate a stored cross-project session ID.
 	s := &Session{AgentSessionID: "leaked-id-from-other-project"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "", "")
 
 	if startedWith != "" {
 		t.Errorf("StartSession called with %q, want \"\" (fresh start; leaked id must NOT be passed through)", startedWith)
@@ -80,7 +80,7 @@ func TestIssue599_ValidSessionIDPreserved(t *testing.T) {
 
 	s := &Session{AgentSessionID: "valid-id-abc"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "", "")
 
 	if startedWith != "valid-id-abc" {
 		t.Errorf("StartSession called with %q, want %q (resume path)", startedWith, "valid-id-abc")
@@ -106,7 +106,7 @@ func TestIssue599_AgentWithoutValidatorNotBlocked(t *testing.T) {
 
 	s := &Session{AgentSessionID: "any-id"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "", "")
 
 	if startedWith != "any-id" {
 		t.Errorf("StartSession called with %q, want %q (no validator = pass through)", startedWith, "any-id")
