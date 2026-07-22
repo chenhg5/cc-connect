@@ -14,6 +14,44 @@
 # 单个 cc-connect 进程可以同时管理多个项目。
 
 # =============================================================================
+# ⚠️  v1.4.0 BREAKING: allow_from now defaults to deny-all / allow_from 现在默认为全部拒绝
+# =============================================================================
+# In v1.3.x and earlier, an empty `allow_from` was treated as "permit every user"
+# (or any `*` wildcard as the same). Starting with v1.4.0, `allow_from` and the
+# platform-level `allow_chat` **default to deny-all when empty**. Without an
+# explicit value, the platform will reject every incoming message and emit a
+# clear `WARN` log. The wildcard `allow_from = "*"` still reproduces the old
+# behavior — use it as a TEMPORARY migration step only, and replace with an
+# explicit user list before going to production.
+#
+# 在 v1.3.x 及更早版本中,空的 `allow_from` 会被视为 "允许所有用户"(`*` 通配符
+# 行为相同)。从 v1.4.0 开始,`allow_from` 以及平台级 `allow_chat` **在留空时
+# 默认为全部拒绝**。如果未显式配置,平台会拒绝所有收到的消息,并打印一条清晰
+# 的 `WARN` 日志。通配符 `allow_from = "*"` 仍可复现旧行为 — 请仅作为临时
+# 迁移步骤使用,并在上生产前替换为显式用户列表。
+#
+# --- Migration example / 迁移示例 ---
+#
+#   [platform.telegram.options]
+#   token = "${TELEGRAM_BOT_TOKEN}"
+#   allow_from = ["*"]                       # 旧行为,临时开启,生产前改成显式列表
+#   # allow_from = ["alice", "bob", "carol"]  # 推荐的显式白名单形式
+#
+# Or, on a per-project basis / 也可以在 [[projects]] 级别配置:
+#
+#   [[projects]]
+#   name = "mybot"
+#   [[projects.platforms]]
+#   type = "telegram"
+#   [projects.platforms.options]
+#   token = "${TELEGRAM_BOT_TOKEN}"
+#   allow_from = ["*"]                       # 旧行为,临时开启,生产前改成显式列表
+#   # allow_from = ["alice", "bob", "carol"]  # 推荐的显式白名单形式
+#
+# See CHANGELOG.md "Unreleased" for the full release note.
+# 完整变更说明见 CHANGELOG.md 的 "Unreleased" 段。
+
+# =============================================================================
 # Global Settings / 全局设置
 # =============================================================================
 

@@ -465,6 +465,29 @@ start if any gate fails or if the probe detects a cross-user leak.
 
 ---
 
+### 🛡️ Security Defaults (v1.4.0+)
+
+From **v1.4.0** onwards, `allow_from` and the platform-level `allow_chat` default
+to **fail-closed** (deny-all) when left empty. In v1.3.x and earlier the same
+empty value meant "permit every user" — that legacy behavior is now opt-in via
+the explicit wildcard `allow_from = "*"`. If you upgrade without setting
+`allow_from` explicitly, every incoming message will be rejected and a `WARN`
+log will be emitted.
+
+```toml
+# Per-platform migration example / 平台级迁移示例
+[platform.telegram.options]
+token = "${TELEGRAM_BOT_TOKEN}"
+allow_from = ["*"]                       # 旧行为,临时开 / legacy behavior, temporary
+# allow_from = ["alice", "bob", "carol"]  # 生产前改成显式列表 / explicit list before production
+```
+
+See the **Unreleased** entry in [`CHANGELOG.md`](./CHANGELOG.md) and the
+"Security defaults" callout at the top of
+[`config.example.toml`](./config.example.toml) for the full migration recipe.
+
+---
+
 ### 🔐 Permission Modes
 
 ```

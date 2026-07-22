@@ -102,6 +102,11 @@ file send/receive via OneBot, WeCom `SendFile` (WebSocket), Feishu audio/video m
 `/timer` and `/cancel` commands, and broad platform fixes across Telegram, Discord, DingTalk, Feishu,
 WeCom, WeiXin, Cursor, OpenCode, Pi, and Codex. See `changelogs/v1.3.3-beta.5.md` for the full list.
 
+## Unreleased
+
+### Security
+- **BREAKING: `allow_from` default changed from allow-all to fail-closed.** The legacy behavior treated an empty `allow_from` as “permit every user” (or any `*` wildcard as the same). Starting with v1.4.0, `allow_from` (and the platform-level `allow_chat`) **default to deny-all when empty**. Users upgrading from <v1.4.0 MUST explicitly set `allow_from` in `[[projects.platforms.options]]` (or `[platform.<name>.options]`) to grant access — otherwise the platform will reject every incoming message and log a clear `WARN` with the platform name and a hint to set `allow_from`. The wildcard `allow_from = "*"` is still supported and reproduces the old behavior; it should be used only as a temporary migration step and replaced with an explicit user list before going to production. Same rule applies to `allow_chat` for chat/group allow-listing. See the “Security defaults” callout at the top of `config.example.toml` for the migration recipe.
+
 ### New Features
 - **Google Antigravity (`agy`)** agent as a first-class integration (#1123)
 - **GitHub Copilot** agent as a first-class integration (#865)

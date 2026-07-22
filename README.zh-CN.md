@@ -452,6 +452,26 @@ cc-connect doctor user-isolation
 
 ---
 
+### 🛡️ 安全默认值（v1.4.0+）
+
+从 **v1.4.0** 起,`allow_from` 以及平台级 `allow_chat` 在留空时默认为**失败
+关闭**(deny-all)。在 v1.3.x 及更早版本中,空值等价于"允许所有用户"——这一
+旧行为需要通过显式通配符 `allow_from = "*"` 才能恢复。如果升级时未显式设置
+`allow_from`,所有收到的消息都会被拒绝,并打印一条 `WARN` 日志。
+
+```toml
+# 平台级迁移示例
+[platform.telegram.options]
+token = "${TELEGRAM_BOT_TOKEN}"
+allow_from = ["*"]                       # 旧行为,临时开启
+# allow_from = ["alice", "bob", "carol"]  # 生产前改为显式白名单
+```
+
+完整迁移说明见 [`CHANGELOG.md`](./CHANGELOG.md) 的 **Unreleased** 段,以及
+[`config.example.toml`](./config.example.toml) 顶部的"Security defaults"提示块。
+
+---
+
 ### 🔐 权限模式
 
 ```
