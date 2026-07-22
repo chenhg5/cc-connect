@@ -6208,6 +6208,7 @@ var builtinCommands = []struct {
 }{
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
+	{[]string{"workdirs", "workdirlist"}, "workdirs"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
@@ -6409,6 +6410,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdNew(p, msg, args)
 	case "list":
 		e.cmdList(p, msg, args)
+	case "workdirs":
+		e.cmdWorkdirs(p, msg, args)
 	case "switch":
 		e.cmdSwitch(p, msg, args)
 	case "name":
@@ -6924,6 +6927,76 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.replyWithCard(p, msg.ReplyCtx, card)
+}
+
+func (e *Engine) cmdWorkdirs(p Platform, msg *Message, args []string) {
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	lister, ok := agent.(WorkdirLister)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWorkdirsNotSupported))
+		return
+	}
+
+	page := 1
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+			page = n
+		}
+	}
+
+	if supportsCards(p) {
+		e.replyWithCard(p, msg.ReplyCtx, e.renderWorkdirsCardSafe(msg.SessionKey, page))
+		return
+	}
+
+	workdirs, err := lister.ListWorkdirs(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWorkdirsError, err))
+		return
+	}
+	if len(workdirs) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWorkdirsEmpty))
+		return
+	}
+
+	total := len(workdirs)
+	totalPages := (total + listPageSize - 1) / listPageSize
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * listPageSize
+	end := start + listPageSize
+	if end > total {
+		end = total
+	}
+
+	currentDir := ""
+	if sw, ok := agent.(WorkDirSwitcher); ok {
+		currentDir = sw.GetWorkDir()
+	}
+	var sb strings.Builder
+	if totalPages > 1 {
+		sb.WriteString(e.i18n.Tf(MsgWorkdirsTitlePaged, total, page, totalPages))
+	} else {
+		sb.WriteString(e.i18n.Tf(MsgWorkdirsTitle, total))
+	}
+	for i := start; i < end; i++ {
+		wd := workdirs[i]
+		marker := "◻"
+		if wd.Cwd == currentDir {
+			marker = "▶"
+		}
+		sb.WriteString(e.i18n.Tf(MsgWorkdirsItem, marker, i+1, wd.Cwd, wd.SessionCount, wd.MessageCount, wd.ModifiedAt.Format("01-02 15:04")))
+	}
+	if totalPages > 1 {
+		fmt.Fprintf(&sb, e.i18n.T(MsgWorkdirsPageHint), page, totalPages)
+	}
+	sb.WriteString(e.i18n.T(MsgWorkdirsHint))
+	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
@@ -8840,6 +8913,15 @@ func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
 	return card
 }
 
+// renderWorkdirsCardSafe wraps renderWorkdirsCard and returns an error card on failure.
+func (e *Engine) renderWorkdirsCardSafe(sessionKey string, page int) *Card {
+	card, err := e.renderWorkdirsCard(sessionKey, page)
+	if err != nil {
+		return e.simpleCard(strings.TrimSpace(e.i18n.Tf(MsgWorkdirsTitle, 0)), "red", err.Error())
+	}
+	return card
+}
+
 // renderDirCardSafe wraps renderDirCard and returns an error card on failure.
 func (e *Engine) renderDirCardSafe(sessionKey string, page int) *Card {
 	card, err := e.renderDirCard(sessionKey, page)
@@ -9189,6 +9271,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/new", action: "act:/new"},
 				{command: "/cancel", action: "cmd:/cancel"},
 				{command: "/list", action: "nav:/list"},
+				{command: "/workdirs", action: "nav:/workdirs"},
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
@@ -11852,6 +11935,14 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 			}
 		}
 		return e.renderListCardSafe(sessionKey, page)
+	case "/workdirs":
+		page := 1
+		if args != "" {
+			if n, err := strconv.Atoi(args); err == nil && n > 0 {
+				page = n
+			}
+		}
+		return e.renderWorkdirsCardSafe(sessionKey, page)
 	case "/dir":
 		page := 1
 		if args != "" {
@@ -12202,6 +12293,30 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		errMsg, _ := e.dirApply(agent, sessions, ik, sessionKey, applyArgs)
 		if errMsg != "" {
 			slog.Debug("dir card action failed", "message", errMsg)
+		}
+
+	case "/workdirs":
+		fields := strings.Fields(args)
+		if len(fields) < 2 || fields[0] != "select" {
+			return
+		}
+		idx, err := strconv.Atoi(fields[1])
+		if err != nil || idx <= 0 {
+			return
+		}
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		lister, ok := agent.(WorkdirLister)
+		if !ok {
+			return
+		}
+		workdirs, err := lister.ListWorkdirs(e.ctx)
+		if err != nil || idx > len(workdirs) {
+			return
+		}
+		ik := e.interactiveKeyForSessionKey(sessionKey)
+		errMsg, _ := e.dirApply(agent, sessions, ik, sessionKey, []string{workdirs[idx-1].Cwd})
+		if errMsg != "" {
+			slog.Debug("workdirs card action failed", "message", errMsg)
 		}
 
 	case "/stop":
@@ -13007,6 +13122,72 @@ func dirCardTruncPath(absPath string) string {
 		return absPath
 	}
 	return string(r[:53]) + "…"
+}
+
+func (e *Engine) renderWorkdirsCard(sessionKey string, page int) (*Card, error) {
+	agent, _ := e.sessionContextForKey(sessionKey)
+	lister, ok := agent.(WorkdirLister)
+	if !ok {
+		return nil, fmt.Errorf("%s", e.i18n.T(MsgWorkdirsNotSupported))
+	}
+	workdirs, err := lister.ListWorkdirs(e.ctx)
+	if err != nil {
+		return nil, fmt.Errorf(e.i18n.T(MsgWorkdirsError), err)
+	}
+	if len(workdirs) == 0 {
+		return e.simpleCard(strings.TrimSpace(e.i18n.Tf(MsgWorkdirsTitle, 0)), "turquoise", e.i18n.T(MsgWorkdirsEmpty)), nil
+	}
+
+	currentDir := ""
+	if sw, ok := agent.(WorkDirSwitcher); ok {
+		currentDir = sw.GetWorkDir()
+	}
+
+	total := len(workdirs)
+	totalPages := (total + listPageSize - 1) / listPageSize
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * listPageSize
+	end := start + listPageSize
+	if end > total {
+		end = total
+	}
+
+	var title string
+	if totalPages > 1 {
+		title = strings.TrimSpace(e.i18n.Tf(MsgWorkdirsTitlePaged, total, page, totalPages))
+	} else {
+		title = strings.TrimSpace(e.i18n.Tf(MsgWorkdirsTitle, total))
+	}
+	cb := NewCard().Title(title, "turquoise")
+	for i := start; i < end; i++ {
+		wd := workdirs[i]
+		marker := "◻"
+		btnType := "default"
+		if wd.Cwd == currentDir {
+			marker = "▶"
+			btnType = "primary"
+		}
+		displayPath := dirCardTruncPath(wd.Cwd)
+		desc := e.i18n.Tf(MsgWorkdirsItem, marker, i+1, displayPath, wd.SessionCount, wd.MessageCount, wd.ModifiedAt.Format("01-02 15:04"))
+		cb.ListItemBtn(strings.TrimSpace(desc), fmt.Sprintf("#%d", i+1), btnType, fmt.Sprintf("act:/workdirs select %d", i+1))
+	}
+
+	var navBtns []CardButton
+	if page > 1 {
+		navBtns = append(navBtns, e.cardPrevButton(fmt.Sprintf("nav:/workdirs %d", page-1)))
+	}
+	navBtns = append(navBtns, e.cardBackButton())
+	if page < totalPages {
+		navBtns = append(navBtns, e.cardNextButton(fmt.Sprintf("nav:/workdirs %d", page+1)))
+	}
+	cb.Buttons(navBtns...)
+	cb.Note(strings.TrimSpace(e.i18n.T(MsgWorkdirsHint)))
+	return cb.Build(), nil
 }
 
 func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {

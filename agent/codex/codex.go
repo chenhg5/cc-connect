@@ -518,6 +518,13 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listCodexSessions(workDir, codexHome)
 }
 
+func (a *Agent) ListWorkdirs(_ context.Context) ([]core.AgentWorkdirInfo, error) {
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return listCodexWorkdirs(codexHome)
+}
+
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
