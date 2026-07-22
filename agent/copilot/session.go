@@ -409,6 +409,29 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 			}
 		}
 
+	case "assistant.reasoning_delta":
+		// Streaming reasoning/thinking chunk. Copilot sends these with the
+		// same deltaContent shape as message deltas, but they must be mapped
+		// to EventThinking (not EventText) so thinking_messages=false can
+		// suppress them and they don't get concatenated with the answer.
+		if content := copilotEventText(evt.Event.Data); content != "" {
+			e := core.Event{Type: core.EventThinking, Content: content}
+			select {
+			case cs.events <- e:
+			case <-cs.ctx.Done():
+			}
+		}
+
+	case "assistant.reasoning":
+		// Final aggregated reasoning. Same mapping as the delta stream.
+		if content := copilotEventText(evt.Event.Data); content != "" {
+			e := core.Event{Type: core.EventThinking, Content: content}
+			select {
+			case cs.events <- e:
+			case <-cs.ctx.Done():
+			}
+		}
+
 	case "assistant.message":
 		usage := copilotEventUsage(evt.Event.Data)
 		if len(evt.Event.Data) > 0 {
@@ -494,6 +517,10 @@ func normalizeCopilotEventType(eventType string) string {
 		return "assistant.message_delta"
 	case "assistant_streaming_delta":
 		return "assistant.streaming_delta"
+	case "assistant_reasoning":
+		return "assistant.reasoning"
+	case "assistant_reasoning_delta":
+		return "assistant.reasoning_delta"
 	}
 	return eventType
 }
