@@ -1151,6 +1151,30 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+
+	// Wait for the turn to fully complete (reply delivered) before returning:
+	// the turn tail persists sessions.json inside t.TempDir, and returning
+	// early races that write against the TempDir cleanup.
+	waitForTurnReply(t, plat)
+}
+
+// waitForTurnReply blocks until the platform has received at least one
+// message, i.e. the current turn has fully completed and its session
+// persistence is done.
+func waitForTurnReply(t *testing.T, plat *stubPlatformEngine) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(plat.getSent()) > 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("turn never completed (no reply reached the platform)")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 // CUJ-A4 · User sends voice → without STT configured, user gets a clear
@@ -1206,7 +1230,7 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 		n := len(agent.sessions)
 		agent.mu.Unlock()
 		if n > 0 {
-			return
+			break
 		}
 		select {
 		case <-deadline:
@@ -1215,6 +1239,10 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+
+	// See TestCUJ_A3_ImageReachesAgent: don't race TempDir cleanup against
+	// the turn tail's session persistence.
+	waitForTurnReply(t, plat)
 }
 
 // CUJ-A6 / A7 are intentionally covered at the platform layer
