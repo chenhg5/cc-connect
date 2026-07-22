@@ -559,6 +559,7 @@ func main() {
 		if len(proj.DisabledCommands) > 0 {
 			engine.SetDisabledCommands(proj.DisabledCommands)
 		}
+		engine.SetPassthroughCommands(proj.PassthroughCommands)
 
 		// Wire admin allowlist for privileged commands
 		engine.SetAdminFrom(proj.AdminFrom)
@@ -1816,6 +1817,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload disabled commands
 	engine.SetDisabledCommands(proj.DisabledCommands)
+	engine.SetPassthroughCommands(proj.PassthroughCommands)
 
 	// Reload admin allowlist
 	engine.SetAdminFrom(proj.AdminFrom)
