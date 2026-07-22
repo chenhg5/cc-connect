@@ -3939,17 +3939,32 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
-		// After /new or /switch the active session changes, but the old agent
-		// process may still be alive. Reusing it would send messages to the
-		// wrong conversation context.
+		//
+		// Trust the live process as the source of truth — UNLESS disk and
+		// live disagree about whether a session exists. Disagreement on
+		// existence means one of the two states is stale, and recycling is
+		// the only way to converge. The two disagreement cases are:
+		//
+		//   1. wantID != "" && currentID == ""  — cold-start race (issue
+		//      #1470): live has not reported its id yet, but disk has a
+		//      session to resume from.
+		//
+		//   2. wantID == "" && currentID != ""  — /new survivor (issue #238
+		//      defense): cmdNew cleared disk, but the prior live process
+		//      somehow wasn't killed (cleanup race, idle reaper, …) and is
+		//      still alive with all the old context. Recycling here is the
+		//      only way the next message lands in a fresh session.
+		//
+		// When both are non-empty we trust live even if the ids differ
+		// (issue #1470 fix: stale disk + alive live means live is the
+		// user's real conversation — do not throw it away).
+		//
+		// When both are empty there is nothing to reuse and nothing to
+		// recycle; fall through to the cold spawn path below.
 		wantID := session.GetAgentSessionID()
 		currentID := state.agentSession.CurrentSessionID()
-		// Reuse only when the live process matches what the Session expects:
-		// - IDs match (same Claude session), or
-		// - the process has not reported an ID yet (startup; empty want is OK).
-		// If wantID is empty (/new, cleared session) but the process already has
-		// a concrete ID, reusing would keep --resume context — recycle (#238).
-		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		// XOR: "exactly one of (wantID=="") and (currentID=="") is true".
+		needRecycle := (wantID == "") != (currentID == "")
 		if !needRecycle {
 			return state
 		}
@@ -14439,7 +14454,15 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	// Look up the SessionManager using the UNPREFIXED sessionKey (matches the
+	// user-message path at engine.go:2923 and cron/timer paths). The
+	// workspace-prefixed interactiveKey is only correct for the engine's
+	// interactiveStates map; the SessionManager keys active sessions by the
+	// raw session key. Using interactiveKey here would land /cmp in a
+	// different session from where the user has been chatting, defeating
+	// the purpose of "compact the conversation I'm in right now" (issue
+	// #1470 follow-up). See also executeSkill below.
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -14667,7 +14690,10 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	// See executeCustomCommand above — use the unprefixed session key for the
+	// SessionManager lookup so skill runs land in the same session as the
+	// user's regular chat messages on that channel.
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return

@@ -7482,78 +7482,144 @@ func TestCleanupCAS_ConcurrentUnconditionalCloseOnce(t *testing.T) {
 	e.interactiveMu.Unlock()
 }
 
-// TestSessionMismatch_RecyclesStaleAgent verifies that getOrCreateInteractiveStateWith
-// detects when the running agent session ID differs from the active Session's
-// AgentSessionID and creates a fresh agent instead of reusing the stale one.
-func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
-	newSess := newControllableSession("new-agent-id")
-	agent := &controllableAgent{nextSession: newSess}
+// TestSessionMismatch_KeepsLiveWhenDiskIsStale verifies that when disk
+// session.AgentSessionID diverges from the live agent session id, the
+// engine trusts the live process and does NOT recycle. This is the
+// regression target for issue #1470: previously a custom prompt command
+// (e.g. /cmp) would land in a stale/empty session because the live
+// process carrying the user's conversation context was killed off.
+//
+// Live represents the user's in-flight conversation — killing it discards
+// context as collateral damage, which is the worst-case outcome. Disk
+// is only a cold-start hint and can be stale from earlier bugs.
+func TestSessionMismatch_KeepsLiveWhenDiskIsStale(t *testing.T) {
+	agent := &controllableAgent{}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	key := "test:user1"
 
-	// Seed a live agent session with ID "old-agent-id".
-	oldSess := newControllableSession("old-agent-id")
+	// Seed a live agent session with ID "live-id" — the user's real session.
+	liveSess := newControllableSession("live-id")
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = &interactiveState{
-		agentSession: oldSess,
+		agentSession: liveSess,
 		platform:     p,
 		replyCtx:     "ctx",
 	}
 	e.interactiveMu.Unlock()
 
-	// The active Session now wants a DIFFERENT agent session ID.
-	session := &Session{AgentSessionID: "new-agent-id"}
+	// Disk points to a DIFFERENT id — could be stale (from an earlier botched
+	// turn) or stale (from a `/switch` whose live process wasn't killed yet).
+	// Either way, the live process is what the user is currently talking to;
+	// we must keep it.
+	session := &Session{AgentSessionID: "stale-disk-id"}
 
 	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
 
-	if state.agentSession == oldSess {
-		t.Fatal("expected stale agent session to be replaced")
+	if state.agentSession != liveSess {
+		t.Fatalf("expected live agent to be kept when disk is stale; got %p, want %p", state.agentSession, liveSess)
 	}
-	if state.agentSession != newSess {
-		t.Fatal("expected new agent session from StartSession")
+	if state.agentSession.CurrentSessionID() != "live-id" {
+		t.Fatalf("live session id changed unexpectedly: got %q, want %q",
+			state.agentSession.CurrentSessionID(), "live-id")
 	}
-
-	// Old session should be closed asynchronously.
+	// Old live session must NOT be closed — it's still the active conversation.
 	select {
-	case <-oldSess.closed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("old agent session was not closed after mismatch")
+	case <-liveSess.closed:
+		t.Fatal("live session was closed despite having a valid id; this is the issue #1470 regression")
+	case <-time.After(100 * time.Millisecond):
+		// good — closed channel did not fire
 	}
 }
 
-// TestSessionClearedAfterNew_RecyclesAliveAgent verifies issue #238: after /new the
-// Session's AgentSessionID is empty but an older Claude process may still be alive;
-// it must be recycled instead of reused (which would keep prior --resume context).
-func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
-	newSess := newControllableSession("fresh-id")
+// TestSessionMismatch_RecyclesWhenDiskClearedButLiveSurvives verifies that
+// when disk session.AgentSessionID is empty (e.g. cmdNew cleared it via
+// /new) but a live agent session is still alive in the map, the engine
+// RECYCLES the orphan — closing the live session and spawning a fresh
+// one on StartSession. This is the regression target for the p2p /new
+// bug reported against cc-connect: a private Feishu chat whose pi
+// subprocess was still alive 18+ hours after the prior turn, where
+// /new cleared the disk Session.AgentSessionID but the prior live
+// state survived cleanupInteractiveState somehow (race / idle reaper
+// mismatch / future bug). After d94d472e (issue #1470), the engine
+// reused the orphan and the next user message hit 286k tokens of old
+// context. The fix is the XOR "disagreement on existence" predicate.
+//
+// Note: cleanupInteractiveState is the proper path for /new under
+// normal conditions — it removes the map entry and closes live in one
+// step. We only get to this code when that cleanup didn't run, and
+// leaving the orphan live would send the next user message to the old
+// context. See issue #238 for the original concern this test defends.
+func TestSessionMismatch_RecyclesWhenDiskClearedButLiveSurvives(t *testing.T) {
+	newSess := newControllableSession("fresh-id") // matches controllableAgent.nextSession
 	agent := &controllableAgent{nextSession: newSess}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
 	key := "test:user1"
-	oldSess := newControllableSession("prior-claude-session")
+	liveSess := newControllableSession("stale-live-id") // orphan from a botched /new
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = &interactiveState{
-		agentSession: oldSess,
+		agentSession: liveSess,
 		platform:     p,
 		replyCtx:     "ctx",
 	}
 	e.interactiveMu.Unlock()
 
-	session := &Session{AgentSessionID: ""}
+	session := &Session{AgentSessionID: ""} // /new cleared disk but didn't kill live
 
 	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
-	if state.agentSession == oldSess {
-		t.Fatal("expected stale agent to be recycled when AgentSessionID was cleared")
+
+	if state.agentSession == liveSess {
+		t.Fatalf("expected orphan live agent to be RECYCLED, but it was kept; this re-introduces the p2p /new regression")
 	}
 	if state.agentSession != newSess {
-		t.Fatal("expected new agent session from StartSession")
+		t.Fatalf("expected fresh agent session from StartSession; got %p, want %p", state.agentSession, newSess)
 	}
 	select {
-	case <-oldSess.closed:
+	case <-liveSess.closed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("old agent session was not closed after /new-style clear")
+		t.Fatal("orphan live agent session was not closed during recycle")
+	}
+}
+
+// TestSessionMismatch_RecyclesColdStartWhenLiveHasNoId verifies the
+// remaining case where needRecycle fires: the live process is alive
+// (Alive() guard above) but hasn't reported a session id yet
+// (currentID == ""), while disk has a session to resume from. This is
+// a narrow race during agent startup — get_state returned before the
+// live id was reported. Recycle here lets the new process use the
+// disk's session, which would otherwise be ignored.
+func TestSessionMismatch_RecyclesColdStartWhenLiveHasNoId(t *testing.T) {
+	newSess := newControllableSession("disk-id") // matches disk so writeback is a no-op
+	agent := &controllableAgent{nextSession: newSess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	liveSess := newControllableSession("") // alive, but no id yet
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: liveSess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	session := &Session{AgentSessionID: "disk-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	if state.agentSession == liveSess {
+		t.Fatal("expected live agent to be replaced when it has no session id but disk has one")
+	}
+	if state.agentSession != newSess {
+		t.Fatalf("expected new agent session from StartSession; got %p, want %p", state.agentSession, newSess)
+	}
+	select {
+	case <-liveSess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("id-less live agent was not closed during cold-start recycle")
 	}
 }
 
