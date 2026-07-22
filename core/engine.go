@@ -4686,6 +4686,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
+	var lastThinkingContent string // tracks last thinking block for thinking-only fallback
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
 	waitStart := time.Now()
@@ -4929,6 +4930,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventThinking:
+			if event.Content != "" && !isEllipsisOnly(event.Content) {
+				lastThinkingContent = event.Content
+			}
 			if isEllipsisOnly(event.Content) {
 				break
 			}
@@ -5477,7 +5481,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
-				fullResponse = e.i18n.T(MsgEmptyResponse)
+				if lastThinkingContent != "" {
+					preview := truncateIf(lastThinkingContent, 500)
+					fullResponse = fmt.Sprintf(e.i18n.T(MsgThinkingOnlyResponse), preview)
+					slog.Warn("thinking-only response",
+						"session", session.ID,
+						"thinking_len", len(lastThinkingContent))
+				} else {
+					fullResponse = e.i18n.T(MsgEmptyResponse)
+				}
 			}
 
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not
@@ -5867,6 +5879,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				msgID = queued.messageID
 				textParts = nil
 				segmentStart = 0
+				lastThinkingContent = ""
 				toolCount = 0
 				turnStart = time.Now()
 				firstEventLogged = false
