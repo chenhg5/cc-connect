@@ -8617,9 +8617,15 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
 			}
 		}
 		if primary == nil && len(bucket.Windows) > 0 {
-			primary = &bucket.Windows[0]
+			// Fall back to the first window when no 5-hour quota is reported
+			// (e.g. Codex accounts whose first bucket only exposes a 7-day
+			// window). Skip it if the slot is already occupied by the 7-day
+			// window so the same block is not rendered twice.
+			if secondary != &bucket.Windows[0] {
+				primary = &bucket.Windows[0]
+			}
 		}
-		if secondary == nil && len(bucket.Windows) > 1 {
+		if secondary == nil && len(bucket.Windows) > 1 && &bucket.Windows[1] != primary {
 			secondary = &bucket.Windows[1]
 		}
 		if primary != nil || secondary != nil {
