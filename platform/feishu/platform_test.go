@@ -2188,6 +2188,268 @@ func TestOnMessage_GracePeriodMessageIsProcessed(t *testing.T) {
 	}
 }
 
+func TestCardAction_PrivateChatBypassesGroupAllowChatAfterAcceptedMessage(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"allow_from":         "ou_allowed",
+		"allow_chat":         "oc_allowed_group",
+		"group_reply_all":    true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	msgCh := make(chan *core.Message, 2)
+	ip.handler = func(_ core.Platform, msg *core.Message) { msgCh <- msg }
+
+	messageID := "om_private_seed"
+	chatID := "oc_private"
+	openID := "ou_allowed"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	content := `{"text":"seed"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	ip.userNameCache.Store(openID, "Allowed User")
+	ip.chatNameCache.Store(chatID, "Private Chat")
+
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &messageID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "seed" {
+			t.Fatalf("seed content = %q, want seed", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected accepted private message to be dispatched")
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: openID},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":      "cmd:/verify-private",
+				"after_click": map[string]any{"title": "Done"},
+			}},
+			Context: &callback.Context{OpenChatID: chatID, OpenMessageID: "om_private_card"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected private card replacement response, got %#v", resp)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "/verify-private" {
+			t.Fatalf("card action content = %q, want /verify-private", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected private card command to be dispatched")
+	}
+}
+
+func TestCardAction_AccessChecksRemainFailClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowFrom string
+		allowChat string
+		groupOnly bool
+		operator  string
+		chatID    string
+		wantPass  bool
+	}{
+		{
+			name:      "allowed group chat remains routable",
+			allowFrom: "ou_allowed",
+			allowChat: "oc_allowed_group",
+			operator:  "ou_allowed",
+			chatID:    "oc_allowed_group",
+			wantPass:  true,
+		},
+		{
+			name:      "unknown chat outside group allowlist is blocked",
+			allowFrom: "ou_allowed",
+			allowChat: "oc_allowed_group",
+			operator:  "ou_allowed",
+			chatID:    "oc_unknown",
+		},
+		{
+			name:      "unauthorized operator is blocked",
+			allowFrom: "ou_allowed",
+			allowChat: "*",
+			operator:  "ou_denied",
+			chatID:    "oc_allowed_group",
+		},
+		{
+			name:      "group only blocks unclassified callback",
+			allowFrom: "ou_allowed",
+			allowChat: "*",
+			groupOnly: true,
+			operator:  "ou_allowed",
+			chatID:    "oc_unclassified",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			platformAny, err := New(map[string]any{
+				"app_id":             "cli_xxx",
+				"app_secret":         "secret",
+				"enable_feishu_card": true,
+				"allow_from":         tt.allowFrom,
+				"allow_chat":         tt.allowChat,
+				"group_only":         tt.groupOnly,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			ip := platformAny.(*interactivePlatform)
+			ip.userNameCache.Store(tt.operator, "Test Operator")
+			ip.chatNameCache.Store(tt.chatID, "Test Chat")
+
+			msgCh := make(chan *core.Message, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) { msgCh <- msg }
+
+			resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+				Event: &callback.CardActionTriggerRequest{
+					Operator: &callback.Operator{OpenID: tt.operator},
+					Action: &callback.CallBackAction{Value: map[string]any{
+						"action":      "cmd:/access-check",
+						"after_click": map[string]any{"title": "Done"},
+					}},
+					Context: &callback.Context{OpenChatID: tt.chatID, OpenMessageID: "om_access_card"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("onCardAction() error = %v", err)
+			}
+
+			if tt.wantPass {
+				if resp == nil || resp.Card == nil {
+					t.Fatalf("expected allowed card response, got %#v", resp)
+				}
+				select {
+				case <-msgCh:
+				case <-time.After(2 * time.Second):
+					t.Fatal("expected allowed card command to be dispatched")
+				}
+				return
+			}
+
+			if resp != nil {
+				t.Errorf("blocked card response = %#v, want nil", resp)
+			}
+			select {
+			case msg := <-msgCh:
+				t.Errorf("blocked card command was dispatched: %q", msg.Content)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestCardAction_GroupOnlyAllowsAcceptedGroup(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"allow_from":         "ou_allowed",
+		"allow_chat":         "oc_allowed_group",
+		"group_only":         true,
+		"group_reply_all":    true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.userNameCache.Store("ou_allowed", "Allowed User")
+	ip.chatNameCache.Store("oc_allowed_group", "Allowed Group")
+
+	msgCh := make(chan *core.Message, 2)
+	ip.handler = func(_ core.Platform, msg *core.Message) { msgCh <- msg }
+
+	messageID := "om_group_seed"
+	chatID := "oc_allowed_group"
+	openID := "ou_allowed"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"seed"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &messageID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case <-msgCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected accepted group message to be dispatched")
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: openID},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":      "cmd:/group-action",
+				"after_click": map[string]any{"title": "Done"},
+			}},
+			Context: &callback.Context{OpenChatID: chatID, OpenMessageID: "om_group_card"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected accepted group card response, got %#v", resp)
+	}
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "/group-action" {
+			t.Fatalf("card action content = %q, want /group-action", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected accepted group card command to be dispatched")
+	}
+}
+
 func TestCmdAction_WithoutAfterClick_DispatchesAndReturnsNil(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
