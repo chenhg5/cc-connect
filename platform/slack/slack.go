@@ -179,6 +179,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				// Editing a mention re-fires a fresh app_mention with Edited set;
+				// ignore it rather than reprocessing the edit as a new prompt.
+				// This also drops edit-to-add-mention (a message edited to newly
+				// @-mention the bot) — an accepted limitation, matching how
+				// Telegram and Discord ignore all inbound edits.
+				if ev.Edited != nil {
+					slog.Debug("slack: ignoring edited app_mention", "user", ev.User, "channel", ev.Channel)
+					return
+				}
+
 				if ts := ev.TimeStamp; ts != "" {
 					if dotIdx := strings.IndexByte(ts, '.'); dotIdx > 0 {
 						if sec, err := strconv.ParseInt(ts[:dotIdx], 10, 64); err == nil {

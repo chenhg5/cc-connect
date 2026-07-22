@@ -2,12 +2,73 @@ package slack
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/chenhg5/cc-connect/core"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
 )
+
+// appMentionEvent wraps an AppMentionEvent in the socketmode/EventsAPI envelope
+// that handleEvent unwraps. Request is nil so handleEvent skips the socket Ack.
+func appMentionEvent(ev *slackevents.AppMentionEvent) socketmode.Event {
+	return socketmode.Event{
+		Type: socketmode.EventTypeEventsAPI,
+		Data: slackevents.EventsAPIEvent{
+			Type: slackevents.CallbackEvent,
+			InnerEvent: slackevents.EventsAPIInnerEvent{
+				Type: "app_mention",
+				Data: ev,
+			},
+		},
+	}
+}
+
+func TestHandleEvent_EditedAppMentionIgnored(t *testing.T) {
+	var calls int
+	p := &Platform{
+		channelNameCache: map[string]string{"C1": "general"},
+		handler:          func(core.Platform, *core.Message) { calls++ },
+	}
+	p.userNameCache.Store("U1", "Alice") // seed caches so a missed guard fails cleanly, not via nil client
+	// A current ts keeps the old-message guard from dropping the event first,
+	// so a regressed Edited guard would let this reach the handler (calls == 1).
+	now := time.Now().Unix()
+	p.handleEvent(appMentionEvent(&slackevents.AppMentionEvent{
+		User:      "U1",
+		Text:      "<@B> redo it",
+		Channel:   "C1",
+		TimeStamp: fmt.Sprintf("%d.000100", now),
+		Edited:    &slackevents.Edited{User: "U1", TimeStamp: fmt.Sprintf("%d.000000", now+1)},
+	}))
+	if calls != 0 {
+		t.Fatalf("edited app_mention dispatched %d messages, want 0", calls)
+	}
+}
+
+func TestHandleEvent_NormalAppMentionDispatches(t *testing.T) {
+	var calls int
+	p := &Platform{
+		channelNameCache: map[string]string{"C1": "general"},
+		handler:          func(core.Platform, *core.Message) { calls++ },
+	}
+	p.userNameCache.Store("U1", "Alice") // avoid nil client in resolveUserName
+	// A realistic (current) ts, like a real mention: passes the old-message
+	// guard and, with no Edited marker, must reach the handler.
+	p.handleEvent(appMentionEvent(&slackevents.AppMentionEvent{
+		User:      "U1",
+		Text:      "<@B> run tests",
+		Channel:   "C1",
+		TimeStamp: fmt.Sprintf("%d.000200", time.Now().Unix()),
+	}))
+	if calls != 1 {
+		t.Fatalf("normal app_mention dispatched %d messages, want 1", calls)
+	}
+}
 
 func TestStripAppMentionText(t *testing.T) {
 	tests := []struct {
