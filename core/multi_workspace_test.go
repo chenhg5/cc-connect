@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,6 +19,17 @@ func (a *namedTestAgent) StartSession(_ context.Context, _ string) (AgentSession
 }
 func (a *namedTestAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *namedTestAgent) Stop() error                                                { return nil }
+
+type workspaceMemoryAgent struct {
+	*namedTestAgent
+	workDir string
+}
+
+func (a *workspaceMemoryAgent) ProjectMemoryFile() string {
+	return filepath.Join(a.workDir, "AGENTS.md")
+}
+
+func (a *workspaceMemoryAgent) GlobalMemoryFile() string { return "" }
 
 // mockChannelResolver implements both Platform and ChannelNameResolver.
 type mockChannelResolver struct {
@@ -669,6 +681,59 @@ func TestCommandContextWithWorkspace_BoundChannel(t *testing.T) {
 	wantKey := wantWS + ":" + msg.SessionKey
 	if interactiveKey != wantKey {
 		t.Errorf("interactiveKey = %q, want %q", interactiveKey, wantKey)
+	}
+}
+
+func TestCmdBindSetup_WritesBoundWorkspaceInstructions(t *testing.T) {
+	baseDir := t.TempDir()
+	globalDir := filepath.Join(baseDir, "global")
+	wsDir := filepath.Join(baseDir, "bound-workspace")
+	for _, dir := range []string{globalDir, wsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	agentName := "workspace-bind-setup-memory-agent"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		return &workspaceMemoryAgent{
+			namedTestAgent: &namedTestAgent{name: agentName},
+			workDir:        workDir,
+		}, nil
+	})
+
+	parent := &workspaceMemoryAgent{
+		namedTestAgent: &namedTestAgent{name: agentName},
+		workDir:        globalDir,
+	}
+	e := NewEngine("test", parent, nil, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	channelID := "C-bound-setup"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "bound-channel", wsDir)
+
+	p := &stubPlatformEngine{n: "test-platform"}
+	msg := &Message{
+		Platform:   "test-platform",
+		ChannelKey: channelID,
+		SessionKey: channelKey + ":U-001",
+		ReplyCtx:   "ctx",
+	}
+
+	e.cmdBindSetup(p, msg)
+
+	if _, err := os.Stat(filepath.Join(wsDir, "AGENTS.md")); err != nil {
+		t.Fatalf("expected bound workspace AGENTS.md to be written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(globalDir, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("global AGENTS.md should not be written, err=%v", err)
+	}
+
+	content, _ := os.ReadFile(filepath.Join(wsDir, "AGENTS.md"))
+	if !strings.Contains(string(content), "cc-connect send --file") {
+		t.Fatalf("workspace AGENTS.md missing attachment instructions: %q", string(content))
 	}
 }
 
