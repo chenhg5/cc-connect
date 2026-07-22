@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -441,6 +442,14 @@ func TestSessionMessage_TextContent(t *testing.T) {
 	if got := m3.textContent(); got != "" {
 		t.Errorf("nil content: got %q, want empty", got)
 	}
+
+	// Issue #441: newer Gemini CLI serializes content as an array of
+	// generic {"text": "..."} objects, not the typed struct shape
+	// above. The map[string]any fallback must extract the text.
+	m4 := sessionMessage{Type: "user", RawContent: json.RawMessage(`[{"type":"text","text":"from map"},{"text":"second"}]`)}
+	if got := m4.textContent(); got != "from map\nsecond" {
+		t.Errorf("map[string]any content: got %q, want %q", got, "from map\nsecond")
+	}
 }
 
 func TestComputeLineDiff(t *testing.T) {
@@ -505,5 +514,82 @@ func TestGeminiSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 
 	if got := s.CurrentSessionID(); got != "" {
 		t.Errorf("ContinueSession should be treated as fresh: chatID = %q, want empty", got)
+	}
+}
+
+// TestAgent_GetSessionHistory is a regression test for issue #441:
+// GetSessionHistory must locate the correct session file under
+// ~/.gemini/tmp/<slug>/chats/ and decode both the plain-string and
+// map[string]any content shapes.
+func TestAgent_GetSessionHistory(t *testing.T) {
+	// Build a temporary home directory layout.
+	home := t.TempDir()
+	workDir := "/fake/workdir"
+	slug := geminiProjectSlug(workDir)
+	chatsDir := filepath.Join(home, ".gemini", "tmp", slug, "chats")
+	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
+		t.Fatalf("mkdir chats dir: %v", err)
+	}
+
+	// Session file 1 — matching sessionID, with a mix of content
+	// shapes (plain string + map[string]any array).
+	const targetID = "session-target"
+	mustWrite := func(name, content string) {
+		path := filepath.Join(chatsDir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	mustWrite("session-target.json", `{
+		"sessionId": "`+targetID+`",
+		"kind": "session",
+		"messages": [
+			{"type": "user", "content": "hi"},
+			{"type": "assistant", "content": [{"text": "hello there"}]},
+			{"type": "user", "content": [{"type": "text", "text": "from map shape"}]}
+		]
+	}`)
+	// Decoy session file with a different ID — must be skipped.
+	mustWrite("session-other.json", `{
+		"sessionId": "other",
+		"kind": "session",
+		"messages": [{"type": "user", "content": "ignored"}]
+	}`)
+
+	// Override $HOME so os.UserHomeDir returns our temp dir.
+	t.Setenv("HOME", home)
+	// UserHomeDir on Windows checks USERPROFILE/HOMEDRIVE; for tests
+	// on Linux/macOS HOME is sufficient. Skip if it didn't take.
+	if got, _ := os.UserHomeDir(); got != home {
+		t.Skipf("os.UserHomeDir did not honor HOME override (got %q); skipping", got)
+	}
+
+	agent := &Agent{workDir: workDir}
+	history, err := agent.GetSessionHistory(context.Background(), targetID, 0)
+	if err != nil {
+		t.Fatalf("GetSessionHistory: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("history length = %d, want 3; got %+v", len(history), history)
+	}
+	want := []core.HistoryEntry{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "hello there"},
+		{Role: "user", Content: "from map shape"},
+	}
+	for i, h := range history {
+		if h.Role != want[i].Role || h.Content != want[i].Content {
+			t.Errorf("history[%d] = %+v, want %+v", i, h, want[i])
+		}
+	}
+
+	// Limit applies to the tail.
+	if limited, _ := agent.GetSessionHistory(context.Background(), targetID, 2); len(limited) != 2 || limited[0].Content != "hello there" {
+		t.Errorf("limit=2 should return last 2 entries; got %+v", limited)
+	}
+
+	// Unknown session ID surfaces an error.
+	if _, err := agent.GetSessionHistory(context.Background(), "no-such-id", 0); err == nil {
+		t.Errorf("expected error for unknown session ID")
 	}
 }

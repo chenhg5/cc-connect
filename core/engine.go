@@ -6964,6 +6964,25 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// (no prior match), History is already nil, so preserving is a no-op.
 	_ = sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
 
+	// Auto-sync recent history from the agent's backend session file
+	// so /current and /history are useful immediately after /switch
+	// (issue #441). This is best-effort: agents that don't implement
+	// HistoryProvider simply skip this step.
+	if hp, ok := agent.(HistoryProvider); ok {
+		if history, err := hp.GetSessionHistory(e.ctx, matched.ID, 10); err == nil && len(history) > 0 {
+			for _, h := range history {
+				session.AddHistory(h.Role, h.Content)
+			}
+			// Persist immediately so the sync survives a daemon
+			// restart. SwitchToAgentSession already calls
+			// saveLocked, but we add history after that point.
+			sessions.Save()
+			slog.Debug("cmdSwitch: synced history from agent",
+				"session_key", msg.SessionKey,
+				"entries", len(history))
+		}
+	}
+
 	shortID := matched.ID
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
