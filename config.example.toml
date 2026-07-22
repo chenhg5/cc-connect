@@ -231,6 +231,17 @@ level = "info" # debug, info, warn, error
 # # env block, NOT here.
 # run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
 # =============================================================================
+# Message Queue / 消息队列
+# =============================================================================
+# When a new message arrives while the agent is still processing a previous
+# turn, it is queued. By default a "message queued" notice is sent to the user.
+# 当上一轮还在处理时到达的新消息会被排队；默认会发一条"消息已收到，将排队处理"的提示。
+
+# [queue]
+# max_depth = 5   # Max queued messages per session (default: 5) / 每会话最大排队消息数（默认 5）
+# notice = true   # Send the "message queued" notice while busy (default: true); set false to stay silent and rely on reactions instead / 忙时是否发排队提示（默认 true）；false 则不发，改用表情反应
+
+# =============================================================================
 # Streaming Preview / 流式预览
 # =============================================================================
 # Real-time message preview: shows agent output as it streams, updating the
@@ -1131,7 +1142,11 @@ app_secret = "your-feishu-app-secret"
 # proxy_password = ""              # Optional proxy auth password / 代理密码
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
-# enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
+# enable_reactions = false  # If true, react to incoming messages / 设为 true 收到消息时添加表情
+# reaction_emoji = "⚡"     # Emoji for the in-progress reaction (default "⚡"); "none" disables / 处理中的表情（默认 ⚡）；"none" 禁用
+# done_emoji = "none"       # Emoji swapped in when the turn finishes, e.g. "✅"; empty/"none" disables / 完成时换成的表情（如 ✅）；空或 "none" 禁用
+#                           # Note: Telegram allows only one bot reaction per message, so done_emoji replaces reaction_emoji.
+#                           # 注意：Telegram 每条消息只允许机器人一个表情，所以 done 会替换掉收到时的表情。
 # progress_style = "compact"  # Progress rendering: legacy | compact (default). Telegram has no rich card UI,
 #                             # so "card" is normalized to "compact". Set "legacy" to disable streaming edits.
 #                             # 进度展示：legacy | compact（默认）。Telegram 不支持富卡片，"card" 会被规整为 "compact"。
