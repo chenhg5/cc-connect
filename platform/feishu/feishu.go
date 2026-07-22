@@ -2180,6 +2180,18 @@ func extractPostPlainText(content string) string {
 					lang := elem.Language
 					line = append(line, "```"+lang+"\n"+elem.Text+"\n```")
 				}
+			case "hr":
+				// Lark posts render an `hr` element as a horizontal rule;
+				// map it to a standalone markdown separator on its own line
+				// so the agent (and downstream markdown renderers) can
+				// recognize the boundary. We flush any pending line text
+				// first so the rule is not glued to surrounding text
+				// (issue #508; related #470/#472).
+				if len(line) > 0 {
+					parts = append(parts, strings.Join(line, ""))
+					line = line[:0]
+				}
+				parts = append(parts, "---")
 			}
 		}
 		if len(line) > 0 {
