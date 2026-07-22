@@ -8202,7 +8202,7 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 }
 
 func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
-	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	agent, sessions, interactiveKey, _, err := e.commandContextWithWorkspace(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -8213,7 +8213,7 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	currentDir := switcher.GetWorkDir()
+	currentDir := e.resolveCurrentWorkDir(msg.SessionKey, switcher)
 
 	if len(args) == 0 {
 		if supportsCards(p) {
@@ -8861,8 +8861,8 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	}
 
 	workDirStr := ""
-	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
-		workDirStr = strings.TrimSpace(wd.GetWorkDir())
+	if wd, ok := agent.(WorkDirSwitcher); ok {
+		workDirStr = strings.TrimSpace(e.resolveCurrentWorkDir(sessionKey, wd))
 	}
 	if workDirStr == "" {
 		workDirStr, _ = os.Getwd()
@@ -13015,7 +13015,7 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s", e.i18n.T(MsgDirNotSupported))
 	}
-	currentDir := switcher.GetWorkDir()
+	currentDir := e.resolveCurrentWorkDir(sessionKey, switcher)
 	var history []string
 	if e.dirHistory != nil {
 		history = e.dirHistory.List(e.name)
@@ -16166,6 +16166,27 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 	return agent, sessions, interactiveKey, effectiveDir, nil
 }
 
+// resolveCurrentWorkDir returns the effective current working directory for a
+// session, checking projectState dir overrides in multi-workspace mode. This
+// is needed because dirApply stores overrides in projectState without updating
+// the agent's workDir in multi-workspace mode.
+func (e *Engine) resolveCurrentWorkDir(sessionKey string, switcher WorkDirSwitcher) string {
+	if e.multiWorkspace && e.projectState != nil {
+		if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+			if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+				workspace := normalizeWorkspacePath(b.Workspace)
+				interactiveKey := workspace + ":" + sessionKey
+				if override := e.projectState.WorkspaceDirOverride(interactiveKey); override != "" {
+					if info, err := os.Stat(override); err == nil && info.IsDir() {
+						return override
+					}
+				}
+			}
+		}
+	}
+	return switcher.GetWorkDir()
+}
+
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
@@ -16179,7 +16200,10 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	}
 	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+			workspace := normalizeWorkspacePath(b.Workspace)
+			interactiveKey := workspace + ":" + sessionKey
+			effectiveDir := e.resolveChannelWorkDir(workspace, interactiveKey)
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir); err == nil {
 				return wsAgent, wsSessions
 			}
 		}
