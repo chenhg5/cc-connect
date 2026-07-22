@@ -199,6 +199,48 @@ func TestBuildArgs_PrintSupportIncludesPrintFlag(t *testing.T) {
 	assert.Contains(t, args, "stream-json")
 }
 
+// TestBuildArgs_WorkDirFlagGated is the regression test for #1476. When the
+// locally installed Kimi Code CLI does not advertise --work-dir in its help
+// output, cc-connect must omit that flag — otherwise the CLI exits with
+// `error: unknown option --work-dir`. The agent still runs in the correct
+// directory because exec.Command.Dir is set separately (see session.go).
+func TestBuildArgs_WorkDirFlagGated(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/", "", "default", "", nil, 0, kimiFlagSupport{WorkDir: false})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	args := ks.buildArgs("hello")
+
+	for _, a := range args {
+		if a == "--work-dir" {
+			t.Fatalf("buildArgs unexpectedly emitted --work-dir when flagSupport.WorkDir=false; args=%v", args)
+		}
+	}
+	// The work-dir value must also NOT leak into args even though we asked
+	// for one. (Confirms the gate is at the flag level, not just dropping
+	// the flag-name while keeping the value.)
+	for _, a := range args {
+		if a == "/" {
+			t.Fatalf("buildArgs leaked workDir value %q into args; args=%v", a, args)
+		}
+	}
+}
+
+// TestBuildArgs_WorkDirFlagEmitted covers the legacy kimi-cli branch — the
+// binary advertises --work-dir, so we must keep emitting it for non-default
+// workspace locations.
+func TestBuildArgs_WorkDirFlagEmitted(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/", "", "default", "", nil, 0, kimiFlagSupport{WorkDir: true})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	args := ks.buildArgs("hello")
+	assert.Contains(t, args, "--work-dir")
+	assert.Contains(t, args, "/")
+}
+
 // TestBuildArgs_PlanMode confirms plan mode still passes --plan independent
 // of --print support.
 func TestBuildArgs_PlanMode(t *testing.T) {
