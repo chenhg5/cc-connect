@@ -89,7 +89,8 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	}
 
 	if sid := ks.CurrentSessionID(); sid != "" {
-		args = append(args, "--resume", sid)
+		// Kimi Code CLI (>=0.27) renamed --resume to -S/--session.
+		args = append(args, "--session", sid)
 	}
 	if ks.model != "" {
 		args = append(args, "--model", ks.model)
@@ -329,12 +330,33 @@ func (ks *kimiSession) handleEvent(raw map[string]any) {
 		ks.handleAssistant(raw)
 	case "tool":
 		ks.handleTool(raw)
+	case "meta":
+		// Kimi Code CLI (>=0.27) emits the resume info as a JSON trailer
+		// instead of the legacy plaintext "To resume this session:" line.
+		if metaType, _ := raw["type"].(string); metaType == "session.resume_hint" {
+			if sid, _ := raw["session_id"].(string); sid != "" {
+				ks.sessionID.Store(sid)
+				slog.Debug("kimiSession: session id updated", "session_id", sid)
+			} else if cmd, _ := raw["command"].(string); cmd != "" {
+				if sid := extractResumeSessionID(cmd); sid != "" {
+					ks.sessionID.Store(sid)
+					slog.Debug("kimiSession: session id updated", "session_id", sid)
+				}
+			}
+		}
 	default:
 		slog.Debug("kimiSession: unhandled role", "role", role)
 	}
 }
 
 func (ks *kimiSession) handleAssistant(raw map[string]any) {
+	// Kimi Code CLI (>=0.27) emits content as a plain string; legacy kimi-cli
+	// used an array of typed blocks. Accept both.
+	if text, ok := raw["content"].(string); ok {
+		if text != "" {
+			ks.pendingMsgs = append(ks.pendingMsgs, text)
+		}
+	}
 	content, _ := raw["content"].([]any)
 	for _, item := range content {
 		block, ok := item.(map[string]any)
@@ -391,8 +413,12 @@ func (ks *kimiSession) handleAssistant(raw map[string]any) {
 
 func (ks *kimiSession) handleTool(raw map[string]any) {
 	toolCallID, _ := raw["tool_call_id"].(string)
-	content, _ := raw["content"].([]any)
 	var outputParts []string
+	// Kimi Code CLI (>=0.27) emits tool content as a plain string.
+	if text, ok := raw["content"].(string); ok && text != "" {
+		outputParts = append(outputParts, text)
+	}
+	content, _ := raw["content"].([]any)
 	for _, item := range content {
 		block, ok := item.(map[string]any)
 		if !ok {

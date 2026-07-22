@@ -224,13 +224,13 @@ func TestBuildArgs_ResumeSession(t *testing.T) {
 	args := ks.buildArgs("continue")
 	resumeIdx := -1
 	for i, a := range args {
-		if a == "--resume" {
+		if a == "--session" {
 			resumeIdx = i
 			break
 		}
 	}
-	require.GreaterOrEqual(t, resumeIdx, 0, "args should include --resume; got %v", args)
-	require.Less(t, resumeIdx+1, len(args), "--resume should be followed by an id")
+	require.GreaterOrEqual(t, resumeIdx, 0, "args should include --session; got %v", args)
+	require.Less(t, resumeIdx+1, len(args), "--session should be followed by an id")
 	assert.Equal(t, "sess-xyz", args[resumeIdx+1])
 }
 
