@@ -24,6 +24,11 @@
 
 - **core**: prevent same-name file attachments from overwriting each other. `SaveFilesToDisk` now scopes files by message ID, keeps duplicate names distinct within one message, and uses an atomic no-overwrite fallback for legacy callers without a message ID (#1552).
 
+## Unreleased
+
+### Fixed
+- **Tool cards leaked when `tool_messages = false` + `progress_style = compact`**: under `progress_style = "compact"` + `enable_feishu_card = true` on Feishu, MCP tool calls (e.g. `mcp__plugin_context7_context7__query-docs`) could surface as standalone cards even with `display.tool_messages = false`. The `EventToolUse` branch now has an explicit early-return when tool messages are suppressed, so neither the rich-card panel nor the compact-progress preview nor the legacy fallback can render tool info when the user has explicitly hidden it. Pre-tool text segments still flush so the post-tool answer arrives as its own message (#1344).
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5

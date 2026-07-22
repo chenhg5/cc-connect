@@ -5022,11 +5022,38 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			if hasRichCard {
-				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
-					break
+			// When tool messages are suppressed, skip ALL tool-info rendering —
+			// rich-card panel, compact progress preview, and legacy fallback.
+			// Issue #1344: under `progress_style=compact` + `enable_feishu_card=true`
+			// on Feishu, MCP tool calls (`mcp__plugin_context7_context7__query-docs`)
+			// were surfacing as standalone cards even with `display.tool_messages=false`.
+			// The shared segment flush below still applies so the post-tool answer
+			// arrives as its own message.
+			if !e.display.ToolMessages {
+				if len(textParts) > segmentStart {
+					if e.display.Mode == "quiet" {
+						if sp.canPreview() && sp.appendSeparator("\n\n") {
+							textParts = append(textParts, "\n\n")
+						}
+					} else {
+						if sp.canPreview() {
+							sp.freeze()
+							sp.detachPreview()
+						} else {
+							segment := strings.Join(textParts[segmentStart:], "")
+							if segment != "" {
+								for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+									sendWorkspace(p, replyCtx, chunk)
+								}
+							}
+						}
+						segmentStart = len(textParts)
+					}
+					silentHold = false
 				}
+				break
+			}
+			if hasRichCard {
 				toolSteps = append(toolSteps, ToolStep{
 					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
@@ -5049,30 +5076,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				break
-			}
-			// When tool messages are hidden, behavior depends on display mode:
-			//   quiet:   append separator to keep all text in one card
-			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
-					if sp.canPreview() && sp.appendSeparator("\n\n") {
-						textParts = append(textParts, "\n\n")
-					}
-				} else {
-					if sp.canPreview() {
-						sp.freeze()
-						sp.detachPreview()
-					} else {
-						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
-							}
-						}
-					}
-					segmentStart = len(textParts)
-				}
-				silentHold = false
 			}
 			if e.display.ToolMessages {
 				// --- StreamingCard path ---
