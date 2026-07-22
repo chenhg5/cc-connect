@@ -11409,6 +11409,45 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 	}
 }
 
+func TestExecuteShellCommand_StripsANSIOutput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubWorkDirAgent{workDir: t.TempDir()}, []Platform{p}, "", LangEnglish)
+
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Platform:   "test",
+		ReplyCtx:   "ctx",
+	}
+
+	execCmd := `printf '\033[32;1mId\033[0m\n'`
+	if runtime.GOOS == "windows" {
+		execCmd = `Write-Output ([string][char]27 + '[32;1mId' + [string][char]27 + '[0m')`
+	}
+
+	e.executeShellCommand(p, msg, &CustomCommand{
+		Name: "ansi",
+		Exec: execCmd,
+	}, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if strings.Contains(sent[0], "\x1b[") {
+				t.Fatalf("expected ANSI escapes to be stripped, got %q", sent[0])
+			}
+			if !strings.Contains(sent[0], "Id") {
+				t.Fatalf("expected sanitized output to contain Id, got %q", sent[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shell response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // --- /diff command tests ---
 
 func TestCmdDiff_BlockedWithoutAdmin(t *testing.T) {
