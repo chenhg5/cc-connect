@@ -144,6 +144,9 @@ previously set a custom `intents` value without this bit, inline keyboard button
 update your `intents` to include bit 26. If you use the default intents, no action is needed. See
 `config.example.toml` for the new `intents` option.
 
+### Fixed
+- **DeepSeek (and any Anthropic-compatible gateway) 400 on `metadata.user_id`**: cc-connect's local `ProviderProxy` now sanitizes the `metadata.user_id` field of `/v1/messages` requests before forwarding. Strings that already match `^[a-zA-Z0-9_-]{1,256}$` are passed through unchanged; non-ASCII or over-long values are replaced with a deterministic `h_<32 hex>` SHA-256 form. A WARN log is emitted when sanitization happens, with the original length and the sanitized value. Provider-agnostic — Anthropic official, OpenAI-compatible endpoints, and any other upstream reached via the proxy are unaffected because the constraint is part of the Anthropic spec itself (#864).
+
 ## v1.3.3-beta.4 (2026-05-28)
 
 ### New Features
