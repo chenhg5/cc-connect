@@ -219,6 +219,24 @@ app_id = "cli_xxxxxxxxxxxx"
 app_secret = "xxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
+**Multiple projects in one process (issue #1562):** By default each `feishu`
+project opens its **own** WebSocket connection. This is the right default when
+multiple projects use **different** `app_id` — every bot reliably receives its
+own messages. If you intentionally point several projects at the **same**
+Feishu `app_id` and rely on server-side load-balancing of one connection, set
+`share_ws = true` to opt into the legacy fan-out behavior (one shared WS per
+group, events dispatched to all projects in the group):
+
+```toml
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "cli_xxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxxxxxxxxxx"
+share_ws = true   # opt-in to legacy shared-WS fan-out across projects with same app_id
+```
+
 **Detailed guide:** [docs/feishu.md](docs/feishu.md)
 
 ---

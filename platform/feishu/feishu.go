@@ -136,7 +136,7 @@ type Platform struct {
 	client           *lark.Client
 	replayClient     *lark.Client
 	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
+	wsClient         wsClientIface
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
@@ -155,8 +155,16 @@ type Platform struct {
 	callbackPath string
 	encryptKey   string
 	eventHandler *dispatcher.EventDispatcher
-	sharedGroup  *sharedWSGroup // non-nil when sharing WebSocket with other platforms
-	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
+	// shareWS opts in to the legacy shared-WebSocket group: when multiple
+	// projects use the same Feishu app_id+domain, they share a single
+	// larkws.Client connection so Feishu's server-side load-balancing still
+	// delivers every message to every project. Default (false) gives each
+	// project its own WebSocket connection — required for multi-project
+	// setups where multiple bots with different app_id run in one process
+	// (issue #1562).
+	shareWS     bool
+	sharedGroup *sharedWSGroup // non-nil: shared group when shareWS=true; self-grouping when independent
+	isWSPrimary bool           // true if this platform owns the shared WebSocket connection; always true in independent mode
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
@@ -315,6 +323,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
 		noReplyToTrigger = true
 	}
+	// share_ws opts this platform into the legacy shared-WebSocket group so
+	// multiple projects using the same Feishu app_id+domain share a single
+	// larkws.Client connection. Default off: each project gets its own WS.
+	// See issue #1562 — the previous all-shared default silently dropped
+	// messages for multi-project setups where bots had different app_id.
+	shareWS := false
+	if v, ok := opts["share_ws"].(bool); ok && v {
+		shareWS = true
+	}
 
 	peerBots := map[string]string{}
 	if raw, ok := opts["peer_bots"].(map[string]any); ok {
@@ -403,6 +420,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		threadIsolation:            threadIsolation,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
+		shareWS:                    shareWS,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
 		dedup:                      &core.MessageDedup{},
@@ -487,38 +505,33 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}
 	}
 
-	// Register for shared WebSocket: multiple projects using the same app_id
-	// share a single WebSocket connection to avoid Feishu's server-side
-	// load-balancing which randomly routes messages across connections.
-	group, isPrimary := registerSharedWS(p)
-	p.sharedGroup = group
-	p.isWSPrimary = isPrimary
-
-	// Secondary platforms skip connection creation — the primary's connection
-	// fans out events to all platforms in the shared group.
-	if !isPrimary {
-		return nil
+	// WebSocket connection strategy: by default each project gets its own
+	// larkws.Client connection, so multi-project setups with different
+	// Feishu app_ids each receive their own messages (issue #1562).
+	// Operators who intentionally point multiple projects at the same
+	// Feishu app_id can opt into legacy fan-out via share_ws = true; in
+	// that mode the first registered project becomes the primary and owns
+	// the WebSocket, fan-out delivers every message to the siblings.
+	if p.shareWS {
+		group, isPrimary := registerSharedWS(p)
+		p.sharedGroup = group
+		p.isWSPrimary = isPrimary
+		// Secondary platforms skip connection creation — the primary's
+		// connection fans out events to all platforms in the shared group.
+		if !isPrimary {
+			return nil
+		}
+	} else {
+		// Independent mode: we own our own WebSocket. The sharedGroup
+		// still exists (so the dispatcher fan-out code is shared between
+		// modes) but contains only ourselves.
+		p.sharedGroup = &sharedWSGroup{platforms: []*Platform{p}}
+		p.isWSPrimary = true
 	}
 
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
-		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
-			// Fan out to all platforms sharing this WebSocket connection.
-			// Each platform's onMessage applies its own allow_chat filter.
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				if err := sibling.onMessage(ctx, event); err != nil {
-					slog.Error("shared ws: onMessage error", "err", err)
-				}
-			}
-			return nil
-		}).
-		OnP2MessageRecalledV1(func(ctx context.Context, event *larkim.P2MessageRecalledV1) error {
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				if err := sibling.onMessageRecalled(ctx, event); err != nil {
-					slog.Error("shared ws: onMessageRecalled error", "err", err)
-				}
-			}
-			return nil
-		}).
+		OnP2MessageReceiveV1(p.fanOutP2MessageReceiveV1).
+		OnP2MessageRecalledV1(p.fanOutP2MessageRecalledV1).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil // ignore read receipts
 		}).
@@ -536,28 +549,8 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		OnP2MessageReactionDeletedV1(func(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
 			return nil // ignore reaction removal events (triggered by our own removeReaction)
 		}).
-		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-			// Fan out card actions: try each platform, return first non-nil response.
-			// Each platform's onCardAction checks allow_chat before processing.
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				resp, err := sibling.onCardAction(event)
-				if err != nil {
-					return nil, err
-				}
-				if resp != nil {
-					return resp, nil
-				}
-			}
-			return nil, nil
-		}).
-		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				if err := sibling.onBotMenu(event); err != nil {
-					slog.Error("shared ws: onBotMenu error", "err", err)
-				}
-			}
-			return nil
-		})
+		OnP2CardActionTrigger(p.fanOutP2CardActionTrigger).
+		OnP2BotMenuV6(p.fanOutP2BotMenuV6)
 
 	if p.useInteractiveCard {
 		slog.Info(p.platformName + ": interactive card mode enabled, ensure card.action.trigger event is subscribed in Feishu console")
@@ -574,6 +567,72 @@ func (p *Platform) shouldUseWebhookMode() bool {
 	return strings.TrimSpace(p.encryptKey) != ""
 }
 
+// wsClientIface is the minimal surface cc-connect needs from a Feishu
+// WebSocket client. The real *larkws.Client satisfies it; tests substitute a
+// fake to drive Start/Stop behavior without hitting the network (issue
+// #1562 regression tests).
+type wsClientIface interface {
+	Start(ctx context.Context) error
+}
+
+// wsClientFactory builds a wsClientIface. Default is the real larkws.NewClient;
+// tests override it to capture construction args and inject fakes.
+var wsClientFactory = func(appID, appSecret string, opts ...larkws.ClientOption) wsClientIface {
+	return larkws.NewClient(appID, appSecret, opts...)
+}
+
+// fanOutP2MessageReceiveV1 is the dispatcher callback for inbound P2 messages.
+// Extracted as a method so tests can invoke it directly without driving the
+// full SDK dispatcher (issue #1562 regression coverage).
+func (p *Platform) fanOutP2MessageReceiveV1(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+	for _, sibling := range p.sharedGroup.allPlatforms() {
+		if err := sibling.onMessage(ctx, event); err != nil {
+			slog.Error("shared ws: onMessage error",
+				"project", sibling.platformName, "app_id", sibling.appID,
+				"platform", fmt.Sprintf("%p", sibling), "err", err)
+		}
+	}
+	return nil
+}
+
+func (p *Platform) fanOutP2MessageRecalledV1(ctx context.Context, event *larkim.P2MessageRecalledV1) error {
+	for _, sibling := range p.sharedGroup.allPlatforms() {
+		if err := sibling.onMessageRecalled(ctx, event); err != nil {
+			slog.Error("shared ws: onMessageRecalled error",
+				"project", sibling.platformName, "app_id", sibling.appID,
+				"platform", fmt.Sprintf("%p", sibling), "err", err)
+		}
+	}
+	return nil
+}
+
+func (p *Platform) fanOutP2CardActionTrigger(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	for _, sibling := range p.sharedGroup.allPlatforms() {
+		resp, err := sibling.onCardAction(event)
+		if err != nil {
+			slog.Error("shared ws: onCardAction error",
+				"project", sibling.platformName, "app_id", sibling.appID,
+				"platform", fmt.Sprintf("%p", sibling), "err", err)
+			return nil, err
+		}
+		if resp != nil {
+			return resp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (p *Platform) fanOutP2BotMenuV6(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
+	for _, sibling := range p.sharedGroup.allPlatforms() {
+		if err := sibling.onBotMenu(event); err != nil {
+			slog.Error("shared ws: onBotMenu error",
+				"project", sibling.platformName, "app_id", sibling.appID,
+				"platform", fmt.Sprintf("%p", sibling), "err", err)
+		}
+	}
+	return nil
+}
+
 // startWebSocketMode starts the WebSocket long connection mode.
 func (p *Platform) startWebSocketMode() error {
 	wsOpts := []larkws.ClientOption{
@@ -584,7 +643,7 @@ func (p *Platform) startWebSocketMode() error {
 	if p.domain != lark.FeishuBaseUrl {
 		wsOpts = append(wsOpts, larkws.WithDomain(p.domain))
 	}
-	p.wsClient = larkws.NewClient(p.appID, p.appSecret, wsOpts...)
+	p.wsClient = wsClientFactory(p.appID, p.appSecret, wsOpts...)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
@@ -4567,17 +4626,25 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 }
 
 func (p *Platform) Stop() error {
-	if p.isWSPrimary {
+	// In shared mode (share_ws = true), unregister from the shared group so
+	// remaining platforms can take stock; surface a warning when the primary
+	// (the actual WS owner) is being torn down while siblings still depend on
+	// it. In independent mode the warning cannot fire because there are no
+	// siblings, and unregisterSharedWS is a no-op on a non-shared key.
+	if p.shareWS {
 		remaining := unregisterSharedWS(p)
-		if remaining > 0 {
-			slog.Warn(p.tag()+": primary shutting down, secondary platforms will lose event source",
-				"remaining", remaining)
+		if p.isWSPrimary && remaining > 0 {
+			slog.Warn(p.tag()+": shared-ws primary shutting down; sibling platforms will lose events",
+				"app_id", p.appID, "remaining", remaining)
 		}
-		if cancel := p.getCancel(); cancel != nil {
-			cancel()
-		}
-	} else {
-		unregisterSharedWS(p)
+	}
+	// Always cancel our own context: previously a secondary platform's
+	// cancel was set during Start but never invoked from Stop, so its
+	// goroutine continued until process exit. Now both branches cancel
+	// (shareWS=true legacy behavior was: secondary path left cancel
+	// dangling — fixed here in both modes).
+	if cancel := p.getCancel(); cancel != nil {
+		cancel()
 	}
 	// Stop webhook server if running (Lark international version)
 	if svr := p.getServer(); svr != nil {
