@@ -1489,14 +1489,47 @@ func resolveClaudeProjectDir(workDir string) string {
 	if err != nil {
 		return ""
 	}
-	// Claude Code encodes paths by replacing os.PathSeparator with "-"
-	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
-	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
-	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return ""
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	// Claude Code encodes paths by replacing '/', ':', '_', ' ', '~' and any
+	// non-ASCII rune with '-'. Replacing only os.PathSeparator misses common
+	// workdir shapes (snake_case dirs, spaces, '~/Library/Mobile Documents/...',
+	// non-ASCII directory names), causing the observer to silently disable.
+	encoded := encodeClaudeProjectKey(workDir)
+	dir := filepath.Join(projectsBase, encoded)
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir
 	}
-	return dir
+	// Fall back to the legacy encoding for backward compatibility with on-disk
+	// project keys created before the encoder above.
+	legacy := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
+	if legacy != encoded {
+		dir = filepath.Join(projectsBase, legacy)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	return ""
+}
+
+// encodeClaudeProjectKey mirrors agent/claudecode.encodeClaudeProjectKey: it
+// normalizes backslashes to forward slashes, then replaces '/', ':', '_', ' ',
+// '~' and non-ASCII runes with '-'. Kept in sync manually because the agent
+// helper is unexported.
+func encodeClaudeProjectKey(absPath string) string {
+	normalized := strings.ReplaceAll(absPath, "\\", "/")
+	var b strings.Builder
+	b.Grow(len(normalized))
+	for _, r := range normalized {
+		switch {
+		case r == '/' || r == ':' || r == '_' || r == ' ' || r == '~':
+			b.WriteByte('-')
+		case r < 128:
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 // resolveConfigPath determines which config file to use.
