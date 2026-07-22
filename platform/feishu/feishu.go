@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -131,24 +133,28 @@ type Platform struct {
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
-	noReplyToTrigger bool
-	resolveMentions  bool
-	client           *lark.Client
-	replayClient     *lark.Client
-	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
-	handler          core.MessageHandler
-	cardNavHandler   core.CardNavigationHandler
-	cancel           context.CancelFunc
-	dedup            *core.MessageDedup
-	botOpenID        string
-	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
-	mentionMap       map[string]string // agent name -> open_id (for outbound @ resolution)
-	userNameCache    sync.Map          // open_id -> display name
-	chatNameCache    sync.Map          // chat_id -> chat name
-	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
-	recalledMu       sync.Mutex
-	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+	noReplyToTrigger   bool
+	resolveMentions    bool
+	client             *lark.Client
+	replayClient       *lark.Client
+	replayClientMu     sync.Mutex
+	wsClient           *larkws.Client
+	handler            core.MessageHandler
+	cardNavHandler     core.CardNavigationHandler
+	cancel             context.CancelFunc
+	wsLastActivity     atomic.Int64
+	wsWatchdogTimeout  time.Duration
+	wsWatchdogInterval time.Duration
+	restartWS          func()
+	dedup              *core.MessageDedup
+	botOpenID          string
+	peerBots           map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap         map[string]string // agent name -> open_id (for outbound @ resolution)
+	userNameCache      sync.Map          // open_id -> display name
+	chatNameCache      sync.Map          // chat_id -> chat name
+	chatMemberCache    sync.Map          // chatID -> *chatMemberEntry
+	recalledMu         sync.Mutex
+	recalledMsgIDs     map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -194,6 +200,11 @@ type Platform struct {
 // image sends. Operators that need a longer or shorter window can override
 // it via the platform option `image_batch_window_ms`.
 const defaultImageBatchWindow = 500 * time.Millisecond
+
+const (
+	defaultWSWatchdogTimeout  = time.Duration(0)
+	defaultWSWatchdogInterval = 1 * time.Minute
+)
 
 // batchWindow returns the effective image-batch coalesce window for this
 // Platform. Tests and zero-initialised Platforms fall back to the default so
@@ -369,6 +380,18 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		imageBatchWindow = time.Duration(ms) * time.Millisecond
 	}
 
+	wsWatchdogTimeout := defaultWSWatchdogTimeout
+	if raw, ok := opts["ws_watchdog_timeout_mins"]; ok {
+		mins, err := coerceMilliseconds(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: invalid ws_watchdog_timeout_mins %v: %w", name, raw, err)
+		}
+		if mins < 0 {
+			return nil, fmt.Errorf("%s: ws_watchdog_timeout_mins must be >= 0, got %d", name, mins)
+		}
+		wsWatchdogTimeout = time.Duration(mins) * time.Minute
+	}
+
 	// Webhook mode configuration (for Lark international version)
 	port, _ := opts["port"].(string)
 	if port == "" {
@@ -413,6 +436,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		mentionMap:                 mentionMap,
 		imageBatch:                 make(map[string]*imageBatchEntry),
 		imageBatchWindow:           imageBatchWindow,
+		wsWatchdogTimeout:          wsWatchdogTimeout,
+		wsWatchdogInterval:         defaultWSWatchdogInterval,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -502,6 +527,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	p.eventHandler = dispatcher.NewEventDispatcher("", p.encryptKey).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+			p.markWSActivity()
 			// Fan out to all platforms sharing this WebSocket connection.
 			// Each platform's onMessage applies its own allow_chat filter.
 			for _, sibling := range p.sharedGroup.allPlatforms() {
@@ -512,6 +538,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return nil
 		}).
 		OnP2MessageRecalledV1(func(ctx context.Context, event *larkim.P2MessageRecalledV1) error {
+			p.markWSActivity()
 			for _, sibling := range p.sharedGroup.allPlatforms() {
 				if err := sibling.onMessageRecalled(ctx, event); err != nil {
 					slog.Error("shared ws: onMessageRecalled error", "err", err)
@@ -520,23 +547,29 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return nil
 		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
+			p.markWSActivity()
 			return nil // ignore read receipts
 		}).
 		OnP2ChatAccessEventBotP2pChatEnteredV1(func(ctx context.Context, event *larkim.P2ChatAccessEventBotP2pChatEnteredV1) error {
+			p.markWSActivity()
 			slog.Debug(p.platformName+": user opened bot chat", "app_id", p.appID)
 			return nil
 		}).
 		OnP1P2PChatCreatedV1(func(ctx context.Context, event *larkim.P1P2PChatCreatedV1) error {
+			p.markWSActivity()
 			slog.Debug(p.platformName+": p2p chat created", "app_id", p.appID)
 			return nil
 		}).
 		OnP2MessageReactionCreatedV1(func(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
+			p.markWSActivity()
 			return nil // ignore reaction events (triggered by our own addReaction)
 		}).
 		OnP2MessageReactionDeletedV1(func(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
+			p.markWSActivity()
 			return nil // ignore reaction removal events (triggered by our own removeReaction)
 		}).
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			p.markWSActivity()
 			// Fan out card actions: try each platform, return first non-nil response.
 			// Each platform's onCardAction checks allow_chat before processing.
 			for _, sibling := range p.sharedGroup.allPlatforms() {
@@ -551,6 +584,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return nil, nil
 		}).
 		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
+			p.markWSActivity()
 			for _, sibling := range p.sharedGroup.allPlatforms() {
 				if err := sibling.onBotMenu(event); err != nil {
 					slog.Error("shared ws: onBotMenu error", "err", err)
@@ -574,6 +608,46 @@ func (p *Platform) shouldUseWebhookMode() bool {
 	return strings.TrimSpace(p.encryptKey) != ""
 }
 
+func (p *Platform) markWSActivity() {
+	p.wsLastActivity.Store(time.Now().UnixNano())
+}
+
+func (p *Platform) watchWebSocket(ctx context.Context) {
+	if p.wsWatchdogTimeout <= 0 {
+		return
+	}
+	interval := p.wsWatchdogInterval
+	if interval <= 0 {
+		interval = defaultWSWatchdogInterval
+	}
+	restart := p.restartWS
+	if restart == nil {
+		restart = func() {
+			slog.Error(p.tag()+": websocket watchdog stale, restarting process",
+				"timeout", p.wsWatchdogTimeout)
+			os.Exit(2)
+		}
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			last := time.Unix(0, p.wsLastActivity.Load())
+			if last.IsZero() {
+				p.markWSActivity()
+				continue
+			}
+			if time.Since(last) >= p.wsWatchdogTimeout {
+				restart()
+				return
+			}
+		}
+	}
+}
+
 // startWebSocketMode starts the WebSocket long connection mode.
 func (p *Platform) startWebSocketMode() error {
 	wsOpts := []larkws.ClientOption{
@@ -590,12 +664,14 @@ func (p *Platform) startWebSocketMode() error {
 	p.mu.Lock()
 	p.cancel = cancel
 	p.mu.Unlock()
+	p.markWSActivity()
 
 	go func() {
 		if err := p.wsClient.Start(ctx); err != nil {
 			slog.Error(p.tag()+": websocket error", "error", err)
 		}
 	}()
+	go p.watchWebSocket(ctx)
 
 	return nil
 }

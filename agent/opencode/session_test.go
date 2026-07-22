@@ -3,12 +3,17 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -331,6 +336,275 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 		if evt.Type == core.EventText {
 			t.Errorf("unexpected EventText for error with no message: %q", evt.Content)
 		}
+	}
+}
+
+func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *testing.T) {
+	events := make(chan string, 16)
+	sseConnected := make(chan struct{})
+	promptStarted := make(chan struct{})
+	releasePrompt := make(chan struct{})
+	permissionReply := make(chan map[string]any, 1)
+	questionReply := make(chan map[string]any, 1)
+	var connectedOnce sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /session", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ses_http"}`))
+	})
+	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		connectedOnce.Do(func() { close(sseConnected) })
+		for {
+			select {
+			case event := <-events:
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+	mux.HandleFunc("POST /session/ses_http/message", func(w http.ResponseWriter, _ *http.Request) {
+		close(promptStarted)
+		<-releasePrompt
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"info":{},"parts":[]}`))
+	})
+	mux.HandleFunc("POST /permission/per_1/reply", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		permissionReply <- body
+		_, _ = w.Write([]byte(`true`))
+	})
+	mux.HandleFunc("POST /question/que_1/reply", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		questionReply <- body
+		_, _ = w.Write([]byte(`true`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	agent, err := New(map[string]any{
+		"cmd":            "/bin/false",
+		"work_dir":       t.TempDir(),
+		"connection_url": server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	select {
+	case <-sseConnected:
+	case <-time.After(time.Second):
+		t.Fatal("SSE was not connected before Send")
+	}
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- session.Send("hello", nil, nil) }()
+	select {
+	case <-promptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("prompt request did not start")
+	}
+
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_user","messageID":"msg_user","type":"text","sessionID":"ses_http","text":"hello"}}}`
+	assertNoOpencodeEvent(t, session.Events())
+
+	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"busy"}}}`
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_step","messageID":"msg_assistant","type":"step-start","sessionID":"ses_http"}}}`
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_1","messageID":"msg_assistant","type":"text","sessionID":"ses_http","text":"fi"}}}`
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventText || event.Content != "fi" {
+		t.Fatalf("first event = %#v, want streamed text", event)
+	}
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_1","messageID":"msg_assistant","type":"text","sessionID":"ses_http","text":"first","time":{"end":1}}}}`
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventText || event.Content != "rst" {
+		t.Fatalf("text delta = %#v, want streamed delta", event)
+	}
+	select {
+	case err := <-sendDone:
+		t.Fatalf("Send returned before prompt response: %v", err)
+	default:
+	}
+
+	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"idle"}}}`
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventResult {
+		t.Fatalf("idle event = %#v, want EventResult", event)
+	}
+	close(releasePrompt)
+	if err := <-sendDone; err != nil {
+		t.Fatal(err)
+	}
+
+	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"busy"}}}`
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_bg_step","messageID":"msg_background","type":"step-start","sessionID":"ses_http"}}}`
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_bg_text","messageID":"msg_background","type":"text","sessionID":"ses_http","text":"background done","time":{"end":1}}}}`
+	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"idle"}}}`
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventText || event.Content != "background done" {
+		t.Fatalf("background event = %#v, want unsolicited text", event)
+	}
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventResult {
+		t.Fatalf("background idle = %#v, want EventResult", event)
+	}
+
+	events <- `{"type":"permission.asked","properties":{"id":"per_1","sessionID":"ses_http","permission":"bash","patterns":["git status"],"metadata":{},"always":[]}}`
+	permission := waitOpencodeEvent(t, session.Events())
+	if permission.Type != core.EventPermissionRequest || permission.RequestID != "per_1" || permission.ToolName != "bash" {
+		t.Fatalf("permission event = %#v", permission)
+	}
+	if err := session.RespondPermission("per_1", core.PermissionResult{Behavior: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body := <-permissionReply:
+		if body["reply"] != "once" {
+			t.Fatalf("permission reply = %#v, want once", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("permission reply was not posted")
+	}
+
+	events <- `{"type":"question.asked","properties":{"id":"que_1","sessionID":"ses_http","questions":[{"question":"Pick a path","header":"Decision","options":[{"label":"A","description":"Alpha"},{"label":"B","description":"Beta"}],"multiple":false}]}}`
+	question := waitOpencodeEvent(t, session.Events())
+	if question.Type != core.EventPermissionRequest || question.RequestID != "que_1" || question.ToolName != "AskUserQuestion" {
+		t.Fatalf("question event = %#v", question)
+	}
+	if len(question.Questions) != 1 || question.Questions[0].Question != "Pick a path" || len(question.Questions[0].Options) != 2 {
+		t.Fatalf("parsed questions = %#v", question.Questions)
+	}
+	if err := session.RespondPermission("que_1", core.PermissionResult{
+		Behavior: "allow",
+		UpdatedInput: map[string]any{
+			"answers": map[string]any{"Pick a path": "A"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body := <-questionReply:
+		answers, ok := body["answers"].([]any)
+		if !ok || len(answers) != 1 {
+			t.Fatalf("question reply = %#v, want one answer row", body)
+		}
+		firstAnswer, ok := answers[0].([]any)
+		if !ok || len(firstAnswer) != 1 || firstAnswer[0] != "A" {
+			t.Fatalf("question answers = %#v, want [[A]]", body["answers"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("question reply was not posted")
+	}
+}
+
+func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing.T) {
+	events := make(chan string, 4)
+	sseConnected := make(chan struct{})
+	var connectedOnce sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /session", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ses_http"}`))
+	})
+	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		connectedOnce.Do(func() { close(sseConnected) })
+		for {
+			select {
+			case event := <-events:
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+	mux.HandleFunc("POST /session/ses_http/message", func(w http.ResponseWriter, _ *http.Request) {
+		events <- `{"type":"session.error","properties":{"sessionID":"ses_http","error":{"name":"PaymentRequiredError","data":{"message":"Insufficient balance. Please recharge your account."}}}}`
+		http.Error(w, `{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_quota"}}`, http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	agent, err := New(map[string]any{
+		"cmd":            "/bin/false",
+		"work_dir":       t.TempDir(),
+		"connection_url": server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	select {
+	case <-sseConnected:
+	case <-time.After(time.Second):
+		t.Fatal("SSE was not connected before Send")
+	}
+
+	err = session.Send("hello", nil, nil)
+	if err == nil {
+		t.Fatal("Send returned nil, want quota error")
+	}
+	if got := err.Error(); !strings.Contains(got, "PaymentRequiredError") || !strings.Contains(got, "Insufficient balance") {
+		t.Fatalf("Send error = %q, want SSE quota error", got)
+	}
+}
+
+func TestOpencodeHTTPMode_RetryStatusWithUsageLimitEmitsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{
+		events:        make(chan core.Event, 4),
+		ctx:           ctx,
+		connectionURL: "http://localhost:4096",
+	}
+	s.chatID.Store("ses_http")
+
+	s.handleHTTPEvent([]byte(`{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"retry","attempt":1,"message":"已达到 5 小时的使用上限。您的限额将在 2026-07-14 20:40:01 重置。"}}}`))
+
+	event := waitOpencodeEvent(t, s.Events())
+	if event.Type != core.EventError {
+		t.Fatalf("event type = %q, want EventError", event.Type)
+	}
+	if event.Error == nil || !strings.Contains(event.Error.Error(), "使用上限") {
+		t.Fatalf("event error = %v, want usage limit message", event.Error)
+	}
+}
+
+func waitOpencodeEvent(t *testing.T, events <-chan core.Event) core.Event {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OpenCode event")
+		return core.Event{}
+	}
+}
+
+func assertNoOpencodeEvent(t *testing.T, events <-chan core.Event) {
+	t.Helper()
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected OpenCode event: %#v", event)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

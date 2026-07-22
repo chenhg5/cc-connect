@@ -1027,6 +1027,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# ws_watchdog_timeout_mins = 15  # Restart cc-connect if Feishu WebSocket receives no events for this many minutes (0 = disabled).
+#                                # 飞书 WebSocket 连续这么多分钟没有任何下行事件时重启 cc-connect 以自恢复（0 = 禁用）。
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 # mention_map = { BOT-A = "ou_bot_a_open_id", BOT-B = "ou_bot_b_open_id" }
@@ -1768,10 +1770,10 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
+# Requires: OpenCode CLI — https://github.com/anomalyco/opencode
 # 需要安装：OpenCode CLI
-# Uses `opencode run --format json` under the hood.
-# 底层使用 `opencode run --format json` 命令。
+# By default, uses `opencode run --format json` under the hood.
+# 默认底层使用 `opencode run --format json` 命令。
 
 # [[projects]]
 # name = "my-opencode-project"
@@ -1782,6 +1784,14 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "default"  # "default" | "yolo"
+#
+# Optional: connect to `opencode serve` instead of starting short-lived CLI runs.
+# This keeps `/event` SSE connected before each prompt, so streaming steps,
+# background callbacks, and permission/question prompts continue to reach cc-connect.
+# 可选：连接到 `opencode serve`，保持 `/event` SSE 长连接，以支持后台回调和决策提示。
+# connection_url = "http://127.0.0.1:4096"
+# username = "opencode"
+# password = "your-opencode-server-password"
 #
 # Mode options / 模式说明:
 # - "default": Standard mode / 标准模式

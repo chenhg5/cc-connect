@@ -4819,6 +4819,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
+			agentName := e.agent.Name()
+			if state.agent != nil {
+				agentName = state.agent.Name()
+			}
+			session.SetAgentSessionID("", agentName)
+			sessions.Save()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
