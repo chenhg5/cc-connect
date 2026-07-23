@@ -1569,6 +1569,20 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
 #
+# Optional (app_server only): expose the managed workspace dependency runtime
+# through Codex's experimental dynamic-tool protocol. This enables skills that
+# require load_workspace_dependencies, such as @oai/artifact-tool workflows.
+# 可选（仅 app_server）：通过 Codex 实验性动态工具协议暴露托管工作区依赖运行时，
+# 供需要 load_workspace_dependencies 的 @oai/artifact-tool 等技能使用。
+# backend = "app_server"
+# app_server_url = "stdio://"
+# workspace_dependencies = true
+# Security: enabling this exposes absolute host runtime paths to the Codex session.
+# 安全提示：启用后会向 Codex 会话暴露宿主机运行时的绝对路径。
+# # Optional override. The default is ~/.cache/codex-runtimes/codex-primary-runtime.
+# # 可选覆盖；默认路径为 ~/.cache/codex-runtimes/codex-primary-runtime。
+# workspace_dependencies_runtime = "/absolute/path/to/codex-primary-runtime"
+#
 # Optional: project system prompt / 可选：项目系统提示
 # Codex has no native system-prompt flag, so cc-connect injects this as a
 # preamble prepended to your first message of each new session (resumed
