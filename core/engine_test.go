@@ -442,11 +442,12 @@ func (p *stubAskQuestionRichCardPlatform) BuildRichCard(status CardStatus, title
 
 type stubModelModeAgent struct {
 	stubAgent
-	model           string
-	mode            string
-	reasoningEffort string
-	providers       []ProviderConfig
-	active          string
+	model            string
+	mode             string
+	reasoningEffort  string
+	reasoningEfforts []string
+	providers        []ProviderConfig
+	active           string
 }
 
 type stubStrictModelAgent struct {
@@ -545,6 +546,9 @@ func (a *stubModelModeAgent) GetReasoningEffort() string {
 }
 
 func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
+	if len(a.reasoningEfforts) > 0 {
+		return append([]string(nil), a.reasoningEfforts...)
+	}
 	return []string{"low", "medium", "high", "xhigh"}
 }
 
@@ -5394,6 +5398,48 @@ func TestCmdReasoning_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	if got := p.buttonRows[0][0].Text; got != "low" {
 		t.Fatalf("first /reasoning button text = %q, want low", got)
 	}
+}
+
+func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
+	efforts := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+	wantUsage := "Usage: `/reasoning <number>` or `/reasoning <" + strings.Join(efforts, "|") + ">`"
+
+	t.Run("list", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "plain"}
+		agent := &stubModelModeAgent{reasoningEfforts: efforts}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+		e.cmdReasoning(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+		if len(p.sent) != 1 || !strings.Contains(p.sent[0], wantUsage) {
+			t.Fatalf("sent = %v, want dynamic usage %q", p.sent, wantUsage)
+		}
+	})
+
+	t.Run("invalid value", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "plain"}
+		agent := &stubModelModeAgent{reasoningEfforts: efforts}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+		e.cmdReasoning(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"invalid"})
+
+		if len(p.sent) != 1 || !strings.Contains(p.sent[0], wantUsage) {
+			t.Fatalf("sent = %v, want dynamic usage %q", p.sent, wantUsage)
+		}
+	})
+
+	t.Run("card note", func(t *testing.T) {
+		agent := &stubModelModeAgent{reasoningEfforts: efforts}
+		e := NewEngine("test", agent, nil, "", LangEnglish)
+		card := e.renderReasoningCard()
+
+		for _, element := range card.Elements {
+			if note, ok := element.(CardNote); ok && note.Text == wantUsage {
+				return
+			}
+		}
+		t.Fatalf("card elements = %#v, want dynamic usage note %q", card.Elements, wantUsage)
+	})
 }
 
 func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
