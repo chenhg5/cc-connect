@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -353,7 +354,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +398,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -607,12 +606,19 @@ func codexSkillDirs(workDir, explicitCodexHome string) []string {
 	}
 
 	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
-	userDirs := make([]string, 0, 2)
+	userDirs := make([]string, 0, 4)
 	if codexHome != "" {
-		userDirs = append(userDirs, filepath.Join(codexHome, "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(codexHome, "skills"),
+			filepath.Join(codexHome, "superpowers", "skills"),
+		)
+		userDirs = append(userDirs, skillroots.Find(filepath.Join(codexHome, "plugins"))...)
 	}
 	if homeDir != "" {
-		userDirs = append(userDirs, filepath.Join(homeDir, ".agents", "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(homeDir, ".agents", "skills"),
+			filepath.Join(homeDir, ".claude", "skills"),
+		)
 	}
 	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
 }
@@ -630,6 +636,7 @@ func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
 		dirs = append(dirs,
 			filepath.Join(current, ".agents", "skills"),
 			filepath.Join(current, ".codex", "skills"),
+			filepath.Join(current, ".claude", "skills"),
 		)
 		if stopAt != "" && sameCodexPath(current, stopAt) {
 			break
