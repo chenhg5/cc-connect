@@ -10405,6 +10405,74 @@ func TestHandleMessageRecallStopsCurrentMessageSilently(t *testing.T) {
 	}
 }
 
+func TestHandleMessageRecallPreservesLaterQueueWhenAgentChannelCloses(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	oldSession := newQueuingSession("old-session")
+	replacementSession := newResultAgentSession("reply after recall")
+
+	var startMu sync.Mutex
+	startCount := 0
+	agent := &controllableAgent{startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+		startMu.Lock()
+		defer startMu.Unlock()
+		startCount++
+		if startCount == 1 {
+			return oldSession, nil
+		}
+		return replacementSession, nil
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "test:recall-queue"
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key, Platform: "test", MessageID: "msg-first",
+		UserID: "user", UserName: "user", Content: "first", ReplyCtx: "ctx-first",
+	})
+	waitForSendCount := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			oldSession.sendMu.Lock()
+			got := len(oldSession.sendCalls)
+			oldSession.sendMu.Unlock()
+			if got >= want {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("old session send count did not reach %d", want)
+	}
+	waitForSendCount(1)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key, Platform: "test", MessageID: "msg-recalled",
+		UserID: "user", UserName: "user", Content: "recalled", ReplyCtx: "ctx-recalled",
+	})
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key, Platform: "test", MessageID: "msg-later",
+		UserID: "user", UserName: "user", Content: "later message", ReplyCtx: "ctx-later",
+	})
+
+	oldSession.events <- Event{Type: EventResult, Content: "first reply", Done: true}
+	waitForSendCount(2)
+
+	e.ReceiveMessage(p, &Message{Platform: "test", MessageID: "msg-recalled", Recalled: true})
+	sent := waitForPlatformSend(p, 4, 3*time.Second)
+	foundReply := false
+	for _, message := range sent {
+		if message == "reply after recall" {
+			foundReply = true
+			break
+		}
+	}
+	if !foundReply {
+		t.Fatalf("sent = %v, want reply for later queued message after recall", sent)
+	}
+	if len(replacementSession.sentPrompts) != 1 || !strings.Contains(replacementSession.sentPrompts[0], "later message") {
+		t.Fatalf("replacement prompts = %v, want later queued message", replacementSession.sentPrompts)
+	}
+}
+
 func TestHandleMessageRecallRemovesQueuedMessageSilently(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

@@ -1230,6 +1230,97 @@ func TestCUJ_A6_A7_CoveredByPlatformLayer(t *testing.T) {
 }
 
 // ===========================================================================
+// CUJ-A8 · Recalling one queued message must not discard messages sent after it
+// ===========================================================================
+
+func TestCUJ_A8_RecallPreservesLaterQueuedMessage(t *testing.T) {
+	env := newCUJEnv(t)
+	key := "test:recall-user"
+
+	// Keep the first turn busy long enough to queue two later messages. The
+	// first queued message will be recalled after it becomes the active turn;
+	// the second queued message must survive that cancellation boundary.
+	env.agent.setNextSessionEvents([]Event{{Type: EventResult, Content: "first reply", Done: true}}, 250)
+	env.engine.ReceiveMessage(plat(env.plat), &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "msg-first",
+		UserID:     "recall-user",
+		UserName:   "recall-user",
+		Content:    "first long-running request",
+		ReplyCtx:   "ctx-first",
+	})
+
+	env.waitFor("first agent session starts", 2*time.Second, func() bool {
+		env.agent.mu.Lock()
+		defer env.agent.mu.Unlock()
+		return len(env.agent.sessions) == 1
+	})
+	env.agent.mu.Lock()
+	firstSession := env.agent.sessions[0]
+	env.agent.mu.Unlock()
+	firstSession.mu.Lock()
+	firstSession.delayMs = 5_000
+	firstSession.mu.Unlock()
+
+	// B and C both arrive while A is busy, so they are accepted in FIFO order.
+	env.engine.ReceiveMessage(plat(env.plat), &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "msg-recalled",
+		UserID:     "recall-user",
+		UserName:   "recall-user",
+		Content:    "this queued request will be recalled",
+		ReplyCtx:   "ctx-recalled",
+	})
+	env.engine.ReceiveMessage(plat(env.plat), &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "msg-after-recall",
+		UserID:     "recall-user",
+		UserName:   "recall-user",
+		Content:    "answer this message after the recall",
+		ReplyCtx:   "ctx-after-recall",
+	})
+
+	// Wait until B is actually active, then deliver the platform recall event.
+	// This pins the same path as the Feishu fallback probe in the live incident.
+	env.waitFor("recalled queued message becomes active", 2*time.Second, func() bool {
+		env.engine.interactiveMu.Lock()
+		state := env.engine.interactiveStates[key]
+		env.engine.interactiveMu.Unlock()
+		if state == nil {
+			return false
+		}
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return state.currentMessageID == "msg-recalled"
+	})
+	env.engine.ReceiveMessage(plat(env.plat), &Message{
+		Platform:  "test",
+		MessageID: "msg-recalled",
+		Recalled:  true,
+	})
+
+	// The user-visible contract: C is still delivered to a replacement agent
+	// session and receives a final reply. Before the fix, the silent recall path
+	// cleared the whole pending queue, so this condition timed out.
+	env.waitFor("message after recall receives a reply", 3*time.Second, func() bool {
+		return env.sentContains("ok")
+	})
+	env.agent.mu.Lock()
+	started := append([]*cujAgentSession(nil), env.agent.sessions...)
+	env.agent.mu.Unlock()
+	if len(started) < 2 {
+		t.Fatalf("agent sessions started = %d, want replacement session after recall", len(started))
+	}
+	prompts := started[len(started)-1].getSentPrompts()
+	if len(prompts) != 1 || !strings.Contains(prompts[0], "answer this message after the recall") {
+		t.Fatalf("replacement session prompts = %v, want only the later queued message", prompts)
+	}
+}
+
+// ===========================================================================
 // SPRINT 2 · B organization (session lifecycle remaining)
 // ===========================================================================
 
