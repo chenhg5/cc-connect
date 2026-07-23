@@ -38,6 +38,7 @@ type replyContext struct {
 // *tgbot.Bot satisfies this interface.
 type telegramBot interface {
 	SendMessage(ctx context.Context, params *tgbot.SendMessageParams) (*models.Message, error)
+	SendRichMessage(ctx context.Context, params *tgbot.SendRichMessageParams) (*models.Message, error)
 	SendPhoto(ctx context.Context, params *tgbot.SendPhotoParams) (*models.Message, error)
 	SendDocument(ctx context.Context, params *tgbot.SendDocumentParams) (*models.Message, error)
 	SendVoice(ctx context.Context, params *tgbot.SendVoiceParams) (*models.Message, error)
@@ -110,6 +111,7 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	enableReactions       bool
+	richMessages          bool
 	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
 
@@ -163,6 +165,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
+	richMessages, _ := opts["rich_messages"].(bool)
 
 	// Default to "compact" so streaming edits work out of the box. Telegram has
 	// no rich card UI, so "card" is normalized to "compact". Users can opt out
@@ -188,6 +191,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		enableReactions:       enableReactions,
+		richMessages:          richMessages,
 		progressStyle:         progressStyle,
 		httpClient:            httpClient,
 	}, nil
@@ -1045,6 +1049,10 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return err
 	}
 
+	if handled, err := p.trySendRichMessage(ctx, bot, rc, content, true, "Reply"); handled {
+		return err
+	}
+
 	html := core.MarkdownToSimpleHTML(content)
 	params := &tgbot.SendMessageParams{
 		ChatID:          rc.chatID,
@@ -1093,6 +1101,10 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return err
 	}
 
+	if handled, err := p.trySendRichMessage(ctx, bot, rc, content, false, "Send"); handled {
+		return err
+	}
+
 	html := core.MarkdownToSimpleHTML(content)
 	params := &tgbot.SendMessageParams{
 		ChatID:          rc.chatID,
@@ -1127,6 +1139,118 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		}
 	}
 	return nil
+}
+
+const telegramMaxRichMessageLen = 32768
+
+func (p *Platform) trySendRichMessage(
+	ctx context.Context,
+	bot telegramBot,
+	rc replyContext,
+	content string,
+	reply bool,
+	method string,
+) (bool, error) {
+	if !p.richMessages {
+		return false, nil
+	}
+
+	sent, err := p.sendRichMessage(ctx, bot, rc, content, reply)
+	if err == nil {
+		return true, nil
+	}
+	if sent == 0 && shouldFallbackRichMessage(err) {
+		slog.Warn("telegram: rich message rejected, falling back to legacy HTML",
+			"method", method,
+			"error", err.Error(),
+			"content_len", len(content),
+		)
+		return false, nil
+	}
+	return true, fmt.Errorf("telegram: send rich message: %w", err)
+}
+
+func (p *Platform) sendRichMessage(
+	ctx context.Context,
+	bot telegramBot,
+	rc replyContext,
+	content string,
+	reply bool,
+) (int, error) {
+	markdown := demoteRemoteMarkdownMedia(content)
+	chunks := core.SplitMessageCodeFenceAware(markdown, telegramMaxRichMessageLen)
+	for i, chunk := range chunks {
+		params := &tgbot.SendRichMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			RichMessage:     models.InputRichMessage{Markdown: chunk},
+		}
+		if reply && i == 0 && rc.messageID != 0 {
+			params.ReplyParameters = &models.ReplyParameters{MessageID: rc.messageID}
+		}
+		if _, err := bot.SendRichMessage(ctx, params); err != nil {
+			return i, fmt.Errorf("chunk %d: %w", i, err)
+		}
+	}
+	return len(chunks), nil
+}
+
+func shouldFallbackRichMessage(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"can't parse",
+		"method not found",
+		"not supported",
+		"unsupported",
+		"rich message",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// demoteRemoteMarkdownMedia keeps links available to users without allowing
+// Telegram to fetch arbitrary HTTP(S) media produced by an agent. Telegram
+// resources such as tg://emoji are kept intact.
+func demoteRemoteMarkdownMedia(markdown string) string {
+	var result strings.Builder
+	for pos := 0; pos < len(markdown); {
+		imageStart := strings.Index(markdown[pos:], "![")
+		if imageStart < 0 {
+			result.WriteString(markdown[pos:])
+			break
+		}
+		imageStart += pos
+		result.WriteString(markdown[pos:imageStart])
+
+		altEnd := strings.Index(markdown[imageStart+2:], "](")
+		if altEnd < 0 {
+			result.WriteString(markdown[imageStart:])
+			break
+		}
+		altEnd += imageStart + 2
+		urlEnd := strings.IndexByte(markdown[altEnd+2:], ')')
+		if urlEnd < 0 {
+			result.WriteString(markdown[imageStart:])
+			break
+		}
+		urlEnd += altEnd + 2
+
+		destination := strings.TrimSpace(markdown[altEnd+2 : urlEnd])
+		lowerDestination := strings.ToLower(destination)
+		if strings.HasPrefix(lowerDestination, "http://") || strings.HasPrefix(lowerDestination, "https://") {
+			result.WriteString(markdown[imageStart+1 : urlEnd+1])
+		} else {
+			result.WriteString(markdown[imageStart : urlEnd+1])
+		}
+		pos = urlEnd + 1
+	}
+	return result.String()
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {

@@ -71,6 +71,7 @@ func (t *stubTypingTicker) Stop() {}
 type stubTelegramBot struct {
 	mu                   sync.Mutex
 	sendMessageCalls     int
+	sendRichMessageCalls int
 	sendPhotoCalls       int
 	sendDocumentCalls    int
 	sendVoiceCalls       int
@@ -83,9 +84,13 @@ type stubTelegramBot struct {
 	getFileCalls         int
 	setReactionCalls     int
 
-	sendErr    error
-	getFileErr error
-	file       *models.File
+	sendErr          error
+	sendRichErr      error
+	sendRichErrAt    int
+	getFileErr       error
+	file             *models.File
+	sendMessageArgs  []*tgbot.SendMessageParams
+	sendRichMessages []*tgbot.SendRichMessageParams
 }
 
 func newStubTelegramBot() *stubTelegramBot {
@@ -94,12 +99,35 @@ func newStubTelegramBot() *stubTelegramBot {
 	}
 }
 
-func (b *stubTelegramBot) SendMessage(_ context.Context, _ *tgbot.SendMessageParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendMessage(_ context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendMessageCalls++
+	copied := *params
+	if params.ReplyParameters != nil {
+		reply := *params.ReplyParameters
+		copied.ReplyParameters = &reply
+	}
+	b.sendMessageArgs = append(b.sendMessageArgs, &copied)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
+	}
+	return &models.Message{ID: 99}, nil
+}
+
+func (b *stubTelegramBot) SendRichMessage(_ context.Context, params *tgbot.SendRichMessageParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.sendRichMessageCalls++
+	call := b.sendRichMessageCalls
+	copied := *params
+	if params.ReplyParameters != nil {
+		reply := *params.ReplyParameters
+		copied.ReplyParameters = &reply
+	}
+	b.sendRichMessages = append(b.sendRichMessages, &copied)
+	b.mu.Unlock()
+	if b.sendRichErr != nil && (b.sendRichErrAt == 0 || b.sendRichErrAt == call) {
+		return nil, b.sendRichErr
 	}
 	return &models.Message{ID: 99}, nil
 }
@@ -216,6 +244,24 @@ func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.sendMessageCalls
+}
+
+func (b *stubTelegramBot) SendRichMessageCallCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sendRichMessageCalls
+}
+
+func (b *stubTelegramBot) SendMessageArgs() []*tgbot.SendMessageParams {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*tgbot.SendMessageParams(nil), b.sendMessageArgs...)
+}
+
+func (b *stubTelegramBot) SendRichMessageArgs() []*tgbot.SendRichMessageParams {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*tgbot.SendRichMessageParams(nil), b.sendRichMessages...)
 }
 
 func (b *stubTelegramBot) SendChatActionCallCount() int {
@@ -365,6 +411,180 @@ func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
 
 	stop := p.StartTyping(ctx, rctx)
 	stop()
+}
+
+func newConnectedTelegramPlatform(t *testing.T, richMessages bool) (*Platform, *stubTelegramBot) {
+	t.Helper()
+
+	platform, err := New(map[string]any{
+		"token":         "test-token",
+		"rich_messages": richMessages,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p := platform.(*Platform)
+	bot := newStubTelegramBot()
+	p.bot = bot
+	p.selfUser = &models.User{ID: 42, Username: "testbot"}
+	return p, bot
+}
+
+func TestSendRichMessagesDisabledByDefault(t *testing.T) {
+	platform, err := New(map[string]any{"token": "test-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p := platform.(*Platform)
+	bot := newStubTelegramBot()
+	p.bot = bot
+
+	if err := p.Send(context.Background(), replyContext{chatID: 123}, "**hello**"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if got := bot.SendRichMessageCallCount(); got != 0 {
+		t.Fatalf("SendRichMessage calls = %d, want 0", got)
+	}
+	args := bot.SendMessageArgs()
+	if len(args) != 1 {
+		t.Fatalf("SendMessage calls = %d, want 1", len(args))
+	}
+	if got := args[0].ParseMode; got != models.ParseModeHTML {
+		t.Fatalf("ParseMode = %q, want HTML", got)
+	}
+	if got := args[0].Text; got != "<b>hello</b>" {
+		t.Fatalf("Text = %q, want converted HTML", got)
+	}
+}
+
+func TestSendRichMessagesUsesMarkdownAndProtectsRemoteMedia(t *testing.T) {
+	p, bot := newConnectedTelegramPlatform(t, true)
+	content := "# Results\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n![diagram](https://example.com/diagram.png)\n\n![Image: 👍](tg://emoji?id=123)"
+	rc := replyContext{chatID: 123, threadID: 55}
+
+	if err := p.Send(context.Background(), rc, content); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if got := bot.SendMessageCallCount(); got != 0 {
+		t.Fatalf("legacy SendMessage calls = %d, want 0", got)
+	}
+	args := bot.SendRichMessageArgs()
+	if len(args) != 1 {
+		t.Fatalf("SendRichMessage calls = %d, want 1", len(args))
+	}
+	if got := args[0].ChatID; got != rc.chatID {
+		t.Fatalf("ChatID = %v, want %d", got, rc.chatID)
+	}
+	if got := args[0].MessageThreadID; got != rc.threadID {
+		t.Fatalf("MessageThreadID = %d, want %d", got, rc.threadID)
+	}
+	markdown := args[0].RichMessage.Markdown
+	if !strings.Contains(markdown, "# Results") || !strings.Contains(markdown, "| A | B |") {
+		t.Fatalf("rich Markdown lost formatting: %q", markdown)
+	}
+	if strings.Contains(markdown, "![diagram]") {
+		t.Fatalf("rich Markdown retained remote-media syntax: %q", markdown)
+	}
+	if !strings.Contains(markdown, "[diagram](https://example.com/diagram.png)") {
+		t.Fatalf("rich Markdown should retain a safe link: %q", markdown)
+	}
+	if !strings.Contains(markdown, "![Image: 👍](tg://emoji?id=123)") {
+		t.Fatalf("rich Markdown should retain Telegram custom emoji: %q", markdown)
+	}
+}
+
+func TestReplyRichMessagesPreservesReplyAndSplitsAtRichLimit(t *testing.T) {
+	p, bot := newConnectedTelegramPlatform(t, true)
+	content := strings.Repeat("界", 32768+17)
+	rc := replyContext{chatID: -100123, threadID: 77, messageID: 88}
+
+	if err := p.Reply(context.Background(), rc, content); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	args := bot.SendRichMessageArgs()
+	if len(args) != 2 {
+		t.Fatalf("SendRichMessage calls = %d, want 2", len(args))
+	}
+	var combined strings.Builder
+	for i, arg := range args {
+		if got := utf8.RuneCountInString(arg.RichMessage.Markdown); got > 32768 {
+			t.Fatalf("chunk %d rune count = %d, want <= 32768", i, got)
+		}
+		if arg.MessageThreadID != rc.threadID {
+			t.Fatalf("chunk %d thread ID = %d, want %d", i, arg.MessageThreadID, rc.threadID)
+		}
+		combined.WriteString(arg.RichMessage.Markdown)
+	}
+	if got := combined.String(); got != content {
+		t.Fatalf("combined rich chunks do not reconstruct original content")
+	}
+	if args[0].ReplyParameters == nil || args[0].ReplyParameters.MessageID != rc.messageID {
+		t.Fatalf("first chunk ReplyParameters = %#v, want message ID %d", args[0].ReplyParameters, rc.messageID)
+	}
+	if args[1].ReplyParameters != nil {
+		t.Fatalf("second chunk ReplyParameters = %#v, want nil", args[1].ReplyParameters)
+	}
+}
+
+func TestSendRichMessagesFallsBackForDeterministicAPIError(t *testing.T) {
+	p, bot := newConnectedTelegramPlatform(t, true)
+	bot.sendRichErr = errors.New("Bad Request: can't parse rich message")
+
+	if err := p.Send(context.Background(), replyContext{chatID: 123}, "**hello**"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if got := bot.SendRichMessageCallCount(); got != 1 {
+		t.Fatalf("SendRichMessage calls = %d, want 1", got)
+	}
+	args := bot.SendMessageArgs()
+	if len(args) != 1 {
+		t.Fatalf("legacy SendMessage calls = %d, want 1", len(args))
+	}
+	if got := args[0].Text; got != "<b>hello</b>" {
+		t.Fatalf("fallback Text = %q, want converted HTML", got)
+	}
+}
+
+func TestSendRichMessagesDoesNotFallbackForTransientError(t *testing.T) {
+	p, bot := newConnectedTelegramPlatform(t, true)
+	bot.sendRichErr = context.DeadlineExceeded
+
+	err := p.Send(context.Background(), replyContext{chatID: 123}, "hello")
+	if err == nil {
+		t.Fatal("Send error = nil, want transient error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send error = %v, want context deadline exceeded", err)
+	}
+	if got := bot.SendMessageCallCount(); got != 0 {
+		t.Fatalf("legacy SendMessage calls = %d, want 0", got)
+	}
+}
+
+func TestReplyRichMessagesDoesNotFallbackAfterPartialDelivery(t *testing.T) {
+	p, bot := newConnectedTelegramPlatform(t, true)
+	apiErr := errors.New("Bad Request: can't parse rich message")
+	bot.sendRichErr = apiErr
+	bot.sendRichErrAt = 2
+	content := strings.Repeat("x", 32768+1)
+
+	err := p.Reply(context.Background(), replyContext{chatID: 123, messageID: 456}, content)
+	if err == nil {
+		t.Fatal("Reply error = nil, want second-chunk error")
+	}
+	if !errors.Is(err, apiErr) {
+		t.Fatalf("Reply error = %v, want second-chunk API error", err)
+	}
+	if got := bot.SendRichMessageCallCount(); got != 2 {
+		t.Fatalf("SendRichMessage calls = %d, want 2", got)
+	}
+	if got := bot.SendMessageCallCount(); got != 0 {
+		t.Fatalf("legacy SendMessage calls = %d, want 0 after partial delivery", got)
+	}
 }
 
 func TestPlatformLateReadyIgnoredAfterStop(t *testing.T) {
@@ -1035,4 +1255,3 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 		t.Fatalf("ProgressStyle() = %q, want compact", got)
 	}
 }
-
