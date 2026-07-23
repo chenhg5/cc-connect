@@ -367,36 +367,10 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// MCP grandchildren (e.g. the Telegram bridge bun process) spinning at
 	// 100% CPU after their parent's stdio pipe closes.
 	prepareCmdForKill(cmd)
-	// Filter out CLAUDECODE env var to prevent "nested session" detection,
-	// since cc-connect is a bridge, not a nested Claude Code session.
-	env := filterEnv(os.Environ(), "CLAUDECODE")
-	if len(extraEnv) > 0 {
-		env = core.MergeEnv(env, extraEnv)
-	}
-	// Signal to PermissionRequest hooks that they are running inside
-	// cc-connect. Hooks can check this env var to skip LLM calls on
-	// the Claude Code side (the hook result is ignored anyway when
-	// --permission-prompt-tool stdio is active). cc-connect runs the
-	// hook itself without this env var, so the real work happens only
-	// once.
-	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
-	// Carry the intended working directory across the sudo -i boundary so the
-	// re-chdir wrapper in BuildSpawnCommand can restore it (sudo -i would
-	// otherwise leave the agent in the target user's HOME). Only meaningful
-	// under isolation; FilterEnvForSpawn keeps it because mergedAllowlist
-	// includes RunAsChdirEnv whenever WorkDir is set.
-	if spawnOpts.IsolationMode() && workDir != "" {
-		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
-	}
-	// When run_as_user is set, strip the supervisor's environment down to
-	// the allowlist before passing it to sudo. sudo --preserve-env also
-	// enforces this, but filtering here makes the cc-connect spawn argv
-	// the single source of truth.
-	env = core.FilterEnvForSpawn(env, spawnOpts)
-	cmd.Env = env
+	cmd.Env = buildClaudeChildEnv(os.Environ(), extraEnv, spawnOpts, workDir)
 
 	var providerEnvSnapshot []string
-	for _, e := range env {
+	for _, e := range cmd.Env {
 		for _, prefix := range []string{"ANTHROPIC_", "CLAUDE_", "AWS_", "NO_PROXY", "DISABLE_"} {
 			if strings.HasPrefix(e, prefix) {
 				providerEnvSnapshot = append(providerEnvSnapshot, e)
@@ -1284,4 +1258,60 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// buildClaudeChildEnv assembles the env slice passed to the Claude Code child
+// process. It is the single source of truth for what the spawned claude CLI
+// inherits, and is extracted so it can be unit-tested without spawning.
+//
+// Layers, in order:
+//
+//  1. Drop CLAUDECODE so the child does not mistake itself for a nested
+//     Claude Code session (#1143 follow-up).
+//  2. Merge extraEnv (the Agent's runtime env: configEnv from
+//     [projects.agent.options.env], provider keys, session-injected vars).
+//     These are the user's documented config and must always reach the child
+//     — including under run_as_user isolation, where FilterEnvForSpawn would
+//     otherwise strip OTEL_* unless explicitly listed in run_as_env (#1589).
+//  3. Add CC_CONNECT_PERMISSION_HOOK_SKIP so PermissionRequest hooks can
+//     detect they're running inside cc-connect and skip their own LLM call.
+//  4. Add CC_RUNAS_CHDIR when running under sudo -i isolation with a
+//     workspace path, so the re-chdir wrapper can restore the intended cwd.
+//  5. Apply FilterEnvForSpawn last so the allowlist only restricts what is
+//     inherited from the supervisor's env, not what the user explicitly
+//     configured via [projects.agent.options.env]. extraEnv is then merged
+//     back on top so explicit OTEL_*, CLAUDE_CODE_*, or any other prefix the
+//     user set in config always survives.
+func buildClaudeChildEnv(osEnv, extraEnv []string, spawnOpts core.SpawnOptions, workDir string) []string {
+	env := filterEnv(osEnv, "CLAUDECODE")
+	// Signal to PermissionRequest hooks that they are running inside
+	// cc-connect. Hooks can check this env var to skip LLM calls on
+	// the Claude Code side (the hook result is ignored anyway when
+	// --permission-prompt-tool stdio is active). cc-connect runs the
+	// hook itself without this env var, so the real work happens only
+	// once.
+	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
+	// Carry the intended working directory across the sudo -i boundary so the
+	// re-chdir wrapper in BuildSpawnCommand can restore it (sudo -i would
+	// otherwise leave the agent in the target user's HOME). Only meaningful
+	// under isolation; FilterEnvForSpawn keeps it because mergedAllowlist
+	// includes RunAsChdirEnv whenever WorkDir is set.
+	if spawnOpts.IsolationMode() && workDir != "" {
+		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
+	}
+	// When run_as_user is set, strip the supervisor's environment down to
+	// the allowlist before passing it to sudo. sudo --preserve-env also
+	// enforces this, but filtering here makes the cc-connect spawn argv
+	// the single source of truth.
+	env = core.FilterEnvForSpawn(env, spawnOpts)
+	// extraEnv (which carries configEnv from [projects.agent.options.env])
+	// is the user's explicit configuration. FilterEnvForSpawn only governs
+	// what the supervisor's env contributes; the user's documented config
+	// must always reach the child, even when the allowlist does not list
+	// those keys. Re-merge after the filter so OTEL_* and other user-set
+	// vars survive run_as_user isolation (#1589).
+	if len(extraEnv) > 0 {
+		env = core.MergeEnv(env, extraEnv)
+	}
+	return env
 }
