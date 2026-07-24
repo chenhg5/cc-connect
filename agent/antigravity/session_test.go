@@ -159,7 +159,7 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.Send("hello", nil, nil); err != nil {
+	if err := s.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
