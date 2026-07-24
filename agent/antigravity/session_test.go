@@ -2,10 +2,11 @@ package antigravity
 
 import (
 	"context"
-	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -57,6 +58,8 @@ func TestNormalizeMode(t *testing.T) {
 }
 
 func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
@@ -69,8 +72,8 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 }
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
-	s, _ := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", "", nil, 0)
-	args := s.buildAntigravityArgs("sid-1", true, "plan", "What is 1+1?")
+	s, _ := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "default", "", nil, 0)
+	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}
@@ -80,81 +83,105 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	if !contains(args, "--sandbox") {
 		t.Fatalf("expected --sandbox in args, got: %v", args)
 	}
+	if !contains(args, "--gemini_dir=/tmp/agy-config") || !contains(args, "--print-timeout=24h") {
+		t.Fatalf("expected isolated Agy config and extended print timeout, got: %v", args)
+	}
+	if !contains(args, "--verbose") {
+		t.Fatalf("expected configured extra args, got: %v", args)
+	}
 	if contains(args, "-m") || contains(args, "--model") {
 		t.Fatalf("did not expect model flags in args, got: %v", args)
 	}
 }
 
-func TestUsesInteractivePermission(t *testing.T) {
-	if !usesInteractivePermission("default") {
-		t.Fatal("default mode should use interactive permission stdin")
-	}
-	if usesInteractivePermission("yolo") {
-		t.Fatal("yolo mode should not use interactive permission stdin")
-	}
-	if usesInteractivePermission("plan") {
-		t.Fatal("plan mode should not use interactive permission stdin")
-	}
-}
+func TestDefaultModeCreatesPermissionBridge(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 
-func TestRespondPermission_WritesTerminalAnswer(t *testing.T) {
 	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
-	r, w, err := os.Pipe()
+	if s.permissionBridge == nil {
+		t.Fatal("permissionBridge = nil, want default-mode permission bridge")
+	}
+	if _, err := os.Stat(filepath.Join(s.permissionBridge.AgyConfigDir(), "config", "hooks.json")); err != nil {
+		t.Fatalf("stat Agy hook overlay: %v", err)
+	}
+}
+
+func TestNonDefaultModesDoNotCreatePermissionBridge(t *testing.T) {
+	for _, mode := range []string{"yolo", "plan"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+
+			s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", mode, "", nil, 0)
+			if err != nil {
+				t.Fatalf("newAntigravitySession: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+
+			if s.permissionBridge != nil {
+				t.Fatalf("permissionBridge = %v, want nil", s.permissionBridge)
+			}
+		})
+	}
+}
+
+func TestRespondPermissionRequiresDefaultMode(t *testing.T) {
+	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "plan", "", nil, 0)
 	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+		t.Fatalf("newAntigravitySession: %v", err)
 	}
-	defer func() { _ = r.Close() }()
-	defer func() { _ = w.Close() }()
-	s.stdin = w
+	defer func() { _ = s.Close() }()
 
-	s.permReqID.Store("req")
-	if err := s.RespondPermission("req", core.PermissionResult{Behavior: "allow"}); err != nil {
-		t.Fatalf("RespondPermission allow: %v", err)
-	}
-	buf := make([]byte, 8)
-	n, err := r.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("read allow response: %v", err)
-	}
-	if got := string(buf[:n]); got != "y\n" {
-		t.Fatalf("allow response = %q, want %q", got, "y\n")
-	}
-
-	s.permReqID.Store("req")
-	if err := s.RespondPermission("req", core.PermissionResult{Behavior: "deny"}); err != nil {
-		t.Fatalf("RespondPermission deny: %v", err)
-	}
-	n, err = r.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("read deny response: %v", err)
-	}
-	if got := string(buf[:n]); got != "n\n" {
-		t.Fatalf("deny response = %q, want %q", got, "n\n")
+	err = s.RespondPermission("req", core.PermissionResult{Behavior: "allow"})
+	if err == nil || !strings.Contains(err.Error(), "only available in default mode") {
+		t.Fatalf("RespondPermission() error = %v, want default-mode error", err)
 	}
 }
 
-func TestExtractPermissionPrompt(t *testing.T) {
-	text := "Tool wants to run command. Allow this action? (y/N)"
-	got, ok := extractPermissionPrompt(text)
-	if !ok {
-		t.Fatalf("expected permission prompt to be detected")
-	}
-	if got == "" {
-		t.Fatalf("detected prompt should not be empty")
-	}
-}
+func TestSendDoesNotHoldStdinOpen(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
 
-func TestExtractPermissionPrompt_SplitChunksDetectedInWindow(t *testing.T) {
-	part1 := "Tool wants to run command. Allow this"
-	part2 := " action? (y/N)"
-	got, ok := extractPermissionPrompt(part1 + part2)
-	if !ok || got == "" {
-		t.Fatalf("expected split prompt to be detected, got ok=%v prompt=%q", ok, got)
+	workDir := t.TempDir()
+	cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+	script := "#!/bin/sh\ncat >/dev/null\nprintf 'done\\n'\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile fake agy: %v", err)
+	}
+
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, workDir, "", "default", "", nil, 2*time.Second)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	var text strings.Builder
+	for {
+		select {
+		case ev := <-s.Events():
+			switch ev.Type {
+			case core.EventPermissionRequest:
+				t.Fatal("unexpected permission request from unstructured stdout")
+			case core.EventText:
+				text.WriteString(ev.Content)
+			case core.EventResult:
+				if !strings.Contains(text.String(), "done") {
+					t.Fatalf("text = %q, want done", text.String())
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for agy process to receive stdin EOF")
+		}
 	}
 }
 
