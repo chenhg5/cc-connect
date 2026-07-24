@@ -204,6 +204,32 @@ func TestParseSendArgs_TTSOnly(t *testing.T) {
 	}
 }
 
+func TestParseSendArgs_GeneratedMediaPrompts(t *testing.T) {
+	req, _, err := parseSendArgs([]string{
+		"--generate-image", "watercolor fox",
+		"--generate-video", "cinematic sunset",
+		"--generate-music", "ambient synthwave",
+		"--music-lyrics", "[Verse]\nhello",
+		"--music-instrumental",
+		"--music-lyrics-optimizer",
+	})
+	if err != nil {
+		t.Fatalf("parseSendArgs returned error: %v", err)
+	}
+	if req.ImagePrompt != "watercolor fox" {
+		t.Fatalf("image prompt = %q", req.ImagePrompt)
+	}
+	if req.VideoPrompt != "cinematic sunset" {
+		t.Fatalf("video prompt = %q", req.VideoPrompt)
+	}
+	if req.MusicPrompt != "ambient synthwave" || req.MusicLyrics != "[Verse]\nhello" {
+		t.Fatalf("music prompt/lyrics = %q/%q", req.MusicPrompt, req.MusicLyrics)
+	}
+	if !req.MusicInstrumental || !req.MusicLyricsOptimizer {
+		t.Fatalf("music flags = instrumental:%v optimizer:%v", req.MusicInstrumental, req.MusicLyricsOptimizer)
+	}
+}
+
 func TestParseSendArgs_AudioRejectsNonAudio(t *testing.T) {
 	dir := t.TempDir()
 	docPath := filepath.Join(dir, "report.txt")
@@ -313,10 +339,11 @@ func TestResolveMaxAttachmentSize(t *testing.T) {
 
 func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 	req := core.SendRequest{
-		Project:    "demo",
-		SessionKey: "telegram:1:2",
-		Message:    "done",
-		TTSText:    "voice done",
+		Project:     "demo",
+		SessionKey:  "telegram:1:2",
+		Message:     "done",
+		TTSText:     "voice done",
+		ImagePrompt: "watercolor fox",
 		Images: []core.ImageAttachment{{
 			MimeType: "image/png",
 			Data:     []byte("img"),
@@ -343,6 +370,9 @@ func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 	}
 	if decoded.TTSText != "voice done" {
 		t.Fatalf("decoded tts_text = %q", decoded.TTSText)
+	}
+	if decoded.ImagePrompt != "watercolor fox" {
+		t.Fatalf("decoded image_prompt = %q", decoded.ImagePrompt)
 	}
 	if len(decoded.Files) != 1 || string(decoded.Files[0].Data) != "doc" {
 		t.Fatalf("decoded files = %#v", decoded.Files)

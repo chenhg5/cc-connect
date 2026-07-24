@@ -39,10 +39,12 @@
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
-# Attachment send-back switch for `cc-connect send --image/--file`.
+# Attachment send-back switch for `cc-connect send --image/--file`
+# and generated media sent by `--generate-image/--generate-video/--generate-music`.
 # Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
 # `cc-connect send --message` without attachments is unaffected.
-# 附件回传开关，用于控制 `cc-connect send --image/--file`。
+# 附件回传开关，用于控制 `cc-connect send --image/--file`
+# 以及 `--generate-image/--generate-video/--generate-music` 生成后的媒体附件回传。
 # 它与 agent 的 /mode 独立；设为 "off" 会禁用通过 IM 回传图片/文件。
 # 不带附件的 `cc-connect send --message` 不受影响。
 # attachment_send = "on"
@@ -537,6 +539,101 @@ level = "info" # debug, info, warn, error
 # base_url = ""              # optional: default "https://api.xiaomimimo.com/v1" / 留空使用默认地址
 #                            # Token Plan 国内地址：https://token-plan-cn.xiaomimimo.com/v1
 # model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
+
+# =============================================================================
+# Generated Image, Video, and Music Send-Back / 图片、视频与音乐生成回传
+# =============================================================================
+# Enable these sections to let agents call `cc-connect send --generate-image`,
+# `--generate-video`, or `--generate-music` directly through configured providers
+# or command adapters such as OpenClaw/vendor CLIs.
+# The generated media is sent back as an attachment, so `attachment_send = "off"`
+# blocks delivery before provider generation starts.
+# 启用后，Agent 可以直接调用 `cc-connect send --generate-image`、
+# `--generate-video` 或 `--generate-music`，通过内置 provider 或 OpenClaw/厂商 CLI
+# 这类 command adapter 生成。生成结果作为附件回传，因此 `attachment_send = "off"`
+# 会在调用 provider 前直接拒绝。
+
+# [image]
+# enabled = false
+# provider = "openai"       # "openai" (OpenAI-compatible), "minimax", "command", or "openclaw"
+# max_prompt_len = 0          # max rune count before rejecting generation; 0 = no limit
+#
+# [image.openai]
+# api_key = "your-openai-api-key"
+# base_url = ""                    # optional: default "https://api.openai.com/v1"; may point to an OpenAI-compatible /v1 endpoint
+# model = "gpt-image-1"
+# size = ""                        # e.g. "1024x1024"; empty = provider/model default
+# quality = ""                     # e.g. "auto", "high", "medium", "low", "standard", "hd"
+# response_format = ""             # "b64_json" or "url" for DALL-E-compatible providers; empty for GPT image models
+# output_format = ""               # "png", "jpeg", or "webp" for GPT image models
+# background = ""                  # "transparent", "opaque", or "auto" for supported GPT image models
+# style = ""                       # "vivid" or "natural" for DALL-E 3
+#
+# [image.minimax]
+# api_key = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""                    # optional: default "https://api.minimaxi.com"
+# model = "image-01"
+# config_file = ""                 # optional MiniMax JSON config path; default data_dir/config/minimax.json
+# response_format = "base64"       # "base64" (default) or "url"
+# aspect_ratio = ""                # e.g. "1:1" or "16:9"; empty = provider default
+# width = 0                        # optional custom width; set together with height
+# height = 0                       # optional custom height; set together with width
+# prompt_optimizer = false
+#
+# [image.command]
+# command = "openclaw"             # executed directly without a shell; leave empty unless provider = "command" or overriding provider = "openclaw"
+# args = ["capability", "image", "generate", "--prompt", "{{prompt}}", "--output", "{{output}}"]
+# work_dir = ""
+# env = []                         # optional KEY=value entries appended to the process env
+# format = "png"                   # used for {{output}} extension and attachment MIME
+# timeout_secs = 600
+#
+# [video]
+# enabled = false
+# provider = "minimax"             # "minimax", "command", or "openclaw"
+# max_prompt_len = 0          # max rune count before rejecting generation; 0 = no limit
+#
+# [video.minimax]
+# api_key = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""                    # optional: default "https://api.minimaxi.com"
+# model = "MiniMax-Hailuo-2.3"
+# config_file = ""                 # optional MiniMax JSON config path; default data_dir/config/minimax.json
+# duration = 6                     # seconds; 0 = provider default
+# resolution = "1080P"             # empty = provider default
+# poll_interval_secs = 10
+# timeout_secs = 600
+#
+# [video.command]
+# command = "openclaw"
+# args = ["capability", "video", "generate", "--model", "byteplus/seedance-1-0-lite-t2v-250428", "--prompt", "{{prompt}}", "--output", "{{output}}"]
+# work_dir = ""
+# env = []
+# format = "mp4"
+# timeout_secs = 900
+#
+# [music]
+# enabled = false
+# provider = "minimax"             # "minimax" or "command"; use command for Suno/vendor wrappers
+# max_prompt_len = 0          # max rune count before rejecting generation; 0 = no limit
+#
+# [music.minimax]
+# api_key = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# base_url = ""                    # optional: default "https://api.minimaxi.com"
+# model = "music-2.6"
+# config_file = ""                 # optional MiniMax JSON config path; default data_dir/config/minimax.json
+# sample_rate = 44100
+# bitrate = 256000
+# format = "mp3"
+# lyrics_optimizer = true          # useful for prompt-only lyric songs
+# instrumental = false
+#
+# [music.command]
+# command = "suno-generate"        # example wrapper; cc-connect only expects media bytes/file output
+# args = ["--prompt", "{{prompt}}", "--lyrics", "{{lyrics}}", "--instrumental", "{{instrumental}}", "--output", "{{output}}"]
+# work_dir = ""
+# env = []
+# format = "mp3"
+# timeout_secs = 900
 
 # =============================================================================
 # Daemon Mode / 守护进程模式

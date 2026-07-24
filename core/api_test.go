@@ -91,6 +91,106 @@ func TestHandleSend_AllowsTTSTextOnly(t *testing.T) {
 	}
 }
 
+type recordingVideoGenerator struct {
+	prompt string
+	calls  int
+}
+
+func (g *recordingVideoGenerator) GenerateVideo(_ context.Context, prompt string) ([]byte, string, error) {
+	g.prompt = prompt
+	g.calls++
+	return []byte("video-bytes"), "mp4", nil
+}
+
+type recordingImageGenerator struct {
+	prompt string
+	calls  int
+}
+
+func (g *recordingImageGenerator) GenerateImage(_ context.Context, prompt string) ([]byte, string, error) {
+	g.prompt = prompt
+	g.calls++
+	return []byte("image-bytes"), "png", nil
+}
+
+type recordingMusicGenerator struct {
+	prompt string
+	opts   MusicGenerationOpts
+	calls  int
+}
+
+func (g *recordingMusicGenerator) GenerateMusic(_ context.Context, prompt string, opts MusicGenerationOpts) ([]byte, string, error) {
+	g.prompt = prompt
+	g.opts = opts
+	g.calls++
+	return []byte("music-bytes"), "mp3", nil
+}
+
+func TestHandleSend_AllowsGeneratedImageVideoAndMusic(t *testing.T) {
+	image := &recordingImageGenerator{}
+	video := &recordingVideoGenerator{}
+	music := &recordingMusicGenerator{}
+	platform := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	engine := NewEngine("test", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	engine.SetImageGenerationConfig(&ImageGenerationCfg{Enabled: true, Provider: "minimax", Generator: image})
+	engine.SetVideoGenerationConfig(&VideoGenerationCfg{Enabled: true, Provider: "minimax", Generator: video})
+	engine.SetMusicGenerationConfig(&MusicGenerationCfg{Enabled: true, Provider: "minimax", Generator: music})
+	engine.interactiveStates["session-1"] = &interactiveState{
+		platform: platform,
+		replyCtx: "reply-ctx",
+	}
+
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	body, err := json.Marshal(SendRequest{
+		Project:              "test",
+		SessionKey:           "session-1",
+		ImagePrompt:          "watercolor fox",
+		VideoPrompt:          "cinematic sunset",
+		MusicPrompt:          "ambient synthwave",
+		MusicLyrics:          "[Verse]\nhello",
+		MusicInstrumental:    true,
+		MusicLyricsOptimizer: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/send", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleSend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if image.calls != 1 || image.prompt != "watercolor fox" {
+		t.Fatalf("image calls/prompt = %d/%q", image.calls, image.prompt)
+	}
+	if video.calls != 1 || video.prompt != "cinematic sunset" {
+		t.Fatalf("video calls/prompt = %d/%q", video.calls, video.prompt)
+	}
+	if music.calls != 1 || music.prompt != "ambient synthwave" {
+		t.Fatalf("music calls/prompt = %d/%q", music.calls, music.prompt)
+	}
+	if music.opts.Lyrics != "[Verse]\nhello" || !music.opts.Instrumental || !music.opts.LyricsOptimizer {
+		t.Fatalf("music opts = %#v", music.opts)
+	}
+	if len(platform.images) != 1 {
+		t.Fatalf("sent images = %d, want 1", len(platform.images))
+	}
+	if platform.images[0].MimeType != "image/png" || string(platform.images[0].Data) != "image-bytes" {
+		t.Fatalf("image attachment = %#v", platform.images[0])
+	}
+	if len(platform.files) != 2 {
+		t.Fatalf("sent files = %d, want 2", len(platform.files))
+	}
+	if platform.files[0].MimeType != "video/mp4" || string(platform.files[0].Data) != "video-bytes" {
+		t.Fatalf("video file = %#v", platform.files[0])
+	}
+	if platform.files[1].MimeType != "audio/mpeg" || string(platform.files[1].Data) != "music-bytes" {
+		t.Fatalf("music file = %#v", platform.files[1])
+	}
+}
+
 // TestHandleSend_UnknownProjectReturns404 ensures the API does NOT silently
 // fall back to the only registered engine when the caller named a different
 // project. Previously a typo'd project name routed messages to whatever
@@ -394,14 +494,7 @@ func TestHandleCronExec_TriggersJob(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for local api trigger, sent=%v", platform.getSent())
+	waitForCronExecCompletion(t, store, job.ID, platform, 2)
 }
 
 func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
@@ -449,14 +542,38 @@ func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
+	waitForCronExecCompletion(t, store, job.ID, platform, 2)
+}
+
+func waitForCronExecCompletion(t *testing.T, store *CronStore, jobID string, platform *stubCronReplyTargetPlatform, wantSent int) {
+	t.Helper()
+
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		sent := platform.getSent()
+		lastRun, lastErr := cronJobRunState(store, jobID)
+		if len(sent) >= wantSent && !lastRun.IsZero() {
+			if lastErr != "" {
+				t.Fatalf("cron job %s completed with error: %s", jobID, lastErr)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for local api alias trigger, sent=%v", platform.getSent())
+
+	lastRun, lastErr := cronJobRunState(store, jobID)
+	t.Fatalf("timed out waiting for cron exec %s, sent=%v last_run=%v last_error=%q", jobID, platform.getSent(), lastRun, lastErr)
+}
+
+func cronJobRunState(store *CronStore, jobID string) (time.Time, string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, job := range store.jobs {
+		if job.ID == jobID {
+			return job.LastRun, job.LastError
+		}
+	}
+	return time.Time{}, ""
 }
 
 func TestHandleCronExec_ProjectMissingIsBadRequest(t *testing.T) {
