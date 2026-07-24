@@ -807,6 +807,95 @@ func TestHandleEvent_AgentEndEmitsResult(t *testing.T) {
 	}
 }
 
+// ── handleEvent: agent_end willRetry (transient error auto-retry) ──
+//
+// Pi auto-retries transient provider failures (e.g. HTTP 429) inside the
+// same turn: it emits agent_end with willRetry=true, then re-runs the agent
+// loop. Closing the turn on the first agent_end (or on the intermediate
+// message_end error) makes the engine report a failure that Pi is about to
+// recover from, and the retry outcome is dropped as stale events.
+
+func TestHandleEvent_AgentEndWillRetryKeepsTurnOpen(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "429 rate_limit_error",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
+
+	evts := drainEvents(s)
+	if len(evts) != 0 {
+		t.Fatalf("willRetry agent_end must not close the turn, got %d events: %#v", len(evts), evts)
+	}
+	if s.pendingErr == "" {
+		t.Error("pendingErr must be retained while Pi is retrying")
+	}
+}
+
+func TestHandleEvent_AgentEndFlushesPendingError(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "429 rate_limit_error",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
+
+	evts := drainEvents(s)
+	if len(evts) != 2 {
+		t.Fatalf("expected EventError + EventResult, got %d events: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventError {
+		t.Errorf("first event = %s, want EventError", evts[0].Type)
+	}
+	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "429") {
+		t.Errorf("error = %v, want deferred 429", evts[0].Error)
+	}
+	if evts[1].Type != core.EventResult {
+		t.Errorf("second event = %s, want EventResult", evts[1].Type)
+	}
+	if s.pendingErr != "" {
+		t.Errorf("pendingErr must be cleared after flush, got %q", s.pendingErr)
+	}
+}
+
+func TestHandleEvent_AgentEndRetrySuccessDropsPendingError(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	// Transient 429 -> Pi retries (willRetry) -> retry succeeds.
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "429 rate_limit_error",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
+	s.handleEvent(map[string]any{
+		"type":    "message_end",
+		"message": map[string]any{"role": "assistant"},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected only EventResult after successful retry, got %d events: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventResult {
+		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	}
+}
+
 func TestHandleEvent_UnhandledType(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
@@ -1295,15 +1384,15 @@ func TestHandleMessageEnd_AssistantError(t *testing.T) {
 		},
 	})
 
+	// Errors are deferred (buffered in pendingErr) so transient provider
+	// failures that Pi auto-retries are not surfaced mid-turn. The agent_end
+	// handler flushes the buffer once the turn truly ends.
 	evts := drainEvents(s)
-	if len(evts) != 1 {
-		t.Fatalf("got %d events, want 1", len(evts))
+	if len(evts) != 0 {
+		t.Fatalf("expected no immediate events for assistant error, got %d", len(evts))
 	}
-	if evts[0].Type != core.EventError {
-		t.Errorf("type = %s", evts[0].Type)
-	}
-	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "400") {
-		t.Errorf("error = %v", evts[0].Error)
+	if s.pendingErr != "400 model not supported" {
+		t.Errorf("pendingErr = %q, want %q", s.pendingErr, "400 model not supported")
 	}
 }
 
