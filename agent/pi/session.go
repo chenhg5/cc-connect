@@ -75,6 +75,15 @@ type piSession struct {
 	usageMu     sync.Mutex
 	lastUsage   *core.ContextUsage
 
+	// pendingErr buffers the most recent assistant errorMessage. Pi
+	// auto-retries transient provider failures (e.g. HTTP 429 rate limits)
+	// inside the same turn and announces this via agent_end.willRetry.
+	// Surfacing such errors immediately would make the engine fail the
+	// turn while Pi is still recovering it, and the retry outcome would
+	// be dropped as stale events. Only written from handleEvent, which
+	// runs on a single goroutine per mode.
+	pendingErr string
+
 	// RPC-only fields (nil/zero when rpc=false)
 	rpcCmd     *exec.Cmd
 	rpcStdin   io.WriteCloser
@@ -412,7 +421,17 @@ func (s *piSession) sendJSON(prompt string) error {
 		}
 	}
 
-	// Signal turn completion
+	// Signal turn completion. Flush a deferred terminal error first in
+	// case the process exited without a final non-retry agent_end (the
+	// agent_end handler normally flushes pendingErr already).
+	if s.pendingErr != "" {
+		errEvt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+		s.pendingErr = ""
+		select {
+		case s.events <- errEvt:
+		case <-s.ctx.Done():
+		}
+	}
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
@@ -505,6 +524,25 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	case "agent_end":
 		s.handleAgentEnd(raw)
+		if willRetry, _ := raw["willRetry"].(bool); willRetry {
+			// Pi is auto-retrying a transient failure (e.g. 429) inside
+			// this turn: it emits agent_end with willRetry=true, then
+			// re-runs the agent loop and emits a fresh agent_start /
+			// agent_end cycle. Keep the turn open and wait for the
+			// retry outcome instead of closing the turn on a failure
+			// Pi is about to recover from.
+			break
+		}
+		if s.pendingErr != "" {
+			// Turn is really over and the last assistant message failed:
+			// surface the deferred error before closing the turn.
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+			s.pendingErr = ""
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
 		if s.rpc {
 			// RPC mode: agent_end marks turn completion; json mode relies
 			// on process exit to emit EventResult.
@@ -880,11 +918,15 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 
 	case "assistant":
 		if errMsg, ok := msg["errorMessage"].(string); ok && errMsg != "" {
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-			}
+			// Defer surfacing: Pi may auto-retry this turn (announced
+			// via agent_end.willRetry). The buffered error is flushed
+			// by the agent_end handler once the turn truly ends, or by
+			// sendJSON on process exit.
+			s.pendingErr = errMsg
+		} else {
+			// A healthy assistant message supersedes any earlier error
+			// that Pi has already retried successfully.
+			s.pendingErr = ""
 		}
 	}
 }
