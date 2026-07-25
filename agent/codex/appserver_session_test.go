@@ -131,6 +131,57 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_FailedTurnEmitsError(t *testing.T) {
+	s := &appServerSession{
+		events:      make(chan core.Event, 2),
+		currentTurn: "turn-1",
+		pendingMsgs: []string{"partial reasoning"},
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error":  map[string]any{"message": "service unavailable"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	s.handleNotification("turn/completed", raw)
+
+	event := <-s.events
+	if event.Type != core.EventError || event.Error == nil || event.Error.Error() != "service unavailable" {
+		t.Fatalf("event = %#v, want EventError with service unavailable", event)
+	}
+
+	s.stateMu.Lock()
+	currentTurn := s.currentTurn
+	pendingCount := len(s.pendingMsgs)
+	s.stateMu.Unlock()
+	if currentTurn != "" {
+		t.Fatalf("current turn = %q after failure, want empty", currentTurn)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending message count = %d after failure, want 0", pendingCount)
+	}
+
+	idleRaw, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"status":   map[string]any{"type": "idle"},
+	})
+	if err != nil {
+		t.Fatalf("marshal idle notification: %v", err)
+	}
+	s.handleNotification("thread/status/changed", idleRaw)
+	select {
+	case duplicate := <-s.events:
+		t.Fatalf("idle notification emitted duplicate event %#v", duplicate)
+	default:
+	}
+}
+
 func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

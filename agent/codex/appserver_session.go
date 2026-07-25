@@ -1126,7 +1126,18 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.completeTurn()
+			if strings.EqualFold(strings.TrimSpace(notif.Turn.Status), "failed") || notif.Turn.Error != nil {
+				errMsg := ""
+				if notif.Turn.Error != nil {
+					errMsg = strings.TrimSpace(notif.Turn.Error.Message)
+				}
+				if errMsg == "" {
+					errMsg = "turn failed (no details)"
+				}
+				s.failTurn(fmt.Errorf("%s", errMsg))
+			} else {
+				s.completeTurn()
+			}
 		}
 
 	case "thread/status/changed":
@@ -1518,6 +1529,18 @@ func (s *appServerSession) completeTurn() {
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+func (s *appServerSession) failTurn(err error) {
+	s.stateMu.Lock()
+	if s.currentTurn == "" {
+		s.stateMu.Unlock()
+		return
+	}
+	s.currentTurn = ""
+	s.pendingMsgs = s.pendingMsgs[:0]
+	s.stateMu.Unlock()
+	s.emitError(err)
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
