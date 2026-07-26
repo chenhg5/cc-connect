@@ -94,7 +94,10 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	if ks.model != "" {
 		args = append(args, "--model", ks.model)
 	}
-	if ks.workDir != "" {
+	// The newer Kimi Code CLI dropped `--work-dir` (passing it fails with
+	// "unknown option"); the working directory is already carried by
+	// cmd.Dir, so only emit the flag for binaries that still advertise it.
+	if ks.workDir != "" && ks.flagSupport.WorkDir {
 		args = append(args, "--work-dir", ks.workDir)
 	}
 
@@ -321,6 +324,7 @@ func extractResumeSessionID(line string) string {
 // Kimi CLI stream-json message roles:
 //   - "assistant": content (think + text), tool_calls
 //   - "tool":      content (tool execution result), tool_call_id
+//   - "meta":      session metadata (newer Kimi Code CLI resume hint)
 func (ks *kimiSession) handleEvent(raw map[string]any) {
 	role, _ := raw["role"].(string)
 
@@ -329,13 +333,46 @@ func (ks *kimiSession) handleEvent(raw map[string]any) {
 		ks.handleAssistant(raw)
 	case "tool":
 		ks.handleTool(raw)
+	case "meta":
+		ks.handleMeta(raw)
 	default:
 		slog.Debug("kimiSession: unhandled role", "role", role)
 	}
 }
 
+// contentBlocks normalises the `content` field of a stream-json message.
+// The legacy kimi-cli emits an array of typed blocks, while the newer Kimi
+// Code CLI emits a plain string — treat a string as a single text block.
+func contentBlocks(raw map[string]any) []any {
+	switch c := raw["content"].(type) {
+	case []any:
+		return c
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []any{map[string]any{"type": "text", "text": c}}
+	default:
+		return nil
+	}
+}
+
+// handleMeta captures the session id reported by the newer Kimi Code CLI,
+// which emits the resume hint as a stdout meta event
+// ({"role":"meta","type":"session.resume_hint","session_id":"..."}) instead
+// of the legacy stderr notice scanned in readLoop.
+func (ks *kimiSession) handleMeta(raw map[string]any) {
+	if t, _ := raw["type"].(string); t != "session.resume_hint" {
+		return
+	}
+	if id, _ := raw["session_id"].(string); id != "" {
+		ks.sessionID.Store(id)
+		slog.Debug("kimiSession: session id from meta event", "session_id", id)
+	}
+}
+
 func (ks *kimiSession) handleAssistant(raw map[string]any) {
-	content, _ := raw["content"].([]any)
+	content := contentBlocks(raw)
 	for _, item := range content {
 		block, ok := item.(map[string]any)
 		if !ok {
@@ -391,7 +428,7 @@ func (ks *kimiSession) handleAssistant(raw map[string]any) {
 
 func (ks *kimiSession) handleTool(raw map[string]any) {
 	toolCallID, _ := raw["tool_call_id"].(string)
-	content, _ := raw["content"].([]any)
+	content := contentBlocks(raw)
 	var outputParts []string
 	for _, item := range content {
 		block, ok := item.(map[string]any)

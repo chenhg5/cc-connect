@@ -247,3 +247,98 @@ func drainEvents(ch <-chan core.Event, max int) []core.Event {
 	}
 	return events
 }
+
+// TestBuildArgs_NoWorkDirSupportOmitsFlag covers the newer Kimi Code CLI,
+// which rejects --work-dir; cmd.Dir still carries the working directory.
+func TestBuildArgs_NoWorkDirSupportOmitsFlag(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{WorkDir: false})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	args := ks.buildArgs("hello")
+	for _, a := range args {
+		if a == "--work-dir" {
+			t.Fatalf("buildArgs unexpectedly emitted --work-dir when flagSupport.WorkDir=false; args=%v", args)
+		}
+	}
+	assert.Contains(t, args, "--prompt")
+}
+
+// TestBuildArgs_WorkDirSupportIncludesFlag covers the legacy kimi-cli
+// branch — the binary advertises --work-dir, so we keep emitting it.
+func TestBuildArgs_WorkDirSupportIncludesFlag(t *testing.T) {
+	ctx := context.Background()
+	ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{WorkDir: true})
+	require.NoError(t, err)
+	defer func() { _ = ks.Close() }()
+
+	args := ks.buildArgs("hello")
+	idx := -1
+	for i, a := range args {
+		if a == "--work-dir" {
+			idx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, idx, 0, "args should include --work-dir; got %v", args)
+	require.Less(t, idx+1, len(args), "--work-dir should be followed by a directory")
+	assert.Equal(t, "/tmp", args[idx+1])
+}
+
+// TestHandleAssistantWithStringContent covers the newer Kimi Code CLI stream
+// format, where assistant content is a plain string instead of typed blocks.
+func TestHandleAssistantWithStringContent(t *testing.T) {
+	ctx := context.Background()
+	ks, _ := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	defer ks.Close()
+
+	ks.handleEvent(map[string]any{
+		"role":    "assistant",
+		"content": "Hello from Kimi Code!",
+	})
+
+	assert.Len(t, ks.pendingMsgs, 1)
+	assert.Equal(t, "Hello from Kimi Code!", ks.pendingMsgs[0])
+}
+
+// TestHandleToolWithStringContent covers tool results whose content is a
+// plain string (newer Kimi Code CLI format).
+func TestHandleToolWithStringContent(t *testing.T) {
+	ctx := context.Background()
+	ks, _ := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	defer ks.Close()
+
+	ks.handleEvent(map[string]any{
+		"role":         "tool",
+		"tool_call_id": "Bash_0",
+		"content":      "total 36\n",
+	})
+
+	events := drainEvents(ks.events, 1)
+	require.Len(t, events, 1)
+	assert.Equal(t, core.EventToolResult, events[0].Type)
+	assert.Equal(t, "Bash_0", events[0].ToolName)
+	assert.Contains(t, events[0].ToolResult, "total 36")
+}
+
+// TestHandleMetaResumeHint covers the newer Kimi Code CLI, which reports the
+// session id as a stdout meta event rather than on stderr.
+func TestHandleMetaResumeHint(t *testing.T) {
+	ctx := context.Background()
+	ks, _ := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	defer ks.Close()
+
+	ks.handleEvent(map[string]any{
+		"role":       "meta",
+		"type":       "session.resume_hint",
+		"session_id": "session_abc-123",
+		"command":    "kimi -r session_abc-123",
+	})
+
+	assert.Equal(t, "session_abc-123", ks.CurrentSessionID())
+
+	// Unrelated meta events must not clobber the session id.
+	ks.handleEvent(map[string]any{"role": "meta", "type": "other"})
+	assert.Equal(t, "session_abc-123", ks.CurrentSessionID())
+}

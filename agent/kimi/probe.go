@@ -20,8 +20,12 @@ import (
 //	now produces: `error: unknown option '--print' (Did you mean --prompt?)`.
 //	The older kimi-cli still requires `--print` for `--output-format` to take
 //	effect. We probe the help text once and adapt accordingly. See #1456.
+//
+//	The newer Kimi Code CLI also dropped `--work-dir` (its working directory
+//	is the process cwd), so support for that flag is probed as well.
 type kimiFlagSupport struct {
-	Print bool
+	Print   bool
+	WorkDir bool
 }
 
 // probeKimiFlags runs `<cmd> --help` with a short timeout and returns the
@@ -49,7 +53,8 @@ func probeKimiFlags(parent context.Context, cmd string, timeout time.Duration) k
 
 	flags := parseKimiHelpFlags(out.String())
 	support := kimiFlagSupport{
-		Print: flags["--print"],
+		Print:   flags["--print"],
+		WorkDir: flags["--work-dir"],
 	}
 	slog.Debug("kimi: flag probe complete", "cmd", cmd, "support", support)
 	return support
