@@ -53,7 +53,11 @@ func newTestEngineWithMultiWorkspace(t *testing.T, baseDir string) *Engine {
 
 func newTestEngineWithMultiWorkspaceAgent(t *testing.T, baseDir string) *Engine {
 	t.Helper()
-	tmpDir := t.TempDir()
+	tmpDir, err := os.MkdirTemp("", "test-multi-workspace-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 	bindingPath := filepath.Join(tmpDir, "bindings.json")
 	sessionPath := filepath.Join(tmpDir, "sessions.json")
 	agentName := "shared-binding-test-agent"
@@ -825,7 +829,12 @@ func TestLookupEffectiveBinding_NoIsolationUnbindsMissing(t *testing.T) {
 // user's chat session (keyed by msg.SessionKey) is the one that gets
 // locked.
 func TestExecuteCustomCommand_LandsInUserChatSession(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir, err := os.MkdirTemp("", "test-exec-custom-command")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(baseDir) })
+
 	wsDir := filepath.Join(baseDir, "bound-workspace")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -905,7 +914,12 @@ func TestExecuteCustomCommand_LandsInUserChatSession(t *testing.T) {
 // TestExecuteSkill_LandsInUserChatSession mirrors the test above for the
 // skill execution path (which has the same bug pattern as custom commands).
 func TestExecuteSkill_LandsInUserChatSession(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir, err := os.MkdirTemp("", "test-exec-skill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(baseDir) })
+
 	wsDir := filepath.Join(baseDir, "bound-workspace")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatal(err)
