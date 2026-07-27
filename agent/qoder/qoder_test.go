@@ -525,7 +525,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Single-line, "---"-prefixed prompt mirroring the reply-chain format while
 	// staying free of shell/batch metacharacters for the fake binary.
