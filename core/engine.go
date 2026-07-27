@@ -2837,6 +2837,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsAgent Agent
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
+	if e.multiWorkspace {
+		e.migrateLegacyWorkspaceBindings(msg)
+	}
 	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
 		e.bindSendWorkDir(msg.SessionKey, forcedWorkDir)
 		var err error
@@ -8632,9 +8635,15 @@ func selectUsageWindows(report *UsageReport) (*UsageWindow, *UsageWindow) {
 			}
 		}
 		if primary == nil && len(bucket.Windows) > 0 {
-			primary = &bucket.Windows[0]
+			// Fall back to the first window when no 5-hour quota is reported
+			// (e.g. Codex accounts whose first bucket only exposes a 7-day
+			// window). Skip it if the slot is already occupied by the 7-day
+			// window so the same block is not rendered twice.
+			if secondary != &bucket.Windows[0] {
+				primary = &bucket.Windows[0]
+			}
 		}
-		if secondary == nil && len(bucket.Windows) > 1 {
+		if secondary == nil && len(bucket.Windows) > 1 && &bucket.Windows[1] != primary {
 			secondary = &bucket.Windows[1]
 		}
 		if primary != nil || secondary != nil {
@@ -16157,6 +16166,29 @@ func effectiveWorkspaceChannelKey(msg *Message) string {
 		return workspaceChannelKey(msg.Platform, msg.ChannelKey)
 	}
 	return extractWorkspaceChannelKey(msg.SessionKey)
+}
+
+// migrateLegacyWorkspaceBindings moves bindings from a platform-provided
+// legacy channel scope to the current scope before workspace resolution. The
+// platform owns both opaque identifiers; core only adds the platform prefix.
+func (e *Engine) migrateLegacyWorkspaceBindings(msg *Message) {
+	if e.workspaceBindings == nil || msg == nil || msg.ChannelKey == "" || msg.LegacyChannelKey == "" {
+		return
+	}
+	oldChannelKey := workspaceChannelKey(msg.Platform, msg.LegacyChannelKey)
+	newChannelKey := workspaceChannelKey(msg.Platform, msg.ChannelKey)
+	if oldChannelKey == "" || newChannelKey == "" || oldChannelKey == newChannelKey {
+		return
+	}
+
+	for _, projectKey := range []string{"project:" + e.name, sharedWorkspaceBindingsKey} {
+		if e.workspaceBindings.MigrateChannelKey(projectKey, oldChannelKey, newChannelKey) {
+			slog.Info("workspace binding migrated",
+				"project", projectKey,
+				"old_channel_key", oldChannelKey,
+				"new_channel_key", newChannelKey)
+		}
+	}
 }
 
 // commandContext resolves the appropriate agent, session manager, and interactive key

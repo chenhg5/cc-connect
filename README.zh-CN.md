@@ -47,13 +47,13 @@
 <details open>
 <summary>赞助商</summary>
 
-[![Kimi](assets/sponsors/kimi-banner-zh.png)](https://www.kimi.com/code/?aff=cc-connect)
+[![Kimi](https://gcdn.moonshot.cn/growth-cdn/sponsor/kimi-zh.png)](https://www.kimi.com/code/?aff=cc-connect)
 
-感谢 [Kimi](https://www.kimi.com/code/?aff=cc-connect) 赞助本项目！[Kimi K2.7 Code](https://platform.kimi.com/docs/guide/kimi-k2-7-code-quickstart) 是 Moonshot AI 推出的编程专用开源智能体模型，在真实长程编程与复杂软件工程工作流中显著提升端到端任务成功率，同时优化推理效率，相比 K2.6 平均减少约 30% 的推理 Token 消耗。
+感谢 [Kimi](https://www.kimi.com/code/?aff=cc-connect) 赞助本项目！[Kimi K3](https://www.kimi.com/blog/kimi-k3) 是 Moonshot AI 迄今能力最强的模型，也是全球首个开源 3T 级模型。K3 拥有 2.8T 参数、原生视觉能力与 100 万 Token 上下文，在长程编码、知识工作和推理任务中展现前沿性能。
 
-在 cc-connect 中，你可以直接接入 Kimi CLI，将运行在本地电脑上的 Kimi 连接到飞书、钉钉、Telegram、Slack、Discord、企业微信等即时通讯工具。无论身在何处，都能通过消息继续处理本地项目，让 Kimi 协助阅读和修改代码、排查问题、执行命令与自动化任务。
+通过 cc-connect，你可以将本地运行的 Kimi CLI 连接到飞书、钉钉、Telegram、Slack、Discord、企业微信等即时通讯工具，随时让 Kimi 阅读和修改代码、排查问题、执行命令与处理自动化任务。
 
-cc-connect 已支持 Kimi CLI。立即体验高性价比的 [Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com/?aff=cc-connect)｜[Global](https://platform.kimi.ai/?aff=cc-connect)）使用 API。
+**cc-connect 已支持 Kimi CLI。立即体验 **[Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)**，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com/?aff=cc-connect)｜[Global](https://platform.kimi.ai/?aff=cc-connect)）使用 API。
 
 ---
 

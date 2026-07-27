@@ -47,13 +47,13 @@
 <details open>
 <summary>Sponsors</summary>
 
-[![Kimi](assets/sponsors/kimi-banner-en.png)](https://www.kimi.com/code/?aff=cc-connect)
+[![Kimi](https://gcdn.moonshot.cn/growth-cdn/sponsor/kimi-en.png)](https://www.kimi.com/code/?aff=cc-connect)
 
-Thanks to [Kimi](https://www.kimi.com/code/?aff=cc-connect) for sponsoring this project! [Kimi K2.7 Code](https://platform.kimi.ai/docs/guide/kimi-k2-7-code-quickstart) is an open-source, coding-focused agentic model developed by Moonshot AI, delivering substantial gains on real-world long-horizon coding tasks and higher end-to-end success across complex software engineering workflows. It also reduces thinking-token usage by approximately 30% compared with K2.6.
+Thanks to [Kimi](https://www.kimi.com/code/?aff=cc-connect) for sponsoring this project! [Kimi K3](https://www.kimi.com/blog/kimi-k3) is Moonshot AI's most capable model and the world's first open 3T-class model. With 2.8 trillion parameters, native vision, and a 1-million-token context window, K3 delivers frontier performance across long-horizon coding, knowledge work, and reasoning.
 
-With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark, DingTalk, Telegram, Slack, Discord, WeChat Work, and other instant messaging tools. Wherever you are, you can continue working on local projects through chat and ask Kimi to inspect or modify code, troubleshoot issues, run commands, and handle automation tasks.
+With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark, DingTalk, Telegram, Slack, Discord, WeCom, and other instant messaging tools. Wherever you are, you can continue working on local projects through chat and ask Kimi to inspect or modify code, troubleshoot issues, run commands, and handle automation tasks.
 
-cc-connect already supports Kimi CLI. Try the cost-effective [Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect) or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com/?aff=cc-connect)｜[Global](https://platform.kimi.ai/?aff=cc-connect)).
+**cc-connect already supports Kimi CLI. Try the **[Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect)**, or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com/?aff=cc-connect) | [Global](https://platform.kimi.ai/?aff=cc-connect)).
 
 ---
 

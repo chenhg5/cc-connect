@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -147,5 +148,91 @@ func TestWorkspaceBindingManager_UnbindScopedRemovesLegacyBinding(t *testing.T) 
 	}
 	if b := mgr.Lookup("project:claude", "C1"); b != nil {
 		t.Fatalf("expected legacy binding to be removed, got %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_InheritChannelKeyPreservesDefault(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "bindings.json")
+	mgr := NewWorkspaceBindingManager(storePath)
+
+	projectKey := "project:claude"
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	newKey := workspaceChannelKey("feishu", "oc_chat:topic:om_root")
+	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/a")
+
+	if !mgr.MigrateChannelKey(projectKey, oldKey, newKey) {
+		t.Fatal("expected topic binding to inherit the chat default")
+	}
+	if b := mgr.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected chat default binding to be preserved, got %+v", b)
+	}
+	if b := mgr.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected inherited topic binding, got %+v", b)
+	}
+
+	reloaded := NewWorkspaceBindingManager(storePath)
+	if b := reloaded.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected inherited binding after reload, got %+v", b)
+	}
+	if b := reloaded.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/a" {
+		t.Fatalf("expected chat default after reload, got %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_InheritChannelKeyDoesNotOverwriteDestination(t *testing.T) {
+	mgr := NewWorkspaceBindingManager(filepath.Join(t.TempDir(), "bindings.json"))
+	projectKey := "project:claude"
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	newKey := workspaceChannelKey("feishu", "oc_chat:topic:om_root")
+	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/legacy")
+	mgr.Bind(projectKey, newKey, "topic", "/workspace/current")
+
+	if mgr.MigrateChannelKey(projectKey, oldKey, newKey) {
+		t.Fatal("inheritance must not overwrite an existing topic binding")
+	}
+	if b := mgr.Lookup(projectKey, newKey); b == nil || b.Workspace != "/workspace/current" {
+		t.Fatalf("destination binding changed unexpectedly: %+v", b)
+	}
+	if b := mgr.Lookup(projectKey, oldKey); b == nil || b.Workspace != "/workspace/legacy" {
+		t.Fatalf("chat default binding should remain: %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_InheritChannelKeyConcurrentTopics(t *testing.T) {
+	mgr := NewWorkspaceBindingManager(filepath.Join(t.TempDir(), "bindings.json"))
+	projectKey := "project:claude"
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	targets := []string{
+		workspaceChannelKey("feishu", "oc_chat:topic:om_root_a"),
+		workspaceChannelKey("feishu", "oc_chat:topic:om_root_b"),
+	}
+	mgr.Bind(projectKey, oldKey, "topic-group", "/workspace/a")
+
+	results := make(chan bool, len(targets))
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		wg.Add(1)
+		go func(channelKey string) {
+			defer wg.Done()
+			results <- mgr.MigrateChannelKey(projectKey, oldKey, channelKey)
+		}(target)
+	}
+	wg.Wait()
+	close(results)
+
+	inherited := 0
+	for ok := range results {
+		if ok {
+			inherited++
+		}
+	}
+	if inherited != len(targets) {
+		t.Fatalf("expected all topics to inherit the default, got %d of %d", inherited, len(targets))
+	}
+	for _, target := range targets {
+		if b := mgr.Lookup(projectKey, target); b == nil || b.Workspace != "/workspace/a" {
+			t.Fatalf("topic %q did not inherit the default: %+v", target, b)
+		}
 	}
 }

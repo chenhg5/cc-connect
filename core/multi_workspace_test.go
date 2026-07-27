@@ -467,6 +467,30 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyWorkspaceBindings_CopiesProjectAndSharedDefaults(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	newKey := workspaceChannelKey("feishu", "oc_chat:topic:om_root")
+	e.workspaceBindings.Bind("project:test", oldKey, "topic-group", "/workspace/project")
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, oldKey, "topic-group", "/workspace/shared")
+
+	e.migrateLegacyWorkspaceBindings(&Message{
+		Platform:         "feishu",
+		ChannelKey:       "oc_chat:topic:om_root",
+		LegacyChannelKey: "oc_chat",
+	})
+
+	for _, projectKey := range []string{"project:test", sharedWorkspaceBindingsKey} {
+		if b := e.workspaceBindings.Lookup(projectKey, oldKey); b == nil {
+			t.Fatalf("%s chat default binding was not preserved", projectKey)
+		}
+		if b := e.workspaceBindings.Lookup(projectKey, newKey); b == nil {
+			t.Fatalf("%s topic binding did not inherit the default", projectKey)
+		}
+	}
+}
+
 // runAsTestAgent is a stub agent that reports run_as_user and run_as_env
 // via the interface methods getOrCreateWorkspaceAgent uses for propagation.
 // It exists specifically to test TestMultiWorkspaceAgent_PropagatesRunAsUser

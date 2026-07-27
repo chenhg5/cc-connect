@@ -6092,6 +6092,32 @@ func TestCmdUsage_LocalizedChinese(t *testing.T) {
 	}
 }
 
+func TestFormatUsageReport_SingleSevenDayWindowDoesNotDuplicate(t *testing.T) {
+	report := &UsageReport{
+		Email: "dev@example.com",
+		Plan:  "team",
+		Buckets: []UsageBucket{{
+			Name:         "Rate limit",
+			Allowed:      true,
+			LimitReached: false,
+			Windows: []UsageWindow{
+				{Name: "Primary", UsedPercent: 40, WindowSeconds: 604800, ResetAfterSeconds: 100000},
+			},
+		}},
+	}
+
+	got := formatUsageReport(report, LangEnglish)
+	if c := strings.Count(got, "7d limit"); c != 1 {
+		t.Fatalf("7d limit rendered %d times, want 1: %q", c, got)
+	}
+	if c := strings.Count(got, "Remaining: 60%"); c != 1 {
+		t.Fatalf("Remaining: 60%% rendered %d times, want 1: %q", c, got)
+	}
+	if strings.Contains(got, "5h limit") {
+		t.Fatalf("usage text = %q, should not invent a 5-hour window", got)
+	}
+}
+
 func TestCmdCommands_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

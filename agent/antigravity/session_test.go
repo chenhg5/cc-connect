@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -82,6 +83,74 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	}
 	if contains(args, "-m") || contains(args, "--model") {
 		t.Fatalf("did not expect model flags in args, got: %v", args)
+	}
+}
+
+func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
+	if os.Getenv("GO_WANT_ANTIGRAVITY_HELPER") == "1" {
+		argsPath := os.Getenv("CC_ANTIGRAVITY_ARGS_FILE")
+		if argsPath == "" {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(argsPath, []byte(strings.Join(os.Args, "\x00")), 0o600); err != nil {
+			os.Exit(2)
+		}
+		_, _ = io.WriteString(os.Stdout, "ok\n")
+		os.Exit(0)
+	}
+
+	argsPath := t.TempDir() + string(os.PathSeparator) + "args"
+	workDir := t.TempDir()
+	s, err := newAntigravitySession(
+		context.Background(),
+		os.Args[0],
+		[]string{"-test.run=TestAntigravitySession_ResumePassesConversationID", "--"},
+		workDir,
+		"",
+		"default",
+		"conversation-1",
+		[]string{
+			"GO_WANT_ANTIGRAVITY_HELPER=1",
+			"CC_ANTIGRAVITY_ARGS_FILE=" + argsPath,
+		},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send("second turn", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case event := <-s.Events():
+		if event.Type != core.EventText {
+			t.Fatalf("first event type = %q, want %q", event.Type, core.EventText)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for helper output")
+	}
+	select {
+	case event := <-s.Events():
+		if event.Type != core.EventResult || !event.Done {
+			t.Fatalf("completion event = %+v, want done EventResult", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for EventResult")
+	}
+
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Split(string(data), "\x00")
+	if !contains(args, "--conversation") || !contains(args, "conversation-1") {
+		t.Fatalf("resume args = %v, want --conversation conversation-1", args)
+	}
+	if !contains(args, "-p") || !contains(args, "second turn") {
+		t.Fatalf("prompt args = %v, want -p second turn", args)
 	}
 }
 

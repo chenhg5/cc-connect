@@ -8,7 +8,7 @@ import (
 
 func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 	opts := map[string]any{
-		"work_dir":    "/tmp/test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "skip-lookpath",
 		"env": map[string]string{
 			"ANTHROPIC_BASE_URL":            "https://api.kimi.com/coding",
@@ -46,7 +46,7 @@ func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 
 func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 	opts := map[string]any{
-		"work_dir":    "/tmp/test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "test-user",
 		"env": map[string]any{
 			"ANTHROPIC_BASE_URL":   "https://api.mimo.com/v1",
@@ -75,7 +75,7 @@ func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 
 func TestNew_NoEnvOpts(t *testing.T) {
 	opts := map[string]any{
-		"work_dir":    "/tmp/test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "test-user",
 	}
 
@@ -95,7 +95,7 @@ func TestNew_NoEnvOpts(t *testing.T) {
 
 func TestNew_ProjectEnvOverridesProviderEnv(t *testing.T) {
 	opts := map[string]any{
-		"work_dir":    "/tmp/test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "test-user",
 		"env": map[string]string{
 			"ANTHROPIC_BASE_URL":   "https://api.deepseek.com/v1",
