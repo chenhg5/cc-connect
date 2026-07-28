@@ -2,8 +2,10 @@ package antigravity
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +226,40 @@ func TestExtractPermissionPrompt_SplitChunksDetectedInWindow(t *testing.T) {
 	got, ok := extractPermissionPrompt(part1 + part2)
 	if !ok || got == "" {
 		t.Fatalf("expected split prompt to be detected, got ok=%v prompt=%q", ok, got)
+	}
+}
+
+func TestDetectNewSessionID_AntigravityCLI(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	workDir := t.TempDir()
+	s, err := newAntigravitySession(context.Background(), "echo", nil, workDir, "", "default", "", nil, 0)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	cacheDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cacheDir: %v", err)
+	}
+
+	preEntries := map[string]bool{"old-session-1": true}
+	sendStartedAt := time.Now()
+
+	// Write last_conversations.json mapping workDir to new-session-123
+	lastMap := map[string]string{
+		filepath.Clean(workDir): "new-session-123",
+	}
+	data, _ := json.Marshal(lastMap)
+	if err := os.WriteFile(filepath.Join(cacheDir, "last_conversations.json"), data, 0o600); err != nil {
+		t.Fatalf("write last_conversations.json: %v", err)
+	}
+
+	got := s.detectNewSessionID(preEntries, sendStartedAt)
+	if got != "new-session-123" {
+		t.Fatalf("detectNewSessionID = %q, want %q", got, "new-session-123")
 	}
 }
 
