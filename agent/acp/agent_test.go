@@ -136,3 +136,51 @@ func TestNew_GenericACPDoesNotImplementModelSwitcher(t *testing.T) {
 		t.Fatalf("generic ACP agent unexpectedly implements ModelSwitcher")
 	}
 }
+
+func TestNew_TraeCLIImplementsReasoningEffortSwitcher(t *testing.T) {
+	a, err := New(map[string]any{
+		"command":          "traecli",
+		"args":             []any{"acp", "serve"},
+		"reasoning_effort": "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	switcher, ok := a.(core.ReasoningEffortSwitcher)
+	if !ok {
+		t.Fatalf("TraeAgent does not implement ReasoningEffortSwitcher")
+	}
+	if got := switcher.GetReasoningEffort(); got != "high" {
+		t.Fatalf("GetReasoningEffort = %q, want high", got)
+	}
+	if efforts := switcher.AvailableReasoningEfforts(); len(efforts) != 4 || efforts[0] != "low" || efforts[3] != "xhigh" {
+		t.Fatalf("AvailableReasoningEfforts = %#v, want [low medium high xhigh]", efforts)
+	}
+	// unknown value falls back to "" (use agent default)
+	switcher.SetReasoningEffort("bogus")
+	if got := switcher.GetReasoningEffort(); got != "" {
+		t.Fatalf("GetReasoningEffort after bogus = %q, want empty", got)
+	}
+	// alias normalization
+	switcher.SetReasoningEffort("x-high")
+	if got := switcher.GetReasoningEffort(); got != "xhigh" {
+		t.Fatalf("GetReasoningEffort after x-high = %q, want xhigh", got)
+	}
+	opts := a.(core.WorkspaceAgentOptionSnapshotter).WorkspaceAgentOptions()
+	if got, _ := opts["reasoning_effort"].(string); got != "xhigh" {
+		t.Fatalf("snapshot reasoning_effort = %q, want xhigh", got)
+	}
+}
+
+func TestNew_GenericACPDoesNotImplementReasoningEffortSwitcher(t *testing.T) {
+	a, err := New(map[string]any{
+		"command": "true",
+		"args":    []any{"acp", "serve"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(core.ReasoningEffortSwitcher); ok {
+		t.Fatalf("generic ACP agent unexpectedly implements ReasoningEffortSwitcher")
+	}
+}

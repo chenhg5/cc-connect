@@ -31,6 +31,9 @@ type Agent struct {
 	authMethod   string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
 	displayName  string // optional, for doctor (default "ACP")
 	model        string // optional, for Trae CLI ACP only
+	// reasoningEffort is the pending reasoning effort to apply to new
+	// sessions (Trae CLI ACP only). Empty means "use the agent default".
+	reasoningEffort string
 
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
@@ -70,7 +73,7 @@ var _ sessionCallbacks = (*Agent)(nil)
 // New builds an acp agent from project options.
 // Required: options["command"] — executable name or path for the ACP agent.
 // Optional: options["args"], options["env"], options["auth_method"],
-// options["display_name"], options["mode"].
+// options["display_name"], options["mode"], options["reasoning_effort"].
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -98,18 +101,21 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = strings.TrimSpace(mode)
 	model, _ := opts["model"].(string)
 	model = strings.TrimSpace(model)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	reasoningEffort = normalizeTraeReasoningEffort(reasoningEffort)
 
 	agent := &Agent{
-		workDir:      workDir,
-		cmd:          cmdStr,
-		cliExtraArgs: cliExtraArgs,
-		args:         args,
-		staticEnv:    staticEnv,
-		extraEnv:     extra,
-		authMethod:   authMethod,
-		displayName:  displayName,
-		mode:         mode,
-		model:        model,
+		workDir:         workDir,
+		cmd:             cmdStr,
+		cliExtraArgs:    cliExtraArgs,
+		args:            args,
+		staticEnv:       staticEnv,
+		extraEnv:        extra,
+		authMethod:      authMethod,
+		displayName:     displayName,
+		mode:            mode,
+		model:           model,
+		reasoningEffort: reasoningEffort,
 	}
 	if isTraeCLICommand(cmdStr) {
 		return &TraeAgent{Agent: agent}, nil
@@ -226,6 +232,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.model != "" {
 		opts["model"] = a.model
 	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
 	return opts
 }
 
@@ -239,6 +248,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.RLock()
 	command := a.cmd
 	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
+	if effort := a.traeReasoningEffortOverrideLocked(); effort != "" {
+		allArgs = append([]string{"-c", fmt.Sprintf("model_reasoning_effort=%q", effort)}, allArgs...)
+	}
 	if model := a.traeModelOverrideLocked(); model != "" {
 		allArgs = append([]string{"-c", fmt.Sprintf("model=%q", model)}, allArgs...)
 	}
@@ -299,6 +311,58 @@ func (a *TraeAgent) AvailableModels(ctx context.Context) []core.ModelOption {
 	workDir := a.workDir
 	a.mu.RUnlock()
 	return fetchTraeModels(ctx, cmd, workDir, extra)
+}
+
+// -- ReasoningEffortSwitcher for Trae CLI ACP --
+//
+// ACP has no generic reasoning-effort RPC either. Trae CLI reads the effort
+// from `model_reasoning_effort` in traecli.toml and accepts an override via
+// `-c model_reasoning_effort=...` before `acp serve` (same mechanism as the
+// model override above). Only TraeAgent exposes this so other ACP agents are
+// unaffected.
+
+func (a *TraeAgent) SetReasoningEffort(effort string) {
+	effort = normalizeTraeReasoningEffort(effort)
+	a.mu.Lock()
+	a.reasoningEffort = effort
+	a.mu.Unlock()
+	slog.Info("acp: Trae CLI reasoning effort changed for future sessions", "reasoning_effort", effort)
+}
+
+func (a *TraeAgent) GetReasoningEffort() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.reasoningEffort
+}
+
+func (a *TraeAgent) AvailableReasoningEfforts() []string {
+	return []string{"low", "medium", "high", "xhigh"}
+}
+
+func (a *Agent) traeReasoningEffortOverrideLocked() string {
+	if !isTraeCLICommand(a.cmd) {
+		return ""
+	}
+	return strings.TrimSpace(a.reasoningEffort)
+}
+
+// normalizeTraeReasoningEffort maps user input to a Trae-accepted effort value.
+// Unknown values return "" so the agent falls back to its configured default.
+func normalizeTraeReasoningEffort(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "low":
+		return "low"
+	case "medium", "med":
+		return "medium"
+	case "high":
+		return "high"
+	case "xhigh", "x-high", "very-high":
+		return "xhigh"
+	default:
+		return ""
+	}
 }
 
 func (a *Agent) traeModelOverrideLocked() string {
