@@ -182,6 +182,7 @@ const (
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
 	MsgSessionNotFound           MsgKey = "session_not_found"
+	MsgSessionResumeTimeout      MsgKey = "session_resume_timeout"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
@@ -813,6 +814,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 會話已過期，請發送 /new 開始新會話",
 		LangJapanese:           "⚠️ セッションが期限切れです。/new で新しい会話を開始してください。",
 		LangSpanish:            "⚠️ Sesión expirada. Usa /new para iniciar una nueva conversación.",
+	},
+	MsgSessionResumeTimeout: {
+		LangEnglish:            "⚠️ This conversation is too large to resume (timed out). Its history is kept — use /new to start a fresh conversation.",
+		LangChinese:            "⚠️ 该会话历史过大，恢复超时。历史已保留，请发送 /new 开始新会话。",
+		LangTraditionalChinese: "⚠️ 該會話歷史過大，恢復逾時。歷史已保留，請發送 /new 開始新會話。",
+		LangJapanese:           "⚠️ この会話は履歴が大きすぎて再開できませんでした（タイムアウト）。履歴は保持されています。/new で新しい会話を開始してください。",
+		LangSpanish:            "⚠️ Esta conversación es demasiado grande para reanudarse (tiempo agotado). Su historial se conserva; usa /new para iniciar una nueva conversación.",
 	},
 	MsgFailedToStartAgentSession: {
 		LangEnglish:            "❌ Error: failed to start agent session",
