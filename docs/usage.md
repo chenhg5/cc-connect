@@ -991,6 +991,40 @@ type = "claudecode"
 
 ---
 
+## Attach an Existing Agent Session
+
+Local tools can bind a platform conversation to an Agent session that was
+created outside cc-connect, such as a Codex or Claude Code session started by
+an IDE. The API is available only on cc-connect's owner-only Unix socket:
+
+```bash
+curl --unix-socket ~/.cc-connect/run/api.sock \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "project": "my-project",
+    "session_key": "feishu:chat-id:user-id",
+    "session_id": "native-agent-session-id",
+    "session_name": "IDE session",
+    "work_dir": "/absolute/path/to/workspace"
+  }' \
+  http://unix/sessions/bind-agent
+```
+
+`project`, `session_key`, and `session_id` identify the cc-connect engine,
+platform conversation, and native Agent session. `project` may be omitted when
+exactly one engine is configured. `session_name` is optional.
+
+`work_dir` is optional and is accepted only for a `multi-workspace` project.
+It must be an existing directory inside that project's `base_dir`; a successful
+request also persists the conversation-to-workspace binding. If the Agent
+implements native session validation, cc-connect rejects IDs that do not
+belong to the selected project before changing the binding.
+
+Do not proxy this endpoint to TCP. The trust boundary is the mode-`0600` Unix
+socket, so any process that can connect to it can change active session routing.
+
+---
+
 ## Web Admin Dashboard (Beta)
 
 > **Status: Beta.** This feature is available since v1.2.2-beta.5. The UI and API may change in future releases.
