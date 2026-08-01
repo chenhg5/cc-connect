@@ -398,6 +398,9 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 			RequestID: we.Approval.ID,
 			Content:   we.Approval.Subject,
 			ToolName:  we.Approval.Tool,
+			// Subject 就是被请求授权的命令/操作文本,
+			// 引擎用 ToolInput 渲染权限卡片的命令内容。
+			ToolInput: we.Approval.Subject,
 		})
 
 	case "ask_request":
