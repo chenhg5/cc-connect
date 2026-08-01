@@ -1463,7 +1463,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// exception: earlier unmentioned messages were never dispatched to the
 	// agent, so bootstrap its context from the parent/root reply chain once.
 	var quoted quotedMessage
-	if parentID != "" && (!(p.threadIsolation && isThreadSessionKey(sessionKey)) || rctx.bootstrapThread) {
+	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
