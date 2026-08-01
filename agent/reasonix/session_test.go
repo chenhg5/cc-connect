@@ -391,12 +391,131 @@ func TestReasonixAgent_PermissionMode(t *testing.T) {
 	}
 }
 
+// ── Test: SetLiveMode toggles serve auto-approve ────────────────
+
+func TestReasonixSession_SetLiveMode_PostsAutoApprove(t *testing.T) {
+	var (
+		calls    []map[string]any
+		callsMu  sync.Mutex
+		calledCh = make(chan struct{}, 4)
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /submit", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("POST /new", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /auto-approve-tools", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		callsMu.Lock()
+		calls = append(calls, body)
+		callsMu.Unlock()
+		calledCh <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /events", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		// Keep the SSE connection open until the test finishes.
+		<-r.Context().Done()
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
+	require.NoError(t, err)
+	defer func() { _ = sess.Close() }()
+
+	require.True(t, sess.SetLiveMode("yolo"))
+	require.True(t, sess.SetLiveMode("default"))
+
+	select {
+	case <-calledCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("auto-approve-tools was not called")
+	}
+	select {
+	case <-calledCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("auto-approve-tools was not called second time")
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	require.Len(t, calls, 2)
+	assert.Equal(t, true, calls[0]["on"], "yolo should enable auto-approve")
+	assert.Equal(t, false, calls[1]["on"], "default should disable auto-approve")
+}
+
+// ── Test: platform prompt is prepended to every submit ──────────
+
+func TestReasonixSession_PlatformPrompt_PrependedToSubmit(t *testing.T) {
+	var (
+		submits   []string
+		submitsMu sync.Mutex
+		submitted = make(chan struct{}, 4)
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /submit", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		submitsMu.Lock()
+		submits = append(submits, body.Input)
+		submitsMu.Unlock()
+		submitted <- struct{}{}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("POST /new", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /events", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		// Keep the stream open and emit turn_done shortly so Send() unblocks.
+		select {
+		case <-time.After(100 * time.Millisecond):
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(wireEvent{Kind: "turn_done"}))
+			flusher.Flush()
+		case <-r.Context().Done():
+		}
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
+	require.NoError(t, err)
+	defer func() { _ = sess.Close() }()
+
+	sess.setPlatformPrompt("CC-ADAPTER-PROMPT")
+	require.NoError(t, sess.Send("first message", "m1", nil, nil))
+
+	select {
+	case <-submitted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("submit was not called")
+	}
+
+	submitsMu.Lock()
+	defer submitsMu.Unlock()
+	require.Len(t, submits, 1)
+	assert.True(t, strings.HasPrefix(submits[0], "CC-ADAPTER-PROMPT"), "submit should start with the platform prompt")
+	assert.Contains(t, submits[0], "first message")
+}
+
 // ── Test: static interface assertions ────────────────────────────
 
 // These compile-time checks ensure Agent and reasonixSession remain compliant
 // with core.Agent and core.AgentSession respectively.
 var _ core.Agent = (*Agent)(nil)
 var _ core.AgentSession = (*reasonixSession)(nil)
+var _ core.LiveModeSwitcher = (*reasonixSession)(nil) // /mode applies live to serve
 
 // ── Test: respond permission posts to /approve ───────────────────
 

@@ -74,6 +74,12 @@ type reasonixSession struct {
 	sessionID string
 	mode      string
 
+	// platformPrompt carries the cc-connect capabilities prompt
+	// (core.AgentSystemPrompt). reasonix serve has its own workspace context
+	// and never reads cc-connect's memory files, so the prompt is prepended
+	// to every submitted turn.
+	platformPrompt string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -145,9 +151,27 @@ func newSession(ctx context.Context, serveURL, workDir, sessionID, mode string) 
 
 // ── core.AgentSession implementation ─────────────────────────────
 
+// setPlatformPrompt stores the cc-connect capabilities prompt. It is called
+// by the Agent before the session's first turn (see StartSession).
+func (s *reasonixSession) setPlatformPrompt(prompt string) {
+	s.mu.Lock()
+	s.platformPrompt = prompt
+	s.mu.Unlock()
+}
+
 func (s *reasonixSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("reasonix: session is closed")
+	}
+
+	// Prepend the cc-connect capabilities prompt on every turn. It is
+	// idempotent enough to repeat: the model treats it as standing
+	// instructions, and serve's /submit accepts a single input string.
+	s.mu.Lock()
+	ccPrompt := s.platformPrompt
+	s.mu.Unlock()
+	if strings.TrimSpace(ccPrompt) != "" {
+		prompt = ccPrompt + "\n\n" + prompt
 	}
 
 	// Save images/files to disk and append references
@@ -190,6 +214,25 @@ func (s *reasonixSession) RespondPermission(requestID string, result core.Permis
 		"session": false,
 	}
 	return s.httpPost("/approve", body)
+}
+
+// SetLiveMode switches the reasonix serve permission mode in real time.
+// "yolo" (and legacy aliases "auto"/"force") turns on tool auto-approval so
+// serve stops emitting approval_request events; "default"/"plan" turns it off
+// (interactive approval per tool). It implements core.LiveModeSwitcher so the
+// engine's /mode command applies immediately to the running session.
+func (s *reasonixSession) SetLiveMode(mode string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	on := normalizeMode(map[string]any{"mode": mode}) == "yolo"
+	body := map[string]any{"on": on}
+	if err := s.httpPost("/auto-approve-tools", body); err != nil {
+		slog.Warn("reasonix: set live mode failed", "mode", mode, "on", on, "error", err)
+		return false
+	}
+	slog.Info("reasonix: live mode set", "mode", mode, "auto_approve", on)
+	return true
 }
 
 func (s *reasonixSession) Events() <-chan core.Event {
