@@ -229,6 +229,42 @@ func TestReasonixSession_SSE_MapsEventTypes(t *testing.T) {
 	assert.Contains(t, types, core.EventToolResult, "should contain tool_result event")
 }
 
+// ── Test: approval_request maps to EventPermissionRequest with ToolInput ──
+func TestReasonixSession_ApprovalRequest_MapsToolInput(t *testing.T) {
+	ts, sseCh := sseServer(t)
+	defer ts.Close()
+
+	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
+	require.NoError(t, err)
+	defer func() { _ = sess.Close() }()
+
+	go func() {
+		sseCh <- mustJSON(wireEvent{Kind: "approval_request", Approval: &wireApproval{
+			ID: "req-1", Tool: "bash", Subject: "touch /tmp/perm-test.txt",
+		}})
+		sseCh <- mustJSON(wireEvent{Kind: "turn_done"})
+	}()
+
+	go func() {
+		_ = sess.Send("test", "", nil, nil)
+	}()
+
+	events := drainEvents(sess.Events(), 2, 5*time.Second)
+
+	var perm *core.Event
+	for i := range events {
+		if events[i].Type == core.EventPermissionRequest {
+			perm = &events[i]
+			break
+		}
+	}
+	require.NotNil(t, perm, "should emit EventPermissionRequest")
+	assert.Equal(t, "req-1", perm.RequestID)
+	assert.Equal(t, "bash", perm.ToolName)
+	assert.Equal(t, "touch /tmp/perm-test.txt", perm.Content)
+	assert.Equal(t, "touch /tmp/perm-test.txt", perm.ToolInput, "ToolInput must carry the command so the permission card shows it")
+}
+
 // ── Test: SSE reconnect with backoff ─────────────────────────────
 
 func TestReasonixSession_SSEReconnect_Backoff(t *testing.T) {
