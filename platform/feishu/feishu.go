@@ -107,9 +107,10 @@ func init() {
 }
 
 type replyContext struct {
-	messageID  string
-	chatID     string
-	sessionKey string
+	messageID       string
+	chatID          string
+	sessionKey      string
+	bootstrapThread bool
 }
 
 type Platform struct {
@@ -1411,8 +1412,13 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	)
 
 	// Mark this thread as bot-engaged so subsequent attachment-only messages
-	// in the same thread can pass through without re-mentioning the bot.
-	p.markThreadSessionActive(sessionKey)
+	// in the same thread can pass through without re-mentioning the bot. When
+	// this is the first accepted message in an existing thread, remember that
+	// dispatch must bootstrap the agent context from the parent/root message.
+	rctx.bootstrapThread = p.markThreadSessionActive(sessionKey)
+	if rctx.bootstrapThread && parentID == "" {
+		parentID = stringValue(msg.RootId)
+	}
 
 	// Dispatch message handling asynchronously so the SDK event loop is not
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
@@ -1451,10 +1457,13 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
 	// Skip quote injection when thread_isolation is enabled and the message is
-	// inside a thread — the thread already provides conversational context, and
-	// long quoted prefixes can drown out the user's actual text (issue #764).
+	// inside an already-engaged thread — the thread provides conversational
+	// context, and long quoted prefixes can drown out the user's actual text
+	// (issue #764). The first accepted message in a pre-existing thread is the
+	// exception: earlier unmentioned messages were never dispatched to the
+	// agent, so bootstrap its context from the parent/root reply chain once.
 	var quoted quotedMessage
-	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
+	if parentID != "" && (!(p.threadIsolation && isThreadSessionKey(sessionKey)) || rctx.bootstrapThread) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
@@ -3330,12 +3339,17 @@ func isAttachmentMsgType(msgType string) bool {
 
 // markThreadSessionActive records that a thread sessionKey has been engaged
 // by an @bot message, enabling attachment-only follow-ups inside the thread.
-// No-op when thread isolation is disabled or sessionKey is not a thread key.
-func (p *Platform) markThreadSessionActive(sessionKey string) {
+// It reports whether this call activated the thread for the first time. It is
+// a no-op when thread isolation is disabled or sessionKey is not a thread key.
+func (p *Platform) markThreadSessionActive(sessionKey string) bool {
 	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
-		return
+		return false
 	}
-	p.activeThreadSessions.Store(sessionKey, time.Now())
+	_, loaded := p.activeThreadSessions.LoadOrStore(sessionKey, time.Now())
+	if loaded {
+		p.activeThreadSessions.Store(sessionKey, time.Now())
+	}
+	return !loaded
 }
 
 // isActiveThreadSession reports whether the given sessionKey corresponds to a
