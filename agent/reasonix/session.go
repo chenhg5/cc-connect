@@ -417,6 +417,10 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 			Type:     core.EventToolUse,
 			ToolName: we.Tool.Name,
 			Content:  we.Tool.Args,
+			// ToolInput drives the engine's tool-call display (rich card
+			// summary / streaming card); without it the command is blank
+			// even though it executes (same gap as approval_request).
+			ToolInput: we.Tool.Args,
 		})
 
 	case "tool_result":

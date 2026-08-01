@@ -227,6 +227,17 @@ func TestReasonixSession_SSE_MapsEventTypes(t *testing.T) {
 	assert.Contains(t, types, core.EventText, "should contain text event")
 	assert.Contains(t, types, core.EventToolUse, "should contain tool_use event")
 	assert.Contains(t, types, core.EventToolResult, "should contain tool_result event")
+
+	// ToolUse must carry ToolInput so the engine's tool-call display
+	// (rich card summary / streaming card) is not blank.
+	for _, evt := range events {
+		if evt.Type == core.EventToolUse {
+			assert.Equal(t, "read_file", evt.ToolName)
+			assert.Equal(t, "main.go", evt.Content)
+			assert.Equal(t, "main.go", evt.ToolInput, "ToolUse.ToolInput must carry the command for display")
+			break
+		}
+	}
 }
 
 // ── Test: approval_request maps to EventPermissionRequest with ToolInput ──
