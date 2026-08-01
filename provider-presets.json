@@ -629,6 +629,34 @@
           "codex_config": { "wire_api": "responses" }
         }
       }
+    },
+    {
+      "name": "orcarouter",
+      "display_name": "OrcaRouter",
+      "invite_url": "https://www.orcarouter.ai",
+      "description": "One OpenAI-compatible endpoint and one key across OpenAI, Anthropic, Google, DeepSeek, xAI, Qwen, Moonshot, MiniMax and Z.AI. Adaptive routing picks an upstream per request on cost/latency/quality, and the same key speaks the OpenAI, Anthropic and Responses wire formats, so Claude Code, Codex and OpenCode all work unchanged.",
+      "description_zh": "一个 OpenAI 兼容端点、一把 Key 打通 OpenAI、Anthropic、Google、DeepSeek、xAI、Qwen、Moonshot、MiniMax、Z.AI 等厂商。自适应路由按成本 / 延迟 / 质量为每个请求挑选上游；同一把 Key 同时支持 OpenAI、Anthropic、Responses 三种协议，Claude Code / Codex / OpenCode 均可零改动接入。",
+      "features": ["150+ Models", "Adaptive Routing", "All Wire Formats", "Gateway Security"],
+      "tier": 2,
+      "website": "https://www.orcarouter.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.orcarouter.ai",
+          "model": "anthropic/claude-opus-4.8",
+          "models": ["anthropic/claude-opus-4.8", "anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4.5"]
+        },
+        "codex": {
+          "base_url": "https://api.orcarouter.ai/v1",
+          "model": "openai/gpt-5.3-codex",
+          "models": ["openai/gpt-5.3-codex", "openai/gpt-5.2-codex", "openai/gpt-5.5"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.orcarouter.ai/v1",
+          "model": "anthropic/claude-opus-4.8",
+          "models": ["anthropic/claude-opus-4.8", "openai/gpt-5.5", "orcarouter/auto"]
+        }
+      }
     }
   ]
 }

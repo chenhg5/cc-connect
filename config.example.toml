@@ -953,6 +953,28 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # model = "MiniMax-M2.5-highspeed"
 # alias = "m25fast"
 #
+# # OrcaRouter — one key across OpenAI, Anthropic, Google, DeepSeek, xAI, Qwen and more
+# # OrcaRouter — 一把 Key 打通 OpenAI、Anthropic、Google、DeepSeek、xAI、Qwen 等厂商
+# # Serves an Anthropic-compatible endpoint, so Claude Code works unchanged and
+# # adaptive thinking is passed through (no thinking = "disabled" needed).
+# # 提供 Anthropic 兼容端点，Claude Code 零改动即可使用，adaptive thinking 原样透传
+# # （无需设置 thinking = "disabled"）。
+# # Docs: https://docs.orcarouter.ai — full catalog: https://www.orcarouter.ai/models
+# [[projects.agent.providers]]
+# name = "orcarouter"
+# api_key = "sk-orca-xxx"
+# base_url = "https://api.orcarouter.ai"
+# model = "anthropic/claude-opus-4.8"
+# [[projects.agent.providers.models]]
+# model = "anthropic/claude-opus-4.8"
+# alias = "opus"
+# [[projects.agent.providers.models]]
+# model = "anthropic/claude-sonnet-5"
+# alias = "sonnet"
+# [[projects.agent.providers.models]]
+# model = "anthropic/claude-haiku-4.5"
+# alias = "haiku"
+#
 # # For special setups (Bedrock, Vertex, Foundry), use the env map:
 # # 特殊环境（Bedrock、Vertex、Foundry）使用 env 字段：
 # [[projects.agent.providers]]
