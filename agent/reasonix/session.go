@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +63,59 @@ type wireAskQuestion struct {
 type wireAskOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
+}
+
+// humanizeToolArgs converts reasonix's JSON tool args (e.g. bash
+// {"command":"ls -la"} or read_file {"path":"/etc/hosts"}) into a compact
+// human-readable string for IM cards. Unknown JSON falls back to the raw
+// string; non-JSON input is returned unchanged.
+func humanizeToolArgs(args string) string {
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return trimmed
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+		return trimmed
+	}
+	// bash/shell calls: always show the actual command, not a description.
+	if _, isBash := m["command"]; isBash {
+		if v, ok := m["command"].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	// Non-shell tools: prefer a concise description, then path/file.
+	if v, ok := m["description"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := m["path"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := m["file"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	// Fall back to a compact key=value rendering, trimmed to a sane length.
+	var parts []string
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			parts = append(parts, k+"="+val)
+		case float64:
+			parts = append(parts, fmt.Sprintf("%s=%g", k, val))
+		default:
+			b, _ := json.Marshal(val)
+			parts = append(parts, k+"="+string(b))
+		}
+	}
+	sort.Strings(parts)
+	out := strings.Join(parts, " ")
+	if len(out) > 300 {
+		out = out[:300] + "…"
+	}
+	return out
 }
 
 // ── Session ──────────────────────────────────────────────────────
@@ -413,14 +467,18 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 
 	case "tool_dispatch":
 		s.flushThinking()
+		// Parse the JSON args into a human-readable summary (e.g. bash
+		// {"command":"ls -la"} → "ls -la") so Feishu/Telegram cards show the
+		// command instead of raw JSON.
+		toolInput := humanizeToolArgs(we.Tool.Args)
 		s.emit(core.Event{
 			Type:     core.EventToolUse,
 			ToolName: we.Tool.Name,
-			Content:  we.Tool.Args,
+			Content:  toolInput,
 			// ToolInput drives the engine's tool-call display (rich card
 			// summary / streaming card); without it the command is blank
 			// even though it executes (same gap as approval_request).
-			ToolInput: we.Tool.Args,
+			ToolInput: toolInput,
 		})
 
 	case "tool_result":
@@ -440,14 +498,16 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 		s.mu.Lock()
 		s.pendingApprovalID = we.Approval.ID
 		s.mu.Unlock()
+		// Subject is usually plain text already; humanize defensively in case
+		// it carries JSON args (e.g. tool args serialized as an object).
+		subject := humanizeToolArgs(we.Approval.Subject)
 		s.emit(core.Event{
 			Type:      core.EventPermissionRequest,
 			RequestID: we.Approval.ID,
-			Content:   we.Approval.Subject,
+			Content:   subject,
 			ToolName:  we.Approval.Tool,
-			// Subject 就是被请求授权的命令/操作文本,
-			// 引擎用 ToolInput 渲染权限卡片的命令内容。
-			ToolInput: we.Approval.Subject,
+			// ToolInput 用于渲染权限卡片的命令内容。
+			ToolInput: subject,
 		})
 
 	case "ask_request":

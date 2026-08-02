@@ -520,6 +520,33 @@ func TestReasonixSession_PlatformPrompt_PrependedToSubmit(t *testing.T) {
 	assert.Contains(t, submits[0], "first message")
 }
 
+// ── Test: humanizeToolArgs converts JSON args to readable text ──
+
+func TestHumanizeToolArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+		want string
+	}{
+		{"empty", "", ""},
+		{"empty object", "{}", ""},
+		{"bash command", `{"command": "ls -la"}`, "ls -la"},
+		{"bash with space", `{"command":"echo hello > /tmp/x"}`, "echo hello > /tmp/x"},
+		{"read_file path", `{"path": "/etc/hosts"}`, "/etc/hosts"},
+		{"edit file", `{"path":"main.go","old_string":"a","new_string":"b"}`, "main.go"},
+		{"bash ignores description", `{"description":"List files","command":"ls"}`, "ls"},
+		{"non-bash description preferred", `{"description":"Read config","path":"/etc/hosts"}`, "Read config"},
+		{"non-json passthrough", "plain text", "plain text"},
+		{"unknown fields kv", `{"timeout":5,"retries":2}`, "retries=2 timeout=5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := humanizeToolArgs(tc.args)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // ── Test: static interface assertions ────────────────────────────
 
 // These compile-time checks ensure Agent and reasonixSession remain compliant
