@@ -27,6 +27,12 @@ type wsTransport struct {
 	name    string
 	project string
 
+	// extraHeaders are injected into the WebSocket upgrade request, in
+	// addition to the standard Authorization/X-Cloud-Web-Token headers.
+	// Used for upstreams that require bespoke auth (e.g. IAP AK/SK via
+	// X-Brain-Authorization).
+	extraHeaders map[string]string
+
 	mu        sync.RWMutex
 	caps      map[string]bool
 	conn      *websocket.Conn
@@ -40,12 +46,13 @@ type wsTransport struct {
 	previewRequests map[string]chan string
 }
 
-func newWSTransport(wsURL, token, name, project string) *wsTransport {
+func newWSTransport(wsURL, token, name, project string, extraHeaders map[string]string) *wsTransport {
 	return &wsTransport{
 		wsURL:           wsURL,
 		token:           token,
 		name:            name,
 		project:         project,
+		extraHeaders:    extraHeaders,
 		caps:            defaultCapabilities(),
 		previewRequests: make(map[string]chan string),
 	}
@@ -130,6 +137,11 @@ func (t *wsTransport) connectOnce(ctx context.Context) error {
 	if t.token != "" {
 		header.Set("Authorization", "Bearer "+t.token)
 		header.Set("X-Cloud-Web-Token", t.token)
+	}
+	for k, v := range t.extraHeaders {
+		if v != "" {
+			header.Set(k, v)
+		}
 	}
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), header)
