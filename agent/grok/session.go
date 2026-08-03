@@ -41,6 +41,27 @@ type sessionConfig struct {
 	maxTurns        int
 }
 
+type processCleanupRecorder struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (recorder *processCleanupRecorder) record(err error) error {
+	if err == nil {
+		return nil
+	}
+	recorder.mu.Lock()
+	recorder.err = errors.Join(recorder.err, err)
+	recorder.mu.Unlock()
+	return err
+}
+
+func (recorder *processCleanupRecorder) Err() error {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return recorder.err
+}
+
 // grokSession is a persistent cc-connect session backed by one Grok headless
 // process per turn. turnMu serializes resume calls and is also the lifecycle
 // barrier used by Close, so the event channel cannot close while Send is
@@ -53,8 +74,10 @@ type grokSession struct {
 	mode            string
 	timeout         time.Duration
 	extraEnv        []string
+	processEnv      []string
 	reasoningEffort string
 	maxTurns        int
+	forceKill       func(*exec.Cmd) error
 
 	events    chan core.Event
 	sessionID atomic.Value // string
@@ -65,6 +88,7 @@ type grokSession struct {
 	turnMu       sync.Mutex
 	turnCancelMu sync.Mutex
 	turnCancel   context.CancelFunc
+	turnDone     <-chan struct{}
 	wg           sync.WaitGroup
 	closeOnce    sync.Once
 	closeDone    chan struct{}
@@ -83,8 +107,10 @@ func newGrokSession(ctx context.Context, cfg sessionConfig) (*grokSession, error
 		mode:            cfg.mode,
 		timeout:         cfg.timeout,
 		extraEnv:        append([]string(nil), cfg.extraEnv...),
+		processEnv:      grokProcessEnv(cfg.extraEnv),
 		reasoningEffort: cfg.reasoningEffort,
 		maxTurns:        cfg.maxTurns,
+		forceKill:       forceKillCmd,
 		events:          make(chan core.Event, 128),
 		ctx:             sessionCtx,
 		cancel:          cancel,
@@ -143,6 +169,15 @@ func (gs *grokSession) Send(prompt, messageID string, images []core.ImageAttachm
 		return errors.New("grok: session is closed")
 	}
 
+	turnCtx, turnCancel := gs.newTurnContext()
+	gs.setTurnCancel(turnCancel, turnCtx.Done())
+	defer func() {
+		if !started {
+			gs.clearTurnCancel(turnCancel)
+			turnCancel()
+		}
+	}()
+
 	fullPrompt, err := gs.promptWithAttachments(prompt, messageID, images, files)
 	if err != nil {
 		return err
@@ -158,14 +193,9 @@ func (gs *grokSession) Send(prompt, messageID string, images []core.ImageAttachm
 		}
 	}()
 
-	turnCtx, turnCancel := gs.newTurnContext()
-	gs.setTurnCancel(turnCancel)
-	defer func() {
-		if !started {
-			gs.clearTurnCancel(turnCancel)
-			turnCancel()
-		}
-	}()
+	if err := turnCtx.Err(); err != nil {
+		return fmt.Errorf("grok: turn stopped: %w", err)
+	}
 
 	args := gs.buildArgs(promptFile)
 	slog.Debug("grok: launching headless turn",
@@ -174,10 +204,15 @@ func (gs *grokSession) Send(prompt, messageID string, images []core.ImageAttachm
 		"args", core.RedactArgs(args))
 	cmd := exec.CommandContext(turnCtx, gs.cmd, args...)
 	cmd.Dir = gs.workDir
-	cmd.Env = core.MergeEnv(os.Environ(), gs.extraEnv)
+	cmd.Env = append([]string(nil), gs.processEnv...)
 	cmd.WaitDelay = 2 * time.Second
 	prepareCmdForKill(cmd)
-	cmd.Cancel = func() error { return forceKillCmd(cmd) }
+	killCmd := gs.forceKill
+	if killCmd == nil {
+		killCmd = forceKillCmd
+	}
+	cleanup := &processCleanupRecorder{}
+	cmd.Cancel = func() error { return cleanup.record(killCmd(cmd)) }
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -199,7 +234,7 @@ func (gs *grokSession) Send(prompt, messageID string, images []core.ImageAttachm
 		defer turnCancel()
 		defer gs.clearTurnCancel(turnCancel)
 		defer removeTempFile(promptFile)
-		gs.readLoop(turnCtx, cmd, stdout, stderr)
+		gs.readLoop(turnCtx, cmd, stdout, stderr, killCmd, cleanup)
 	}()
 	return nil
 }
@@ -211,9 +246,10 @@ func (gs *grokSession) newTurnContext() (context.Context, context.CancelFunc) {
 	return context.WithCancel(gs.ctx)
 }
 
-func (gs *grokSession) setTurnCancel(cancel context.CancelFunc) {
+func (gs *grokSession) setTurnCancel(cancel context.CancelFunc, done <-chan struct{}) {
 	gs.turnCancelMu.Lock()
 	gs.turnCancel = cancel
+	gs.turnDone = done
 	gs.turnCancelMu.Unlock()
 }
 
@@ -221,6 +257,7 @@ func (gs *grokSession) clearTurnCancel(_ context.CancelFunc) {
 	gs.turnCancelMu.Lock()
 	// Turns are serialized, so the current cancel belongs to this reader.
 	gs.turnCancel = nil
+	gs.turnDone = nil
 	gs.turnCancelMu.Unlock()
 }
 
@@ -304,7 +341,14 @@ func removeTempFile(path string) {
 	}
 }
 
-func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderr *cappedWriter) {
+func (gs *grokSession) readLoop(
+	ctx context.Context,
+	cmd *exec.Cmd,
+	stdout io.ReadCloser,
+	stderr *cappedWriter,
+	killCmd func(*exec.Cmd) error,
+	cleanup *processCleanupRecorder,
+) {
 	defer func() {
 		if err := stdout.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 			slog.Debug("grok: close stdout", "error", err)
@@ -321,7 +365,9 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 		}
 		var raw map[string]any
 		if err := json.Unmarshal(line, &raw); err != nil {
-			slog.Debug("grok: ignored non-JSON stdout", "line", truncate(string(line), 200))
+			// Never log raw CLI output here. Warnings and malformed frames can
+			// contain prompt text or credentials inherited by the child process.
+			slog.Debug("grok: ignored non-JSON stdout", "bytes", len(line))
 			continue
 		}
 		if state.terminal {
@@ -335,27 +381,30 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 		// Scanner stops consuming after an oversized token. Kill the process
 		// before Wait so a child that is still filling stdout cannot deadlock
 		// on a full pipe.
-		_ = forceKillCmd(cmd)
+		_ = cleanup.record(killCmd(cmd))
 	}
 	waitErr := cmd.Wait()
+	cleanupDetail := gs.logCleanupFailure(cleanup.Err())
 
 	if state.terminal {
 		return
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		stoppedErr := fmt.Errorf("grok: turn stopped: %w", ctxErr)
+		gs.emitStopped(core.Event{Type: core.EventError, Error: withCleanupFailure(stoppedErr, cleanupDetail)})
+		return
+	}
 	if scanErr != nil {
-		gs.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("grok: read NDJSON stream: %w", scanErr)})
+		streamErr := fmt.Errorf("grok: read NDJSON stream: %w", scanErr)
+		gs.emitTerminal(ctx, core.Event{Type: core.EventError, Error: withCleanupFailure(streamErr, cleanupDetail)})
 		return
 	}
 	if waitErr != nil {
-		if ctx.Err() != nil {
-			gs.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("grok: turn stopped: %w", ctx.Err())})
-			return
-		}
-		detail := redactEnvSecrets(stripANSI(strings.TrimSpace(stderr.String())), gs.extraEnv)
+		detail := redactEnvSecrets(stripANSI(strings.TrimSpace(stderr.String())), gs.processEnv)
 		if detail == "" {
 			detail = waitErr.Error()
 		}
-		gs.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("grok: headless turn failed: %s", truncate(detail, 1200))})
+		gs.emitTerminal(ctx, core.Event{Type: core.EventError, Error: fmt.Errorf("grok: headless turn failed: %s", truncate(detail, 1200))})
 		return
 	}
 
@@ -363,12 +412,32 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	// usable, but finalize this turn if a future CLI version omits it.
 	state.flushThinking(gs)
 	state.flushText(gs)
-	gs.emit(core.Event{
+	gs.emitTerminal(ctx, core.Event{
 		Type:      core.EventResult,
 		Content:   state.finalText,
 		SessionID: gs.CurrentSessionID(),
 		Done:      true,
 	})
+}
+
+func (gs *grokSession) logCleanupFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := redactEnvSecrets(stripANSI(strings.TrimSpace(err.Error())), gs.processEnv)
+	if detail == "" {
+		detail = "unknown cleanup failure"
+	}
+	detail = truncate(detail, 1200)
+	slog.Warn("grok: process-tree cleanup incomplete", "error", detail)
+	return detail
+}
+
+func withCleanupFailure(base error, detail string) error {
+	if detail == "" {
+		return base
+	}
+	return fmt.Errorf("%w; process-tree cleanup incomplete: %s", base, detail)
 }
 
 type streamBlock struct {
@@ -429,8 +498,7 @@ func (gs *grokSession) handleEvent(state *streamState, raw map[string]any) bool 
 		state.flushThinking(gs)
 		state.flushText(gs)
 		if resultIsError(raw) {
-			gs.emit(core.Event{Type: core.EventError, Error: gs.streamError(raw)})
-			return true
+			return gs.emit(core.Event{Type: core.EventError, Error: gs.streamError(raw)})
 		}
 		content := stringValue(raw["result"])
 		if content == "" {
@@ -446,13 +514,11 @@ func (gs *grokSession) handleEvent(state *streamState, raw map[string]any) bool 
 		usage, _ := raw["usage"].(map[string]any)
 		applyUsage(&event, usage)
 		gs.updateContextUsage(event, raw, state)
-		gs.emit(event)
-		return true
+		return gs.emit(event)
 	case "error":
 		state.flushThinking(gs)
 		state.flushText(gs)
-		gs.emit(core.Event{Type: core.EventError, Error: gs.streamError(raw)})
-		return true
+		return gs.emit(core.Event{Type: core.EventError, Error: gs.streamError(raw)})
 	default:
 		slog.Debug("grok: unhandled NDJSON event", "type", stringValue(raw["type"]))
 		return false
@@ -460,7 +526,7 @@ func (gs *grokSession) handleEvent(state *streamState, raw map[string]any) bool 
 }
 
 func (gs *grokSession) streamError(raw map[string]any) error {
-	detail := redactEnvSecrets(stripANSI(resultErrorMessage(raw)), gs.extraEnv)
+	detail := redactEnvSecrets(stripANSI(resultErrorMessage(raw)), gs.processEnv)
 	return fmt.Errorf("grok: %s", truncate(detail, 1200))
 }
 
@@ -882,7 +948,7 @@ func (gs *grokSession) updateContextUsage(event core.Event, raw map[string]any, 
 		}
 	}
 	if contextWindow == 0 {
-		contextWindow = grokModelContextWindow(gs.extraEnv, state.currentModel)
+		contextWindow = grokModelContextWindow(gs.processEnv, gs.workDir, state.currentModel)
 	}
 	inputTokens := state.lastInputTokens
 	cacheRead := state.lastCacheRead
@@ -949,7 +1015,46 @@ func boolValue(value any) bool {
 	return result
 }
 
-func (gs *grokSession) emit(event core.Event) {
+func (gs *grokSession) emit(event core.Event) bool {
+	gs.turnCancelMu.Lock()
+	turnDone := gs.turnDone
+	gs.turnCancelMu.Unlock()
+	select {
+	case gs.events <- event:
+		return true
+	case <-gs.ctx.Done():
+		return false
+	case <-turnDone:
+		return false
+	}
+}
+
+func (gs *grokSession) emitTerminal(ctx context.Context, event core.Event) {
+	if gs.emit(event) {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		gs.emitStopped(core.Event{Type: core.EventError, Error: fmt.Errorf("grok: turn stopped: %w", err)})
+	}
+}
+
+func (gs *grokSession) emitStopped(event core.Event) {
+	select {
+	case gs.events <- event:
+		return
+	case <-gs.ctx.Done():
+		return
+	default:
+	}
+
+	// A terminal event is part of the AgentSession contract. If backpressure
+	// filled the channel, sacrifice one stale partial event so the consumer can
+	// still observe that the cancelled turn ended.
+	select {
+	case <-gs.events:
+		slog.Debug("grok: event channel full, dropped buffered event for stopped turn")
+	default:
+	}
 	select {
 	case gs.events <- event:
 	case <-gs.ctx.Done():
@@ -989,13 +1094,13 @@ func (gs *grokSession) Close() error {
 		}
 		gs.turnCancelMu.Unlock()
 
-		// Wait for Send preparation and the active reader to leave the
-		// lifecycle barrier before closing the shared event channel.
+		// Hold the lifecycle barrier through channel teardown. An active reader
+		// calls wg.Done before releasing turnMu, so Wait cannot race with Add.
 		gs.turnMu.Lock()
-		gs.turnMu.Unlock()
 		gs.wg.Wait()
 		close(gs.events)
 		close(gs.closeDone)
+		gs.turnMu.Unlock()
 	})
 	<-gs.closeDone
 	return nil
@@ -1025,15 +1130,16 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 func stripANSI(value string) string { return ansiEscape.ReplaceAllString(value, "") }
 
 func redactEnvSecrets(value string, env []string) string {
-	for _, pair := range env {
-		key, secret, ok := strings.Cut(pair, "=")
+	redactedEnv := core.RedactEnv(env)
+	for i, pair := range env {
+		if i >= len(redactedEnv) || redactedEnv[i] == pair {
+			continue
+		}
+		_, secret, ok := strings.Cut(pair, "=")
 		if !ok || secret == "" {
 			continue
 		}
-		upper := strings.ToUpper(key)
-		if strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") {
-			value = core.RedactToken(value, secret)
-		}
+		value = core.RedactToken(value, secret)
 	}
 	return value
 }

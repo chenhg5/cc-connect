@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,12 +38,12 @@ type grokSessionRecord struct {
 	info core.AgentSessionInfo
 }
 
-func grokModelContextWindow(extraEnv []string, model string) int {
+func grokModelContextWindow(processEnv []string, workDir, model string) int {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return 0
 	}
-	data, err := os.ReadFile(filepath.Join(resolveGrokHome(extraEnv), "models_cache.json"))
+	data, err := os.ReadFile(filepath.Join(resolveGrokHome(processEnv, workDir), "models_cache.json"))
 	if err != nil {
 		return 0
 	}
@@ -58,25 +60,142 @@ func grokModelContextWindow(extraEnv []string, model string) int {
 	return cache.Models[model].Info.ContextWindow
 }
 
-// resolveGrokHome mirrors Grok's environment precedence. The last injected
-// value wins because core.MergeEnv applies later entries as overrides.
-func resolveGrokHome(extraEnv []string) string {
-	for i := len(extraEnv) - 1; i >= 0; i-- {
-		key, value, ok := strings.Cut(extraEnv[i], "=")
-		if ok && key == "GROK_HOME" {
-			if value = strings.TrimSpace(value); value != "" {
-				return value
-			}
+func grokModelReasoningEfforts(effectiveEnv []string, workDir, model string) []string {
+	data, err := os.ReadFile(filepath.Join(resolveGrokHome(effectiveEnv, workDir), "models_cache.json"))
+	if err != nil {
+		return nil
+	}
+	var cache struct {
+		Models map[string]struct {
+			Info struct {
+				ReasoningEfforts []struct {
+					ID string `json:"id"`
+				} `json:"reasoning_efforts"`
+			} `json:"info"`
+		} `json:"models"`
+	}
+	if json.Unmarshal(data, &cache) != nil {
+		return nil
+	}
+
+	model = strings.TrimSpace(model)
+	if model == "" && len(cache.Models) == 1 {
+		for onlyModel := range cache.Models {
+			model = onlyModel
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv("GROK_HOME")); value != "" {
-		return value
+	entry, ok := cache.Models[model]
+	if !ok {
+		return nil
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	seen := make(map[string]bool)
+	efforts := make([]string, 0, len(entry.Info.ReasoningEfforts))
+	for _, option := range entry.Info.ReasoningEfforts {
+		id := normalizeReasoningEffort(option.ID)
+		key := strings.ToLower(id)
+		if id == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		efforts = append(efforts, id)
+	}
+	return efforts
+}
+
+// resolveGrokHome mirrors the environment seen by a launched Grok process.
+// An explicitly empty GROK_HOME clears an inherited value and falls back to
+// HOME. Relative state directories are resolved from the process work_dir.
+func resolveGrokHome(effectiveEnv []string, workDir string) string {
+	processEnv := grokProcessEnv(effectiveEnv)
+	if value, ok := grokEnvValue(processEnv, "GROK_HOME"); ok {
+		if value = strings.TrimSpace(value); value != "" {
+			return resolveGrokPath(value, workDir)
+		}
+	}
+
+	homeDir := grokUserHome(processEnv)
+	if homeDir == "" {
 		return ""
 	}
-	return filepath.Join(homeDir, ".grok")
+	return resolveGrokPath(filepath.Join(homeDir, ".grok"), workDir)
+}
+
+func grokProcessEnv(effectiveEnv []string) []string {
+	return mergeGrokEnv(os.Environ(), effectiveEnv)
+}
+
+// mergeGrokEnv makes the last assignment authoritative while preserving the
+// remaining entries' order. Grok's layered config, provider, and per-session
+// env need one unambiguous value per key.
+func mergeGrokEnv(layers ...[]string) []string {
+	var flattened []string
+	for _, layer := range layers {
+		flattened = append(flattened, layer...)
+	}
+	last := make(map[string]int, len(flattened))
+	for i, pair := range flattened {
+		if key, _, ok := strings.Cut(pair, "="); ok {
+			last[grokEnvKey(key)] = i
+		}
+	}
+	env := make([]string, 0, len(flattened))
+	for i, pair := range flattened {
+		key, _, ok := strings.Cut(pair, "=")
+		if !ok || last[grokEnvKey(key)] == i {
+			env = append(env, pair)
+		}
+	}
+	return env
+}
+
+func grokEnvValue(env []string, name string) (string, bool) {
+	name = grokEnvKey(name)
+	for i := len(env) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(env[i], "=")
+		if ok && grokEnvKey(key) == name {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func grokEnvKey(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
+}
+
+func grokUserHome(processEnv []string) string {
+	if home, ok := grokEnvValue(processEnv, "HOME"); ok && strings.TrimSpace(home) != "" {
+		return strings.TrimSpace(home)
+	}
+	if home, ok := grokEnvValue(processEnv, "USERPROFILE"); ok && strings.TrimSpace(home) != "" {
+		return strings.TrimSpace(home)
+	}
+	drive, _ := grokEnvValue(processEnv, "HOMEDRIVE")
+	path, _ := grokEnvValue(processEnv, "HOMEPATH")
+	if home := strings.TrimSpace(drive + path); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return strings.TrimSpace(home)
+}
+
+func resolveGrokPath(path, workDir string) string {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if strings.TrimSpace(workDir) == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			workDir = cwd
+		}
+	}
+	if absWorkDir, err := filepath.Abs(workDir); err == nil {
+		workDir = absWorkDir
+	}
+	return filepath.Clean(filepath.Join(workDir, path))
 }
 
 func listGrokSessions(grokHome, workDir string) ([]core.AgentSessionInfo, error) {
@@ -116,7 +235,7 @@ func scanGrokSessions(grokHome, workDir string) ([]grokSessionRecord, error) {
 		return nil, fmt.Errorf("grok: resolve work_dir %q: %w", workDir, err)
 	}
 	if strings.TrimSpace(grokHome) == "" {
-		grokHome = resolveGrokHome(nil)
+		grokHome = resolveGrokHome(nil, workDir)
 	}
 	if grokHome == "" {
 		return nil, nil
@@ -186,7 +305,7 @@ func readGrokSessionRecord(sessionDir, groupCWD, targetCWD string) (grokSessionR
 		sessionCWD = groupCWD
 	}
 	canonicalCWD, err := canonicalGrokWorkDir(sessionCWD)
-	if err != nil || canonicalCWD != targetCWD {
+	if err != nil || !sameGrokWorkDir(canonicalCWD, targetCWD) {
 		return grokSessionRecord{}, false
 	}
 
@@ -253,6 +372,15 @@ func canonicalGrokWorkDir(workDir string) (string, error) {
 	return abs, nil
 }
 
+func sameGrokWorkDir(left, right string) bool {
+	if left == right {
+		return true
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
+}
+
 func firstGrokTime(values ...string) time.Time {
 	for _, value := range values {
 		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
@@ -274,7 +402,11 @@ func getGrokSessionHistory(grokHome, workDir, sessionID string, limit int) ([]co
 	if err != nil {
 		return nil, fmt.Errorf("grok: open session history: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			slog.Warn("grok: close session history", "error", err)
+		}
+	}()
 
 	var entries []core.HistoryEntry
 	reader := bufio.NewReader(file)

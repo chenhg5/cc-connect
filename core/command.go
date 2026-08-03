@@ -22,9 +22,11 @@ type CustomCommand struct {
 
 // CommandRegistry holds all available custom commands and resolves agent command files.
 type CommandRegistry struct {
-	mu        sync.RWMutex
-	commands  map[string]*CustomCommand // from config.toml or runtime add
-	agentDirs []string                  // directories to scan for *.md command files
+	mu                 sync.RWMutex
+	commands           map[string]*CustomCommand // from config.toml or runtime add
+	agentDirs          []string                  // directories to scan for *.md command files
+	agentIgnorePaths   []string
+	agentDisabledNames []string
 }
 
 func NewCommandRegistry() *CommandRegistry {
@@ -72,7 +74,19 @@ func (r *CommandRegistry) Remove(name string) bool {
 
 // SetAgentDirs sets the directories to scan for agent command files.
 func (r *CommandRegistry) SetAgentDirs(dirs []string) {
-	r.agentDirs = dirs
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agentDirs = append([]string(nil), dirs...)
+}
+
+// SetAgentFileFilters applies native agent discovery filters only to command
+// files found through agentDirs. Registered config and runtime commands are
+// intentionally unaffected.
+func (r *CommandRegistry) SetAgentFileFilters(ignorePaths, disabledNames []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agentIgnorePaths = append([]string(nil), ignorePaths...)
+	r.agentDisabledNames = append([]string(nil), disabledNames...)
 }
 
 // Resolve looks up a command by name. Config commands take priority, then
@@ -96,38 +110,47 @@ func (r *CommandRegistry) Resolve(name string) (*CustomCommand, bool) {
 			return c, true
 		}
 	}
+	agentDirs := append([]string(nil), r.agentDirs...)
+	ignorePaths := append([]string(nil), r.agentIgnorePaths...)
+	disabledNames := append([]string(nil), r.agentDisabledNames...)
 	r.mu.RUnlock()
 
-	// Scan agent command directories; try both original name and hyphenated variant
-	candidates := []string{name}
-	if alt := strings.ReplaceAll(name, "_", "-"); alt != name {
-		candidates = append(candidates, alt)
-	}
-	for _, dir := range r.agentDirs {
-		absDir, err := filepath.Abs(dir)
+	ignorePaths, disabled := prepareAgentFileFilters(ignorePaths, disabledNames)
+	// Scan agent command directories, preferring the requested spelling before
+	// trying the established hyphen/underscore aliases.
+	for _, dir := range agentDirs {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		for _, candidate := range candidates {
-			mdPath := filepath.Join(dir, candidate+".md")
-			absPath, err := filepath.Abs(mdPath)
-			if err != nil || !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) {
-				continue
+		for _, candidate := range agentCommandCandidates(name) {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+					continue
+				}
+				actualName := strings.TrimSuffix(entry.Name(), ".md")
+				if !strings.EqualFold(actualName, candidate) {
+					continue
+				}
+				mdPath := filepath.Join(dir, entry.Name())
+				if agentCommandFileFiltered(actualName, mdPath, ignorePaths, disabled) {
+					continue
+				}
+				data, err := os.ReadFile(mdPath)
+				if err != nil {
+					continue
+				}
+				content := strings.TrimSpace(string(data))
+				if content == "" {
+					continue
+				}
+				slog.Debug("command: loaded agent command file", "path", mdPath)
+				return &CustomCommand{
+					Name:   actualName,
+					Prompt: content,
+					Source: "agent",
+				}, true
 			}
-			data, err := os.ReadFile(mdPath)
-			if err != nil {
-				continue
-			}
-			content := strings.TrimSpace(string(data))
-			if content == "" {
-				continue
-			}
-			slog.Debug("command: loaded agent command file", "path", mdPath)
-			return &CustomCommand{
-				Name:   candidate,
-				Prompt: content,
-				Source: "agent",
-			}, true
 		}
 	}
 
@@ -137,17 +160,25 @@ func (r *CommandRegistry) Resolve(name string) (*CustomCommand, bool) {
 // ListAll returns all registered commands (config + agent command files).
 func (r *CommandRegistry) ListAll() []*CustomCommand {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	registered := make([]*CustomCommand, 0, len(r.commands))
+	for _, command := range r.commands {
+		registered = append(registered, command)
+	}
+	agentDirs := append([]string(nil), r.agentDirs...)
+	ignorePaths := append([]string(nil), r.agentIgnorePaths...)
+	disabledNames := append([]string(nil), r.agentDisabledNames...)
+	r.mu.RUnlock()
 
 	seen := make(map[string]bool)
 	var result []*CustomCommand
 
-	for _, c := range r.commands {
+	for _, c := range registered {
 		result = append(result, c)
 		seen[strings.ToLower(c.Name)] = true
 	}
 
-	for _, dir := range r.agentDirs {
+	ignorePaths, disabled := prepareAgentFileFilters(ignorePaths, disabledNames)
+	for _, dir := range agentDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -160,10 +191,14 @@ func (r *CommandRegistry) ListAll() []*CustomCommand {
 			if seen[strings.ToLower(name)] {
 				continue
 			}
+			path := filepath.Join(dir, entry.Name())
+			if agentCommandFileFiltered(name, path, ignorePaths, disabled) {
+				continue
+			}
 			seen[strings.ToLower(name)] = true
 
 			desc := ""
-			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			data, err := os.ReadFile(path)
 			if err == nil {
 				first, _, _ := strings.Cut(strings.TrimSpace(string(data)), "\n")
 				if len([]rune(first)) > 60 {
@@ -181,6 +216,47 @@ func (r *CommandRegistry) ListAll() []*CustomCommand {
 	}
 
 	return result
+}
+
+func agentCommandCandidates(name string) []string {
+	candidates := make([]string, 0, 3)
+	for _, candidate := range []string{
+		name,
+		strings.ReplaceAll(name, "_", "-"),
+		strings.ReplaceAll(name, "-", "_"),
+	} {
+		duplicate := false
+		for _, existing := range candidates {
+			if candidate == existing {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func prepareAgentFileFilters(ignorePaths, disabledNames []string) ([]string, map[string]bool) {
+	canonicalIgnorePaths := make([]string, 0, len(ignorePaths))
+	for _, path := range ignorePaths {
+		if strings.TrimSpace(path) != "" {
+			canonicalIgnorePaths = append(canonicalIgnorePaths, canonicalDiscoveryPath(path))
+		}
+	}
+	disabled := make(map[string]bool, len(disabledNames))
+	for _, name := range disabledNames {
+		if name != "" {
+			disabled[name] = true
+		}
+	}
+	return canonicalIgnorePaths, disabled
+}
+
+func agentCommandFileFiltered(name, path string, ignorePaths []string, disabled map[string]bool) bool {
+	return disabled[name] || discoveryPathIgnored(path, ignorePaths)
 }
 
 // placeholderRe matches {{1}}, {{2*}}, {{args}}, and variants with defaults like {{1:foo}}.

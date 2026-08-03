@@ -200,12 +200,85 @@ func TestSkillRegistryListAll_IgnoresRootSkillFile(t *testing.T) {
 	}
 }
 
+func TestSkillRegistryConfiguredPaths_RecursesAndAppliesFilters(t *testing.T) {
+	conventionalRoot := t.TempDir()
+	configuredRoot := t.TempDir()
+	directRoot := t.TempDir()
+
+	writeSkillFile(t, filepath.Join(conventionalRoot, "conventional", "SKILL.md"), "Conventional skill")
+	writeSkillFile(t, filepath.Join(conventionalRoot, "ignored-conventional", "SKILL.md"), "Ignored conventional skill")
+	writeSkillFile(t, filepath.Join(configuredRoot, "teams", "nested-skill", "SKILL.md"), "Nested configured skill")
+	writeSkillFile(t, filepath.Join(configuredRoot, "ignored", "hidden-skill", "SKILL.md"), "Ignored configured skill")
+	writeSkillFile(t, filepath.Join(configuredRoot, "ignored-sibling", "boundary-skill", "SKILL.md"), "Boundary skill")
+	writeSkillFile(t, filepath.Join(configuredRoot, "disabled-skill", "SKILL.md"), "Disabled configured skill")
+	writeSkillFile(t, filepath.Join(configuredRoot, "disabled_skill", "SKILL.md"), "Distinct underscore skill")
+	writeNamedSkillFile(t, filepath.Join(configuredRoot, "frontmatter-folder", "SKILL.md"), "frontmatter-disabled")
+	directFile := filepath.Join(directRoot, "direct-skill", "SKILL.md")
+	writeSkillFile(t, directFile, "Direct configured skill")
+
+	r := NewSkillRegistry()
+	r.SetDiscoveryConfig(SkillDiscoveryConfig{
+		Dirs:          []string{conventionalRoot},
+		Paths:         []string{configuredRoot, directFile},
+		IgnorePaths:   []string{filepath.Join(conventionalRoot, "ignored-conventional"), filepath.Join(configuredRoot, "ignored")},
+		DisabledNames: []string{"disabled_skill", "frontmatter-disabled"},
+	})
+
+	want := []string{"conventional", "nested-skill", "boundary-skill", "disabled-skill", "direct-skill"}
+	gotNames := make(map[string]bool)
+	for _, skill := range r.ListAll() {
+		gotNames[skill.Name] = true
+	}
+	for _, name := range want {
+		if !gotNames[name] {
+			t.Errorf("expected %q to be discovered: %v", name, gotNames)
+		}
+	}
+	for _, name := range []string{"ignored-conventional", "hidden-skill", "disabled_skill", "frontmatter-folder"} {
+		if gotNames[name] {
+			t.Errorf("expected %q to be filtered", name)
+		}
+	}
+	if len(gotNames) != len(want) {
+		t.Fatalf("skills discovered = %d, want %d: %v", len(gotNames), len(want), gotNames)
+	}
+}
+
+func TestSkillRegistrySetDirs_ClearsExtendedDiscoveryConfig(t *testing.T) {
+	configuredRoot := t.TempDir()
+	legacyRoot := t.TempDir()
+	writeSkillFile(t, filepath.Join(configuredRoot, "configured", "SKILL.md"), "Configured skill")
+	writeSkillFile(t, filepath.Join(legacyRoot, "legacy", "SKILL.md"), "Legacy skill")
+
+	r := NewSkillRegistry()
+	r.SetDiscoveryConfig(SkillDiscoveryConfig{Paths: []string{configuredRoot}})
+	r.SetDirs([]string{legacyRoot})
+
+	if r.Resolve("configured") != nil {
+		t.Fatal("SetDirs must clear configured paths")
+	}
+	if r.Resolve("legacy") == nil {
+		t.Fatal("SetDirs must retain its legacy depth-1 discovery behavior")
+	}
+}
+
 func writeSkillFile(t *testing.T, path, description string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
 	data := []byte("---\ndescription: " + description + "\n---\nPrompt body")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func writeNamedSkillFile(t *testing.T, path, name string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	data := []byte("---\nname: " + name + "\ndescription: Named skill\n---\nPrompt body")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}

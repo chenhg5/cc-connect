@@ -6,8 +6,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestResolveGrokHomePrecedence(t *testing.T) {
@@ -21,19 +25,61 @@ func TestResolveGrokHomePrecedence(t *testing.T) {
 		"GROK_HOME=" + extraHome,
 		"UNRELATED=1",
 		"GROK_HOME=" + lastHome,
-	})
+	}, fallbackHome)
 	if got != lastHome {
 		t.Fatalf("resolveGrokHome() = %q, want last injected value %q", got, lastHome)
 	}
 
-	if got := resolveGrokHome(nil); got != filepath.Join(fallbackHome, "from-process") {
+	if got := resolveGrokHome(nil, fallbackHome); got != filepath.Join(fallbackHome, "from-process") {
 		t.Fatalf("resolveGrokHome(nil) = %q, want process value", got)
 	}
 
 	t.Setenv("GROK_HOME", "")
-	if got := resolveGrokHome(nil); got != filepath.Join(fallbackHome, ".grok") {
+	if got := resolveGrokHome(nil, fallbackHome); got != filepath.Join(fallbackHome, ".grok") {
 		t.Fatalf("resolveGrokHome(nil) = %q, want default under HOME", got)
 	}
+}
+
+func TestResolveGrokHomeUsesEffectiveEnvironmentAndWorkDir(t *testing.T) {
+	processHome := t.TempDir()
+	optionsHome := filepath.Join(t.TempDir(), "options-home")
+	workDir := filepath.Join(t.TempDir(), "workspace")
+	mustMkdirAll(t, workDir)
+	t.Setenv("HOME", processHome)
+	t.Setenv("GROK_HOME", filepath.Join(processHome, "process-grok-home"))
+
+	t.Run("empty override clears inherited GROK_HOME", func(t *testing.T) {
+		got := resolveGrokHome([]string{
+			"HOME=" + optionsHome,
+			"GROK_HOME=",
+		}, workDir)
+		want := filepath.Join(optionsHome, ".grok")
+		if got != want {
+			t.Fatalf("resolveGrokHome() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("relative GROK_HOME is relative to work_dir", func(t *testing.T) {
+		got := resolveGrokHome([]string{
+			"HOME=" + optionsHome,
+			"GROK_HOME=.state/grok",
+		}, workDir)
+		want := filepath.Join(workDir, ".state", "grok")
+		if got != want {
+			t.Fatalf("resolveGrokHome() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty HOME falls back to the system user home", func(t *testing.T) {
+		got := resolveGrokHome([]string{
+			"HOME=",
+			"GROK_HOME=",
+		}, workDir)
+		want := filepath.Join(processHome, ".grok")
+		if got != want {
+			t.Fatalf("resolveGrokHome() = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestGrokModelContextWindow(t *testing.T) {
@@ -42,12 +88,30 @@ func TestGrokModelContextWindow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(grokHome, "models_cache.json"), []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, "grok-4.5"); got != 500000 {
+	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, t.TempDir(), "grok-4.5"); got != 500000 {
 		t.Fatalf("grokModelContextWindow() = %d, want 500000", got)
 	}
-	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, "missing"); got != 0 {
+	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, t.TempDir(), "missing"); got != 0 {
 		t.Fatalf("missing model context window = %d, want 0", got)
 	}
+}
+
+func TestGrokModelReasoningEffortsUsesAdvertisedOptionIDs(t *testing.T) {
+	workDir := t.TempDir()
+	grokHome := filepath.Join(t.TempDir(), ".grok")
+	require.NoError(t, os.MkdirAll(grokHome, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(grokHome, "models_cache.json"), []byte(`{
+		"models": {
+			"grok-custom": {"info": {"reasoning_efforts": [
+				{"id":"deep"}, {"id":"xhigh"}, {"id":"DEEP"}, {"id":"--unsafe"}
+			]}}
+		}
+	}`), 0o600))
+
+	got := grokModelReasoningEfforts([]string{"GROK_HOME=" + grokHome}, workDir, "grok-custom")
+	assert.Equal(t, []string{"deep", "xhigh"}, got)
+	assert.Equal(t, got, grokModelReasoningEfforts([]string{"GROK_HOME=" + grokHome}, workDir, ""),
+		"a single cached model should be the local default fallback")
 }
 
 func TestGrokStoreStrictWorkspaceIsolation(t *testing.T) {
@@ -91,6 +155,38 @@ func TestGrokStoreCanonicalizesMacOSSymlink(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].ID != "session-symlink" {
 		t.Fatalf("listGrokSessions() = %+v, want symlink-backed session", sessions)
+	}
+}
+
+func TestGrokStoreMatchesCaseVariantsOnlyWhenFilesystemDoes(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS default volumes are case-insensitive; other platforms retain native semantics")
+	}
+
+	grokHome := filepath.Join(t.TempDir(), "grok-home")
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "CaseSensitiveWorkspace")
+	mustMkdirAll(t, workspace)
+	caseVariant := filepath.Join(parent, "casesensitiveworkspace")
+	variantInfo, err := os.Stat(caseVariant)
+	if err != nil {
+		t.Skip("test volume is case-sensitive")
+	}
+	workspaceInfo, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(workspaceInfo, variantInfo) {
+		t.Skip("test volume does not resolve case variants to the same directory")
+	}
+
+	writeGrokSummaryFixture(t, grokHome, "case-variant", "session-case", caseVariant, "case", "2026-08-03T03:30:00Z")
+	sessions, err := listGrokSessions(grokHome, workspace)
+	if err != nil {
+		t.Fatalf("listGrokSessions() error = %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "session-case" {
+		t.Fatalf("listGrokSessions() = %+v, want case-variant session", sessions)
 	}
 }
 

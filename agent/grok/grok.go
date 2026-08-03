@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ type Agent struct {
 	timeout         time.Duration
 	reasoningEffort string
 	maxTurns        int
+	inspectRunner   grokInspectRunner
 
 	providers  []core.ProviderConfig
 	activeIdx  int
@@ -130,19 +132,28 @@ func normalizeMode(raw string) string {
 }
 
 func normalizeReasoningEffort(raw string) string {
-	switch effort := strings.ToLower(strings.TrimSpace(raw)); effort {
-	case "", "low", "medium", "high":
-		return effort
+	effort := strings.TrimSpace(raw)
+	switch strings.ToLower(effort) {
+	case "":
+		return ""
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(effort)
 	default:
+		// Grok also accepts model-specific menu option IDs (for example
+		// "deep"). Preserve a safe opaque ID so config can use the same value
+		// as the local CLI; whitespace and flag-like values are rejected.
+		if grokReasoningEffortID.MatchString(effort) {
+			return effort
+		}
 		slog.Warn("grok: ignoring unsupported reasoning effort", "effort", raw)
 		return ""
 	}
 }
 
+var grokReasoningEffortID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+
 func permissionModeFlag(mode string) string {
 	switch mode {
-	case "default":
-		return "default"
 	case "accept_edits":
 		return "acceptEdits"
 	case "auto":
@@ -151,14 +162,20 @@ func permissionModeFlag(mode string) string {
 		return "dontAsk"
 	case "plan":
 		return "plan"
-	default:
+	case "yolo":
 		return "bypassPermissions"
+	default:
+		// Keep the launch layer fail-closed even if an internal caller ever
+		// bypasses normalizeMode. Only an exact yolo value may select Grok's
+		// unrestricted permission mode.
+		return "default"
 	}
 }
 
-func (a *Agent) Name() string           { return "grok" }
-func (a *Agent) CLIBinaryName() string  { return a.commandName() }
-func (a *Agent) CLIDisplayName() string { return "Grok Build" }
+func (a *Agent) Name() string            { return "grok" }
+func (a *Agent) CLIBinaryName() string   { return a.commandName() }
+func (a *Agent) CLIDisplayName() string  { return "Grok Build" }
+func (a *Agent) CompressCommand() string { return "/compact" }
 
 func (a *Agent) commandName() string {
 	a.mu.RLock()
@@ -202,8 +219,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	cmdName := a.cmd
 	extraArgs := append([]string(nil), a.cliExtraArgs...)
 	workDir := a.workDir
-	extraEnv := append([]string(nil), a.configEnv...)
-	extraEnv = append(extraEnv, a.providerEnvLocked()...)
+	extraEnv := a.effectiveEnvLocked()
 	a.mu.RUnlock()
 	if len(configured) > 0 {
 		return configured
@@ -211,10 +227,10 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	args := append(extraArgs, "models")
+	args := append(extraArgs, "--no-auto-update", "models")
 	cmd := exec.CommandContext(probeCtx, cmdName, args...)
 	cmd.Dir = workDir
-	cmd.Env = core.MergeEnv(os.Environ(), extraEnv)
+	cmd.Env = grokProcessEnv(extraEnv)
 	out, err := cmd.Output()
 	if err == nil {
 		if models := parseModelsOutput(string(out)); len(models) > 0 {
@@ -232,9 +248,18 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 func parseModelsOutput(output string) []core.ModelOption {
 	seen := make(map[string]bool)
 	var models []core.ModelOption
+	inAvailableModels := false
 	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
-		if !strings.HasPrefix(strings.ToLower(line), "grok-") {
+		line = strings.TrimSpace(stripANSI(line))
+		if strings.EqualFold(line, "Available models:") {
+			inAvailableModels = true
+			continue
+		}
+		if !inAvailableModels || !strings.HasPrefix(line, "*") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		if line == "" {
 			continue
 		}
 		name := strings.Fields(line)[0]
@@ -263,7 +288,18 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"high", "medium", "low"}
+	a.mu.RLock()
+	model := core.GetProviderModel(a.providers, a.activeIdx, a.model)
+	workDir := a.workDir
+	effectiveEnv := a.effectiveEnvLocked()
+	a.mu.RUnlock()
+
+	if efforts := grokModelReasoningEfforts(effectiveEnv, workDir, model); len(efforts) > 0 {
+		return efforts
+	}
+	// Canonical Grok levels. A model may expose a subset or custom option IDs;
+	// those are preferred from models_cache.json above when available.
+	return []string{"max", "xhigh", "high", "medium", "low", "minimal", "none"}
 }
 
 func (a *Agent) SetMode(mode string) {
@@ -300,13 +336,13 @@ func (a *Agent) SetSessionEnv(env []string) {
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.RLock()
 	model := core.GetProviderModel(a.providers, a.activeIdx, a.model)
-	extraEnv := append([]string(nil), a.configEnv...)
-	extraEnv = append(extraEnv, a.providerEnvLocked()...)
-	extraEnv = append(extraEnv, a.sessionEnv...)
+	workDir := a.workDir
+	extraEnv := a.effectiveEnvLocked()
+	home := resolveGrokHome(extraEnv, workDir)
 	cfg := sessionConfig{
 		cmd:             a.cmd,
 		extraArgs:       append([]string(nil), a.cliExtraArgs...),
-		workDir:         a.workDir,
+		workDir:         workDir,
 		model:           model,
 		mode:            a.mode,
 		resumeID:        sessionID,
@@ -316,13 +352,16 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		maxTurns:        a.maxTurns,
 	}
 	a.mu.RUnlock()
+	if sessionID != "" && sessionID != core.ContinueSession && findGrokSessionDir(home, workDir, sessionID) == "" {
+		return nil, fmt.Errorf("grok: session %q does not belong to work_dir %q", sessionID, workDir)
+	}
 	return newGrokSession(ctx, cfg)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	a.mu.RLock()
 	workDir := a.workDir
-	home := resolveGrokHome(a.effectiveEnvLocked())
+	home := resolveGrokHome(a.effectiveEnvLocked(), workDir)
 	a.mu.RUnlock()
 	return listGrokSessions(home, workDir)
 }
@@ -330,7 +369,7 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
 	a.mu.RLock()
 	workDir := a.workDir
-	home := resolveGrokHome(a.effectiveEnvLocked())
+	home := resolveGrokHome(a.effectiveEnvLocked(), workDir)
 	a.mu.RUnlock()
 	return findGrokSessionDir(home, workDir, sessionID) != ""
 }
@@ -340,21 +379,20 @@ func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 	workDir := a.workDir
 	cmdName := a.cmd
 	extraArgs := append([]string(nil), a.cliExtraArgs...)
-	extraEnv := append([]string(nil), a.configEnv...)
-	extraEnv = append(extraEnv, a.providerEnvLocked()...)
-	extraEnv = append(extraEnv, a.sessionEnv...)
-	home := resolveGrokHome(extraEnv)
+	extraEnv := a.effectiveEnvLocked()
+	home := resolveGrokHome(extraEnv, workDir)
 	a.mu.RUnlock()
 	if findGrokSessionDir(home, workDir, sessionID) == "" {
 		return fmt.Errorf("grok: session %q does not belong to work_dir %q", sessionID, workDir)
 	}
-	args := append(extraArgs, "sessions", "delete", sessionID)
+	args := append(extraArgs, "--no-auto-update", "sessions", "delete", sessionID)
 	cmd := exec.CommandContext(ctx, cmdName, args...)
 	cmd.Dir = workDir
-	cmd.Env = core.MergeEnv(os.Environ(), extraEnv)
+	processEnv := grokProcessEnv(extraEnv)
+	cmd.Env = processEnv
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		detail := redactEnvSecrets(stripANSI(strings.TrimSpace(string(out))), extraEnv)
+		detail := redactEnvSecrets(stripANSI(strings.TrimSpace(string(out))), processEnv)
 		return fmt.Errorf("grok: delete session %q: %w: %s", sessionID, err, truncate(detail, 500))
 	}
 	return nil
@@ -363,7 +401,7 @@ func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	a.mu.RLock()
 	workDir := a.workDir
-	home := resolveGrokHome(a.effectiveEnvLocked())
+	home := resolveGrokHome(a.effectiveEnvLocked(), workDir)
 	a.mu.RUnlock()
 	return getGrokSessionHistory(home, workDir, sessionID, limit)
 }
@@ -414,9 +452,25 @@ func joinCommand(cmd string, args []string) string {
 func (a *Agent) SkillDirs() []string {
 	a.mu.RLock()
 	workDir := a.workDir
-	home := resolveGrokHome(a.effectiveEnvLocked())
+	effectiveEnv := a.effectiveEnvLocked()
 	a.mu.RUnlock()
-	return []string{filepath.Join(workDir, ".grok", "skills"), filepath.Join(home, "skills")}
+	return grokCapabilityDirs(workDir, effectiveEnv, "skills")
+}
+
+func (a *Agent) SkillDiscoveryConfig() core.SkillDiscoveryConfig {
+	a.mu.RLock()
+	workDir := a.workDir
+	effectiveEnv := a.effectiveEnvLocked()
+	a.mu.RUnlock()
+	return grokSkillDiscoveryConfig(workDir, effectiveEnv)
+}
+
+func (a *Agent) CommandDirs() []string {
+	a.mu.RLock()
+	workDir := a.workDir
+	effectiveEnv := a.effectiveEnvLocked()
+	a.mu.RUnlock()
+	return grokCapabilityDirs(workDir, effectiveEnv, "commands")
 }
 
 func (a *Agent) ProjectMemoryFile() string {
@@ -427,13 +481,10 @@ func (a *Agent) ProjectMemoryFile() string {
 
 func (a *Agent) GlobalMemoryFile() string {
 	a.mu.RLock()
-	home := resolveGrokHome(a.effectiveEnvLocked())
+	workDir := a.workDir
+	home := resolveGrokHome(a.effectiveEnvLocked(), workDir)
 	a.mu.RUnlock()
-	path := filepath.Join(home, "AGENTS.md")
-	if _, err := os.Stat(path); err == nil {
-		return path
-	}
-	return ""
+	return filepath.Join(home, "AGENTS.md")
 }
 
 func (a *Agent) SetProviders(providers []core.ProviderConfig) {
@@ -501,10 +552,7 @@ func (a *Agent) providerEnvLocked() []string {
 // effectiveEnvLocked requires a read or write lock on a.mu and preserves the
 // same override order used for launched sessions.
 func (a *Agent) effectiveEnvLocked() []string {
-	env := append([]string(nil), a.configEnv...)
-	env = append(env, a.providerEnvLocked()...)
-	env = append(env, a.sessionEnv...)
-	return env
+	return mergeGrokEnv(a.configEnv, a.providerEnvLocked(), a.sessionEnv)
 }
 
 var (
@@ -521,5 +569,10 @@ var (
 	_ core.SessionDeleter                  = (*Agent)(nil)
 	_ core.HistoryProvider                 = (*Agent)(nil)
 	_ core.MemoryFileProvider              = (*Agent)(nil)
+	_ core.CommandProvider                 = (*Agent)(nil)
 	_ core.SkillProvider                   = (*Agent)(nil)
+	_ core.SkillDiscoveryConfigProvider    = (*Agent)(nil)
+	_ core.NativeSlashCommandProvider      = (*Agent)(nil)
+	_ core.NativeSlashPolicyProvider       = (*Agent)(nil)
+	_ core.ContextCompressor               = (*Agent)(nil)
 )

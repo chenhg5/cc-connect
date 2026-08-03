@@ -81,6 +81,11 @@ type workspacePool struct {
 	idleTimeout time.Duration
 }
 
+type reapedWorkspace struct {
+	Path  string
+	Agent Agent
+}
+
 func newWorkspacePool(idleTimeout time.Duration) *workspacePool {
 	return &workspacePool{
 		states:      make(map[string]*workspaceState),
@@ -135,22 +140,60 @@ func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
 	return s
 }
 
+// AcquireTurn atomically verifies pool membership/agent identity and marks the
+// workspace active. The returned lease must be released with EndTurn.
+func (p *workspacePool) AcquireTurn(workspace string, expected Agent) *workspaceState {
+	normalized := normalizeWorkspacePath(workspace)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state := p.states[workspace]
+	if state == nil && normalized != workspace {
+		state = p.states[normalized]
+	}
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if expected != nil && !sameAgentInstance(state.agent, expected) {
+		return nil
+	}
+	state.activeTurns++
+	state.lastActivity = time.Now()
+	return state
+}
+
 // ReapIdle removes and returns workspace paths that have been idle longer than idleTimeout.
 // A zero idleTimeout disables reaping entirely.
 func (p *workspacePool) ReapIdle() []string {
+	reapedStates := p.ReapIdleStates()
+	reaped := make([]string, 0, len(reapedStates))
+	for _, state := range reapedStates {
+		reaped = append(reaped, state.Path)
+	}
+	return reaped
+}
+
+// ReapIdleStates is the engine-facing form of ReapIdle. It captures the exact
+// agent instance that owned each removed pool entry so later capability
+// cleanup cannot delete state published by a same-path replacement.
+func (p *workspacePool) ReapIdleStates() []reapedWorkspace {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.idleTimeout <= 0 {
 		return nil
 	}
 	cutoff := time.Now().Add(-p.idleTimeout)
-	var reaped []string
+	var reaped []reapedWorkspace
 	for path, state := range p.states {
 		if state.HasActiveTurn() {
 			continue
 		}
 		if state.LastActivity().Before(cutoff) {
-			reaped = append(reaped, path)
+			state.mu.Lock()
+			agent := state.agent
+			state.mu.Unlock()
+			reaped = append(reaped, reapedWorkspace{Path: path, Agent: agent})
 			delete(p.states, path)
 		}
 	}

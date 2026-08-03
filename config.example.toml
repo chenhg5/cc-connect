@@ -2128,7 +2128,8 @@ app_secret = "your-feishu-app-secret"
 # mode = "default"          # optional; omitted defaults to safe "default"
 # cmd = "grok"              # optional CLI binary name (default: "grok")
 # # model = "grok-4.5"      # optional; omitted = local Grok default
-# # reasoning_effort = "high" # optional: low | medium | high
+# # reasoning_effort = "high" # optional; model-advertised ID, canonical levels:
+#                              # none | minimal | low | medium | high | xhigh | max
 # # max_turns = 50           # optional native Grok turn cap
 # # timeout_mins = 30        # optional per-turn timeout; omitted/0 = no limit
 # # env = { GROK_HOME = "/path/to/.grok", XAI_API_KEY = "xai-..." }

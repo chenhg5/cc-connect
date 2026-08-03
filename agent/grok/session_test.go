@@ -1,11 +1,15 @@
 package grok
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -313,6 +317,55 @@ func TestSendRedactsSecretsFromCLIError(t *testing.T) {
 	assert.Contains(t, message, "[REDACTED]")
 }
 
+func TestSendRedactsSecretsFromInheritedEnvironment(t *testing.T) {
+	tests := []struct {
+		name       string
+		helperMode string
+		envKey     string
+	}{
+		{name: "stderr", helperMode: "fail", envKey: "XAI_API_KEY"},
+		{name: "stream error", helperMode: "stream-error", envKey: "GROK_INHERITED_SECRET"},
+		{name: "credential", helperMode: "fail", envKey: "SERVICE_CREDENTIAL"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			secret := "inherited-secret-marker-" + strings.ReplaceAll(test.name, " ", "-")
+			t.Setenv(test.envKey, secret)
+			session := newHelperSession(t, t.TempDir(), test.helperMode, "GROK_HELPER_TARGET_ENV="+test.envKey)
+			defer func() { _ = session.Close() }()
+
+			require.NoError(t, session.Send("fail", "", nil, nil))
+			events := collectUntilTerminal(t, session.Events())
+			require.Len(t, events, 1)
+			require.Equal(t, core.EventError, events[0].Type)
+			require.Error(t, events[0].Error)
+			message := events[0].Error.Error()
+			assert.Contains(t, message, test.envKey)
+			assert.NotContains(t, message, secret)
+			assert.Contains(t, message, "[REDACTED]")
+		})
+	}
+}
+
+func TestSendDoesNotLogNonJSONStdout(t *testing.T) {
+	secret := "non-json-credential-marker"
+	t.Setenv("SERVICE_CREDENTIAL", secret)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	session := newHelperSession(t, t.TempDir(), "non-json-warning")
+	defer func() { _ = session.Close() }()
+	require.NoError(t, session.Send("warn", "", nil, nil))
+	events := collectUntilTerminal(t, session.Events())
+	require.NotEmpty(t, events)
+	require.Equal(t, core.EventResult, events[len(events)-1].Type)
+	assert.Contains(t, logs.String(), "ignored non-JSON stdout")
+	assert.NotContains(t, logs.String(), secret)
+	assert.NotContains(t, logs.String(), "SERVICE_CREDENTIAL")
+}
+
 func TestCancelTurnStopsProcessButKeepsSessionAlive(t *testing.T) {
 	session := newHelperSession(t, t.TempDir(), "sleep")
 	defer func() { _ = session.Close() }()
@@ -325,7 +378,144 @@ func TestCancelTurnStopsProcessButKeepsSessionAlive(t *testing.T) {
 	assert.Equal(t, core.EventError, cancelEvent.Type)
 	require.Error(t, cancelEvent.Error)
 	assert.Contains(t, cancelEvent.Error.Error(), "turn stopped")
+	assert.NotContains(t, cancelEvent.Error.Error(), "process-tree cleanup incomplete")
 	assert.True(t, session.Alive(), "CancelTurn must not destroy conversation continuity")
+}
+
+func TestCancelTurnReportsAndRedactsProcessTreeCleanupFailure(t *testing.T) {
+	const secret = "cleanup-secret-marker"
+	t.Setenv("SERVICE_CREDENTIAL", secret)
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	session := newHelperSession(t, t.TempDir(), "sleep")
+	defer func() { _ = session.Close() }()
+	cleanupCalled := make(chan struct{}, 1)
+	session.forceKill = func(cmd *exec.Cmd) error {
+		select {
+		case cleanupCalled <- struct{}{}:
+		default:
+		}
+		if cmd == nil || cmd.Process == nil {
+			return errors.New("simulated process-tree cleanup failed before process start")
+		}
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("simulated direct process kill failed: %w", err)
+		}
+		return fmt.Errorf("simulated cleanup failure SERVICE_CREDENTIAL=%s", secret)
+	}
+
+	require.NoError(t, session.Send("sleep", "", nil, nil))
+	initEvent := readEvents(t, session.Events(), 1)[0]
+	require.Equal(t, "sid-sleep", initEvent.SessionID)
+	require.NoError(t, session.CancelTurn())
+
+	cancelEvent := readEvents(t, session.Events(), 1)[0]
+	require.Equal(t, core.EventError, cancelEvent.Type)
+	require.Error(t, cancelEvent.Error)
+	assert.ErrorIs(t, cancelEvent.Error, context.Canceled)
+	message := cancelEvent.Error.Error()
+	assert.Contains(t, message, "turn stopped")
+	assert.Contains(t, message, "process-tree cleanup incomplete")
+	assert.Contains(t, message, "SERVICE_CREDENTIAL=[REDACTED]")
+	assert.NotContains(t, message, secret)
+
+	select {
+	case <-cleanupCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("injected process-tree cleanup was not called")
+	}
+	logText := logs.String()
+	assert.Contains(t, logText, "process-tree cleanup incomplete")
+	assert.Contains(t, logText, "SERVICE_CREDENTIAL=[REDACTED]")
+	assert.NotContains(t, logText, secret)
+	assert.True(t, session.Alive(), "cleanup failure must not destroy conversation continuity")
+}
+
+func TestSendRegistersCancellationBeforePromptPreparation(t *testing.T) {
+	workDir := t.TempDir()
+	session := newHelperSession(t, workDir, "sleep")
+	defer func() { _ = session.Close() }()
+
+	// Holding this mutex stops Send exactly where it publishes the active
+	// turn's cancel function. Prompt preparation must not run before that
+	// publication, otherwise a concurrent CancelTurn can be lost.
+	session.turnCancelMu.Lock()
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- session.Send("sleep", "", nil, nil)
+	}()
+	turnLocked := waitForGrokTurnLocked(session, 2*time.Second)
+	promptPreparedEarly := false
+	if turnLocked {
+		promptPreparedEarly = waitForGrokPromptFile(workDir, 250*time.Millisecond)
+	}
+	session.turnCancelMu.Unlock()
+
+	require.True(t, turnLocked, "Send never entered turn preparation")
+	require.False(t, promptPreparedEarly, "Send prepared a prompt before publishing its cancel function")
+	require.Eventually(t, func() bool {
+		session.turnCancelMu.Lock()
+		cancelReady := session.turnCancel != nil
+		session.turnCancelMu.Unlock()
+		return cancelReady
+	}, 2*time.Second, 5*time.Millisecond)
+	require.NoError(t, session.CancelTurn())
+
+	select {
+	case <-sendDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return after cancellation during preparation")
+	}
+}
+
+func TestCancelTurnReleasesReaderWhenEventBufferIsFull(t *testing.T) {
+	session := newHelperSession(t, t.TempDir(), "sleep")
+	defer func() { _ = session.Close() }()
+	fillGrokEventBuffer(session)
+
+	require.NoError(t, session.Send("sleep", "", nil, nil))
+	require.Eventually(t, func() bool {
+		return session.CurrentSessionID() == "sid-sleep"
+	}, 2*time.Second, 5*time.Millisecond, "reader never reached the blocked event emission")
+	require.NoError(t, session.CancelTurn())
+	requireGrokTurnReleased(t, session, 2*time.Second)
+	requireGrokStoppedEvent(t, session, 2*time.Second)
+}
+
+func TestTurnTimeoutReleasesReaderWhenEventBufferIsFull(t *testing.T) {
+	session := newHelperSession(t, t.TempDir(), "sleep")
+	defer func() { _ = session.Close() }()
+	session.timeout = time.Second
+	fillGrokEventBuffer(session)
+
+	require.NoError(t, session.Send("sleep", "", nil, nil))
+	require.Eventually(t, func() bool {
+		return session.CurrentSessionID() == "sid-sleep"
+	}, 2*time.Second, 5*time.Millisecond, "reader never reached the blocked event emission")
+	requireGrokTurnReleased(t, session, 3*time.Second)
+	requireGrokStoppedEvent(t, session, 2*time.Second)
+}
+
+func TestCancelTurnWhileTerminalEventIsBackpressuredEmitsStopped(t *testing.T) {
+	for _, helperMode := range []string{"terminal-result", "terminal-error"} {
+		t.Run(helperMode, func(t *testing.T) {
+			session := newHelperSession(t, t.TempDir(), helperMode)
+			defer func() { _ = session.Close() }()
+			fillGrokEventBuffer(session)
+
+			require.NoError(t, session.Send("terminal", "", nil, nil))
+			require.Eventually(t, func() bool {
+				return session.CurrentSessionID() == "sid-terminal"
+			}, 2*time.Second, 5*time.Millisecond, "reader never reached the blocked terminal event")
+			require.NoError(t, session.CancelTurn())
+			requireGrokTurnReleased(t, session, 2*time.Second)
+			requireGrokStoppedEvent(t, session, 2*time.Second)
+		})
+	}
 }
 
 func TestCloseWhileTurnActiveIsConcurrentAndIdempotent(t *testing.T) {
@@ -422,8 +612,33 @@ func TestGrokHelperProcess(t *testing.T) {
 		helperWriteJSON(map[string]any{"type": "result", "subtype": "success", "result": "large-complete", "session_id": "sid-large"})
 		os.Exit(0)
 	case "fail":
-		_, _ = fmt.Fprintf(os.Stderr, "\x1b[31mfailed using %s\x1b[0m\n", os.Getenv("XAI_API_KEY"))
+		target := os.Getenv("GROK_HELPER_TARGET_ENV")
+		if target == "" {
+			target = "XAI_API_KEY"
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "\x1b[31mfailed using %s=%s\x1b[0m\n", target, os.Getenv(target))
 		os.Exit(9)
+	case "stream-error":
+		target := os.Getenv("GROK_HELPER_TARGET_ENV")
+		if target == "" {
+			target = "GROK_INHERITED_SECRET"
+		}
+		helperWriteJSON(map[string]any{
+			"type":    "error",
+			"message": target + "=" + os.Getenv(target),
+		})
+		os.Exit(0)
+	case "non-json-warning":
+		_, _ = fmt.Fprintf(os.Stdout, "warning SERVICE_CREDENTIAL=%s\n", os.Getenv("SERVICE_CREDENTIAL"))
+		helperWriteJSON(map[string]any{"type": "system", "session_id": "sid-warning"})
+		helperWriteJSON(map[string]any{"type": "result", "subtype": "success", "result": "ok", "session_id": "sid-warning"})
+		os.Exit(0)
+	case "terminal-result":
+		helperWriteJSON(map[string]any{"type": "result", "subtype": "success", "result": "ok", "session_id": "sid-terminal"})
+		os.Exit(0)
+	case "terminal-error":
+		helperWriteJSON(map[string]any{"type": "error", "message": "terminal failure", "session_id": "sid-terminal"})
+		os.Exit(0)
 	case "sleep":
 		helperWriteJSON(map[string]any{"type": "system", "session_id": "sid-sleep"})
 		time.Sleep(30 * time.Second)
@@ -535,6 +750,68 @@ func waitForClosedEvents(t *testing.T, events <-chan core.Event) {
 			}
 		case <-timer.C:
 			t.Fatal("event channel was not closed")
+		}
+	}
+}
+
+func waitForGrokPromptFile(workDir string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	pattern := filepath.Join(workDir, ".cc-connect", "prompts", "grok-prompt-*.txt")
+	for time.Now().Before(deadline) {
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+func waitForGrokTurnLocked(session *grokSession, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if session.turnMu.TryLock() {
+			session.turnMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func fillGrokEventBuffer(session *grokSession) {
+	for range cap(session.events) {
+		session.events <- core.Event{Type: core.EventText, Content: "buffered"}
+	}
+}
+
+func requireGrokTurnReleased(t *testing.T, session *grokSession, timeout time.Duration) {
+	t.Helper()
+	released := make(chan struct{})
+	go func() {
+		session.turnMu.Lock()
+		defer session.turnMu.Unlock()
+		close(released)
+	}()
+	select {
+	case <-released:
+	case <-time.After(timeout):
+		t.Fatal("turn mutex remained locked after cancellation")
+	}
+}
+
+func requireGrokStoppedEvent(t *testing.T, session *grokSession, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-session.events:
+			if event.Type == core.EventError && event.Error != nil && strings.Contains(event.Error.Error(), "turn stopped") {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("missing terminal stopped-turn event after cancellation")
 		}
 	}
 }

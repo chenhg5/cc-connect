@@ -116,6 +116,68 @@ func TestGrokLocalIntegration(t *testing.T) {
 	}, 10*time.Second, 250*time.Millisecond, "deleted Grok session remained discoverable")
 }
 
+// TestGrokLocalNativeSlashIntegration verifies the non-ACP path end to end:
+// Grok advertises a project command through its exact initialized slash table,
+// then the same literal slash invocation is handled by a normal Agent session.
+func TestGrokLocalNativeSlashIntegration(t *testing.T) {
+	if os.Getenv("CC_CONNECT_GROK_INTEGRATION") != "1" {
+		t.Skip("set CC_CONNECT_GROK_INTEGRATION=1 to run the local Grok integration test")
+	}
+
+	workDir := t.TempDir()
+	commandDir := filepath.Join(workDir, ".grok", "commands")
+	require.NoError(t, os.MkdirAll(commandDir, 0o755))
+	commandPath := filepath.Join(commandDir, "cc-connect-native-probe.md")
+	require.NoError(t, os.WriteFile(commandPath, []byte("Reply with exactly CC_CONNECT_NATIVE_PROBE_$ARGUMENTS and nothing else. Do not use tools.\n"), 0o644))
+
+	rawAgent, err := New(map[string]any{
+		"work_dir":     workDir,
+		"cmd":          "grok",
+		"mode":         "yolo",
+		"timeout_mins": 3,
+	})
+	require.NoError(t, err)
+	agent := rawAgent.(*Agent)
+
+	discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	commands, err := agent.NativeSlashCommands(discoveryCtx)
+	discoveryCancel()
+	require.NoError(t, err)
+	found := false
+	for _, command := range commands {
+		if command.Target == "cc-connect-native-probe" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "Grok init did not advertise the project native command")
+
+	testCtx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	session, err := agent.StartSession(testCtx, "")
+	require.NoError(t, err)
+	var sessionID string
+	defer func() {
+		_ = session.Close()
+		if sessionID == "" {
+			sessionID = session.CurrentSessionID()
+		}
+		if sessionID != "" {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			_ = agent.DeleteSession(cleanupCtx, sessionID)
+		}
+	}()
+
+	require.NoError(t, session.Send("/cc-connect-native-probe marker-123", "native-probe", nil, nil))
+	events, err := collectLocalGrokTurn(session.Events(), 3*time.Minute)
+	require.NoError(t, err)
+	result := terminalResult(t, events)
+	assert.Equal(t, "CC_CONNECT_NATIVE_PROBE_marker-123", strings.TrimSpace(result.Content))
+	sessionID = session.CurrentSessionID()
+	require.NotEmpty(t, sessionID)
+}
+
 func collectLocalGrokTurn(events <-chan core.Event, timeout time.Duration) ([]core.Event, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()

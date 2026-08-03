@@ -601,6 +601,56 @@ type SkillProvider interface {
 	SkillDirs() []string
 }
 
+// SkillDiscoveryConfig describes both conventional skill roots and optional
+// agent-specific discovery settings. Dirs use the depth-1 convention described
+// by SkillProvider. Paths may point to a SKILL.md file or to a directory that
+// should be searched recursively. IgnorePaths and DisabledNames also filter
+// flat agent command files when the agent implements CommandProvider.
+type SkillDiscoveryConfig struct {
+	Dirs          []string
+	Paths         []string
+	IgnorePaths   []string
+	DisabledNames []string // exact Skill.Name or DisplayName values to exclude
+}
+
+// SkillDiscoveryConfigProvider is an optional interface for agents whose
+// native skill configuration supports additional paths or filters. It takes
+// precedence over SkillProvider when both are implemented.
+type SkillDiscoveryConfigProvider interface {
+	SkillDiscoveryConfig() SkillDiscoveryConfig
+}
+
+// NativeSlashCommand is a slash command that the agent CLI resolves itself.
+// Name is the CLI-reported name; Target is the exact first token that must be
+// forwarded to the CLI (without a leading slash). The engine may expose a
+// platform-safe alias while preserving Target for invocation.
+type NativeSlashCommand struct {
+	Name               string
+	Target             string
+	Description        string
+	IsSkill            bool
+	AdminOnly          bool   // command mutates agent security/configuration state
+	PolicyCommand      string // related cc-connect command ID for role/disabled policy
+	ReplacementCommand string // full cc-connect built-in invocation, without leading slash
+}
+
+// NativeSlashCommandProvider is an optional authoritative discovery interface
+// for agents whose CLI can report the exact set of enabled, user-invocable
+// slash commands. A successful call (including an empty result) takes
+// precedence over filesystem SkillProvider and CommandProvider discovery.
+// Returning an error asks the engine to fall back to those legacy providers.
+type NativeSlashCommandProvider interface {
+	NativeSlashCommands(ctx context.Context) ([]NativeSlashCommand, error)
+}
+
+// NativeSlashPolicyProvider supplies policy metadata for native commands even
+// when authoritative discovery is temporarily unavailable. Implementations
+// should return true only for command names whose disabled/admin policy is
+// known without consulting the live CLI.
+type NativeSlashPolicyProvider interface {
+	NativeSlashPolicy(name string) (NativeSlashCommand, bool)
+}
+
 // SessionDeleter is an optional interface for agents that support deleting sessions.
 type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
@@ -674,6 +724,28 @@ type BotCommandInfo struct {
 	Command     string // command name without leading "/"
 	Description string // short description for the menu
 	IsSkill     bool   // whether this entry comes from a skill
+	IsNative    bool   // whether the target is resolved by the agent CLI
+}
+
+// CommandMenuPolicy describes platform limits that core should apply before
+// handing commands to CommandRegistrar. A zero Limit means unlimited.
+type CommandMenuPolicy struct {
+	Limit           int
+	PreserveNative  bool // prioritize all agent-native commands before truncation
+	SkillsAllOrNone bool // omit every skill when the complete menu exceeds Limit
+}
+
+// CommandMenuPolicyProvider lets a platform declare its native command-menu
+// constraints without core knowing the platform by name.
+type CommandMenuPolicyProvider interface {
+	CommandMenuPolicy() CommandMenuPolicy
+}
+
+// CommandMenuKeyProvider optionally maps a command to the exact key a platform
+// will register. Returning an empty key excludes the command. Core uses this to
+// count platform-normalized, de-duplicated menu entries against a policy limit.
+type CommandMenuKeyProvider interface {
+	CommandMenuKey(command string) string
 }
 
 // CommandRegistrar is an optional interface for platforms that support

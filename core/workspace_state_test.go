@@ -173,6 +173,35 @@ func TestWorkspacePool_ReapIdle_SkipsBusyWorkspace(t *testing.T) {
 	}
 }
 
+func TestWorkspacePool_AcquireTurnPreventsSelectedStateFromBeingReaped(t *testing.T) {
+	pool := newWorkspacePool(time.Nanosecond)
+	agent := &stubAgent{}
+	state := pool.GetOrCreate("/workspace/selected")
+	state.mu.Lock()
+	state.agent = agent
+	state.lastActivity = time.Now().Add(-time.Hour)
+	state.mu.Unlock()
+
+	lease := pool.AcquireTurn("/workspace/selected", agent)
+	if lease != state {
+		t.Fatal("expected exact selected workspace state lease")
+	}
+	state.mu.Lock()
+	state.lastActivity = time.Now().Add(-time.Hour)
+	state.mu.Unlock()
+	if reaped := pool.ReapIdleStates(); len(reaped) != 0 {
+		t.Fatalf("leased workspace was reaped: %+v", reaped)
+	}
+
+	lease.EndTurn()
+	state.mu.Lock()
+	state.lastActivity = time.Now().Add(-time.Hour)
+	state.mu.Unlock()
+	if reaped := pool.ReapIdleStates(); len(reaped) != 1 || reaped[0].Agent != agent {
+		t.Fatalf("released workspace reap = %+v, want exact owning agent", reaped)
+	}
+}
+
 func TestInteractiveKeyForSessionKey_NormalizesWorkspace(t *testing.T) {
 	tmp := t.TempDir()
 	wsDir := filepath.Join(tmp, "ws1")
