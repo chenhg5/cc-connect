@@ -86,6 +86,10 @@ npm install -g @iflow-ai/iflow-cli
 
 # Qoder CLI
 curl -fsSL https://qoder.com/install | bash
+
+# Grok Build (xAI)
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok login   # or export XAI_API_KEY=...
 ```
 
 For **Cursor Agent** and **OpenCode**, follow their official install docs:
@@ -101,7 +105,14 @@ gemini --version
 iflow --version
 opencode --version
 qodercli --version
+grok version
 ```
+
+`type = "grok"` uses Grok Build's native headless CLI directly (not an ACP
+bridge). It reuses your `grok login` session and, unless you explicitly set a
+`model`, the same local default model as an interactive `grok` invocation.
+See the Grok example in `config.example.toml` for permission modes, exact
+session resume, `GROK_HOME`, and optional provider settings.
 
 ## Step 3: Create config.toml
 
@@ -143,7 +154,7 @@ level = "info"  # debug, info, warn, error
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or "codex", "cursor", "gemini", "qoder", "opencode", "iflow"
+type = "claudecode"  # or "codex", "cursor", "gemini", "grok", "qoder", "opencode", "iflow", ...
 
 [projects.agent.options]
 work_dir = "/absolute/path/to/your/project"
