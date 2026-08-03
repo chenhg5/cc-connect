@@ -122,9 +122,16 @@ func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
 	models, err := readSettingsModels()
 	if err != nil {
 		slog.Debug("pi: AvailableModels: read settings", "error", err)
-		return nil
 	}
-	return models
+	if len(models) > 0 {
+		return models
+	}
+	// enabledModels 未配置时，回退到 pi 自身的模型目录 models-store.json，
+	// 否则 /model 卡片只会显示当前模型、无法列出可切换的模型列表。
+	if store := readModelsStore(); len(store) > 0 {
+		return store
+	}
+	return nil
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -441,6 +448,59 @@ func readSettingsModels() ([]core.ModelOption, error) {
 		models = append(models, option)
 	}
 	return models, nil
+}
+
+// modelsStoreJSON represents the structure of ~/.pi/agent/models-store.json,
+// the provider catalog pi itself maintains (hydrated from the published
+// pi-ai package and refreshed as providers are added). Top-level keys are
+// provider names, each with a Models list.
+//
+//	{
+//	  "deepseek": { "models": [ { "id": "...", "name": "...", ... } ] }
+//	}
+type modelsStoreJSON map[string]struct {
+	Models []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
+// readModelsStore reads all models from pi's models-store.json as
+// provider-qualified ModelOptions (Name = "provider/id", Alias = short id,
+// Desc = display name). Returns nil when the file is missing or unreadable;
+// callers fall back to an empty list.
+func readModelsStore() []core.ModelOption {
+	dir := piSettingsDir()
+	if dir == "" {
+		return nil
+	}
+	path := filepath.Join(dir, "models-store.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Debug("pi: read models-store", "path", path, "error", err)
+		return nil
+	}
+	var store modelsStoreJSON
+	if err := json.Unmarshal(data, &store); err != nil {
+		slog.Warn("pi: parse models-store", "path", path, "error", err)
+		return nil
+	}
+	var models []core.ModelOption
+	for provider, p := range store {
+		for _, m := range p.Models {
+			if m.ID == "" {
+				continue
+			}
+			models = append(models, core.ModelOption{
+				Name:  provider + "/" + m.ID,
+				Alias: m.ID,
+				Desc:  m.Name,
+			})
+		}
+	}
+	// Map iteration order is random — sort for deterministic card display.
+	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
+	return models
 }
 
 // readDefaultModel returns the defaultModel from settings.json.
