@@ -2125,7 +2125,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# mode = "yolo"             # optional; omitted defaults to "yolo"
+# mode = "default"          # optional; omitted defaults to safe "default"
 # cmd = "grok"              # optional CLI binary name (default: "grok")
 # # model = "grok-4.5"      # optional; omitted = local Grok default
 # # reasoning_effort = "high" # optional: low | medium | high
@@ -2134,8 +2134,8 @@ app_secret = "your-feishu-app-secret"
 # # env = { GROK_HOME = "/path/to/.grok", XAI_API_KEY = "xai-..." }
 #
 # Mode options / 模式说明:
-# - "yolo":         bypassPermissions + --always-approve (default; unattended)
-# - "default":      native default permission mode
+# - "default":      native default permission mode (default; safest)
+# - "yolo":         bypassPermissions + --always-approve (explicit opt-in)
 # - "accept_edits": native acceptEdits permission mode
 # - "auto":         native auto permission mode
 # - "plan":         native read-only plan mode

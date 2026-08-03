@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewDefaultsMatchDirectGrokCLI(t *testing.T) {
+func TestNewUsesSafeDefaultsAndInheritsLocalModel(t *testing.T) {
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	workDir := t.TempDir()
@@ -30,7 +30,7 @@ func TestNewDefaultsMatchDirectGrokCLI(t *testing.T) {
 	assert.Equal(t, "Grok Build", agent.CLIDisplayName())
 	assert.Equal(t, wantWorkDir, agent.GetWorkDir())
 	assert.Empty(t, agent.GetModel(), "an empty model must inherit the local Grok default")
-	assert.Equal(t, "yolo", agent.GetMode(), "headless automation must not block on permission prompts")
+	assert.Equal(t, "default", agent.GetMode(), "unattended approval must require explicit yolo opt-in")
 	assert.Zero(t, agent.timeout)
 	assert.Zero(t, agent.maxTurns)
 }
@@ -94,7 +94,7 @@ func TestNewValidatesWorkDirAndBinary(t *testing.T) {
 
 func TestNormalizeMode(t *testing.T) {
 	tests := map[string]string{
-		"":                  "yolo",
+		"":                  "default",
 		"default":           "default",
 		"ask":               "default",
 		"yolo":              "yolo",

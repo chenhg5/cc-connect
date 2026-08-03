@@ -105,12 +105,12 @@ func intFromOpts(opts map[string]any, key string, def int) int {
 	}
 }
 
-// Grok's headless stream is read-only, so an omitted mode defaults to the
-// automation-safe yolo mode. Explicit modes retain Grok's native semantics;
-// only yolo receives --always-approve.
+// Omitted or unknown modes use Grok's native default permission policy.
+// Unrestricted execution requires an explicit yolo opt-in; only yolo receives
+// --always-approve.
 func normalizeMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "default", "ask":
+	case "", "default", "ask":
 		return "default"
 	case "accept_edits", "acceptedits", "auto_edit", "autoedit", "edit":
 		return "accept_edits"
@@ -120,7 +120,7 @@ func normalizeMode(raw string) string {
 		return "dont_ask"
 	case "plan":
 		return "plan"
-	case "", "yolo", "force", "bypass", "always-approve", "bypasspermissions":
+	case "yolo", "force", "bypass", "always-approve", "bypasspermissions":
 		return "yolo"
 	default:
 		// A typo in an explicitly configured permission mode must never
