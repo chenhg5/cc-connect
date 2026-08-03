@@ -476,7 +476,11 @@ func TestAgent_StartSession_NoModeNoEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession() error = %v", err)
 	}
-	defer sess.Close()
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
 
 	ps := sess.(*piSession)
 	for _, e := range ps.extraEnv {
