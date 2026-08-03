@@ -4774,6 +4774,80 @@ func TestCmdModel_MultiWorkspacePersistsWorkspaceModelForRecreatedAgent(t *testi
 	}
 }
 
+func TestGetOrCreateWorkspaceAgent_InvalidatesPersistedSessionsForDifferentAgentType(t *testing.T) {
+	const agentName = "workspace-session-invalidation-test-agent"
+	RegisterAgent(agentName, func(map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	stateDir := t.TempDir()
+	e := NewEngine(
+		"workspace-session-invalidation",
+		&namedTestAgent{name: agentName},
+		nil,
+		filepath.Join(stateDir, "global-sessions.json"),
+		LangEnglish,
+	)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(stateDir, "bindings.json"))
+	workspace := normalizeWorkspacePath(t.TempDir())
+
+	_, initialSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("initial getOrCreateWorkspaceAgent: %v", err)
+	}
+	const staleKey = "discord:channel:stale"
+	stale := initialSessions.GetOrCreateActive(staleKey)
+	stale.SetAgentSessionID("opencode-session-id", "opencode")
+	stale.AddHistory("user", "stale session history remains local")
+
+	const matchingKey = "discord:channel:matching"
+	matching := initialSessions.GetOrCreateActive(matchingKey)
+	matching.SetAgentSessionID("matching-session-id", agentName)
+	matching.AddHistory("assistant", "matching session history remains local")
+	initialSessions.Save()
+
+	// Drop only the cached in-memory workspace objects. The next call must
+	// rebuild the per-workspace SessionManager from its persisted store and
+	// invalidate it against the newly created workspace agent's type.
+	ws := e.workspacePool.GetOrCreate(workspace)
+	ws.mu.Lock()
+	ws.agent = nil
+	ws.sessions = nil
+	ws.mu.Unlock()
+
+	_, recreatedSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("recreated getOrCreateWorkspaceAgent: %v", err)
+	}
+	if recreatedSessions == initialSessions {
+		t.Fatal("workspace SessionManager was reused instead of recreated from persisted state")
+	}
+
+	recreatedStale := recreatedSessions.GetOrCreateActive(staleKey)
+	if got := recreatedStale.GetAgentSessionID(); got != "" {
+		t.Fatalf("different-agent AgentSessionID = %q, want cleared", got)
+	}
+	if recreatedStale.AgentType != agentName {
+		t.Fatalf("different-agent AgentType = %q, want current type %q", recreatedStale.AgentType, agentName)
+	}
+	staleHistory := recreatedStale.GetHistory(0)
+	if len(staleHistory) != 1 || staleHistory[0].Content != "stale session history remains local" {
+		t.Fatalf("different-agent history = %#v, want preserved", staleHistory)
+	}
+
+	recreatedMatching := recreatedSessions.GetOrCreateActive(matchingKey)
+	if got := recreatedMatching.GetAgentSessionID(); got != "matching-session-id" {
+		t.Fatalf("matching-agent AgentSessionID = %q, want preserved", got)
+	}
+	if recreatedMatching.AgentType != agentName {
+		t.Fatalf("matching-agent AgentType = %q, want %q", recreatedMatching.AgentType, agentName)
+	}
+	matchingHistory := recreatedMatching.GetHistory(0)
+	if len(matchingHistory) != 1 || matchingHistory[0].Content != "matching session history remains local" {
+		t.Fatalf("matching-agent history = %#v, want preserved", matchingHistory)
+	}
+}
+
 func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{
