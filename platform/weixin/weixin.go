@@ -27,10 +27,6 @@ const (
 	sessionKeyPrefix = "weixin:dm:"
 	maxWeixinChunk   = 3800 // stay under typical IM limits
 
-	// weixinSendMaxRetries is the maximum number of attempts for sendMessage.
-	weixinSendMaxRetries = 3
-	// weixinSendRetryDelay is the delay between retries when sendMessage fails.
-	weixinSendRetryDelay = 500 * time.Millisecond
 	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
 	weixinChunkSendDelay = 100 * time.Millisecond
 	// typingTicketTTL is how long a cached typing ticket remains valid.
@@ -38,12 +34,6 @@ const (
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
 	typingRepeatInterval = 5 * time.Second
 )
-
-// weixinThrottleBackoff is how long to wait before retrying a send that ilink
-// throttled with ret=-2 "prepare failed". The penalty is bot-wide and long
-// (~1h); a short backoff only adds more refused sends to the window.
-// A var (not const) so tests can shrink it.
-var weixinThrottleBackoff = 15 * time.Second
 
 type replyContext struct {
 	peerUserID   string
@@ -674,8 +664,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 			case <-time.After(weixinChunkSendDelay):
 			}
 		}
-		// Retry sendText with context_token refresh on failure
-		err := p.sendChunkWithRetry(ctx, rc, chunk, i+1, total)
+		err := p.sendChunk(ctx, rc, chunk)
 		if err != nil {
 			slog.Error("weixin: chunk send failed, message incomplete",
 				"peer", rc.peerUserID,
@@ -704,38 +693,21 @@ func isSendThrottled(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "ret=-2")
 }
 
-// sendChunkWithRetry sends a single chunk with a retry mechanism.
-// When sendMessage returns ret=-2 (ilink throttling the bot), it backs off and
-// retries rather than hammering the throttled endpoint with 500ms-interval retries
-// (which only adds more refused sends to the penalty window).
-// chunkIdx and totalChunks are 1-based indices used for logging context.
-func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string, chunkIdx, totalChunks int) error {
-	var lastErr error
-	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
-		clientID := "cc-" + randomHex(6)
-		err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if isSendThrottled(err) {
-			slog.Warn("weixin: sendMessage throttled by ilink (ret=-2); backing off before retry",
-				"attempt", attempt+1, "peer", rc.peerUserID,
-				"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
-				"chunk_runes", utf8.RuneCountInString(chunk),
-				"backoff", weixinThrottleBackoff)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(weixinThrottleBackoff):
-			}
-			continue
-		}
-		// For other errors, don't retry.
-		return err
+// sendChunk sends a single chunk. If ilink throttles the send (ret=-2
+// "prepare failed"), it fails fast instead of retrying: live testing showed the
+// penalty is escalated by every send attempt made while it is active, so retrying
+// (e.g. the old 3×500ms loop plus the extra notice send) only prolongs the outage.
+func (p *Platform) sendChunk(ctx context.Context, rc *replyContext, chunk string) error {
+	clientID := "cc-" + randomHex(6)
+	err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
+	if err == nil {
+		return nil
 	}
-	return fmt.Errorf("weixin: sendMessage throttled (ret=-2) after %d attempts; "+
-		"ilink is rate-limiting the bot, retry later: %w", weixinSendMaxRetries, lastErr)
+	if isSendThrottled(err) {
+		return fmt.Errorf("weixin: sendMessage throttled by ilink (ret=-2); "+
+			"the bot is rate-limited and sending during the penalty escalates it, retry the message later: %w", err)
+	}
+	return err
 }
 
 func truncatePreview(s string, max int) string {

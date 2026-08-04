@@ -474,44 +474,10 @@ func TestIsSendThrottled(t *testing.T) {
 	}
 }
 
-// TestSendChunkWithRetry_RecoversFromThrottle verifies the send path backs off
-// and retries when ilink returns ret=-2, succeeding once the throttle clears.
-func TestSendChunkWithRetry_RecoversFromThrottle(t *testing.T) {
-	var sendCalls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sendCalls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		if sendCalls.Load() <= 2 {
-			_, _ = w.Write([]byte(`{"ret":-2,"errmsg":"prepare failed"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"message_id":123}`))
-	}))
-	defer srv.Close()
-
-	old := weixinThrottleBackoff
-	weixinThrottleBackoff = time.Millisecond
-	defer func() { weixinThrottleBackoff = old }()
-
-	p := &Platform{httpClient: &http.Client{}}
-	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
-	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := p.sendChunkWithRetry(ctx, rc, "hello", 1, 1); err != nil {
-		t.Fatalf("sendChunkWithRetry failed: %v", err)
-	}
-	if got := sendCalls.Load(); got < 3 {
-		t.Fatalf("sendmessage calls = %d, want >= 3 (2 throttled + 1 success)", got)
-	}
-}
-
-// TestSendChunkWithRetry_FailsAfterThrottleAttempts verifies a persistently
-// throttled bot gives up after weixinSendMaxRetries attempts with a clear error
-// instead of hammering the endpoint indefinitely.
-func TestSendChunkWithRetry_FailsAfterThrottleAttempts(t *testing.T) {
+// TestSendChunk_FailsFastOnThrottle verifies a throttled send fails immediately
+// with a single sendmessage call — no retries, because every attempt made during
+// the ilink penalty window escalates it.
+func TestSendChunk_FailsFastOnThrottle(t *testing.T) {
 	var sendCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sendCalls.Add(1)
@@ -520,9 +486,35 @@ func TestSendChunkWithRetry_FailsAfterThrottleAttempts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	old := weixinThrottleBackoff
-	weixinThrottleBackoff = time.Millisecond
-	defer func() { weixinThrottleBackoff = old }()
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := p.sendChunk(ctx, rc, "hello")
+	if err == nil {
+		t.Fatal("expected a throttled error, got nil")
+	}
+	if !isSendThrottled(err) {
+		t.Fatalf("error should be recognized as a throttle, got: %v", err)
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls = %d, want 1 (fail fast, no retries)", got)
+	}
+}
+
+// TestSendChunk_Succeeds verifies a normal send returns nil and issues exactly
+// one sendmessage call.
+func TestSendChunk_Succeeds(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":123}`))
+	}))
+	defer srv.Close()
 
 	p := &Platform{httpClient: &http.Client{}}
 	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
@@ -531,14 +523,10 @@ func TestSendChunkWithRetry_FailsAfterThrottleAttempts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := p.sendChunkWithRetry(ctx, rc, "hello", 1, 1)
-	if err == nil {
-		t.Fatal("expected a throttled error, got nil")
+	if err := p.sendChunk(ctx, rc, "hello"); err != nil {
+		t.Fatalf("sendChunk failed: %v", err)
 	}
-	if !isSendThrottled(err) {
-		t.Fatalf("error should be recognized as a throttle, got: %v", err)
-	}
-	if got := sendCalls.Load(); got != weixinSendMaxRetries {
-		t.Fatalf("sendmessage calls = %d, want %d (bounded retries)", got, weixinSendMaxRetries)
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls = %d, want 1", got)
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -109,8 +108,31 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 	}, nil
 }
 
+// sendSingleItem sends a media item. If ilink throttles the send (ret=-2
+// "prepare failed"), it fails fast instead of retrying: the penalty is escalated
+// by every send attempt made while it is active, so retrying only prolongs the
+// outage.
 func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item messageItem) error {
-	return p.sendSingleItemWithRetry(ctx, rc, item)
+	msg := sendMessageReq{
+		Msg: weixinOutboundMsg{
+			FromUserID:   "",
+			ToUserID:     rc.peerUserID,
+			ClientID:     "cc-" + randomHex(8),
+			MessageType:  messageTypeBot,
+			MessageState: messageStateFinish,
+			ItemList:     []messageItem{item},
+			ContextToken: rc.contextToken,
+		},
+	}
+	err := p.api.sendMessage(ctx, &msg)
+	if err == nil {
+		return nil
+	}
+	if isSendThrottled(err) {
+		return fmt.Errorf("weixin: sendMessage throttled by ilink (ret=-2); "+
+			"the bot is rate-limited and sending during the penalty escalates it, retry the message later: %w", err)
+	}
+	return err
 }
 
 func mediaFromUploadRef(ref *cdnUploadedRef) *cdnMedia {
@@ -131,45 +153,6 @@ func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
 	}
 }
 
-// sendSingleItemWithRetry sends a media item with a retry mechanism.
-// When sendMessage returns ret=-2 (ilink throttling the bot), it backs off and
-// retries rather than hammering the throttled endpoint with 500ms-interval retries.
-func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
-	var lastErr error
-	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
-		msg := sendMessageReq{
-			Msg: weixinOutboundMsg{
-				FromUserID:   "",
-				ToUserID:     rc.peerUserID,
-				ClientID:     "cc-" + randomHex(8),
-				MessageType:  messageTypeBot,
-				MessageState: messageStateFinish,
-				ItemList:     []messageItem{item},
-				ContextToken: rc.contextToken,
-			},
-		}
-		err := p.api.sendMessage(ctx, &msg)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if isSendThrottled(err) {
-			slog.Warn("weixin: sendMessage throttled by ilink (ret=-2) for media; backing off before retry",
-				"attempt", attempt+1, "peer", rc.peerUserID,
-				"backoff", weixinThrottleBackoff)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(weixinThrottleBackoff):
-			}
-			continue
-		}
-		// For other errors, don't retry
-		return err
-	}
-	return fmt.Errorf("weixin: sendMessage throttled (ret=-2) after %d attempts; "+
-		"ilink is rate-limiting the bot, retry later: %w", weixinSendMaxRetries, lastErr)
-}
 
 // SendImage implements core.ImageSender.
 func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAttachment) error {
