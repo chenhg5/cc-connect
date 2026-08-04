@@ -291,6 +291,11 @@ level = "info" # debug, info, warn, error
 # max_per_second = 25
 # [outgoing_rate_limit.platforms.feishu]
 # max_per_second = 5
+# Weixin (ilink) sendmessage throttles the bot after a short burst (ret=-2
+# "prepare failed", penalty on the order of an hour). Pace sends to avoid it:
+# [outgoing_rate_limit.platforms.weixin]
+# max_per_second = 0.5
+# burst = 1
 
 # =============================================================================
 # Relay Settings / Relay 设置
