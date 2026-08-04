@@ -27,7 +27,7 @@ const (
 	sessionKeyPrefix = "weixin:dm:"
 	maxWeixinChunk   = 3800 // stay under typical IM limits
 
-	// weixinSendMaxRetries is the maximum number of retries for sendMessage when API returns ret=-2.
+	// weixinSendMaxRetries is the maximum number of attempts for sendMessage.
 	weixinSendMaxRetries = 3
 	// weixinSendRetryDelay is the delay between retries when sendMessage fails.
 	weixinSendRetryDelay = 500 * time.Millisecond
@@ -38,6 +38,12 @@ const (
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
 	typingRepeatInterval = 5 * time.Second
 )
+
+// weixinThrottleBackoff is how long to wait before retrying a send that ilink
+// throttled with ret=-2 "prepare failed". The penalty is bot-wide and long
+// (~1h); a short backoff only adds more refused sends to the window.
+// A var (not const) so tests can shrink it.
+var weixinThrottleBackoff = 15 * time.Second
 
 type replyContext struct {
 	peerUserID   string
@@ -651,8 +657,8 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 		slog.Error("weixin: cannot send message - missing context_token",
 			"peer", rc.peerUserID,
 			"content_preview", truncatePreview(content, 100),
-			"hint", "user needs to send a new message to refresh context_token")
-		return fmt.Errorf("weixin: missing context_token for peer %q - user must send a new message first", rc.peerUserID)
+			"hint", "user needs to send a message to the bot first so a context_token can be captured")
+		return fmt.Errorf("weixin: missing context_token for peer %q - user must send a message to the bot first", rc.peerUserID)
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil
@@ -675,12 +681,15 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 				"peer", rc.peerUserID,
 				"failed_chunk", fmt.Sprintf("%d/%d", i+1, total),
 				"error", err)
-			// Notify user that message delivery was incomplete.
-			// Use a short message that is unlikely to fail itself.
-			notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
-			noticeID := "cc-" + randomHex(6)
-			if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, noticeID); nerr != nil {
-				slog.Warn("weixin: failed to send incomplete-delivery notice", "peer", rc.peerUserID, "error", nerr)
+			// Notify user that message delivery was incomplete, unless the failure
+			// is the ilink throttle: the notice send would be refused too, only
+			// adding another throttled request.
+			if !isSendThrottled(err) {
+				notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
+				noticeID := "cc-" + randomHex(6)
+				if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, noticeID); nerr != nil {
+					slog.Warn("weixin: failed to send incomplete-delivery notice", "peer", rc.peerUserID, "error", nerr)
+				}
 			}
 			return fmt.Errorf("weixin: send chunk %d/%d: %w", i+1, total, err)
 		}
@@ -688,11 +697,17 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	return nil
 }
 
-// sendChunkWithRetry sends a single chunk with retry mechanism.
-// When sendMessage returns ret=-2, it tries to refresh the context_token from
-// storage (which is updated by every inbound message) before retrying.
-// If the stored token is the same as the current one (no refresh possible),
-// it fails fast rather than burning retries on a stale token.
+// isSendThrottled reports whether err is ilink sendmessage's burst-throttle
+// response (ret=-2 "prepare failed"). This is a bot-wide rate-limit penalty, not a
+// context_token problem: the gateway accepts any (or no) context_token on sends.
+func isSendThrottled(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ret=-2")
+}
+
+// sendChunkWithRetry sends a single chunk with a retry mechanism.
+// When sendMessage returns ret=-2 (ilink throttling the bot), it backs off and
+// retries rather than hammering the throttled endpoint with 500ms-interval retries
+// (which only adds more refused sends to the penalty window).
 // chunkIdx and totalChunks are 1-based indices used for logging context.
 func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string, chunkIdx, totalChunks int) error {
 	var lastErr error
@@ -703,47 +718,24 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 			return nil
 		}
 		lastErr = err
-		// Check if error is ret=-2 (API declined) - attempt token refresh
-		if strings.Contains(err.Error(), "ret=-2") {
-			preview := []rune(chunk)
-			if len(preview) > 50 {
-				preview = preview[:50]
-			}
-			// Refresh context_token from stored tokens (may have been updated by a
-			// concurrent inbound message while we were waiting).
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken == "" || freshToken == rc.contextToken {
-				// No fresh token available — further retries would use the same stale
-				// token and all fail. Fail fast with an actionable error.
-				slog.Warn("weixin: sendMessage ret=-2, no fresh context_token available — "+
-					"user must send a new message to refresh the session token",
-					"attempt", attempt+1, "peer", rc.peerUserID,
-					"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
-					"chunk_runes", utf8.RuneCountInString(chunk),
-					"preview", string(preview))
-				return fmt.Errorf("weixin: sendMessage ret=-2 (expired context_token); "+
-					"user must send a new message to peer %q to refresh the session token: %w",
-					rc.peerUserID, lastErr)
-			}
-			slog.Warn("weixin: sendMessage ret=-2, retrying with fresh context_token",
+		if isSendThrottled(err) {
+			slog.Warn("weixin: sendMessage throttled by ilink (ret=-2); backing off before retry",
 				"attempt", attempt+1, "peer", rc.peerUserID,
 				"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
 				"chunk_runes", utf8.RuneCountInString(chunk),
-				"preview", string(preview))
-			rc.contextToken = freshToken
-			slog.Debug("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
-			// Brief delay before retry
+				"backoff", weixinThrottleBackoff)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(weixinSendRetryDelay):
+			case <-time.After(weixinThrottleBackoff):
 			}
 			continue
 		}
-		// For other errors, don't retry
+		// For other errors, don't retry.
 		return err
 	}
-	return lastErr
+	return fmt.Errorf("weixin: sendMessage throttled (ret=-2) after %d attempts; "+
+		"ilink is rate-limiting the bot, retry later: %w", weixinSendMaxRetries, lastErr)
 }
 
 func truncatePreview(s string, max int) string {

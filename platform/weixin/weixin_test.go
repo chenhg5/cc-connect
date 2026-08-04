@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -456,5 +457,88 @@ func TestReconstructReplyCtx_MissingToken(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "no stored context_token") {
 		t.Errorf("error = %q, want it to mention 'no stored context_token'", err.Error())
+	}
+}
+
+// TestIsSendThrottled verifies ret=-2 (ilink sendmessage burst throttle) is
+// recognized as a throttle and other errors are not.
+func TestIsSendThrottled(t *testing.T) {
+	if !isSendThrottled(fmt.Errorf("weixin: sendMessage: ret=-2 errcode=0 errmsg=prepare failed")) {
+		t.Fatal("ret=-2 should be recognized as a throttle")
+	}
+	if isSendThrottled(fmt.Errorf("weixin: sendMessage: connection reset by peer")) {
+		t.Fatal("non-ret=-2 error should not be treated as a throttle")
+	}
+	if isSendThrottled(nil) {
+		t.Fatal("nil error should not be treated as a throttle")
+	}
+}
+
+// TestSendChunkWithRetry_RecoversFromThrottle verifies the send path backs off
+// and retries when ilink returns ret=-2, succeeding once the throttle clears.
+func TestSendChunkWithRetry_RecoversFromThrottle(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if sendCalls.Load() <= 2 {
+			_, _ = w.Write([]byte(`{"ret":-2,"errmsg":"prepare failed"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"message_id":123}`))
+	}))
+	defer srv.Close()
+
+	old := weixinThrottleBackoff
+	weixinThrottleBackoff = time.Millisecond
+	defer func() { weixinThrottleBackoff = old }()
+
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := p.sendChunkWithRetry(ctx, rc, "hello", 1, 1); err != nil {
+		t.Fatalf("sendChunkWithRetry failed: %v", err)
+	}
+	if got := sendCalls.Load(); got < 3 {
+		t.Fatalf("sendmessage calls = %d, want >= 3 (2 throttled + 1 success)", got)
+	}
+}
+
+// TestSendChunkWithRetry_FailsAfterThrottleAttempts verifies a persistently
+// throttled bot gives up after weixinSendMaxRetries attempts with a clear error
+// instead of hammering the endpoint indefinitely.
+func TestSendChunkWithRetry_FailsAfterThrottleAttempts(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":-2,"errmsg":"prepare failed"}`))
+	}))
+	defer srv.Close()
+
+	old := weixinThrottleBackoff
+	weixinThrottleBackoff = time.Millisecond
+	defer func() { weixinThrottleBackoff = old }()
+
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := p.sendChunkWithRetry(ctx, rc, "hello", 1, 1)
+	if err == nil {
+		t.Fatal("expected a throttled error, got nil")
+	}
+	if !isSendThrottled(err) {
+		t.Fatalf("error should be recognized as a throttle, got: %v", err)
+	}
+	if got := sendCalls.Load(); got != weixinSendMaxRetries {
+		t.Fatalf("sendmessage calls = %d, want %d (bounded retries)", got, weixinSendMaxRetries)
 	}
 }

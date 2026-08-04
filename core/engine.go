@@ -11678,7 +11678,7 @@ func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content 
 				"platform", p.Name(),
 				"error", err,
 				"content_len", len(content),
-				"hint", "user needs to send a new message to refresh context_token")
+				"hint", "user needs to send a message to the bot first so a context_token can be captured")
 		} else {
 			slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		}

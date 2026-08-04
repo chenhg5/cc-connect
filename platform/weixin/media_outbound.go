@@ -131,7 +131,9 @@ func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
 	}
 }
 
-// sendSingleItemWithRetry sends a media item with retry mechanism for ret=-2 errors.
+// sendSingleItemWithRetry sends a media item with a retry mechanism.
+// When sendMessage returns ret=-2 (ilink throttling the bot), it backs off and
+// retries rather than hammering the throttled endpoint with 500ms-interval retries.
 func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
@@ -151,33 +153,22 @@ func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext
 			return nil
 		}
 		lastErr = err
-		// Check if error is ret=-2 (API declined) - attempt token refresh
-		if strings.Contains(err.Error(), "ret=-2") {
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken == "" || freshToken == rc.contextToken {
-				slog.Warn("weixin: sendMessage ret=-2 for media, no fresh context_token — "+
-					"user must send a new message to refresh session token",
-					"attempt", attempt+1, "peer", rc.peerUserID)
-				return fmt.Errorf("weixin: sendMessage ret=-2 (expired context_token); "+
-					"user must send a new message to peer %q to refresh the session token: %w",
-					rc.peerUserID, lastErr)
-			}
-			slog.Warn("weixin: sendMessage ret=-2 for media, retrying with fresh context_token",
-				"attempt", attempt+1, "peer", rc.peerUserID)
-			rc.contextToken = freshToken
-			slog.Debug("weixin: using refreshed context_token for media retry", "peer", rc.peerUserID)
-			// Brief delay before retry
+		if isSendThrottled(err) {
+			slog.Warn("weixin: sendMessage throttled by ilink (ret=-2) for media; backing off before retry",
+				"attempt", attempt+1, "peer", rc.peerUserID,
+				"backoff", weixinThrottleBackoff)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(weixinSendRetryDelay):
+			case <-time.After(weixinThrottleBackoff):
 			}
 			continue
 		}
 		// For other errors, don't retry
 		return err
 	}
-	return lastErr
+	return fmt.Errorf("weixin: sendMessage throttled (ret=-2) after %d attempts; "+
+		"ilink is rate-limiting the bot, retry later: %w", weixinSendMaxRetries, lastErr)
 }
 
 // SendImage implements core.ImageSender.
