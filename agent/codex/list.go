@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -83,7 +84,11 @@ func loadCodexSessionTitles(codexHome string) map[string]string {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("codex: failed to close session index", "path", path, "error", err)
+		}
+	}()
 
 	titles := make(map[string]string)
 	scanner := bufio.NewScanner(f)
