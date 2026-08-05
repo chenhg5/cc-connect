@@ -649,6 +649,52 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 }
 
+func TestSend_TurnFailedServerOverloadedIsRetriable(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	shellScript := "#!/bin/sh\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overloaded\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\",\"codex_error_info\":\"server_overloaded\"}}'\n"
+	powershellScript := "[Console]::Out.WriteLine('{\"type\":\"thread.started\",\"thread_id\":\"thread-overloaded\"}')\n" +
+		"[Console]::Out.WriteLine('{\"type\":\"turn.failed\",\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\",\"codex_error_info\":\"server_overloaded\"}}')\n"
+	writeFakeCodexScript(t, binDir, shellScript, powershellScript)
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	if err := cs.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case evt := <-cs.Events():
+			if evt.Type != core.EventError {
+				continue
+			}
+			if evt.ErrorKind != core.ErrorKindOverloaded {
+				t.Fatalf("ErrorKind = %q, want %q", evt.ErrorKind, core.ErrorKindOverloaded)
+			}
+			if evt.Error == nil || !strings.Contains(evt.Error.Error(), "Selected model is at capacity") {
+				t.Fatalf("Error = %v, want capacity message", evt.Error)
+			}
+			return
+		case <-timeout:
+			t.Fatal("timed out waiting for retriable error event")
+		}
+	}
+}
+
 func TestWaitForArgsFile_WaitsForNonEmptyContent(t *testing.T) {
 	workDir := t.TempDir()
 	argsFile := filepath.Join(workDir, "args.txt")

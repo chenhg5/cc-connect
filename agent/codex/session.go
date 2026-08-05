@@ -408,14 +408,17 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 
 	case "turn.failed":
 		errMsg := ""
+		errInfo := ""
 		if errObj, ok := raw["error"].(map[string]any); ok {
 			errMsg, _ = errObj["message"].(string)
+			errInfo, _ = errObj["codex_error_info"].(string)
 		}
 		if errMsg == "" {
 			errMsg = "turn failed (no details)"
 		}
-		slog.Warn("codexSession: turn failed", "error", errMsg)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+		errKind := codexErrorKind(errInfo, errMsg)
+		slog.Warn("codexSession: turn failed", "error", errMsg, "codex_error_info", errInfo, "error_kind", errKind)
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg), ErrorKind: errKind}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -433,6 +436,24 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	default:
 		slog.Debug("codexSession: unhandled event type", "type", eventType)
 	}
+}
+
+func codexErrorKind(errorInfo string, message string) core.ErrorKind {
+	switch strings.TrimSpace(errorInfo) {
+	case "server_overloaded":
+		return core.ErrorKindOverloaded
+	case "rate_limit_exceeded", "rate_limit":
+		return core.ErrorKindRateLimit
+	}
+
+	msg := strings.ToLower(message)
+	if strings.Contains(msg, "at capacity") || strings.Contains(msg, "overloaded") {
+		return core.ErrorKindOverloaded
+	}
+	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "rate_limit") {
+		return core.ErrorKindRateLimit
+	}
+	return core.ErrorKindUnknown
 }
 
 // flushPendingAsThinking emits all buffered agent_messages as EventThinking.
