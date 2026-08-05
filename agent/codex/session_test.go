@@ -614,7 +614,11 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() {
+		if err := cs.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
 
 	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -669,7 +673,11 @@ func TestSend_TurnFailedServerOverloadedIsRetriable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() {
+		if err := cs.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
 
 	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
