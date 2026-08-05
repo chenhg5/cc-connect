@@ -37,8 +37,8 @@ const (
 	// active. We pace separate messages (not chunks: multi-chunk sends are fine)
 	// to stay well below the trigger. Configurable via burst_limit /
 	// burst_window_secs platform options.
-	defaultBurstLimit      = 4  // max separate messages per window
-	defaultBurstWindowSecs = 120 // window length
+	defaultBurstLimit      = 4     // max separate messages per window
+	defaultBurstWindowSecs = 86400 // window length (24h: ilink budgets ~5-6 sends/day)
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
@@ -670,14 +670,18 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 	}()
 }
 
-// waitSendQuota blocks until the bot's recent separate-message volume is under
-// the burst window quota, so ilink's sendmessage throttle (ret=-2 "prepare
-// failed") is not triggered. Live testing showed the gateway throttles after
-// roughly 5-6 separate messages within a short window and that attempts made
-// during the penalty escalate it, so we pace separate messages (not chunks —
-// multi-chunk sends are fine) to stay safely below the trigger. A limit of 0
-// disables the quota.
-func (p *Platform) waitSendQuota(ctx context.Context) error {
+// checkSendQuota enforces the bot's separate-message budget so ilink's
+// sendmessage throttle (ret=-2 "prepare failed") is not triggered. Live testing
+// showed the gateway throttles a bot after roughly 5-6 separate messages per
+// long window (about a day; matches the 24h context TTL), regardless of pacing,
+// and that attempts made during the penalty escalate it. Multi-chunk sends do
+// not count (a chunked message is one logical message). This quota counts
+// logical messages in a sliding window and FAILS FAST once the budget is
+// exhausted — waiting for the window to slide (up to a day) is useless, and the
+// fail-fast philosophy (see sendChunk) applies: do not keep hammering a
+// throttled bot. Configure via burst_limit / burst_window_secs platform
+// options. A limit of 0 disables the quota.
+func (p *Platform) checkSendQuota(ctx context.Context) error {
 	if p.sendQuotaLimit <= 0 || p.sendQuotaWindow <= 0 {
 		return nil
 	}
@@ -692,18 +696,9 @@ func (p *Platform) waitSendQuota(ctx context.Context) error {
 	}
 	p.sendQuotaTimes = kept
 	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
-		oldest := p.sendQuotaTimes[0]
-		wait := oldest.Add(p.sendQuotaWindow).Sub(now)
 		p.sendQuotaMu.Unlock()
-		if wait <= 0 {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
-		return p.waitSendQuota(ctx)
+		return fmt.Errorf("weixin: send budget exhausted (%d messages in the last %s); "+
+			"ilink throttles the bot after roughly 5-6 sends per window — reduce messages or re-login later", p.sendQuotaLimit, p.sendQuotaWindow)
 	}
 	p.sendQuotaTimes = append(p.sendQuotaTimes, now)
 	p.sendQuotaMu.Unlock()
@@ -715,7 +710,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	if !ok || rc == nil {
 		return fmt.Errorf("weixin: invalid reply context")
 	}
-	if err := p.waitSendQuota(ctx); err != nil {
+	if err := p.checkSendQuota(ctx); err != nil {
 		return err
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {

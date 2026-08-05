@@ -1448,7 +1448,7 @@ app_secret = "your-feishu-app-secret"
 # （多切块发送不计数），且节流期内每次尝试都会升级惩罚。配额对独立消息限速，
 # 使其低于触发阈值。设为 0 关闭配额。
 # burst_limit = 4           # max separate messages per window / 每窗口最多独立消息数
-# burst_window_secs = 120   # window length / 窗口时长（秒）
+# burst_window_secs = 86400 # window length (default 24h) / 窗口时长（秒，默认24小时）
 
 # -----------------------------------------------------------------------------
 # Tencent Yuanbao (yuanbao.tencent.com bot platform)
