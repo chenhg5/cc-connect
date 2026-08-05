@@ -382,6 +382,15 @@ func (w *compactProgressWriter) AppendEvent(kind ProgressCardEntryKind, text str
 
 // AppendStructured appends one structured progress event and updates the in-place message.
 func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallback string) bool {
+	return w.appendStructured(item, fallback, false)
+}
+
+// AppendStructuredImmediate appends an event and forces an immediate edit.
+func (w *compactProgressWriter) AppendStructuredImmediate(item ProgressCardEntry, fallback string) bool {
+	return w.appendStructured(item, fallback, true)
+}
+
+func (w *compactProgressWriter) appendStructured(item ProgressCardEntry, fallback string, forceUpdate bool) bool {
 	if !w.enabled || w.failed {
 		return false
 	}
@@ -484,7 +493,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	if w.ctx.Err() != nil || time.Now().Before(w.retryAfter) {
 		return true
 	}
-	if w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
+	if !forceUpdate && w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
 		return true
 	}
 
