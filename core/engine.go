@@ -3756,16 +3756,17 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 }
 
 type interactiveRetryTurn struct {
-	kind          ErrorKind
-	err           error
-	promptContent string
-	msgID         string
-	images        []ImageAttachment
-	files         []FileAttachment
-	replyCtx      any
-	logSessionKey string
-	contentLen    int
-	notify        func(string) bool
+	kind           ErrorKind
+	err            error
+	promptContent  string
+	msgID          string
+	images         []ImageAttachment
+	files          []FileAttachment
+	replyCtx       any
+	logSessionKey  string
+	contentLen     int
+	notify         func(string) bool
+	finalizeNotice func(ProgressCardState, CardStatus)
 }
 
 func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, promptContent string, msgID string, images []ImageAttachment, files []FileAttachment, replyCtx any, turnStart time.Time, logSessionKey string, contentLen int) {
@@ -3848,6 +3849,9 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 
 		if attempt >= maxAttempts {
 			slog.Error("retriable agent error exhausted", "error", retryErr, "kind", retryKind, "session", logSessionKey, "attempts", attempt)
+			if retryTurn.finalizeNotice != nil {
+				retryTurn.finalizeNotice(ProgressCardStateFailed, CardStatusError)
+			}
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -3883,6 +3887,9 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 				default:
 				}
 			}
+			if retryTurn.finalizeNotice != nil {
+				retryTurn.finalizeNotice(ProgressCardStateCompleted, CardStatusDone)
+			}
 			return
 		case <-stopCh:
 			if !timer.Stop() {
@@ -3891,7 +3898,13 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 				default:
 				}
 			}
+			if retryTurn.finalizeNotice != nil {
+				retryTurn.finalizeNotice(ProgressCardStateCompleted, CardStatusDone)
+			}
 			return
+		}
+		if retryTurn.finalizeNotice != nil {
+			retryTurn.finalizeNotice(ProgressCardStateCompleted, CardStatusDone)
 		}
 	}
 }
@@ -6082,11 +6095,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Warn("agent retriable error", "error", event.Error, "kind", event.ErrorKind, "session_key", sessionKey)
+				var lastRetryNotice string
 				notifyRetry := func(notice string) bool {
 					notice = strings.TrimSpace(notice)
 					if notice == "" {
 						return false
 					}
+					lastRetryNotice = notice
 					if hasRichCard && cardMessageID != nil {
 						if updater, ok := p.(MessageUpdater); ok {
 							statusFooter := joinStatusFooterLines(
@@ -6101,10 +6116,37 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 					}
-					if cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: notice}, notice) {
+					if cp.AppendStructuredImmediate(ProgressCardEntry{Kind: ProgressEntryInfo, Text: notice}, notice) {
 						return true
 					}
 					return sp.updateStatusFooter(CardStatusWorking, notice)
+				}
+				finalizeRetryNotice := func(progressState ProgressCardState, cardStatus CardStatus) {
+					if hasRichCard && cardMessageID != nil {
+						if updater, ok := p.(MessageUpdater); ok {
+							if cardStatus == "" {
+								cardStatus = CardStatusDone
+							}
+							statusFooter := e.composeRichStatusFooter(cardStatus != CardStatusDone && cardStatus != CardStatusError, turnStart, e.agent, state.agentSession, state.workspaceDir)
+							if lastRetryNotice != "" {
+								statusFooter = joinStatusFooterLines(lastRetryNotice, statusFooter)
+							}
+							card := buildResolvedRichCard(cardStatus, "", toolSteps, partialText, false, statusFooter)
+							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+								slog.Debug("rich card: failed to finalize retriable notice", "platform", p.Name(), "error", err)
+							}
+						}
+					}
+					if progressState == "" {
+						progressState = ProgressCardStateCompleted
+					}
+					cp.Finalize(progressState)
+					if lastRetryNotice != "" {
+						if cardStatus == "" {
+							cardStatus = CardStatusDone
+						}
+						sp.updateStatusFooter(cardStatus, lastRetryNotice)
+					}
 				}
 				retryTurn := &interactiveRetryTurn{kind: event.ErrorKind, err: event.Error}
 				if currentRetryTurn != nil {
@@ -6113,6 +6155,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					retryTurn.err = event.Error
 				}
 				retryTurn.notify = notifyRetry
+				retryTurn.finalizeNotice = finalizeRetryNotice
 				return retryTurn
 			}
 			cp.Finalize(ProgressCardStateFailed)
