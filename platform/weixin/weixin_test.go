@@ -530,3 +530,76 @@ func TestSendChunk_Succeeds(t *testing.T) {
 		t.Fatalf("sendmessage calls = %d, want 1", got)
 	}
 }
+
+// TestWaitSendQuota_AllowsUnderLimit verifies sends under the window limit pass
+// through without blocking.
+func TestWaitSendQuota_AllowsUnderLimit(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 4, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if err := p.waitSendQuota(ctx); err != nil {
+			t.Fatalf("waitSendQuota(%d) unexpectedly failed: %v", i, err)
+		}
+	}
+}
+
+// TestWaitSendQuota_BlocksWhenOverLimit verifies the quota paces sends once the
+// window is full, waiting until the oldest send falls outside the window.
+func TestWaitSendQuota_BlocksWhenOverLimit(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 1, sendQuotaWindow: 300 * time.Millisecond}
+	ctx := context.Background()
+	if err := p.waitSendQuota(ctx); err != nil {
+		t.Fatalf("first send should pass: %v", err)
+	}
+	start := time.Now()
+	if err := p.waitSendQuota(ctx); err != nil {
+		t.Fatalf("second send should be allowed after window expires: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+		t.Fatalf("expected to block ~300ms, got %v", elapsed)
+	}
+}
+
+// TestWaitSendQuota_DisabledWhenZero verifies limit 0 disables the quota entirely.
+func TestWaitSendQuota_DisabledWhenZero(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 0, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if err := p.waitSendQuota(ctx); err != nil {
+			t.Fatalf("disabled quota should never block: %v", err)
+		}
+	}
+}
+
+// TestSendChunks_AppliesQuota verifies a burst of separate messages is paced by
+// the window quota end-to-end through sendChunks (httptest server).
+func TestSendChunks_AppliesQuota(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":123}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}, sendQuotaLimit: 1, sendQuotaWindow: 200 * time.Millisecond}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := p.sendChunks(ctx, rc, "first"); err != nil {
+		t.Fatalf("first send failed: %v", err)
+	}
+	start := time.Now()
+	if err := p.sendChunks(ctx, rc, "second"); err != nil {
+		t.Fatalf("second send failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("second send should have been paced ~200ms, got %v", elapsed)
+	}
+	if got := sendCalls.Load(); got != 2 {
+		t.Fatalf("sendmessage calls = %d, want 2", got)
+	}
+}

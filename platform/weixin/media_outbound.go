@@ -113,6 +113,9 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 // by every send attempt made while it is active, so retrying only prolongs the
 // outage.
 func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item messageItem) error {
+	if err := p.waitSendQuota(ctx); err != nil {
+		return err
+	}
 	msg := sendMessageReq{
 		Msg: weixinOutboundMsg{
 			FromUserID:   "",

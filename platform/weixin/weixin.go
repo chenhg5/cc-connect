@@ -29,6 +29,16 @@ const (
 
 	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
 	weixinChunkSendDelay = 100 * time.Millisecond
+
+	// Send-volume quota that keeps the bot under ilink's burst throttle
+	// (sendMessage ret=-2 "prepare failed"). Live testing showed the gateway
+	// throttles the bot after roughly 5-6 separate messages within a short window,
+	// and that the penalty is escalated by every send attempt made while it is
+	// active. We pace separate messages (not chunks: multi-chunk sends are fine)
+	// to stay well below the trigger. Configurable via burst_limit /
+	// burst_window_secs platform options.
+	defaultBurstLimit      = 4  // max separate messages per window
+	defaultBurstWindowSecs = 120 // window length
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
@@ -83,6 +93,12 @@ type Platform struct {
 
 	typingMu      sync.RWMutex
 	typingTickets map[string]typingTicketEntry // peerUserID → cached ticket
+
+	// Send-volume quota guarding against ilink's burst throttle (see constants).
+	sendQuotaMu     sync.Mutex
+	sendQuotaTimes  []time.Time
+	sendQuotaLimit  int
+	sendQuotaWindow time.Duration
 }
 
 type typingTicketEntry struct {
@@ -131,6 +147,16 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	lp := pickInt(opts["long_poll_timeout_ms"])
 
+	// Send-volume quota (see defaultBurstLimit constants). 0 disables the quota.
+	burstLimit := pickInt(opts["burst_limit"])
+	if burstLimit < 0 {
+		burstLimit = 0
+	}
+	burstWindow := pickInt(opts["burst_window_secs"])
+	if burstWindow < 0 {
+		burstWindow = 0
+	}
+
 	dataDir, _ := opts["cc_data_dir"].(string)
 	project, _ := opts["cc_project"].(string)
 	stateDir := ""
@@ -163,20 +189,29 @@ func New(opts map[string]any) (core.Platform, error) {
 		Transport: &http.Transport{Proxy: nil},
 	}
 
+	if burstLimit <= 0 {
+		burstLimit = defaultBurstLimit
+	}
+	if burstWindow <= 0 {
+		burstWindow = defaultBurstWindowSecs
+	}
+
 	p := &Platform{
-		token:         token,
-		baseURL:       baseURL,
-		cdnBaseURL:    cdnBaseURL,
-		allowFrom:     allowFrom,
-		routeTag:      routeTag,
-		stateDir:      stateDir,
-		longPollMS:    lp,
-		accountLabel:  accountLabel,
-		httpClient:    httpClient,
-		cdnHttpClient: cdnHttpClient,
-		tokens:        make(map[string]string),
-		dedup:         make(map[string]time.Time),
-		typingTickets: make(map[string]typingTicketEntry),
+		token:           token,
+		baseURL:         baseURL,
+		cdnBaseURL:      cdnBaseURL,
+		allowFrom:       allowFrom,
+		routeTag:        routeTag,
+		stateDir:        stateDir,
+		longPollMS:      lp,
+		accountLabel:    accountLabel,
+		httpClient:      httpClient,
+		cdnHttpClient:   cdnHttpClient,
+		tokens:          make(map[string]string),
+		dedup:           make(map[string]time.Time),
+		typingTickets:   make(map[string]typingTicketEntry),
+		sendQuotaLimit:  burstLimit,
+		sendQuotaWindow: time.Duration(burstWindow) * time.Second,
 	}
 	p.api = newAPIClient(baseURL, token, routeTag, httpClient)
 
@@ -635,10 +670,53 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 	}()
 }
 
+// waitSendQuota blocks until the bot's recent separate-message volume is under
+// the burst window quota, so ilink's sendmessage throttle (ret=-2 "prepare
+// failed") is not triggered. Live testing showed the gateway throttles after
+// roughly 5-6 separate messages within a short window and that attempts made
+// during the penalty escalate it, so we pace separate messages (not chunks —
+// multi-chunk sends are fine) to stay safely below the trigger. A limit of 0
+// disables the quota.
+func (p *Platform) waitSendQuota(ctx context.Context) error {
+	if p.sendQuotaLimit <= 0 || p.sendQuotaWindow <= 0 {
+		return nil
+	}
+	p.sendQuotaMu.Lock()
+	now := time.Now()
+	cutoff := now.Add(-p.sendQuotaWindow)
+	kept := p.sendQuotaTimes[:0]
+	for _, t := range p.sendQuotaTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	p.sendQuotaTimes = kept
+	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
+		oldest := p.sendQuotaTimes[0]
+		wait := oldest.Add(p.sendQuotaWindow).Sub(now)
+		p.sendQuotaMu.Unlock()
+		if wait <= 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		return p.waitSendQuota(ctx)
+	}
+	p.sendQuotaTimes = append(p.sendQuotaTimes, now)
+	p.sendQuotaMu.Unlock()
+	return nil
+}
+
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
 		return fmt.Errorf("weixin: invalid reply context")
+	}
+	if err := p.waitSendQuota(ctx); err != nil {
+		return err
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
 		rc.contextToken = p.getContextToken(rc.peerUserID)
