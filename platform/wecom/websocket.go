@@ -287,7 +287,7 @@ func (p *WSPlatform) handleFrame(frame wsFrame) {
 	case "aibot_msg_callback":
 		p.handleMsgCallback(frame)
 	case "aibot_event_callback":
-		slog.Debug("wecom-ws: event callback received (ignored)", "req_id", frame.Headers.ReqID)
+		p.handleEventCallback(frame)
 	case "":
 		// Response frame (no cmd): identify by req_id prefix
 		reqID := frame.Headers.ReqID
@@ -530,6 +530,125 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 	}
 	slog.Debug("wecom-ws: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
 	return nil
+}
+
+var _ core.CardSender = (*WSPlatform)(nil)
+
+// SendCard sends a structured card via aibot_send_msg. Implements core.CardSender.
+func (p *WSPlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: send card: invalid reply context type %T", rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive card")
+	}
+
+	cardPayload, err := buildWeComTemplateCard(card)
+	if err != nil {
+		return fmt.Errorf("wecom-ws: build template card: %w", err)
+	}
+
+	reqID := p.generateReqID("aibot_send_msg")
+	frame := map[string]any{
+		"cmd":     "aibot_send_msg",
+		"headers": map[string]string{"req_id": reqID},
+		"body": map[string]any{
+			"chatid":        rc.chatID,
+			"msgtype":       "template_card",
+			"template_card": cardPayload,
+		},
+	}
+	if err := p.writeAndWaitAck(ctx, frame, reqID); err != nil {
+		slog.Error("wecom-ws: send card failed", "user", rc.userID, "error", err)
+		return err
+	}
+	slog.Debug("wecom-ws: card sent", "user", rc.userID)
+	return nil
+}
+
+// ReplyCard replies with a structured card via aibot_respond_msg. Implements core.CardSender.
+func (p *WSPlatform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return fmt.Errorf("wecom-ws: reply card: invalid reply context type %T", rctx)
+	}
+	if rc.reqID == "" {
+		return p.SendCard(ctx, rctx, card)
+	}
+
+	cardPayload, err := buildWeComTemplateCard(card)
+	if err != nil {
+		return fmt.Errorf("wecom-ws: build template card: %w", err)
+	}
+
+	frame := map[string]any{
+		"cmd":     "aibot_respond_msg",
+		"headers": map[string]string{"req_id": rc.reqID},
+		"body": map[string]any{
+			"msgtype":       "template_card",
+			"template_card": cardPayload,
+		},
+	}
+	if err := p.writeJSON(frame); err != nil {
+		slog.Error("wecom-ws: reply card failed", "user", rc.userID, "error", err)
+		return err
+	}
+	slog.Debug("wecom-ws: card reply sent", "user", rc.userID)
+	return nil
+}
+
+func (p *WSPlatform) handleEventCallback(frame wsFrame) {
+	var body struct {
+		MsgID      string `json:"msgid"`
+		CreateTime int64  `json:"create_time"`
+		AibotID    string `json:"aibotid"`
+		ChatID     string `json:"chatid"`
+		From       struct {
+			UserID string `json:"userid"`
+		} `json:"from"`
+		MsgType string `json:"msgtype"`
+		Event   struct {
+			EventType string `json:"eventtype"`
+			EventKey  string `json:"event_key"`
+			TaskID    string `json:"task_id"`
+		} `json:"event"`
+	}
+
+	if err := json.Unmarshal(frame.Body, &body); err != nil {
+		slog.Warn("wecom-ws: parse event_callback body failed", "error", err)
+		return
+	}
+
+	if body.Event.EventType == "template_card_event" {
+		slog.Info("wecom-ws: template_card_event received", "user", body.From.UserID, "event_key", body.Event.EventKey, "task_id", body.Event.TaskID)
+		if !core.AllowList(p.allowFrom, body.From.UserID) {
+			slog.Warn("wecom-ws: event rejected by allow_from", "user", body.From.UserID)
+			return
+		}
+		chatID := body.ChatID
+		if chatID == "" {
+			chatID = body.From.UserID
+		}
+		sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
+		chatName := chatID
+		rctx := wsReplyContext{reqID: frame.Headers.ReqID, userID: body.From.UserID, chatID: chatID}
+
+		responseText, isPerm := parseWeComPermissionResponse(body.Event.EventKey)
+		go p.handler(p, &core.Message{
+			SessionKey:           sessionKey,
+			Platform:             "wecom",
+			MessageID:            body.MsgID,
+			UserID:               body.From.UserID,
+			UserName:             body.From.UserID,
+			ChatName:             chatName,
+			Content:              responseText,
+			ReplyCtx:             rctx,
+			IsPermissionResponse: isPerm,
+		})
+	} else {
+		slog.Debug("wecom-ws: event callback received (ignored)", "req_id", frame.Headers.ReqID, "event_type", body.Event.EventType)
+	}
 }
 
 // ReconstructReplyCtx rebuilds a reply context from a session key.
