@@ -1264,6 +1264,62 @@ func TestProcessInteractiveTurnWithRetry_ReplaysPromptAfterOverloaded(t *testing
 	}
 }
 
+func TestProcessInteractiveTurnWithRetry_RichCardNoticeUpdatesCard(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "rich",
+	})
+	sessionKey := "feishu:user-rich-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-rich-retry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-retry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-rich-retry", nil, nil, "ctx-rich-retry", time.Now(), sessionKey, len("hello"))
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2", got)
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
+			t.Fatalf("retry notice was sent as standalone message: %#v", p.getSent())
+		}
+	}
+	rendered := strings.Join(append(p.getPreviewStarts(), p.getPreviewEdits()...), "\n")
+	if !strings.Contains(rendered, "Retrying in") || !strings.Contains(rendered, "attempt 2/2") {
+		t.Fatalf("rich card updates should contain retry notice, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "ok after retry") {
+		t.Fatalf("rich card updates should contain final response, got %q", rendered)
+	}
+}
+
 func TestProcessInteractiveEvents_StripsAgentFooterWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -7431,6 +7487,13 @@ type alwaysRetryAgentSession struct {
 	mu        sync.Mutex
 }
 
+type richCardRetryOnceAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
 func newRetryOnceAgentSession(id string) *retryOnceAgentSession {
 	return &retryOnceAgentSession{
 		sessionID: id,
@@ -7447,6 +7510,13 @@ func newQueuedRetryAgentSession(id string) *queuedRetryAgentSession {
 
 func newAlwaysRetryAgentSession(id string) *alwaysRetryAgentSession {
 	return &alwaysRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newRichCardRetryOnceAgentSession(id string) *richCardRetryOnceAgentSession {
+	return &richCardRetryOnceAgentSession{
 		sessionID: id,
 		events:    make(chan Event, 8),
 	}
@@ -7547,6 +7617,41 @@ func (s *alwaysRetryAgentSession) Close() error {
 }
 
 func (s *alwaysRetryAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *richCardRetryOnceAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{Type: EventThinking, Content: "Inspecting retry path"}
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventText, Content: "ok after retry"}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *richCardRetryOnceAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *richCardRetryOnceAgentSession) Events() <-chan Event     { return s.events }
+func (s *richCardRetryOnceAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *richCardRetryOnceAgentSession) Alive() bool              { return true }
+func (s *richCardRetryOnceAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+func (s *richCardRetryOnceAgentSession) sendCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sends

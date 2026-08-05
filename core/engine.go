@@ -3841,6 +3841,7 @@ type interactiveRetryTurn struct {
 	replyCtx      any
 	logSessionKey string
 	contentLen    int
+	notify        func(string) bool
 }
 
 func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, promptContent string, msgID string, images []ImageAttachment, files []FileAttachment, replyCtx any, turnStart time.Time, logSessionKey string, contentLen int) {
@@ -3941,7 +3942,10 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgRetriableAgentError), delay.Round(time.Second), attempt+1, maxAttempts))
+			notice := fmt.Sprintf(e.i18n.T(MsgRetriableAgentError), delay.Round(time.Second), attempt+1, maxAttempts)
+			if retryTurn.notify == nil || !retryTurn.notify(notice) {
+				e.send(p, replyCtx, notice)
+			}
 		}
 
 		timer := time.NewTimer(delay)
@@ -6160,19 +6164,43 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			state.mu.Unlock()
 			if event.ErrorKind.IsRetriable() {
-				sp.discard()
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
 						slog.Debug("async send error after retriable EventError", "error", err)
 					}
 				}
 				slog.Warn("agent retriable error", "error", event.Error, "kind", event.ErrorKind, "session_key", sessionKey)
+				notifyRetry := func(notice string) bool {
+					notice = strings.TrimSpace(notice)
+					if notice == "" {
+						return false
+					}
+					if hasRichCard && cardMessageID != nil {
+						if updater, ok := p.(MessageUpdater); ok {
+							statusFooter := joinStatusFooterLines(
+								notice,
+								e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir),
+							)
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, statusFooter)
+							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+								return true
+							} else {
+								slog.Debug("rich card: failed to update retriable notice", "platform", p.Name(), "error", err)
+							}
+						}
+					}
+					if cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: notice}, notice) {
+						return true
+					}
+					return sp.updateStatusFooter(CardStatusWorking, notice)
+				}
 				retryTurn := &interactiveRetryTurn{kind: event.ErrorKind, err: event.Error}
 				if currentRetryTurn != nil {
 					*retryTurn = *currentRetryTurn
 					retryTurn.kind = event.ErrorKind
 					retryTurn.err = event.Error
 				}
+				retryTurn.notify = notifyRetry
 				return retryTurn
 			}
 			cp.Finalize(ProgressCardStateFailed)
@@ -7810,6 +7838,17 @@ func appendReplyFooter(content, footer string) string {
 		return "*" + footer + "*"
 	}
 	return content + "\n\n*" + footer + "*"
+}
+
+func joinStatusFooterLines(lines ...string) string {
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func appendFinalMetadataToSegment(segment, fullResponse string) string {
