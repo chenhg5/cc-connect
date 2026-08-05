@@ -1320,6 +1320,63 @@ func TestProcessInteractiveTurnWithRetry_RichCardNoticeUpdatesCard(t *testing.T)
 	}
 }
 
+func TestProcessInteractiveTurnWithRetry_ProgressCardNoticeUpdatesCard(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-progress-card-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-progress-card-retry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry", nil, nil, "ctx-progress-card-retry", time.Now(), sessionKey, len("hello"))
+
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
+			t.Fatalf("retry notice was sent as standalone message: %#v", p.getSent())
+		}
+	}
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 {
+		t.Fatal("preview edits = 0, want retry notice to update progress card")
+	}
+	var sawRetry bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		for _, item := range payload.Items {
+			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "attempt 2/2") {
+				sawRetry = true
+			}
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("progress card edits should contain retry info item, got %#v", edits)
+	}
+}
+
 func TestProcessInteractiveEvents_StripsAgentFooterWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
