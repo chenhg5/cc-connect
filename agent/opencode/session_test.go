@@ -343,7 +343,6 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	events := make(chan string, 16)
 	sseConnected := make(chan struct{})
 	promptStarted := make(chan struct{})
-	releasePrompt := make(chan struct{})
 	permissionReply := make(chan map[string]any, 1)
 	questionReply := make(chan map[string]any, 1)
 	var connectedOnce sync.Once
@@ -369,11 +368,10 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 			}
 		}
 	})
-	mux.HandleFunc("POST /session/ses_http/message", func(w http.ResponseWriter, _ *http.Request) {
+	// prompt_async is fire-and-forget (204). The turn output flows via /event.
+	mux.HandleFunc("POST /session/ses_http/prompt_async", func(w http.ResponseWriter, _ *http.Request) {
 		close(promptStarted)
-		<-releasePrompt
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"info":{},"parts":[]}`))
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /permission/per_1/reply", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -415,7 +413,16 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	select {
 	case <-promptStarted:
 	case <-time.After(time.Second):
-		t.Fatal("prompt request did not start")
+		t.Fatal("prompt_async request did not start")
+	}
+	// With fire-and-forget prompt_async, Send returns as soon as the 204 is received.
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("Send returned %v, want nil after prompt_async 204", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send did not return after prompt_async 204")
 	}
 
 	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_user","messageID":"msg_user","type":"text","sessionID":"ses_http","text":"hello"}}}`
@@ -431,19 +438,10 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventText || event.Content != "rst" {
 		t.Fatalf("text delta = %#v, want streamed delta", event)
 	}
-	select {
-	case err := <-sendDone:
-		t.Fatalf("Send returned before prompt response: %v", err)
-	default:
-	}
 
 	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"idle"}}}`
 	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventResult {
 		t.Fatalf("idle event = %#v, want EventResult", event)
-	}
-	close(releasePrompt)
-	if err := <-sendDone; err != nil {
-		t.Fatal(err)
 	}
 
 	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"busy"}}}`
@@ -505,7 +503,7 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	}
 }
 
-func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing.T) {
+func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenPromptAsyncFails(t *testing.T) {
 	events := make(chan string, 4)
 	sseConnected := make(chan struct{})
 	var connectedOnce sync.Once
@@ -531,7 +529,7 @@ func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing
 			}
 		}
 	})
-	mux.HandleFunc("POST /session/ses_http/message", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /session/ses_http/prompt_async", func(w http.ResponseWriter, _ *http.Request) {
 		events <- `{"type":"session.error","properties":{"sessionID":"ses_http","error":{"name":"PaymentRequiredError","data":{"message":"Insufficient balance. Please recharge your account."}}}}`
 		http.Error(w, `{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_quota"}}`, http.StatusInternalServerError)
 	})
@@ -564,6 +562,91 @@ func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenMessageEndpointFails(t *testing
 	}
 	if got := err.Error(); !strings.Contains(got, "PaymentRequiredError") || !strings.Contains(got, "Insufficient balance") {
 		t.Fatalf("Send error = %q, want SSE quota error", got)
+	}
+}
+
+// TestOpencodeHTTPMode_SSEReconnectsAfterEOF verifies the central fix: when
+// the /event SSE stream ends (server restart, network blip, keepalive expiry),
+// cc-connect reconnects instead of tearing the session down. The session must
+// stay alive and keep delivering events after reconnect.
+func TestOpencodeHTTPMode_SSEReconnectsAfterEOF(t *testing.T) {
+	events := make(chan string, 16)
+	firstConnect := make(chan struct{})
+	secondConnect := make(chan struct{})
+	var connectCount atomic.Int32
+	var firstOnce, secondOnce sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /session", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ses_http"}`))
+	})
+	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
+		n := connectCount.Add(1)
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		if n == 1 {
+			firstOnce.Do(func() { close(firstConnect) })
+			return // close immediately — simulates server restart / connection drop
+		}
+		secondOnce.Do(func() { close(secondConnect) })
+		for {
+			select {
+			case event := <-events:
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+	mux.HandleFunc("POST /session/ses_http/prompt_async", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	agent, err := New(map[string]any{
+		"cmd":            "/bin/false",
+		"work_dir":       t.TempDir(),
+		"connection_url": server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	select {
+	case <-firstConnect:
+	case <-time.After(time.Second):
+		t.Fatal("first SSE connection was not established")
+	}
+	// First connection returns immediately, simulating EOF. Wait for reconnect.
+	select {
+	case <-secondConnect:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("SSE did not reconnect after EOF (connectCount=%d)", connectCount.Load())
+	}
+
+	// Session must still be alive and deliver events on the new connection.
+	if !session.Alive() {
+		t.Fatal("session is not alive after SSE reconnect")
+	}
+	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"busy"}}}`
+	events <- `{"type":"session.next.step.started","properties":{"sessionID":"ses_http","assistantMessageID":"msg_post"}}`
+	events <- `{"type":"message.part.updated","properties":{"part":{"id":"prt_post","messageID":"msg_post","type":"text","sessionID":"ses_http","text":"after reconnect","time":{"end":1}}}}`
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventText || event.Content != "after reconnect" {
+		t.Fatalf("post-reconnect text = %#v, want 'after reconnect'", event)
+	}
+	events <- `{"type":"session.status","properties":{"sessionID":"ses_http","status":{"type":"idle"}}}`
+	if event := waitOpencodeEvent(t, session.Events()); event.Type != core.EventResult {
+		t.Fatalf("post-reconnect idle = %#v, want EventResult", event)
 	}
 }
 

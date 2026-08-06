@@ -116,11 +116,13 @@ func (s *opencodeSession) sendHTTP(prompt string, imagePaths []string) error {
 		body["model"] = map[string]any{"providerID": providerID, "modelID": modelID}
 	}
 
-	path := "/session/" + url.PathEscape(s.CurrentSessionID()) + "/message"
-	// ponytail: /message is NON-IDEMPOTENT (each call creates a new user message) and
-	// streams the entire turn. Retrying duplicates the prompt into the session; the
-	// 60s API timeout kills legit long turns. No timeout, no retry — like /event.
-	if err := s.doHTTPJSONWithRetryClient(s.streamClient, http.MethodPost, path, body, nil, 1); err != nil {
+	// /prompt_async is fire-and-forget (204); the whole turn flows via /event SSE.
+	// Decouples POST lifecycle from the agent turn so long turns (incl. background
+	// subagent dispatch) can't break the POST and vice versa.
+	path := "/session/" + url.PathEscape(s.CurrentSessionID()) + "/prompt_async"
+	if err := s.doHTTPJSONWithRetryClient(s.httpClient, http.MethodPost, path, body, nil, 1); err != nil {
+		// Surface any async session.error (quota, payment-required) emitted on /event
+		// before returning the POST-level failure.
 		if agentErr := s.waitHTTPAgentError(750 * time.Millisecond); agentErr != nil {
 			return agentErr
 		}
@@ -151,24 +153,83 @@ func (s *opencodeSession) waitHTTPAgentError(timeout time.Duration) error {
 	}
 }
 
+// initialSSEBackoff and maxSSEBackoff bound the reconnect retry cadence after
+// the /event SSE stream ends. The SSE is the only durable link to opencode's
+// turn output, so on EOF we reconnect instead of tearing the session down.
+const (
+	initialSSEBackoff = 500 * time.Millisecond
+	maxSSEBackoff     = 30 * time.Second
+)
+
 func (s *opencodeSession) startHTTPEventStream() error {
-	resp, err := s.doStreamRequest(http.MethodGet, "/event", nil)
+	resp, err := s.connectSSE()
 	if err != nil {
 		return fmt.Errorf("opencode: connect event stream: %w", err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer func() { _ = resp.Body.Close() }()
-		return s.httpStatusError(resp)
-	}
 	s.wg.Add(1)
-	go s.readHTTPEvents(resp.Body)
+	go s.readHTTPEventsLoop(resp)
 	return nil
 }
 
-func (s *opencodeSession) readHTTPEvents(body io.ReadCloser) {
-	defer s.wg.Done()
-	defer func() { _ = body.Close() }()
+func (s *opencodeSession) connectSSE() (*http.Response, error) {
+	resp, err := s.doStreamRequest(http.MethodGet, "/event", nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return resp, nil
+}
 
+// readHTTPEventsLoop consumes the /event SSE forever, reconnecting with
+// exponential backoff (capped at maxSSEBackoff) whenever the stream ends.
+// It only returns when s.ctx is cancelled (session close). Transient stream
+// EOF — server restart, network blip, keepalive expiry — no longer kills the
+// session; the loop just reconnects.
+func (s *opencodeSession) readHTTPEventsLoop(initial *http.Response) {
+	defer s.wg.Done()
+
+	resp := initial
+	backoff := initialSSEBackoff
+	for {
+		s.readSSEBody(resp.Body)
+		_ = resp.Body.Close()
+		if s.ctx.Err() != nil {
+			return
+		}
+		slog.Info("opencode: /event stream ended, reconnecting", "backoff", backoff)
+
+		for attempts := 0; ; attempts++ {
+			if s.ctx.Err() != nil {
+				return
+			}
+			if attempts > 0 {
+				wait := backoff
+				backoff *= 2
+				if backoff > maxSSEBackoff {
+					backoff = maxSSEBackoff
+				}
+				s.sleepContext(wait)
+				if s.ctx.Err() != nil {
+					return
+				}
+			}
+			newResp, err := s.connectSSE()
+			if err != nil {
+				slog.Warn("opencode: /event reconnect failed", "error", err, "attempt", attempts+1)
+				continue
+			}
+			resp = newResp
+			backoff = initialSSEBackoff
+			break
+		}
+	}
+}
+
+func (s *opencodeSession) readSSEBody(body io.ReadCloser) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var data strings.Builder
@@ -189,15 +250,18 @@ func (s *opencodeSession) readHTTPEvents(body io.ReadCloser) {
 		}
 		data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 	}
-	if s.ctx.Err() != nil {
-		return
+	if err := scanner.Err(); err != nil && s.ctx.Err() == nil {
+		slog.Debug("opencode: /event scanner ended", "error", err)
 	}
-	s.alive.Store(false)
-	err := scanner.Err()
-	if err == nil {
-		err = io.EOF
+}
+
+func (s *opencodeSession) sleepContext(d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-s.ctx.Done():
+	case <-t.C:
 	}
-	s.emitHTTPEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("opencode: event stream closed: %w", err)})
 }
 
 func (s *opencodeSession) handleHTTPEvent(data []byte) {
