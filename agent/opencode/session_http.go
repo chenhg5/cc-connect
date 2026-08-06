@@ -34,7 +34,11 @@ func newOpencodeHTTPSession(ctx context.Context, connectionURL, username, passwo
 	if err != nil {
 		return nil, err
 	}
-	s.httpClient = &http.Client{}
+	// Regular API calls need a timeout so a hung opencode server doesn't
+	// block cc-connect forever. The event stream uses a separate client
+	// without a timeout because it is intentionally long-lived.
+	s.httpClient = &http.Client{Timeout: 60 * time.Second}
+	s.streamClient = &http.Client{}
 	s.connectionURL = connectionURL
 	s.username = username
 	s.password = password
@@ -111,7 +115,12 @@ func (s *opencodeSession) sendHTTP(prompt string, imagePaths []string) error {
 	if providerID, modelID, ok := strings.Cut(s.model, "/"); ok && providerID != "" && modelID != "" {
 		body["model"] = map[string]any{"providerID": providerID, "modelID": modelID}
 	}
-	if err := s.doHTTPJSON(http.MethodPost, "/session/"+url.PathEscape(s.CurrentSessionID())+"/message", body, nil); err != nil {
+
+	path := "/session/" + url.PathEscape(s.CurrentSessionID()) + "/message"
+	// ponytail: /message is NON-IDEMPOTENT (each call creates a new user message) and
+	// streams the entire turn. Retrying duplicates the prompt into the session; the
+	// 60s API timeout kills legit long turns. No timeout, no retry — like /event.
+	if err := s.doHTTPJSONWithRetryClient(s.streamClient, http.MethodPost, path, body, nil, 1); err != nil {
 		if agentErr := s.waitHTTPAgentError(750 * time.Millisecond); agentErr != nil {
 			return agentErr
 		}
@@ -143,7 +152,7 @@ func (s *opencodeSession) waitHTTPAgentError(timeout time.Duration) error {
 }
 
 func (s *opencodeSession) startHTTPEventStream() error {
-	resp, err := s.doHTTPRequest(http.MethodGet, "/event", nil)
+	resp, err := s.doStreamRequest(http.MethodGet, "/event", nil)
 	if err != nil {
 		return fmt.Errorf("opencode: connect event stream: %w", err)
 	}
@@ -207,6 +216,10 @@ func (s *opencodeSession) handleHTTPEvent(data []byte) {
 	}
 
 	switch event.Type {
+	case "session.next.step.started":
+		if assistantMessageID, _ := props["assistantMessageID"].(string); assistantMessageID != "" {
+			s.markHTTPAssistantMessageByID(assistantMessageID)
+		}
 	case "message.part.updated":
 		s.handleHTTPPart(props)
 	case "session.status":
@@ -291,6 +304,10 @@ func (s *opencodeSession) handleHTTPPart(props map[string]any) {
 
 func (s *opencodeSession) markHTTPAssistantMessage(part map[string]any) {
 	messageID := stringValue(part["messageID"])
+	s.markHTTPAssistantMessageByID(messageID)
+}
+
+func (s *opencodeSession) markHTTPAssistantMessageByID(messageID string) {
 	if messageID == "" {
 		return
 	}
@@ -495,25 +512,87 @@ func (s *opencodeSession) respondHTTPPermission(requestID string, result core.Pe
 }
 
 func (s *opencodeSession) doHTTPJSON(method, path string, body, output any) error {
-	resp, err := s.doHTTPRequest(method, path, body)
-	if err != nil {
-		return err
+	return s.doHTTPJSONWithRetry(method, path, body, output, 1)
+}
+
+func (s *opencodeSession) doHTTPJSONWithRetry(method, path string, body, output any, maxAttempts int) error {
+	return s.doHTTPJSONWithRetryClient(s.httpClient, method, path, body, output, maxAttempts)
+}
+
+func (s *opencodeSession) doHTTPJSONWithRetryClient(client *http.Client, method, path string, body, output any, maxAttempts int) error {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			slog.Info("opencode: retrying HTTP request", "path", path, "attempt", attempt+1, "max", maxAttempts)
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+		resp, err := s.doRequestWithClient(client, method, path, body)
+		if err != nil {
+			lastErr = err
+			if !isHTTPRetryableError(err) {
+				return err
+			}
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %s: %s", resp.Status, strings.TrimSpace(string(data)))
+			if !isHTTPRetryableStatus(resp.StatusCode) {
+				return lastErr
+			}
+			continue
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if output == nil {
+			_, err = io.Copy(io.Discard, resp.Body)
+			return err
+		}
+		if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return s.httpStatusError(resp)
+	return lastErr
+}
+
+func isHTTPRetryableError(err error) bool {
+	if err == nil {
+		return false
 	}
-	if output == nil {
-		_, err = io.Copy(io.Discard, resp.Body)
-		return err
+	if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+		return true
 	}
-	if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+	if netErr, ok := err.(interface{ Temporary() bool }); ok && netErr.Temporary() {
+		return true
 	}
-	return nil
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"econnreset", "econnrefused", "econnaborted", "enoent", "broken pipe",
+		"connection reset", "connection refused", "connection aborted",
+		"no such host", "i/o timeout", "tls handshake timeout",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHTTPRetryableStatus(code int) bool {
+	return code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout ||
+		code == http.StatusTooManyRequests || code == http.StatusBadGateway
 }
 
 func (s *opencodeSession) doHTTPRequest(method, path string, body any) (*http.Response, error) {
+	return s.doRequestWithClient(s.httpClient, method, path, body)
+}
+
+func (s *opencodeSession) doStreamRequest(method, path string, body any) (*http.Response, error) {
+	return s.doRequestWithClient(s.streamClient, method, path, body)
+}
+
+func (s *opencodeSession) doRequestWithClient(client *http.Client, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -541,7 +620,7 @@ func (s *opencodeSession) doHTTPRequest(method, path string, body any) (*http.Re
 	if s.password != "" {
 		req.SetBasicAuth(s.username, s.password)
 	}
-	return s.httpClient.Do(req)
+	return client.Do(req)
 }
 
 func (s *opencodeSession) httpStatusError(resp *http.Response) error {

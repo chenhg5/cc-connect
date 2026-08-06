@@ -39,6 +39,7 @@ type opencodeSession struct {
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 	httpClient        *http.Client
+	streamClient      *http.Client // ponytail: separate no-timeout client for SSE event stream
 	connectionURL     string
 	username          string
 	password          string
