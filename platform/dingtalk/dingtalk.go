@@ -54,12 +54,20 @@ type repliedTextContent struct {
 	Text string `json:"text"`
 }
 
+type repliedMediaContent struct {
+	DownloadCode string `json:"downloadCode"`
+	FileName     string `json:"fileName"`
+}
+
 const maxQuotedMessageRunes = 4000
 
 const (
 	defaultReactionEmoji        = "🤔Thinking"
 	customTextEmotionID         = "2659900"
 	customTextEmotionBackground = "im_bg_1"
+	// maxDingTalkFileBytes limits attachment memory usage while keeping common
+	// documents within the supported range.
+	maxDingTalkFileBytes = 50 * 1024 * 1024
 )
 
 type downloadResponse struct {
@@ -336,9 +344,15 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 
 	// Extract message content, recovering quoted/reply info from richText.
 	messageContent := data.Text.Content
+	var images []core.ImageAttachment
+	var files []core.FileAttachment
 	if richText != nil && richText.IsReplyMsg && richText.RepliedMsg != nil {
 		slog.Debug("dingtalk: reply message detected", "msgType", richText.RepliedMsg.MsgType)
 		messageContent = p.formatReplyContent(richText, messageContent)
+		mediaContent, ok := p.extractQuotedMediaContent(richText.RepliedMsg.Content)
+		if ok {
+			images, files = p.downloadQuotedMedia(richText.RepliedMsg.MsgType, mediaContent, data.MsgId)
+		}
 	}
 
 	// Handle text messages (default)
@@ -351,6 +365,8 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		Content:    messageContent,
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
+		Images:     images,
+		Files:      files,
 		ReplyCtx: replyContext{
 			sessionWebhook: data.SessionWebhook,
 			conversationId: data.ConversationId,
@@ -602,43 +618,13 @@ func (p *Platform) handleFileMessage(data *chatbot.BotCallbackDataModel, session
 
 	fileName, _ := fileData["fileName"].(string)
 
-	downloadURL, err := p.getDownloadURL(downloadCode)
+	file, err := p.downloadFile(downloadCode, fileName)
 	if err != nil {
-		slog.Error("dingtalk: failed to get file download URL", "error", err)
+		slog.Error("dingtalk: failed to download file", "error", err, "file_name", fileName)
 		return
 	}
 
-	resp, err := p.httpClient.Get(downloadURL)
-	if err != nil {
-		slog.Error("dingtalk: failed to download file", "error", err)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("dingtalk: file download returned status", "status", resp.StatusCode)
-		return
-	}
-
-	// DingTalk caps single file at 100 MiB; 50 MiB is plenty for agent inputs
-	// and matches what other platforms accept without OOM risk.
-	const maxFileBytes = 50 * 1024 * 1024
-	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
-	if err != nil {
-		slog.Error("dingtalk: failed to read file data", "error", err)
-		return
-	}
-	if len(fileBytes) > maxFileBytes {
-		slog.Error("dingtalk: file too large, dropping", "size", len(fileBytes), "limit", maxFileBytes, "file_name", fileName)
-		return
-	}
-
-	mimeType := resp.Header.Get("Content-Type")
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
-
-	slog.Info("dingtalk: file downloaded successfully", "size", len(fileBytes), "mime", mimeType, "file_name", fileName)
+	slog.Info("dingtalk: file downloaded successfully", "size", len(file.Data), "mime", file.MimeType, "file_name", file.FileName)
 
 	msg := &core.Message{
 		SessionKey: sessionKey,
@@ -655,14 +641,68 @@ func (p *Platform) handleFileMessage(data *chatbot.BotCallbackDataModel, session
 			messageID:      data.MsgId,
 			isGroup:        data.ConversationType == "2",
 		},
-		Files: []core.FileAttachment{{
-			MimeType: mimeType,
-			Data:     fileBytes,
-			FileName: fileName,
-		}},
+		Files: []core.FileAttachment{file},
 	}
 
 	p.handler(p, msg)
+}
+
+func (p *Platform) downloadFile(downloadCode, fileName string) (core.FileAttachment, error) {
+	downloadURL, err := p.getDownloadURL(downloadCode)
+	if err != nil {
+		return core.FileAttachment{}, fmt.Errorf("get download URL: %w", err)
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		return core.FileAttachment{}, fmt.Errorf("http get: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return core.FileAttachment{}, fmt.Errorf("download returned status %d", resp.StatusCode)
+	}
+
+	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxDingTalkFileBytes+1))
+	if err != nil {
+		return core.FileAttachment{}, fmt.Errorf("read response: %w", err)
+	}
+	if len(fileBytes) > maxDingTalkFileBytes {
+		return core.FileAttachment{}, fmt.Errorf("file too large: size %d exceeds limit %d", len(fileBytes), maxDingTalkFileBytes)
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return core.FileAttachment{MimeType: mimeType, Data: fileBytes, FileName: fileName}, nil
+}
+
+func (p *Platform) downloadQuotedMedia(msgType string, media repliedMediaContent, messageID string) ([]core.ImageAttachment, []core.FileAttachment) {
+	if msgType == "picture" || msgType == "image" {
+		image, err := p.downloadImage(media.DownloadCode)
+		if err != nil {
+			slog.Warn("dingtalk: failed to download quoted image", "error", err, "msg_type", msgType, "msg_id", messageID)
+			return nil, nil
+		}
+		slog.Info("dingtalk: quoted image downloaded successfully", "size", len(image.Data), "mime", image.MimeType, "msg_type", msgType)
+		return []core.ImageAttachment{image}, nil
+	}
+
+	// Unknown downloadable reply types are retained as files. If DingTalk sends
+	// a new image msgType, MIME detection still promotes it to an image.
+	file, err := p.downloadFile(media.DownloadCode, media.FileName)
+	if err != nil {
+		slog.Warn("dingtalk: failed to download quoted attachment", "error", err, "file_name", media.FileName, "msg_type", msgType, "msg_id", messageID)
+		return nil, nil
+	}
+	if strings.HasPrefix(strings.ToLower(file.MimeType), "image/") {
+		image := core.ImageAttachment{MimeType: file.MimeType, Data: file.Data, FileName: file.FileName}
+		slog.Info("dingtalk: quoted attachment detected as image", "size", len(image.Data), "mime", image.MimeType, "msg_type", msgType)
+		return []core.ImageAttachment{image}, nil
+	}
+	slog.Info("dingtalk: quoted attachment downloaded successfully", "size", len(file.Data), "mime", file.MimeType, "file_name", file.FileName, "msg_type", msgType)
+	return nil, []core.FileAttachment{file}
 }
 
 func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
@@ -1471,12 +1511,32 @@ func (p *Platform) extractQuotedMessageText(msg *repliedMessage) string {
 	switch msg.MsgType {
 	case "text":
 		return p.extractQuotedTextMessageText(msg.Content)
+	case "file":
+		mediaContent, ok := p.extractQuotedMediaContent(msg.Content)
+		if !ok {
+			return ""
+		}
+		return "文件: " + mediaContent.FileName
+	case "picture", "image":
+		return "图片"
 	case "interactiveCard":
 		return p.extractInteractiveCardQuotedText(msg.Content)
 	default:
 		slog.Debug("dingtalk: quoted message type not supported", "type", msg.MsgType)
 		return ""
 	}
+}
+
+func (p *Platform) extractQuotedMediaContent(raw json.RawMessage) (repliedMediaContent, bool) {
+	var mediaContent repliedMediaContent
+	if err := json.Unmarshal(raw, &mediaContent); err != nil {
+		slog.Debug("dingtalk: failed to parse replied media content", "error", err)
+		return repliedMediaContent{}, false
+	}
+	if mediaContent.DownloadCode == "" {
+		return repliedMediaContent{}, false
+	}
+	return mediaContent, true
 }
 
 func (p *Platform) extractQuotedTextMessageText(raw json.RawMessage) string {

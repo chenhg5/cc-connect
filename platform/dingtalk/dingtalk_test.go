@@ -328,6 +328,44 @@ func TestFormatReplyContent_EmptyContent_UsesFallback(t *testing.T) {
 	}
 }
 
+func TestFormatReplyContent_WithQuotedFile(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedMediaContent{
+		DownloadCode: "download-code",
+		FileName:     "AGENTS.user.md",
+	})
+	richText := &richTextContent{
+		Content:    "这个文件你能看得见吗",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "file",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"文件: AGENTS.user.md\"\n\n这个文件你能看得见吗"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_WithQuotedPicture(t *testing.T) {
+	p := &Platform{}
+	richText := &richTextContent{
+		Content:    "这个呢",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "picture",
+			Content: json.RawMessage(`{"downloadCode":"download-code"}`),
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"图片\"\n\n这个呢"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
 func TestFormatReplyContent_TextQuotePreservesWhitespace(t *testing.T) {
 	p := &Platform{}
 	repliedContent, _ := json.Marshal(repliedTextContent{Text: "  original message  "})
@@ -365,7 +403,7 @@ func TestFormatReplyContent_NonTextMsgType(t *testing.T) {
 		Content:    "user reply",
 		IsReplyMsg: true,
 		RepliedMsg: &repliedMessage{
-			MsgType: "image",
+			MsgType: "video",
 			Content: json.RawMessage(`{}`),
 		},
 	}
@@ -1256,6 +1294,144 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler never invoked with file message")
+	}
+}
+
+func TestReplyToFileMessage_BuildsTextAndFileAttachment(t *testing.T) {
+	const fileBody = "quoted dingtalk file"
+	const fileName = "AGENTS.user.md"
+
+	fileSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown")
+		_, _ = w.Write([]byte(fileBody))
+	}))
+	defer fileSrv.Close()
+
+	rt := &dingtalkFileDownloadRT{
+		accessToken: "tok-replied-file",
+		downloadURL: fileSrv.URL,
+	}
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "text",
+		"msgId": "msg-replied-file-1",
+		"conversationType": "2",
+		"conversationId": "conv-1",
+		"conversationTitle": "test group",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"text": {
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "file",
+				"content": {
+					"spaceId": "space-1",
+					"fileName": "` + fileName + `",
+					"downloadCode": "dc-replied-file",
+					"fileId": "file-1"
+				}
+			},
+			"content": "这个文件你能看得见吗"
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		expectedContent := "引用: \"文件: " + fileName + "\"\n\n这个文件你能看得见吗"
+		if msg.Content != expectedContent {
+			t.Errorf("Content = %q, want %q", msg.Content, expectedContent)
+		}
+		if len(msg.Files) != 1 {
+			t.Fatalf("Files len = %d, want 1", len(msg.Files))
+		}
+		file := msg.Files[0]
+		if file.FileName != fileName {
+			t.Errorf("FileName = %q, want %q", file.FileName, fileName)
+		}
+		if string(file.Data) != fileBody {
+			t.Errorf("file bytes = %q, want %q", file.Data, fileBody)
+		}
+		if file.MimeType != "text/markdown" {
+			t.Errorf("MimeType = %q, want %q", file.MimeType, "text/markdown")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked for reply-to-file message")
+	}
+}
+
+func TestReplyToPictureMessage_BuildsTextAndImageAttachment(t *testing.T) {
+	imageBody := []byte("fake png bytes")
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(imageBody)
+	}))
+	defer imageSrv.Close()
+
+	rt := &dingtalkFileDownloadRT{
+		accessToken: "tok-replied-picture",
+		downloadURL: imageSrv.URL,
+	}
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "text",
+		"msgId": "msg-replied-picture-1",
+		"conversationType": "2",
+		"conversationId": "conv-1",
+		"conversationTitle": "test group",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"text": {
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "picture",
+				"content": {"downloadCode": "dc-replied-picture"}
+			},
+			"content": "这个呢"
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "引用: \"图片\"\n\n这个呢" {
+			t.Errorf("Content = %q", msg.Content)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if len(msg.Files) != 0 {
+			t.Fatalf("Files len = %d, want 0", len(msg.Files))
+		}
+		image := msg.Images[0]
+		if string(image.Data) != string(imageBody) {
+			t.Errorf("image bytes = %q, want %q", image.Data, imageBody)
+		}
+		if image.MimeType != "image/png" {
+			t.Errorf("MimeType = %q, want image/png", image.MimeType)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked for reply-to-picture message")
 	}
 }
 
