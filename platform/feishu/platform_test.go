@@ -1397,6 +1397,117 @@ func TestResolveRichCardMarkdownUploadsRemoteImages(t *testing.T) {
 	}
 }
 
+func TestPopulateWorkspaceChannelKeys_WorkspaceThreadIsolation(t *testing.T) {
+	tests := []struct {
+		name           string
+		platform       *Platform
+		msg            *core.Message
+		wantChannelKey string
+		wantLegacyKey  string
+	}{
+		{
+			name:     "thread_isolation sets topic-scoped key from session key",
+			platform: &Platform{platformName: "feishu", threadIsolation: true},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_chat",
+					sessionKey: "feishu:oc_chat:root:om_root",
+				},
+			},
+			wantChannelKey: "oc_chat:topic:om_root",
+			wantLegacyKey:  "oc_chat",
+		},
+		{
+			name:     "workspace_thread_isolation sets topic-scoped key from rootID",
+			platform: &Platform{platformName: "feishu", workspaceThreadIsolation: true},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_chat",
+					sessionKey: "feishu:oc_chat:ou_user",
+					rootID:     "om_topic_root",
+				},
+			},
+			wantChannelKey: "oc_chat:topic:om_topic_root",
+			wantLegacyKey:  "oc_chat",
+		},
+		{
+			name:     "workspace_thread_isolation without rootID keeps chat-level key",
+			platform: &Platform{platformName: "feishu", workspaceThreadIsolation: true},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_chat",
+					sessionKey: "feishu:oc_chat:ou_user",
+				},
+			},
+			wantChannelKey: "oc_chat",
+			wantLegacyKey:  "",
+		},
+		{
+			name:     "neither flag set keeps chat-level key",
+			platform: &Platform{platformName: "feishu"},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_chat",
+					sessionKey: "feishu:oc_chat:ou_user",
+					rootID:     "om_topic_root",
+				},
+			},
+			wantChannelKey: "oc_chat",
+			wantLegacyKey:  "",
+		},
+		{
+			name:     "thread_isolation fallback to session key when rootID is empty",
+			platform: &Platform{platformName: "feishu", threadIsolation: true},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_chat",
+					sessionKey: "feishu:oc_chat:root:om_from_session",
+					rootID:     "",
+				},
+			},
+			wantChannelKey: "oc_chat:topic:om_from_session",
+			wantLegacyKey:  "oc_chat",
+		},
+		{
+			name:     "workspace_thread_isolation prefers rootID over session key",
+			platform: &Platform{platformName: "feishu", workspaceThreadIsolation: true, threadIsolation: true},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_chat",
+					sessionKey: "feishu:oc_chat:root:om_from_session",
+					rootID:     "om_from_event",
+				},
+			},
+			wantChannelKey: "oc_chat:topic:om_from_event",
+			wantLegacyKey:  "oc_chat",
+		},
+		{
+			name:     "p2p chat without rootID keeps chat-level key",
+			platform: &Platform{platformName: "feishu", workspaceThreadIsolation: true},
+			msg: &core.Message{
+				ReplyCtx: replyContext{
+					chatID:     "oc_p2p",
+					sessionKey: "feishu:oc_p2p:ou_user",
+				},
+			},
+			wantChannelKey: "oc_p2p",
+			wantLegacyKey:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.platform.populateWorkspaceChannelKeys(tt.msg)
+			if tt.msg.ChannelKey != tt.wantChannelKey {
+				t.Errorf("ChannelKey = %q, want %q", tt.msg.ChannelKey, tt.wantChannelKey)
+			}
+			if tt.msg.LegacyChannelKey != tt.wantLegacyKey {
+				t.Errorf("LegacyChannelKey = %q, want %q", tt.msg.LegacyChannelKey, tt.wantLegacyKey)
+			}
+		})
+	}
+}
+
 func TestResolveRichCardMarkdownStreamingStartsUploadWithoutWaiting(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	started := make(chan struct{})
