@@ -32,7 +32,11 @@ func TestGatewayWebhook(t *testing.T) {
 	if gt.listener == nil {
 		t.Fatal("gateway listener not started")
 	}
-	url := "http://" + gt.listener.Addr().String() + gt.webhookPath
+	// listener.Addr() returns the IPv6 wildcard "[::]:port" on dual-stack
+	// systems. The wildcard address is not dialable — the test client must
+	// use the loopback form to actually reach the listener.
+	addr := strings.Replace(gt.listener.Addr().String(), "[::]", "[::1]", 1)
+	url := "http://" + addr + gt.webhookPath
 	body, _ := json.Marshal(wireInboundMessage{
 		Type: "message", MsgID: "g1", SessionKey: "cloud_web:x:y",
 		UserID: "y", Content: "from gateway", ReplyCtx: "ctx",
