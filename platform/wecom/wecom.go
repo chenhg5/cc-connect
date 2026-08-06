@@ -653,7 +653,7 @@ func (p *Platform) sendCardInternal(ctx context.Context, rctx any, card *core.Ca
 	if err != nil {
 		return fmt.Errorf("wecom: send template card: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		ErrCode int    `json:"errcode"`
