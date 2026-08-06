@@ -697,7 +697,7 @@ func (p *Platform) downloadQuotedMedia(msgType string, media repliedMediaContent
 		return nil, nil
 	}
 	if strings.HasPrefix(strings.ToLower(file.MimeType), "image/") {
-		image := core.ImageAttachment{MimeType: file.MimeType, Data: file.Data, FileName: file.FileName}
+		image := core.ImageAttachment(file)
 		slog.Info("dingtalk: quoted attachment detected as image", "size", len(image.Data), "mime", image.MimeType, "msg_type", msgType)
 		return []core.ImageAttachment{image}, nil
 	}
