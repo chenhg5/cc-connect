@@ -815,6 +815,28 @@ func (s *piSession) handleMessageUpdate(raw map[string]any) {
 }
 
 func (s *piSession) emitToolFromMessage(ame map[string]any) {
+	// pi >= 0.84.0: message_update emits only assistantMessageEvent deltas
+	// (the cumulative message and assistantMessageEvent.partial were removed
+	// to make JSON/RPC streaming output linear). toolcall_end now carries the
+	// complete toolCall object directly, so read it before falling back to
+	// the pre-0.84.0 message/partial snapshots. (toolCall has carried the
+	// same finalized block on every released pi version, so the fast path
+	// always wins; the fallback is a defensive safety net.)
+	if tc, ok := ame["toolCall"].(map[string]any); ok {
+		if itemType, _ := tc["type"].(string); itemType == "toolCall" {
+			name, _ := tc["name"].(string)
+			input := extractToolInput(tc)
+			evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+			return
+		}
+		// type != "toolCall" cannot happen on the real pi wire; fall through
+		// to the pre-0.84.0 snapshot path rather than silently dropping.
+	}
+
 	msg, _ := ame["message"].(map[string]any)
 	if msg == nil {
 		msg, _ = ame["partial"].(map[string]any)

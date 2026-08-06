@@ -1111,6 +1111,115 @@ func TestHandleMessageUpdate_ToolcallEnd_UsesPartialFallback(t *testing.T) {
 	}
 }
 
+// TestHandleMessageUpdate_ToolcallEnd_DirectToolCall covers the pi v0.84.0
+// breaking change: message_update emits only assistantMessageEvent deltas,
+// with the cumulative message and assistantMessageEvent.partial removed.
+// toolcall_end now carries the complete toolCall object; without the
+// toolCall branch, EventToolUse is never emitted and tool calls are lost.
+func TestHandleMessageUpdate_ToolcallEnd_DirectToolCall(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type": "toolcall_end",
+			"toolCall": map[string]any{
+				"type":      "toolCall",
+				"name":      "read",
+				"arguments": map[string]any{"file_path": "/tmp/foo.txt"},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse || evts[0].ToolName != "read" || evts[0].ToolInput != "/tmp/foo.txt" {
+		t.Errorf("event = %+v", evts[0])
+	}
+}
+
+// TestHandleMessageUpdate_ToolcallEnd_CoexistsWithPartial pins the dedup
+// semantics: on v0.83.0 the wire carried BOTH toolCall and partial (they
+// reference the same finalized content block). The fast path must win and
+// emit exactly one EventToolUse — a future refactor that removes the early
+// return would double-emit, and one that breaks the fast path would emit 0.
+func TestHandleMessageUpdate_ToolcallEnd_CoexistsWithPartial(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_end",
+			"contentIndex": float64(0),
+			"toolCall": map[string]any{
+				"type":      "toolCall",
+				"name":      "read",
+				"arguments": map[string]any{"file_path": "/tmp/foo.txt"},
+			},
+			"partial": map[string]any{
+				"content": []any{
+					map[string]any{
+						"type":      "toolCall",
+						"name":      "bash",
+						"arguments": map[string]any{"command": "ls"},
+					},
+				},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want exactly 1 (no double-emit)", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse || evts[0].ToolName != "read" || evts[0].ToolInput != "/tmp/foo.txt" {
+		t.Errorf("event = %+v (want the toolCall fast-path event, not the partial one)", evts[0])
+	}
+}
+
+// TestHandleMessageUpdate_ToolcallEnd_NonToolCallType exercises the
+// toolCall-present-but-wrong-type path: it must fall through to the
+// message/partial snapshot path rather than emit from the toolCall fast
+// path. The partial carries a real toolCall so the fixture can observe the
+// fall-through — an unconditional early return (the M1 bug) would emit 0.
+func TestHandleMessageUpdate_ToolcallEnd_NonToolCallType(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_end",
+			"contentIndex": float64(0),
+			"toolCall": map[string]any{
+				"type": "text",
+				"text": "hello",
+			},
+			"partial": map[string]any{
+				"content": []any{
+					map[string]any{
+						"type":      "toolCall",
+						"name":      "read",
+						"arguments": map[string]any{"file_path": "/tmp/foo.txt"},
+					},
+				},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1 from the message/partial fallback", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse || evts[0].ToolName != "read" || evts[0].ToolInput != "/tmp/foo.txt" {
+		t.Errorf("event = %+v (want the partial-path event)", evts[0])
+	}
+}
+
 func TestHandleMessageUpdate_ToolcallEnd_NonToolCallItem(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
