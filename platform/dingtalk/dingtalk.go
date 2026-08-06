@@ -380,8 +380,10 @@ func (p *Platform) replyUnauthorized(data *chatbot.BotCallbackDataModel) {
 	}
 }
 
-// parseRichText extracts plain text and embedded picture download codes from a
-// DingTalk richText payload while preserving the picture order.
+// parseRichText extracts plain text and embedded image download codes from a
+// DingTalk richText payload while preserving the image order. DingTalk may
+// provide both downloadCode and pictureDownloadCode; the download API expects
+// downloadCode, while pictureDownloadCode is retained as a compatibility fallback.
 func parseRichText(content interface{}) (string, []string) {
 	m, ok := content.(map[string]interface{})
 	if !ok {
@@ -392,7 +394,7 @@ func parseRichText(content interface{}) (string, []string) {
 		return "", nil
 	}
 	var b strings.Builder
-	var pictureDownloadCodes []string
+	var imageDownloadCodes []string
 	for _, part := range parts {
 		item, ok := part.(map[string]interface{})
 		if !ok {
@@ -401,14 +403,17 @@ func parseRichText(content interface{}) (string, []string) {
 		if text, ok := item["text"].(string); ok {
 			b.WriteString(text)
 		}
-		if code, ok := item["pictureDownloadCode"].(string); ok {
+		code, _ := item["downloadCode"].(string)
+		code = strings.TrimSpace(code)
+		if code == "" {
+			code, _ = item["pictureDownloadCode"].(string)
 			code = strings.TrimSpace(code)
-			if code != "" {
-				pictureDownloadCodes = append(pictureDownloadCodes, code)
-			}
+		}
+		if code != "" {
+			imageDownloadCodes = append(imageDownloadCodes, code)
 		}
 	}
-	return strings.TrimSpace(b.String()), pictureDownloadCodes
+	return strings.TrimSpace(b.String()), imageDownloadCodes
 }
 
 func (p *Platform) downloadRichTextImages(downloadCodes []string, messageID string) []core.ImageAttachment {

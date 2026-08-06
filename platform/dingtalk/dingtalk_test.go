@@ -688,10 +688,10 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 
 func TestParseRichText(t *testing.T) {
 	tests := []struct {
-		name             string
-		content          interface{}
-		wantText         string
-		wantPictureCodes []string
+		name              string
+		content           interface{}
+		wantText          string
+		wantDownloadCodes []string
 	}{
 		{
 			name:     "nil content",
@@ -744,14 +744,14 @@ func TestParseRichText(t *testing.T) {
 			content: map[string]interface{}{
 				"richText": []interface{}{
 					map[string]interface{}{"text": "See image: "},
-					map[string]interface{}{"pictureDownloadCode": "abc123"},
+					map[string]interface{}{"pictureDownloadCode": "preview-abc123", "downloadCode": "abc123"},
 					map[string]interface{}{"pictureDownloadCode": "  "},
 					map[string]interface{}{"pictureDownloadCode": "def456"},
 					map[string]interface{}{"text": "done"},
 				},
 			},
-			wantText:         "See image: done",
-			wantPictureCodes: []string{"abc123", "def456"},
+			wantText:          "See image: done",
+			wantDownloadCodes: []string{"abc123", "def456"},
 		},
 		{
 			name: "missing richText key",
@@ -764,12 +764,12 @@ func TestParseRichText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotText, gotPictureCodes := parseRichText(tt.content)
+			gotText, gotDownloadCodes := parseRichText(tt.content)
 			if gotText != tt.wantText {
 				t.Errorf("parseRichText() text = %q, want %q", gotText, tt.wantText)
 			}
-			if got, want := strings.Join(gotPictureCodes, ","), strings.Join(tt.wantPictureCodes, ","); got != want {
-				t.Errorf("parseRichText() picture codes = %q, want %q", got, want)
+			if got, want := strings.Join(gotDownloadCodes, ","), strings.Join(tt.wantDownloadCodes, ","); got != want {
+				t.Errorf("parseRichText() download codes = %q, want %q", got, want)
 			}
 		})
 	}
@@ -811,7 +811,7 @@ func TestOnRawMessage_RichTextWithPicture_DownloadsImage(t *testing.T) {
 		"content": {
 			"richText": [
 				{"text": "Please inspect "},
-				{"pictureDownloadCode": "picture-code-1"},
+				{"pictureDownloadCode": "preview-picture-code-1", "downloadCode": "picture-code-1", "type": "picture"},
 				{"text": "this image"}
 			]
 		}
@@ -922,9 +922,9 @@ func TestOnRawMessage_RichTextPictures_PreservesUsableContent(t *testing.T) {
 		"senderStaffId": "user-1",
 		"content": {
 			"richText": [
-				{"pictureDownloadCode": "picture-a"},
-				{"pictureDownloadCode": "broken-picture"},
-				{"pictureDownloadCode": "picture-b"}
+				{"pictureDownloadCode": "preview-a", "downloadCode": "picture-a", "type": "picture"},
+				{"pictureDownloadCode": "preview-broken", "downloadCode": "broken-picture", "type": "picture"},
+				{"pictureDownloadCode": "preview-b", "downloadCode": "picture-b", "type": "picture"}
 			]
 		}
 	}`)
