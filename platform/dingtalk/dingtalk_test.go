@@ -683,31 +683,32 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// extractRichText tests (from main: richText message type support)
+// parseRichText tests
 // ──────────────────────────────────────────────────────────────
 
-func TestExtractRichText(t *testing.T) {
+func TestParseRichText(t *testing.T) {
 	tests := []struct {
-		name    string
-		content interface{}
-		want    string
+		name             string
+		content          interface{}
+		wantText         string
+		wantPictureCodes []string
 	}{
 		{
-			name:    "nil content",
-			content: nil,
-			want:    "",
+			name:     "nil content",
+			content:  nil,
+			wantText: "",
 		},
 		{
-			name:    "non-map content",
-			content: "not a map",
-			want:    "",
+			name:     "non-map content",
+			content:  "not a map",
+			wantText: "",
 		},
 		{
 			name: "empty richText array",
 			content: map[string]interface{}{
 				"richText": []interface{}{},
 			},
-			want: "",
+			wantText: "",
 		},
 		{
 			name: "single text element",
@@ -716,7 +717,7 @@ func TestExtractRichText(t *testing.T) {
 					map[string]interface{}{"text": "Hello World"},
 				},
 			},
-			want: "Hello World",
+			wantText: "Hello World",
 		},
 		{
 			name: "multiple text elements",
@@ -726,7 +727,7 @@ func TestExtractRichText(t *testing.T) {
 					map[string]interface{}{"text": "World"},
 				},
 			},
-			want: "Hello World",
+			wantText: "Hello World",
 		},
 		{
 			name: "text with attrs (bold etc) — attrs ignored, text extracted",
@@ -736,35 +737,217 @@ func TestExtractRichText(t *testing.T) {
 					map[string]interface{}{"text": "bold", "attrs": map[string]interface{}{"bold": true}},
 				},
 			},
-			want: "normal bold",
+			wantText: "normal bold",
 		},
 		{
-			name: "mixed text and picture elements — pictures skipped",
+			name: "mixed text and picture elements",
 			content: map[string]interface{}{
 				"richText": []interface{}{
 					map[string]interface{}{"text": "See image: "},
 					map[string]interface{}{"pictureDownloadCode": "abc123"},
+					map[string]interface{}{"pictureDownloadCode": "  "},
+					map[string]interface{}{"pictureDownloadCode": "def456"},
 					map[string]interface{}{"text": "done"},
 				},
 			},
-			want: "See image: done",
+			wantText:         "See image: done",
+			wantPictureCodes: []string{"abc123", "def456"},
 		},
 		{
 			name: "missing richText key",
 			content: map[string]interface{}{
 				"other": "data",
 			},
-			want: "",
+			wantText: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractRichText(tt.content)
-			if got != tt.want {
-				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
+			gotText, gotPictureCodes := parseRichText(tt.content)
+			if gotText != tt.wantText {
+				t.Errorf("parseRichText() text = %q, want %q", gotText, tt.wantText)
+			}
+			if got, want := strings.Join(gotPictureCodes, ","), strings.Join(tt.wantPictureCodes, ","); got != want {
+				t.Errorf("parseRichText() picture codes = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestOnRawMessage_RichTextWithPicture_DownloadsImage(t *testing.T) {
+	const imageBody = "rich-text-image"
+
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte(imageBody))
+	}))
+	defer imageSrv.Close()
+
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient: &http.Client{Transport: &dingtalkFileDownloadRT{
+			accessToken: "tok-rich-text-image",
+			downloadURL: imageSrv.URL,
+		}},
+	}
+
+	captured := make(chan *core.Message, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		captured <- msg
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rich-text-image",
+		"conversationType": "2",
+		"conversationId": "conv-group",
+		"conversationTitle": "test group",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "Please inspect "},
+				{"pictureDownloadCode": "picture-code-1"},
+				{"text": "this image"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "Please inspect this image" {
+			t.Fatalf("Content = %q, want %q", msg.Content, "Please inspect this image")
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != imageBody {
+			t.Fatalf("image bytes = %q, want %q", got, imageBody)
+		}
+		if msg.Images[0].MimeType != "image/png" {
+			t.Fatalf("image MIME = %q, want image/png", msg.Images[0].MimeType)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked for richText image message")
+	}
+}
+
+type richTextImageResponse struct {
+	body     string
+	mimeType string
+}
+
+type richTextImageDownloadRT struct {
+	images      map[string]richTextImageResponse
+	failedCodes map[string]bool
+}
+
+func (r *richTextImageDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/v1.0/robot/messageFiles/download" {
+		var payload struct {
+			DownloadCode string `json:"downloadCode"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		if r.failedCodes[payload.DownloadCode] {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"download unavailable"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		body := fmt.Sprintf(`{"downloadUrl":"https://richtext-images.invalid/%s"}`, payload.DownloadCode)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+
+	if req.URL.Host == "richtext-images.invalid" {
+		code := strings.TrimPrefix(req.URL.Path, "/")
+		image, ok := r.images[code]
+		if !ok {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		header := make(http.Header)
+		header.Set("Content-Type", image.mimeType)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(image.body)),
+			Header:     header,
+			Request:    req,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("unexpected request: %s", req.URL)
+}
+
+func TestOnRawMessage_RichTextPictures_PreservesUsableContent(t *testing.T) {
+	rt := &richTextImageDownloadRT{
+		images: map[string]richTextImageResponse{
+			"picture-a": {body: "image-a", mimeType: "image/jpeg"},
+			"picture-b": {body: "image-b", mimeType: "image/png"},
+		},
+		failedCodes: map[string]bool{"broken-picture": true},
+	}
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		accessToken:  "tok-rich-text-images",
+		tokenExpiry:  time.Now().Add(time.Hour),
+	}
+
+	captured := make(chan *core.Message, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) { captured <- msg }
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rich-text-multiple-images",
+		"conversationType": "2",
+		"conversationId": "conv-group",
+		"senderStaffId": "user-1",
+		"content": {
+			"richText": [
+				{"pictureDownloadCode": "picture-a"},
+				{"pictureDownloadCode": "broken-picture"},
+				{"pictureDownloadCode": "picture-b"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty for picture-only richText", msg.Content)
+		}
+		if len(msg.Images) != 2 {
+			t.Fatalf("Images len = %d, want 2 usable images", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != "image-a" {
+			t.Fatalf("first image = %q, want image-a", got)
+		}
+		if got := string(msg.Images[1].Data); got != "image-b" {
+			t.Fatalf("second image = %q, want image-b", got)
+		}
+		if msg.ChannelKey != "conv-group" {
+			t.Fatalf("ChannelKey = %q, want conv-group", msg.ChannelKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked for picture-only richText message")
 	}
 }
 
