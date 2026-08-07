@@ -258,6 +258,8 @@
     "port": "Порт",
     "wsUrl": "URL WebSocket",
     "appId": "App ID",
+    "tenantId": "ID арендатора",
+    "sessionScope": "Область сессии",
     "appSecret": "App Secret",
     "sandboxMode": "Режим песочницы",
     "channelSecret": "Channel Secret",

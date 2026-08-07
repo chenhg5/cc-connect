@@ -266,6 +266,8 @@
     "port": "端口",
     "wsUrl": "WebSocket 地址",
     "appId": "App ID",
+    "tenantId": "租户 ID",
+    "sessionScope": "会话范围",
     "appSecret": "App Secret",
     "sandboxMode": "沙箱模式",
     "channelSecret": "Channel Secret",

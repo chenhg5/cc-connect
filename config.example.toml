@@ -1179,6 +1179,37 @@ app_secret = "your-feishu-app-secret"
 # token = "YOUR_WEBEX_BOT_ACCESS_TOKEN"   # from developer.webex.com (Bot)
 # allow_from = "you@cisco.com"            # comma-separated email allowlist / 逗号分隔的邮箱白名单
 
+# Microsoft Teams (uncomment to enable / 取消注释以启用)
+# 1. Create an Azure Bot resource; note its App ID + client secret
+#    创建 Azure Bot 资源，记录 App ID 与客户端密钥
+# 2. Set the bot's "messaging endpoint" to https://<your-host><webhook_path>
+#    将机器人的"消息终结点"设置为 https://<你的域名><webhook_path>
+# Connection: inbound webhook (Bot Framework) — a public HTTPS URL IS required / 需要公网 HTTPS 地址
+# Replies stream as an Adaptive Card. See docs/teams.md for the full setup. / 完整配置见 docs/teams.md。
+# Single-tenant only (tenant_id required) — multi-tenant bot creation is deprecated by Azure.
+# 仅支持单租户（必须填 tenant_id）——Azure 已弃用多租户机器人创建。
+# Omitting allow_from (or "*") permits anyone in your tenant; set an AAD-object-ID allowlist
+# to restrict to specific users. / 留空 allow_from（或填 "*"）允许本租户任何人；填 AAD 用户 ID 可限定到特定用户。
+
+# [[projects.platforms]]
+# type = "teams"
+#
+# [projects.platforms.options]
+# app_id = "00000000-0000-0000-0000-000000000000"   # Azure Bot App (client) ID
+# app_password = "YOUR_CLIENT_SECRET"               # Azure Bot client secret
+# tenant_id = "00000000-0000-0000-0000-000000000000"  # REQUIRED — AAD tenant (directory) ID that owns the bot / 必填：拥有该机器人的 AAD 租户 ID
+# webhook_port = "3978"                             # local bind port (default 3978)
+# webhook_path = "/api/messages"                    # must match the Azure messaging endpoint path
+# allow_from = "*"                                  # "*"/empty = all users in the tenant; or comma-separated AAD object IDs / "*"/留空=租户内所有人，或逗号分隔的 AAD 用户 ID
+# session_scope = "thread"                          # "thread" (default) | "channel" | "user"
+# card_update_interval_ms = 1500                    # streaming card edit throttle (ms; Teams limits edits ~1/s)
+# card_loading_text = "💭 Thinking…"                 # label on the placeholder card while the agent works; empty = no label
+# service_url_allowlist = ""                         # optional defense-in-depth: comma-separated Bot Connector hosts the
+#                                                    # bot may reply to; empty = any JWT-validated host. e.g. public cloud:
+#                                                    # "smba.trafficmanager.net" (see docs/teams.md for gov-cloud hosts)
+# max_attachment_bytes = 20971520                    # cap per inbound 1:1 file/image download (default 20 MiB); larger = skipped with a notice
+#                                                    # 1:1 file receive also needs supportsFiles:true in the Teams app manifest (see docs/teams.md)
+
 # MAX messenger (uncomment to enable / 取消注释以启用)
 # 1. Create a bot via @MasterBot in MAX, get the access token
 #    在 MAX 中通过 @MasterBot 创建机器人，获取 access token

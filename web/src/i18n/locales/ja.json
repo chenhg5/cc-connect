@@ -266,6 +266,8 @@
     "port": "ポート",
     "wsUrl": "WebSocket URL",
     "appId": "アプリ ID",
+    "tenantId": "テナント ID",
+    "sessionScope": "セッション範囲",
     "appSecret": "アプリシークレット",
     "sandboxMode": "サンドボックスモード",
     "channelSecret": "チャンネルシークレット",
