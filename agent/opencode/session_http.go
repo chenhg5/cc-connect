@@ -648,10 +648,6 @@ func isHTTPRetryableStatus(code int) bool {
 		code == http.StatusTooManyRequests || code == http.StatusBadGateway
 }
 
-func (s *opencodeSession) doHTTPRequest(method, path string, body any) (*http.Response, error) {
-	return s.doRequestWithClient(s.httpClient, method, path, body)
-}
-
 func (s *opencodeSession) doStreamRequest(method, path string, body any) (*http.Response, error) {
 	return s.doRequestWithClient(s.streamClient, method, path, body)
 }
@@ -685,11 +681,6 @@ func (s *opencodeSession) doRequestWithClient(client *http.Client, method, path 
 		req.SetBasicAuth(s.username, s.password)
 	}
 	return client.Do(req)
-}
-
-func (s *opencodeSession) httpStatusError(resp *http.Response) error {
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	return fmt.Errorf("HTTP %s: %s", resp.Status, strings.TrimSpace(string(data)))
 }
 
 func (s *opencodeSession) emitHTTPEvent(event core.Event) {

@@ -125,16 +125,16 @@ func TestLiveSSEReconnectAfterServerRestart(t *testing.T) {
 		// Otherwise, proxy through.
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, url+r.URL.Path+"?"+r.URL.RawQuery, r.Body)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		req.Header = r.Header.Clone()
 		resp, err := http.DefaultTransport.RoundTrip(req)
 		if err != nil {
-			http.Error(w, err.Error(), 502)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -146,7 +146,7 @@ func TestLiveSSEReconnectAfterServerRestart(t *testing.T) {
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
-				w.Write(buf[:n])
+				_, _ = w.Write(buf[:n])
 				if flusher != nil {
 					flusher.Flush()
 				}
