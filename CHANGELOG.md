@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Grok Build agent** (`type = "grok"`): first-class, non-ACP adapter for xAI's native Grok Build CLI. It runs headless turns with `--output-format streaming-messages-json`, resumes the exact saved session with `--resume`, inherits Grok's local default model unless `model` is configured, and supports native permission modes. Omitted `mode` uses the safe native `default`; unrestricted `yolo` requires explicit opt-in and is the only mode that adds `--always-approve`. Custom homes (`GROK_HOME`) and model endpoints (`GROK_MODELS_BASE_URL`) are supported. See `config.example.toml` and install Grok Build from https://x.ai/cli.
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 - **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。

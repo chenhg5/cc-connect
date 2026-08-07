@@ -47,7 +47,7 @@ type progressPlatform struct {
 type Platform struct {
 	token                      string
 	allowFrom                  string
-	guildID                    string   // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	progressStyle              string
 	groupReplyAllGuilds        []string // guild IDs where groupReplyAll is active; "*" = all guilds
 	shareSessionInChannel      bool
@@ -525,6 +525,17 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	return nil
 }
 
+func (p *Platform) CommandMenuPolicy() core.CommandMenuPolicy {
+	return core.CommandMenuPolicy{Limit: 100, PreserveNative: true}
+}
+
+func (p *Platform) CommandMenuKey(command string) string {
+	if command == "" || len(command) > 32 {
+		return ""
+	}
+	return command
+}
+
 // SetLifecycleHandler registers a handler that will be notified when the
 // Discord platform becomes ready or unavailable. Implementing this method
 // also opts the platform into Engine.Start's AsyncRecoverablePlatform path,
@@ -848,7 +859,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		MessageID: i.ID,
 		ChannelID: i.ChannelID,
 		UserID:    userID, UserName: userName,
-		Content:  cmdText, ReplyCtx: rctx,
+		Content: cmdText, ReplyCtx: rctx,
 	}
 	msg.ChatName, _ = p.ResolveChannelName(channelID)
 	p.dispatchMessage(msg)

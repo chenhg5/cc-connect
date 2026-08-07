@@ -27,6 +27,25 @@ func (a *stubAgent) StartSession(_ context.Context, _ string) (AgentSession, err
 func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *stubAgent) Stop() error                                                { return nil }
 
+type stubSkillDiscoveryAgent struct {
+	stubAgent
+	legacyDirs  []string
+	commandDirs []string
+	config      SkillDiscoveryConfig
+}
+
+func (a *stubSkillDiscoveryAgent) SkillDirs() []string {
+	return a.legacyDirs
+}
+
+func (a *stubSkillDiscoveryAgent) SkillDiscoveryConfig() SkillDiscoveryConfig {
+	return a.config
+}
+
+func (a *stubSkillDiscoveryAgent) CommandDirs() []string {
+	return a.commandDirs
+}
+
 type stubAgentSession struct{}
 
 func (s *stubAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
@@ -206,6 +225,45 @@ type stubLifecyclePlatform struct {
 	cardNavSetCalls    int
 	startCalls         int
 	stopCalls          int
+}
+
+type stubMenuPolicyPlatform struct {
+	stubPlatformEngine
+	policy CommandMenuPolicy
+	key    func(string) string
+}
+
+func (p *stubMenuPolicyPlatform) CommandMenuPolicy() CommandMenuPolicy { return p.policy }
+func (p *stubMenuPolicyPlatform) CommandMenuKey(command string) string {
+	if p.key != nil {
+		return p.key(command)
+	}
+	return strings.ToLower(strings.TrimSpace(command))
+}
+
+func underscoreCommandMenuKey(command string) string {
+	command = strings.ToLower(command)
+	var b strings.Builder
+	for _, c := range command {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteRune(c)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	result := b.String()
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+	result = strings.Trim(result, "_")
+	if result == "" || result[0] < 'a' || result[0] > 'z' {
+		return ""
+	}
+	if len(result) > 32 {
+		result = result[:32]
+	}
+	return result
 }
 
 func (p *stubLifecyclePlatform) Start(MessageHandler) error {
@@ -904,6 +962,33 @@ func TestEngine_OnPlatformReady_IsIdempotentUntilUnavailable(t *testing.T) {
 
 	if p.registerCalls != 2 {
 		t.Fatalf("registerCalls after recover = %d, want 2", p.registerCalls)
+	}
+}
+
+func TestRefreshReadyPlatformCommandsSkipsUnchangedMenuButReconnectForcesRegistration(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "bounded-menu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.OnPlatformReady(p)
+	if p.registerCalls != 1 {
+		t.Fatalf("initial registerCalls = %d, want 1", p.registerCalls)
+	}
+
+	e.refreshReadyPlatformCommands()
+	e.refreshReadyPlatformCommands()
+	if p.registerCalls != 1 {
+		t.Fatalf("unchanged refresh registerCalls = %d, want 1", p.registerCalls)
+	}
+
+	e.AddCommand("fresh", "fresh", "", "", "", "test")
+	e.refreshReadyPlatformCommands()
+	if p.registerCalls != 2 {
+		t.Fatalf("changed refresh registerCalls = %d, want 2", p.registerCalls)
+	}
+
+	e.OnPlatformUnavailable(p, errors.New("lost"))
+	e.OnPlatformReady(p)
+	if p.registerCalls != 3 {
+		t.Fatalf("reconnect registerCalls = %d, want forced third registration", p.registerCalls)
 	}
 }
 
@@ -2860,6 +2945,67 @@ func TestEngine_SkillCommand_DisabledByRole(t *testing.T) {
 	}
 }
 
+func TestNewEnginePrefersSkillDiscoveryConfigProvider(t *testing.T) {
+	legacyRoot := t.TempDir()
+	configuredRoot := t.TempDir()
+	writeSkillFile(t, filepath.Join(legacyRoot, "legacy", "SKILL.md"), "Legacy skill")
+	writeSkillFile(t, filepath.Join(configuredRoot, "nested", "configured", "SKILL.md"), "Configured skill")
+
+	agent := &stubSkillDiscoveryAgent{
+		legacyDirs: []string{legacyRoot},
+		config: SkillDiscoveryConfig{
+			Paths: []string{configuredRoot},
+		},
+	}
+	e := NewEngine("skills-config", agent, nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+
+	if e.skills.Resolve("configured") == nil {
+		t.Fatal("engine did not apply configured recursive skill paths")
+	}
+	if e.skills.Resolve("legacy") != nil {
+		t.Fatal("engine used SkillProvider fallback instead of SkillDiscoveryConfigProvider")
+	}
+}
+
+func TestNewEngineAppliesSkillDiscoveryFiltersToAgentCommandFiles(t *testing.T) {
+	commandDir := t.TempDir()
+	for name, content := range map[string]string{
+		"visible.md":  "visible prompt",
+		"blocked.md":  "blocked prompt",
+		"ignored.md":  "ignored prompt",
+		"CaseName.md": "case prompt",
+	} {
+		if err := os.WriteFile(filepath.Join(commandDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	agent := &stubSkillDiscoveryAgent{
+		commandDirs: []string{commandDir},
+		config: SkillDiscoveryConfig{
+			IgnorePaths:   []string{filepath.Join(commandDir, "ignored.md")},
+			DisabledNames: []string{"blocked", "casename"},
+		},
+	}
+	e := NewEngine("command-filters", agent, nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+
+	for _, name := range []string{"blocked", "ignored"} {
+		if _, ok := e.commands.Resolve(name); ok {
+			t.Errorf("filtered agent command %q resolved", name)
+		}
+	}
+	for _, name := range []string{"visible", "CaseName"} {
+		if _, ok := e.commands.Resolve(name); !ok {
+			t.Errorf("available agent command %q did not resolve", name)
+		}
+	}
+
+	e.AddCommand("blocked", "config", "config prompt", "", "", "config")
+	if command, ok := e.commands.Resolve("blocked"); !ok || command.Source != "config" {
+		t.Fatalf("registered command should remain available: (%+v, %v)", command, ok)
+	}
+}
+
 func TestEngine_SkillCommand_DisabledByProjectLevel(t *testing.T) {
 	e := newTestEngine()
 
@@ -4774,6 +4920,80 @@ func TestCmdModel_MultiWorkspacePersistsWorkspaceModelForRecreatedAgent(t *testi
 	}
 }
 
+func TestGetOrCreateWorkspaceAgent_InvalidatesPersistedSessionsForDifferentAgentType(t *testing.T) {
+	const agentName = "workspace-session-invalidation-test-agent"
+	RegisterAgent(agentName, func(map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	stateDir := t.TempDir()
+	e := NewEngine(
+		"workspace-session-invalidation",
+		&namedTestAgent{name: agentName},
+		nil,
+		filepath.Join(stateDir, "global-sessions.json"),
+		LangEnglish,
+	)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(stateDir, "bindings.json"))
+	workspace := normalizeWorkspacePath(t.TempDir())
+
+	_, initialSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("initial getOrCreateWorkspaceAgent: %v", err)
+	}
+	const staleKey = "discord:channel:stale"
+	stale := initialSessions.GetOrCreateActive(staleKey)
+	stale.SetAgentSessionID("opencode-session-id", "opencode")
+	stale.AddHistory("user", "stale session history remains local")
+
+	const matchingKey = "discord:channel:matching"
+	matching := initialSessions.GetOrCreateActive(matchingKey)
+	matching.SetAgentSessionID("matching-session-id", agentName)
+	matching.AddHistory("assistant", "matching session history remains local")
+	initialSessions.Save()
+
+	// Drop only the cached in-memory workspace objects. The next call must
+	// rebuild the per-workspace SessionManager from its persisted store and
+	// invalidate it against the newly created workspace agent's type.
+	ws := e.workspacePool.GetOrCreate(workspace)
+	ws.mu.Lock()
+	ws.agent = nil
+	ws.sessions = nil
+	ws.mu.Unlock()
+
+	_, recreatedSessions, err := e.getOrCreateWorkspaceAgent(workspace)
+	if err != nil {
+		t.Fatalf("recreated getOrCreateWorkspaceAgent: %v", err)
+	}
+	if recreatedSessions == initialSessions {
+		t.Fatal("workspace SessionManager was reused instead of recreated from persisted state")
+	}
+
+	recreatedStale := recreatedSessions.GetOrCreateActive(staleKey)
+	if got := recreatedStale.GetAgentSessionID(); got != "" {
+		t.Fatalf("different-agent AgentSessionID = %q, want cleared", got)
+	}
+	if recreatedStale.AgentType != agentName {
+		t.Fatalf("different-agent AgentType = %q, want current type %q", recreatedStale.AgentType, agentName)
+	}
+	staleHistory := recreatedStale.GetHistory(0)
+	if len(staleHistory) != 1 || staleHistory[0].Content != "stale session history remains local" {
+		t.Fatalf("different-agent history = %#v, want preserved", staleHistory)
+	}
+
+	recreatedMatching := recreatedSessions.GetOrCreateActive(matchingKey)
+	if got := recreatedMatching.GetAgentSessionID(); got != "matching-session-id" {
+		t.Fatalf("matching-agent AgentSessionID = %q, want preserved", got)
+	}
+	if recreatedMatching.AgentType != agentName {
+		t.Fatalf("matching-agent AgentType = %q, want %q", recreatedMatching.AgentType, agentName)
+	}
+	matchingHistory := recreatedMatching.GetHistory(0)
+	if len(matchingHistory) != 1 || matchingHistory[0].Content != "matching session history remains local" {
+		t.Fatalf("matching-agent history = %#v, want preserved", matchingHistory)
+	}
+}
+
 func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{
@@ -6198,7 +6418,11 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 }
 
 func TestCmdSkills_UsesTelegramSafeNamesOnTelegramPlatform(t *testing.T) {
-	p := &stubPlatformEngine{n: "telegram"}
+	p := &stubMenuPolicyPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "normalized-menu"},
+		policy:             CommandMenuPolicy{Limit: 100, SkillsAllOrNone: true},
+		key:                underscoreCommandMenuKey,
+	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	temp := t.TempDir()
 	skillDir := temp + "/telegram-codex-bot"
@@ -6238,12 +6462,17 @@ func TestMenuCommandsForPlatform_TelegramOmitsAllSkillsWhenMenuWouldOverflow(t *
 	}
 	e.skills.SetDirs([]string{temp})
 
-	commands, skillsOmitted := e.menuCommandsForPlatform("telegram")
+	platform := &stubMenuPolicyPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "limited-menu"},
+		policy:             CommandMenuPolicy{Limit: 100, SkillsAllOrNone: true},
+		key:                underscoreCommandMenuKey,
+	}
+	plan := e.menuCommandsForPlatform(platform)
 
-	if !skillsOmitted {
+	if !plan.skillsOmitted {
 		t.Fatalf("expected Telegram menu planner to omit skill commands when command menu overflows")
 	}
-	for _, cmd := range commands {
+	for _, cmd := range plan.commands {
 		if cmd.IsSkill {
 			t.Fatalf("menu commands should omit skills when overflowed, got %+v", cmd)
 		}
@@ -6251,7 +6480,11 @@ func TestMenuCommandsForPlatform_TelegramOmitsAllSkillsWhenMenuWouldOverflow(t *
 }
 
 func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu(t *testing.T) {
-	p := &stubPlatformEngine{n: "telegram"}
+	p := &stubMenuPolicyPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "limited-menu"},
+		policy:             CommandMenuPolicy{Limit: 100, SkillsAllOrNone: true},
+		key:                underscoreCommandMenuKey,
+	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	temp := t.TempDir()
 	for i := 0; i < 80; i++ {
@@ -9312,6 +9545,22 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 	// Create a separate "workspace" session manager that drainOrphanedQueue should use.
 	wsSessionsPath := filepath.Join(t.TempDir(), "ws_sessions.json")
 	wsSessions := NewSessionManager(wsSessionsPath)
+	workspaceDir := t.TempDir()
+	e.workspacePool = newWorkspacePool(time.Nanosecond)
+	workspaceState := e.workspacePool.GetOrCreate(workspaceDir)
+	workspaceState.mu.Lock()
+	workspaceState.agent = agent
+	workspaceState.sessions = wsSessions
+	workspaceState.mu.Unlock()
+	lease := e.workspacePool.AcquireTurn(workspaceDir, agent)
+	if lease == nil {
+		t.Fatal("expected workspace turn lease")
+	}
+	leaseMessage := &Message{workspaceLease: lease}
+	lease = takeWorkspaceTurnLease(leaseMessage)
+	if leaseMessage.workspaceLease != nil {
+		t.Fatal("takeWorkspaceTurnLease did not transfer ownership")
+	}
 
 	key := "ws1:test:user1"
 	session := wsSessions.GetOrCreateActive("test:user1")
@@ -9333,6 +9582,7 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	// Push events so the drain completes.
+	releaseResult := make(chan struct{})
 	go func() {
 		sess.sendMu.Lock()
 		for len(sess.sendCalls) == 0 {
@@ -9341,19 +9591,44 @@ func TestDrainOrphanedQueue_UsesWorkspaceSessionManager(t *testing.T) {
 			sess.sendMu.Lock()
 		}
 		sess.sendMu.Unlock()
+		<-releaseResult
 		sess.events <- Event{Type: EventResult, Content: "orphan-response", Done: true}
 	}()
 
 	done := make(chan struct{})
 	go func() {
-		e.drainOrphanedQueue(session, wsSessions, key, agent, "")
+		e.drainOrphanedQueue(session, wsSessions, key, agent, workspaceDir, lease)
 		close(done)
 	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		sent := len(sess.sendCalls) > 0
+		sess.sendMu.Unlock()
+		if sent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("orphan drain did not send the queued prompt")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	workspaceState.mu.Lock()
+	workspaceState.lastActivity = time.Now().Add(-time.Hour)
+	workspaceState.mu.Unlock()
+	if reaped := e.workspacePool.ReapIdleStates(); len(reaped) != 0 {
+		t.Fatalf("orphan drain workspace was reaped while leased: %#v", reaped)
+	}
+	close(releaseResult)
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("drainOrphanedQueue did not complete in time")
+	}
+	if workspaceState.HasActiveTurn() {
+		t.Fatal("orphan drain did not release its transferred lease")
 	}
 
 	// The assistant response should be saved in the workspace session manager,

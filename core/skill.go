@@ -21,8 +21,11 @@ type Skill struct {
 // SkillRegistry discovers and caches agent skills from skill directories.
 // Skills are project-level: each Engine has its own SkillRegistry.
 type SkillRegistry struct {
-	mu   sync.RWMutex
-	dirs []string
+	mu            sync.RWMutex
+	dirs          []string
+	paths         []string
+	ignorePaths   []string
+	disabledNames []string
 	// cached results; nil means not yet scanned
 	cache []*Skill
 }
@@ -33,9 +36,18 @@ func NewSkillRegistry() *SkillRegistry {
 
 // SetDirs configures which directories to scan for skills.
 func (r *SkillRegistry) SetDirs(dirs []string) {
+	r.SetDiscoveryConfig(SkillDiscoveryConfig{Dirs: dirs})
+}
+
+// SetDiscoveryConfig configures conventional roots, recursive paths, and
+// filters for skill discovery.
+func (r *SkillRegistry) SetDiscoveryConfig(config SkillDiscoveryConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.dirs = dirs
+	r.dirs = append([]string(nil), config.Dirs...)
+	r.paths = append([]string(nil), config.Paths...)
+	r.ignorePaths = append([]string(nil), config.IgnorePaths...)
+	r.disabledNames = append([]string(nil), config.DisabledNames...)
 	r.cache = nil
 }
 
@@ -76,9 +88,24 @@ func (r *SkillRegistry) ListAll() []*Skill {
 
 	var result []*Skill
 	seen := make(map[string]bool)
+	ignorePaths := make([]string, 0, len(r.ignorePaths))
+	for _, path := range r.ignorePaths {
+		if strings.TrimSpace(path) != "" {
+			ignorePaths = append(ignorePaths, canonicalDiscoveryPath(path))
+		}
+	}
+	disabled := make(map[string]bool, len(r.disabledNames))
+	for _, name := range r.disabledNames {
+		if name != "" {
+			disabled[name] = true
+		}
+	}
 
 	for _, dir := range r.dirs {
-		result = append(result, discoverSkillsInDir(dir, seen)...)
+		result = append(result, discoverSkillsInDir(dir, seen, ignorePaths, disabled)...)
+	}
+	for _, path := range r.paths {
+		result = append(result, discoverSkillsInPath(path, seen, ignorePaths, disabled)...)
 	}
 
 	r.cache = result
@@ -95,7 +122,7 @@ func (r *SkillRegistry) ListAll() []*Skill {
 // Nested SKILL.md files inside a skill (e.g. example templates shipped
 // alongside the real one) are treated as skill assets and ignored, so they
 // cannot leak into platform command menus as phantom slash commands.
-func discoverSkillsInDir(scanRoot string, seen map[string]bool) []*Skill {
+func discoverSkillsInDir(scanRoot string, seen map[string]bool, ignorePaths []string, disabled map[string]bool) []*Skill {
 	entries, err := os.ReadDir(scanRoot)
 	if err != nil {
 		return nil
@@ -114,24 +141,114 @@ func discoverSkillsInDir(scanRoot string, seen map[string]bool) []*Skill {
 
 		skillDir := filepath.Join(scanRoot, skillName)
 		skillFile := filepath.Join(skillDir, "SKILL.md")
-		data, err := os.ReadFile(skillFile)
-		if err != nil {
+		skill := discoverSkillFile(skillFile, seen, ignorePaths, disabled)
+		if skill == nil {
 			// No SKILL.md at the top of this subdir — and we deliberately
 			// do NOT recurse, matching the Claude Code CLI rule.
 			continue
 		}
-
-		skill := parseSkillMD(skillName, string(data), skillDir)
-		if skill == nil {
-			continue
-		}
-
-		seen[strings.ToLower(skillName)] = true
 		result = append(result, skill)
-		slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
 	}
 
 	return result
+}
+
+// discoverSkillsInPath recursively searches a configured directory, or reads
+// a configured SKILL.md file directly.
+func discoverSkillsInPath(scanPath string, seen map[string]bool, ignorePaths []string, disabled map[string]bool) []*Skill {
+	info, err := os.Stat(scanPath)
+	if err != nil {
+		return nil
+	}
+	if !info.IsDir() {
+		if filepath.Base(scanPath) != "SKILL.md" {
+			return nil
+		}
+		if skill := discoverSkillFile(scanPath, seen, ignorePaths, disabled); skill != nil {
+			return []*Skill{skill}
+		}
+		return nil
+	}
+
+	walkRoot := scanPath
+	if resolved, err := filepath.EvalSymlinks(scanPath); err == nil {
+		walkRoot = resolved
+	}
+	var result []*Skill
+	_ = filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if discoveryPathIgnored(path, ignorePaths) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || entry.Name() != "SKILL.md" {
+			return nil
+		}
+		if skill := discoverSkillFile(path, seen, ignorePaths, disabled); skill != nil {
+			result = append(result, skill)
+		}
+		return nil
+	})
+	return result
+}
+
+func discoverSkillFile(skillFile string, seen map[string]bool, ignorePaths []string, disabled map[string]bool) *Skill {
+	skillDir := filepath.Dir(skillFile)
+	skillName := filepath.Base(skillDir)
+	if seen[strings.ToLower(skillName)] {
+		return nil
+	}
+	if discoveryPathIgnored(skillDir, ignorePaths) || discoveryPathIgnored(skillFile, ignorePaths) {
+		return nil
+	}
+
+	data, err := os.ReadFile(skillFile)
+	if err != nil {
+		return nil
+	}
+	skill := parseSkillMD(skillName, string(data), skillDir)
+	if skill == nil {
+		return nil
+	}
+	if disabled[skill.Name] || disabled[skill.DisplayName] {
+		return nil
+	}
+
+	seen[strings.ToLower(skillName)] = true
+	slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
+	return skill
+}
+
+func discoveryPathIgnored(path string, ignorePaths []string) bool {
+	if len(ignorePaths) == 0 {
+		return false
+	}
+	path = canonicalDiscoveryPath(path)
+	for _, ignored := range ignorePaths {
+		rel, err := filepath.Rel(ignored, path)
+		if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalDiscoveryPath(path string) string {
+	path = filepath.Clean(path)
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return path
 }
 
 // isDiscoverableSubdir reports whether entry should be considered as a

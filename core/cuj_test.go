@@ -1142,12 +1142,19 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 		agent.mu.Lock()
 		n := len(agent.sessions)
 		agent.mu.Unlock()
-		if n > 0 {
+		finalReplySeen := false
+		for _, sent := range plat.getSent() {
+			if strings.HasPrefix(strings.TrimSpace(sent), "ok") {
+				finalReplySeen = true
+				break
+			}
+		}
+		if n > 0 && finalReplySeen {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatal("agent never received the message with image")
+			t.Fatal("image turn did not reach the agent and complete with a final reply")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -1206,12 +1213,19 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 		agent.mu.Lock()
 		n := len(agent.sessions)
 		agent.mu.Unlock()
-		if n > 0 {
+		finalReplySeen := false
+		for _, sent := range plat.getSent() {
+			if strings.HasPrefix(strings.TrimSpace(sent), "ok") {
+				finalReplySeen = true
+				break
+			}
+		}
+		if n > 0 && finalReplySeen {
 			return
 		}
 		select {
 		case <-deadline:
-			t.Fatal("agent never received the message with file attachment")
+			t.Fatal("file turn did not reach the agent and complete with a final reply")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}

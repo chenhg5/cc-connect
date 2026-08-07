@@ -28,7 +28,6 @@ import (
 )
 
 const maxPlatformMessageLen = 4000
-const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
 // defaultPendingRestartTimeout is how long the post-restart notify
@@ -364,10 +363,16 @@ type Engine struct {
 	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
-	commands *CommandRegistry
-	skills   *SkillRegistry
-	aliases  map[string]string // trigger → command (e.g. "帮助" → "/help")
-	aliasMu  sync.RWMutex
+	commands             *CommandRegistry
+	skills               *SkillRegistry
+	nativeSlashMu        sync.RWMutex
+	nativeSlashByAgent   map[string]nativeSlashState
+	nativeSlashOrder     []string
+	nativeSlashPrewarm   atomic.Bool
+	nativeSlashRefreshMu sync.Mutex
+	nativeSlashRefreshes map[string]*nativeSlashRefreshRequest
+	aliases              map[string]string // trigger → command (e.g. "帮助" → "/help")
+	aliasMu              sync.RWMutex
 
 	aliasSaveAddFunc func(name, command string) error
 	aliasSaveDelFunc func(name string) error
@@ -444,11 +449,14 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
-	platformLifecycleMu sync.Mutex
-	platformReady       map[Platform]bool
-	stopping            bool
-	replyFooterMu       sync.Mutex
-	replyFooterUsage    replyFooterUsageCache
+	platformLifecycleMu           sync.Mutex
+	platformCommandRegistrationMu sync.Mutex
+	platformCommandFingerprintMu  sync.Mutex
+	platformCommandFingerprints   map[Platform]string
+	platformReady                 map[Platform]bool
+	stopping                      bool
+	replyFooterMu                 sync.Mutex
+	replyFooterUsage              replyFooterUsageCache
 
 	// pendingRestartNotify is queued at startup if a /restart was consumed
 	// from the run/restart_notify file. It is dispatched on the first
@@ -484,19 +492,21 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
-	messageID         string
-	platform          Platform
-	replyCtx          any
-	content           string
-	images            []ImageAttachment
-	files             []FileAttachment
-	fromVoice         bool
-	userID            string
-	userName          string // sender's display name for sender injection
-	msgPlatform       string // platform name for sender injection
-	msgSessionKey     string // session key for extracting chat ID
-	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
-	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
+	messageID          string
+	platform           Platform
+	replyCtx           any
+	content            string
+	images             []ImageAttachment
+	files              []FileAttachment
+	fromVoice          bool
+	userID             string
+	userName           string // sender's display name for sender injection
+	msgPlatform        string // platform name for sender injection
+	msgSessionKey      string // session key for extracting chat ID
+	channelKey         string // platform-provided channel identifier (preferred over sessionKey extraction)
+	userMessageTimeMs  int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
+	nativeSlash        bool   // preserve native slash as the first prompt token
+	nativeSlashRefresh bool   // refresh native capabilities after a successful turn
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -714,42 +724,47 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:                  name,
-		agent:                 ag,
-		platforms:             platforms,
-		sessions:              NewSessionManager(sessionStorePath),
-		ctx:                   ctx,
-		cancel:                cancel,
-		i18n:                  NewI18n(lang),
-		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
-		commands:              NewCommandRegistry(),
-		skills:                NewSkillRegistry(),
-		aliases:               make(map[string]string),
-		interactiveStates:     make(map[string]*interactiveState),
-		sendWorkDirs:          make(map[string]string),
-		platformReady:         make(map[Platform]bool),
-		startedAt:             time.Now(),
-		streamPreview:         DefaultStreamPreviewCfg(),
-		references:            DefaultReferenceRenderCfg(),
-		eventIdleTimeout:      defaultEventIdleTimeout,
-		maxQueuedMessages:     defaultMaxQueuedMessages,
-		showContextIndicator:  true,
-		showWorkdirIndicator:  true,
-		shell:                 defaultShell(),
-		shellFlag:             defaultShellFlag(),
-		pendingRestartTimeout: defaultPendingRestartTimeout,
+		name:                        name,
+		agent:                       ag,
+		platforms:                   platforms,
+		sessions:                    NewSessionManager(sessionStorePath),
+		ctx:                         ctx,
+		cancel:                      cancel,
+		i18n:                        NewI18n(lang),
+		attachmentSendEnabled:       true,
+		display:                     DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		commands:                    NewCommandRegistry(),
+		skills:                      NewSkillRegistry(),
+		nativeSlashByAgent:          make(map[string]nativeSlashState),
+		nativeSlashRefreshes:        make(map[string]*nativeSlashRefreshRequest),
+		aliases:                     make(map[string]string),
+		interactiveStates:           make(map[string]*interactiveState),
+		sendWorkDirs:                make(map[string]string),
+		platformReady:               make(map[Platform]bool),
+		platformCommandFingerprints: make(map[Platform]string),
+		startedAt:                   time.Now(),
+		streamPreview:               DefaultStreamPreviewCfg(),
+		references:                  DefaultReferenceRenderCfg(),
+		eventIdleTimeout:            defaultEventIdleTimeout,
+		maxQueuedMessages:           defaultMaxQueuedMessages,
+		showContextIndicator:        true,
+		showWorkdirIndicator:        true,
+		shell:                       defaultShell(),
+		shellFlag:                   defaultShellFlag(),
+		pendingRestartTimeout:       defaultPendingRestartTimeout,
 	}
 
 	if ag != nil {
 		e.sessions.InvalidateForAgent(ag.Name())
 	}
 
-	if cp, ok := ag.(CommandProvider); ok {
-		e.commands.SetAgentDirs(cp.CommandDirs())
-	}
-	if sp, ok := ag.(SkillProvider); ok {
-		e.skills.SetDirs(sp.SkillDirs())
+	if ag != nil {
+		if _, native := ag.(NativeSlashCommandProvider); native {
+			e.refreshNativeSlashCommands(ctx, ag)
+			e.clearFilesystemCapabilities()
+		} else {
+			e.configureFilesystemCapabilities(ag)
+		}
 	}
 
 	return e
@@ -766,7 +781,52 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
 	e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
+	e.prewarmBoundWorkspaceCapabilities()
 	go e.runIdleReaper()
+}
+
+func (e *Engine) prewarmBoundWorkspaceCapabilities() {
+	if e.workspaceBindings == nil || e.agent == nil {
+		return
+	}
+	if _, ok := e.agent.(NativeSlashCommandProvider); !ok {
+		return
+	}
+
+	unique := make(map[string]bool)
+	for _, bindingKey := range []string{"project:" + e.name, sharedWorkspaceBindingsKey} {
+		for _, binding := range e.workspaceBindings.ListByProject(bindingKey) {
+			if binding == nil || strings.TrimSpace(binding.Workspace) == "" {
+				continue
+			}
+			workspace := canonicalDiscoveryPath(binding.Workspace)
+			info, err := os.Stat(workspace)
+			if err != nil || !info.IsDir() {
+				slog.Warn("workspace capability prewarm skipped invalid binding", "project", e.name)
+				continue
+			}
+			unique[workspace] = true
+		}
+	}
+	workspaces := make([]string, 0, len(unique))
+	for workspace := range unique {
+		workspaces = append(workspaces, workspace)
+	}
+	sort.Strings(workspaces)
+	if len(workspaces) == 0 {
+		return
+	}
+
+	e.nativeSlashPrewarm.Store(true)
+	for _, workspace := range workspaces {
+		if _, _, err := e.getOrCreateWorkspaceAgent(workspace); err != nil {
+			// Do not include the workspace or wrapped factory error: either may
+			// contain private local data. One bad binding must not block others.
+			slog.Warn("workspace capability prewarm failed", "project", e.name)
+		}
+	}
+	e.nativeSlashPrewarm.Store(false)
+	e.refreshReadyPlatformCommands()
 }
 
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
@@ -803,14 +863,18 @@ func (e *Engine) reapIdleWorkspaces() {
 		return
 	}
 
-	reaped := e.workspacePool.ReapIdle()
+	reaped := e.workspacePool.ReapIdleStates()
 	if len(reaped) == 0 {
 		return
 	}
+	e.cleanupReapedWorkspaces(reaped)
+}
 
-	reapedSet := make(map[string]struct{}, len(reaped))
+func (e *Engine) cleanupReapedWorkspaces(reaped []reapedWorkspace) {
+	rootNativeKey := nativeSlashAgentKey(e.agent)
+	reapedSet := make(map[string]Agent, len(reaped))
 	for _, ws := range reaped {
-		reapedSet[ws] = struct{}{}
+		reapedSet[ws.Path] = ws.Agent
 	}
 
 	type cleanupTarget struct {
@@ -821,7 +885,8 @@ func (e *Engine) reapIdleWorkspaces() {
 	var targets []cleanupTarget
 	e.interactiveMu.Lock()
 	for key, state := range e.interactiveStates {
-		if _, ok := reapedSet[state.workspaceDir]; ok {
+		expected, ok := reapedSet[state.workspaceDir]
+		if ok && expected != nil && sameAgentInstance(state.agent, expected) {
 			targets = append(targets, cleanupTarget{key: key, state: state})
 		}
 	}
@@ -830,8 +895,74 @@ func (e *Engine) reapIdleWorkspaces() {
 	for _, target := range targets {
 		e.cleanupInteractiveState(target.key, target.state)
 	}
+	menuChanged := false
 	for _, ws := range reaped {
-		slog.Info("workspace idle-reaped", "workspace", ws)
+		if !e.workspaceHasPersistentBinding(ws.Path) && ws.Agent != nil {
+			key := ws.Agent.Name() + "\x00" + canonicalDiscoveryPath(ws.Path)
+			if key != rootNativeKey {
+				menuChanged = e.removeNativeSlashStateForAgent(key, ws.Agent) || menuChanged
+			}
+		}
+		slog.Info("workspace idle-reaped", "workspace", ws.Path)
+	}
+	if menuChanged {
+		e.refreshReadyPlatformCommands()
+	}
+}
+
+func (e *Engine) workspaceHasPersistentBinding(workspace string) bool {
+	wanted := canonicalDiscoveryPath(workspace)
+	return e.persistentBoundWorkspaceSet()[wanted]
+}
+
+func (e *Engine) persistentBoundWorkspaceSet() map[string]bool {
+	bound := make(map[string]bool)
+	if e.workspaceBindings == nil {
+		return bound
+	}
+	for _, bindingKey := range []string{"project:" + e.name, sharedWorkspaceBindingsKey} {
+		for _, binding := range e.workspaceBindings.ListByProject(bindingKey) {
+			if binding != nil && strings.TrimSpace(binding.Workspace) != "" {
+				bound[canonicalDiscoveryPath(binding.Workspace)] = true
+			}
+		}
+	}
+	return bound
+}
+
+// reconcileNativeSlashWorkspaceStates drops retained menu capabilities only
+// after a binding mutation leaves a workspace both unbound and absent from the
+// live pool. Idle reaping intentionally preserves capabilities for persistent
+// bindings so their slash menu remains usable before the next message.
+func (e *Engine) reconcileNativeSlashWorkspaceStates() {
+	bound := e.persistentBoundWorkspaceSet()
+	live := make(map[string]bool)
+	if e.workspacePool != nil {
+		for workspace := range e.workspacePool.All() {
+			live[canonicalDiscoveryPath(workspace)] = true
+		}
+	}
+	rootKey := nativeSlashAgentKey(e.agent)
+
+	changed := false
+	e.nativeSlashMu.Lock()
+	for key, state := range e.nativeSlashByAgent {
+		workspace := state.workspacePath
+		if workspace == "" || key == rootKey || bound[workspace] || live[workspace] {
+			continue
+		}
+		delete(e.nativeSlashByAgent, key)
+		for i, existing := range e.nativeSlashOrder {
+			if existing == key {
+				e.nativeSlashOrder = append(e.nativeSlashOrder[:i], e.nativeSlashOrder[i+1:]...)
+				break
+			}
+		}
+		changed = true
+	}
+	e.nativeSlashMu.Unlock()
+	if changed {
+		e.refreshReadyPlatformCommands()
 	}
 }
 
@@ -1137,6 +1268,7 @@ func resolveDisabledCmds(cmds []string) map[string]bool {
 	for _, c := range cmds {
 		c = strings.ToLower(strings.TrimPrefix(c, "/"))
 		if c == "*" {
+			m["*"] = true
 			for _, bc := range builtinCommands {
 				m[bc.id] = true
 			}
@@ -1353,7 +1485,32 @@ func (e *Engine) ProjectName() string {
 
 // ListSkills returns all discovered skills for this engine's project.
 func (e *Engine) ListSkills() []*Skill {
-	return e.skills.ListAll()
+	return e.listSkillsForAgent(e.agent)
+}
+
+func (e *Engine) listSkillsForAgent(agent Agent) []*Skill {
+	native := e.nativeSkillsForAgent(agent)
+	seen := make(map[string]bool, len(native))
+	result := make([]*Skill, 0, len(native))
+	for _, skill := range native {
+		result = append(result, skill)
+		seen[normalizeCommandName(skill.Name)] = true
+	}
+	for _, skill := range e.scopedFallbackSkillsForAgent(agent) {
+		if seen[normalizeCommandName(skill.Name)] {
+			continue
+		}
+		seen[normalizeCommandName(skill.Name)] = true
+		result = append(result, skill)
+	}
+	for _, skill := range e.skills.ListAll() {
+		if seen[normalizeCommandName(skill.Name)] {
+			continue
+		}
+		seen[normalizeCommandName(skill.Name)] = true
+		result = append(result, skill)
+	}
+	return result
 }
 
 // SkillDirs returns the configured skill directories for this engine.
@@ -1488,15 +1645,6 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	content := job.Prompt
-	if strings.HasPrefix(content, "/") {
-		parts := strings.Fields(content)
-		if len(parts) > 0 {
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
-			}
-		}
-	}
 
 	msg := &Message{
 		SessionKey:   sessionKey,
@@ -1513,31 +1661,63 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	agent := e.agent
 	sessions := e.sessions
 	workspaceDir := ""
+	var workspaceLease *workspaceState
+	defer func() {
+		if workspaceLease != nil {
+			workspaceLease.EndTurn()
+		}
+	}()
 
 	if e.multiWorkspace {
 		channelID := extractChannelID(sessionKey)
 		if channelID != "" {
 			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
 			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+				wsAgent, wsSessions, _, effectiveDir, lease, err := e.workspaceTurnContext(workspace, sessionKey)
 				if err == nil {
 					agent = wsAgent
 					sessions = wsSessions
 					workspaceDir = effectiveDir
+					workspaceLease = lease
 				}
 			}
 		}
 	}
 
 	if job.WorkDir != "" {
-		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
+		wsAgent, wsSessions, lease, err := e.getOrCreateWorkspaceAgentWithLease(job.WorkDir)
 		if err == nil {
+			if workspaceLease != nil {
+				workspaceLease.EndTurn()
+			}
 			agent = wsAgent
 			sessions = wsSessions
 			workspaceDir = job.WorkDir
+			workspaceLease = lease
 		} else {
 			slog.Warn("cron: workspace agent creation failed, using global",
 				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
+		}
+	}
+
+	if commandName := slashCommandName(content); commandName != "" {
+		if native, ok := e.resolveNativeSlashCommandOrPolicy(agent, commandName); ok {
+			e.userRolesMu.RLock()
+			disabled := nativeSlashCommandDisabled(native, e.disabledCmds)
+			e.userRolesMu.RUnlock()
+			if disabled {
+				return fmt.Errorf("cron native command %q is disabled", native.Name)
+			}
+			if native.AdminOnly {
+				return fmt.Errorf("cron native command %q requires an interactive administrator", native.Name)
+			}
+			content = rewriteNativeSlashCommand(content, native.Target)
+			msg.Content = content
+			msg.nativeSlash = true
+		} else if skill := e.skills.Resolve(commandName); skill != nil {
+			parts := splitCommandArgs(content)
+			content = BuildSkillInvocationPrompt(skill, parts[1:])
+			msg.Content = content
 		}
 	}
 
@@ -1559,7 +1739,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			iKey = workspaceDir + ":" + iKey
 		}
 		prevHistLen := session.HistoryLen()
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		lease := workspaceLease
+		workspaceLease = nil
+		e.processInteractiveMessageWithLease(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lease)
 		e.cleanupInteractiveState(iKey)
 		// Empty-response detection via session history delta: processInteractiveMessageWith
 		// always adds a "user" entry (prevHistLen+1), then an "assistant" entry on success
@@ -1582,7 +1764,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		iKey = workspaceDir + ":" + sessionKey
 	}
 	prevHistLen := session.HistoryLen()
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	lease := workspaceLease
+	workspaceLease = nil
+	e.processInteractiveMessageWithLease(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lease)
 	// Same empty-response detection as the useNewSession path above.
 	if !job.Mute && session.HistoryLen() < prevHistLen+2 {
 		return fmt.Errorf("cron job %q produced an empty response", job.ID)
@@ -1691,15 +1875,6 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	content := job.Prompt
-	if strings.HasPrefix(content, "/") {
-		parts := strings.Fields(content)
-		if len(parts) > 0 {
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
-			}
-		}
-	}
 
 	msg := &Message{
 		SessionKey:   sessionKey,
@@ -1714,31 +1889,63 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	agent := e.agent
 	sessions := e.sessions
 	workspaceDir := ""
+	var workspaceLease *workspaceState
+	defer func() {
+		if workspaceLease != nil {
+			workspaceLease.EndTurn()
+		}
+	}()
 
 	if e.multiWorkspace {
 		channelID := extractChannelID(sessionKey)
 		if channelID != "" {
 			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
 			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+				wsAgent, wsSessions, _, effectiveDir, lease, err := e.workspaceTurnContext(workspace, sessionKey)
 				if err == nil {
 					agent = wsAgent
 					sessions = wsSessions
 					workspaceDir = effectiveDir
+					workspaceLease = lease
 				}
 			}
 		}
 	}
 
 	if job.WorkDir != "" {
-		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
+		wsAgent, wsSessions, lease, err := e.getOrCreateWorkspaceAgentWithLease(job.WorkDir)
 		if err == nil {
+			if workspaceLease != nil {
+				workspaceLease.EndTurn()
+			}
 			agent = wsAgent
 			sessions = wsSessions
 			workspaceDir = job.WorkDir
+			workspaceLease = lease
 		} else {
 			slog.Warn("timer: workspace agent creation failed, using global",
 				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
+		}
+	}
+
+	if commandName := slashCommandName(content); commandName != "" {
+		if native, ok := e.resolveNativeSlashCommandOrPolicy(agent, commandName); ok {
+			e.userRolesMu.RLock()
+			disabled := nativeSlashCommandDisabled(native, e.disabledCmds)
+			e.userRolesMu.RUnlock()
+			if disabled {
+				return fmt.Errorf("timer native command %q is disabled", native.Name)
+			}
+			if native.AdminOnly {
+				return fmt.Errorf("timer native command %q requires an interactive administrator", native.Name)
+			}
+			content = rewriteNativeSlashCommand(content, native.Target)
+			msg.Content = content
+			msg.nativeSlash = true
+		} else if skill := e.skills.Resolve(commandName); skill != nil {
+			parts := splitCommandArgs(content)
+			content = BuildSkillInvocationPrompt(skill, parts[1:])
+			msg.Content = content
 		}
 	}
 
@@ -1759,7 +1966,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		lease := workspaceLease
+		workspaceLease = nil
+		e.processInteractiveMessageWithLease(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lease)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
@@ -1773,7 +1982,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	lease := workspaceLease
+	workspaceLease = nil
+	e.processInteractiveMessageWithLease(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lease)
 	return nil
 }
 
@@ -2343,6 +2554,9 @@ func (e *Engine) OnPlatformUnavailable(p Platform, err error) {
 	if !e.markPlatformUnavailable(p) {
 		return
 	}
+	e.platformCommandFingerprintMu.Lock()
+	delete(e.platformCommandFingerprints, p)
+	e.platformCommandFingerprintMu.Unlock()
 	slog.Warn("platform unavailable", "project", e.name, "platform", p.Name(), "error", err)
 }
 
@@ -2389,20 +2603,55 @@ func (e *Engine) markPlatformUnavailable(p Platform) bool {
 }
 
 func (e *Engine) initPlatformCapabilities(p Platform) {
-	if registrar, ok := p.(CommandRegistrar); ok {
-		commands, skillsOmitted := e.menuCommandsForPlatform(p.Name())
-		if skillsOmitted && strings.EqualFold(p.Name(), "telegram") {
-			slog.Info("telegram: omitting skill commands from menu due to command limit", "project", e.name)
-		}
-		if err := registrar.RegisterCommands(commands); err != nil {
-			slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
-		} else {
-			slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(commands))
-		}
-	}
+	e.registerPlatformCommands(p, true)
 
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
+	}
+}
+
+func (e *Engine) registerPlatformCommands(p Platform, force bool) {
+	if registrar, ok := p.(CommandRegistrar); ok {
+		e.platformCommandRegistrationMu.Lock()
+		defer e.platformCommandRegistrationMu.Unlock()
+		plan := e.menuCommandsForPlatform(p)
+		fingerprint := commandMenuFingerprint(p, plan.commands)
+		e.platformCommandFingerprintMu.Lock()
+		unchanged := e.platformCommandFingerprints[p] == fingerprint
+		e.platformCommandFingerprintMu.Unlock()
+		if !force && unchanged {
+			return
+		}
+		if plan.omitted > 0 {
+			slog.Warn("platform command menu limit reached; lower-priority entries omitted",
+				"project", e.name, "platform", p.Name(), "omitted", plan.omitted,
+				"skills_all_or_none", plan.skillsOmitted)
+		}
+		if err := registrar.RegisterCommands(plan.commands); err != nil {
+			slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
+		} else {
+			e.platformCommandFingerprintMu.Lock()
+			e.platformCommandFingerprints[p] = fingerprint
+			e.platformCommandFingerprintMu.Unlock()
+			slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(plan.commands))
+		}
+	}
+}
+
+// refreshReadyPlatformCommands re-registers only the slash menu. It is used
+// after native capabilities change (for example, /dir or a newly-created
+// workspace) without re-installing unrelated platform callbacks.
+func (e *Engine) refreshReadyPlatformCommands() {
+	e.platformLifecycleMu.Lock()
+	var ready []Platform
+	for platform, isReady := range e.platformReady {
+		if isReady {
+			ready = append(ready, platform)
+		}
+	}
+	e.platformLifecycleMu.Unlock()
+	for _, platform := range ready {
+		e.registerPlatformCommands(platform, false)
 	}
 }
 
@@ -2837,19 +3086,27 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsAgent Agent
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
+	defer func() {
+		if msg.workspaceLease != nil {
+			msg.workspaceLease.EndTurn()
+			msg.workspaceLease = nil
+		}
+	}()
 	if e.multiWorkspace {
 		e.migrateLegacyWorkspaceBindings(msg)
 	}
 	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
 		e.bindSendWorkDir(msg.SessionKey, forcedWorkDir)
 		var err error
-		wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(forcedWorkDir)
+		var lease *workspaceState
+		wsAgent, wsSessions, lease, err = e.getOrCreateWorkspaceAgentWithLease(forcedWorkDir)
 		if err != nil {
 			slog.Error("failed to create send work_dir agent", "work_dir", forcedWorkDir, "err", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
 			return
 		}
 		resolvedWorkspace = forcedWorkDir
+		msg.workspaceLease = lease
 	} else if e.multiWorkspace {
 		channelID := effectiveChannelID(msg)
 		channelKey := effectiveWorkspaceChannelKey(msg)
@@ -2883,13 +3140,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 
 			var effectiveWorkspace string
-			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
+			var lease *workspaceState
+			wsAgent, wsSessions, _, effectiveWorkspace, lease, err = e.workspaceTurnContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
 				return
 			}
 			resolvedWorkspace = effectiveWorkspace
+			msg.workspaceLease = lease
 		}
 	}
 
@@ -2903,11 +3162,35 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
-		if e.handleCommand(p, msg, content) {
-			return
+	if strings.HasPrefix(content, "/") {
+		if len(msg.Images) == 0 {
+			if e.handleCommand(p, msg, content) {
+				return
+			}
+			// Unrecognized slash command — fall through to agent as normal message
+		} else {
+			// Commands with images historically bypass cc-connect command
+			// execution. Preserve that behavior for built-ins/config commands while
+			// rewriting only actual agent-native image skills so the agent CLI sees
+			// '/' as the first byte.
+			commandName := slashCommandName(content)
+			cmdID := matchPrefix(strings.ToLower(commandName), builtinCommands)
+			custom, customFound := e.commands.Resolve(commandName)
+			if cmdID == "" && (!customFound || custom.Source == "agent") {
+				e.userRolesMu.RLock()
+				disabled := e.disabledCmds
+				roles := e.userRoles
+				e.userRolesMu.RUnlock()
+				if roles != nil {
+					if role := roles.ResolveRole(msg.UserID); role != nil {
+						disabled = role.DisabledCmds
+					}
+				}
+				if matched, consumed := e.handleNativeSlashCommand(p, msg, content, commandName, disabled); matched && consumed {
+					return
+				}
+			}
 		}
-		// Unrecognized slash command — fall through to agent as normal message
 	}
 
 	// Permission responses bypass the session lock.
@@ -2978,7 +3261,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
+				lease := takeWorkspaceTurnLease(msg)
+				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace, lease)
 			}
 			return
 		}
@@ -3017,7 +3301,8 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	lease := takeWorkspaceTurnLease(msg)
+	go e.processInteractiveMessageWithLease(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey, lease)
 }
 
 func runMessageAccepted(msg *Message) {
@@ -3126,19 +3411,21 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
-		messageID:         msg.MessageID,
-		platform:          p,
-		replyCtx:          msg.ReplyCtx,
-		content:           msg.Content,
-		images:            msg.Images,
-		files:             msg.Files,
-		fromVoice:         msg.FromVoice,
-		userID:            msg.UserID,
-		userName:          msg.UserName,
-		msgPlatform:       msg.Platform,
-		msgSessionKey:     msg.SessionKey,
-		channelKey:        msg.ChannelKey,
-		userMessageTimeMs: msg.UserMessageTimeMs,
+		messageID:          msg.MessageID,
+		platform:           p,
+		replyCtx:           msg.ReplyCtx,
+		content:            msg.Content,
+		images:             msg.Images,
+		files:              msg.Files,
+		fromVoice:          msg.FromVoice,
+		userID:             msg.UserID,
+		userName:           msg.UserName,
+		msgPlatform:        msg.Platform,
+		msgSessionKey:      msg.SessionKey,
+		channelKey:         msg.ChannelKey,
+		userMessageTimeMs:  msg.UserMessageTimeMs,
+		nativeSlash:        msg.nativeSlash,
+		nativeSlashRefresh: msg.nativeSlashRefresh,
 	})
 	runMessageAccepted(msg)
 	queueDepth := len(state.pendingMessages)
@@ -3181,13 +3468,22 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 // has already exited. It processes all pending messages in the state, similar
 // to the drain loop in processInteractiveMessageWith but as a standalone
 // goroutine.
-func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string) {
+func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string, workspaceLease *workspaceState) {
 	unlocked := false
 	defer func() {
 		if !unlocked {
 			session.Unlock()
 		}
 	}()
+	if workspaceLease != nil {
+		defer workspaceLease.EndTurn()
+	} else if workspaceDir != "" && e.workspacePool != nil {
+		workspaceLease = e.workspacePool.AcquireTurn(workspaceDir, agent)
+		if workspaceLease == nil {
+			return
+		}
+		defer workspaceLease.EndTurn()
+	}
 
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
@@ -3629,7 +3925,7 @@ func isDenyResponse(s string) bool {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
-	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "", "")
+	e.processInteractiveMessageWithLease(p, msg, session, e.agent, e.sessions, msg.SessionKey, "", "", nil)
 }
 
 // processInteractiveMessageWith is the core interactive processing loop.
@@ -3637,6 +3933,10 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY in the agent env; otherwise interactiveKey is used.
 func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) {
+	e.processInteractiveMessageWithLease(p, msg, session, agent, sessions, interactiveKey, workspaceDir, ccSessionKey, nil)
+}
+
+func (e *Engine) processInteractiveMessageWithLease(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string, workspaceLease *workspaceState) {
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -3647,9 +3947,37 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			session.Unlock()
 		}
 	}()
+	incomingWorkspaceLease := workspaceLease != nil
+	if incomingWorkspaceLease {
+		defer workspaceLease.EndTurn()
+	}
 
 	if e.ctx.Err() != nil {
 		return
+	}
+	if workspaceDir != "" && e.workspacePool != nil {
+		if workspaceLease == nil {
+			workspaceLease = e.workspacePool.AcquireTurn(workspaceDir, agent)
+			if workspaceLease == nil {
+				// Compatibility for direct/internal callers that provide a
+				// workspace without first resolving it through workspaceContext.
+				candidate := e.workspacePool.GetOrCreate(workspaceDir)
+				candidate.mu.Lock()
+				if candidate.agent == nil {
+					candidate.agent = agent
+					candidate.sessions = sessions
+				}
+				candidate.mu.Unlock()
+				workspaceLease = e.workspacePool.AcquireTurn(workspaceDir, agent)
+			}
+		}
+		if workspaceLease == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, "workspace state changed while starting the turn"))
+			return
+		}
+		if !incomingWorkspaceLease {
+			defer workspaceLease.EndTurn()
+		}
 	}
 
 	turnStart := time.Now()
@@ -3696,12 +4024,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	e.cancelAgentSessionIdleClose(state)
 
-	if workspaceDir != "" && e.workspacePool != nil {
-		ws := e.workspacePool.GetOrCreate(workspaceDir)
-		ws.BeginTurn()
-		defer ws.EndTurn()
-	}
-
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
 	// Defer restores only when SetLiveMode succeeds for the override.
 	if msg.ModeOverride != "" {
@@ -3746,7 +4068,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	promptContent := msg.Content
+	if !msg.nativeSlash {
+		promptContent = e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	}
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -3768,7 +4093,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
 	}()
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	e.processInteractiveEventsWithNativeRefresh(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.nativeSlashRefresh)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -3882,12 +4207,23 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create per-workspace session manager
 	h := sha256.Sum256([]byte(workspace))
-	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
-		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	sessionFile := ""
+	if storePath := e.sessions.StorePath(); storePath != "" {
+		sessionFile = filepath.Join(filepath.Dir(storePath),
+			fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	}
 	sessions := NewSessionManager(sessionFile)
+	sessions.InvalidateForAgent(agent.Name())
 
 	ws.agent = agent
 	ws.sessions = sessions
+	if _, ok := agent.(NativeSlashCommandProvider); ok {
+		e.refreshNativeSlashCommands(e.ctx, agent)
+		e.markNativeSlashWorkspaceState(nativeSlashAgentKey(agent), agent, workspace)
+		if !e.nativeSlashPrewarm.Load() {
+			e.refreshReadyPlatformCommands()
+		}
+	}
 	return agent, sessions, nil
 }
 
@@ -3915,6 +4251,45 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 		return nil, nil, "", "", err
 	}
 	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
+}
+
+func (e *Engine) workspaceTurnContext(workspace, sessionKey string) (Agent, *SessionManager, string, string, *workspaceState, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
+		if err != nil {
+			return nil, nil, "", "", nil, err
+		}
+		if e.workspacePool != nil {
+			if lease := e.workspacePool.AcquireTurn(effectiveDir, agent); lease != nil {
+				return agent, sessions, interactiveKey, effectiveDir, lease, nil
+			}
+		}
+	}
+	return nil, nil, "", "", nil, fmt.Errorf("workspace state changed while acquiring turn lease")
+}
+
+func (e *Engine) getOrCreateWorkspaceAgentWithLease(workspace string) (Agent, *SessionManager, *workspaceState, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		agent, sessions, err := e.getOrCreateWorkspaceAgent(workspace)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if e.workspacePool != nil {
+			if lease := e.workspacePool.AcquireTurn(workspace, agent); lease != nil {
+				return agent, sessions, lease, nil
+			}
+		}
+	}
+	return nil, nil, nil, fmt.Errorf("workspace state changed while acquiring turn lease")
+}
+
+func takeWorkspaceTurnLease(msg *Message) *workspaceState {
+	if msg == nil {
+		return nil
+	}
+	lease := msg.workspaceLease
+	msg.workspaceLease = nil
+	return lease
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
@@ -4479,13 +4854,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	events := agentSession.Events()
 
 	var turnActive bool // true after first event, cleared on EventResult
+	var workspaceLease *workspaceState
 	defer func() {
-		if turnActive {
-			if workspaceDir != "" && e.workspacePool != nil {
-				if ws := e.workspacePool.Get(workspaceDir); ws != nil {
-					ws.EndTurn()
-				}
-			}
+		if turnActive && workspaceLease != nil {
+			workspaceLease.EndTurn()
 		}
 	}()
 
@@ -4539,9 +4911,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			if !turnActive {
 				turnActive = true
 				if workspaceDir != "" && e.workspacePool != nil {
-					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
-						ws.BeginTurn()
-					}
+					state.mu.Lock()
+					agent := state.agent
+					state.mu.Unlock()
+					workspaceLease = e.workspacePool.AcquireTurn(workspaceDir, agent)
 				}
 				slog.Info("unsolicited events detected, relaying to platform",
 					"session", sessionKey)
@@ -4601,10 +4974,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				textParts = nil
 				toolsUsed = nil
 				turnActive = false
-				if workspaceDir != "" && e.workspacePool != nil {
-					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
-						ws.EndTurn()
-					}
+				if workspaceLease != nil {
+					workspaceLease.EndTurn()
+					workspaceLease = nil
 				}
 
 				// Mark clean exit so next foreground turn preserves events.
@@ -4681,6 +5053,10 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+	e.processInteractiveEventsWithNativeRefresh(state, session, sessions, sessionKey, msgID, turnStart, stopTypingFn, sendDone, replyCtx, false)
+}
+
+func (e *Engine) processInteractiveEventsWithNativeRefresh(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, refreshNativeCapabilities bool) {
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -5466,6 +5842,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = false
 			state.mu.Unlock()
+			if refreshNativeCapabilities {
+				e.scheduleNativeSlashRefresh(replyAgent)
+			}
 
 			fullResponse := event.Content
 			if e.display.HideAgentFooter {
@@ -5846,7 +6225,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				queuedPrompt := queued.content
+				if !queued.nativeSlash {
+					queuedPrompt = e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				}
 
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
@@ -5868,6 +6250,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
+				refreshNativeCapabilities = queued.nativeSlashRefresh
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
@@ -6165,7 +6548,10 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+		prompt := queued.content
+		if !queued.nativeSlash {
+			prompt = e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+		}
 
 		state.mu.Lock()
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
@@ -6195,7 +6581,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEventsWithNativeRefresh(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, queued.nativeSlashRefresh)
 	}
 }
 
@@ -6502,7 +6888,58 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "ps":
 		e.cmdPs(p, msg, args)
 	default:
-		if custom, ok := e.commands.Resolve(cmd); ok {
+		custom, customFound := e.commands.Resolve(cmd)
+		if customFound && custom.Source != "agent" {
+			if disabledCmds[strings.ToLower(custom.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", custom.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+custom.Name))
+				return true
+			}
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", custom.Name, "type", "custom")
+			e.executeCustomCommand(p, msg, custom, args)
+			return true
+		}
+		if matched, consumed := e.handleNativeSlashCommand(p, msg, raw, cmd, disabledCmds); matched {
+			return consumed
+		}
+		agent, _, _, contextErr := e.commandContext(p, msg)
+		if contextErr != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, contextErr))
+			return true
+		}
+		if fallback, ok := e.resolveScopedFallbackCommand(agent, cmd); ok {
+			if disabledCmds[strings.ToLower(fallback.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", fallback.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+fallback.Name))
+				return true
+			}
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", fallback.Name, "type", "custom")
+			e.executeCustomCommand(p, msg, fallback, args)
+			return true
+		}
+		if fallback := e.resolveScopedFallbackSkill(agent, cmd); fallback != nil {
+			if disabledCmds[strings.ToLower(fallback.Name)] {
+				slog.Info("audit: command_blocked",
+					"user_id", msg.UserID, "platform", msg.Platform,
+					"project", e.name, "command", fallback.Name, "reason", "disabled")
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+fallback.Name))
+				return true
+			}
+			slog.Info("audit: command_executed",
+				"user_id", msg.UserID, "platform", msg.Platform,
+				"project", e.name, "command", fallback.Name, "type", "skill")
+			e.executeSkill(p, msg, fallback, args)
+			return true
+		}
+		if customFound {
 			if disabledCmds[strings.ToLower(custom.Name)] {
 				slog.Info("audit: command_blocked",
 					"user_id", msg.UserID, "platform", msg.Platform,
@@ -6538,6 +6975,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 }
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
+	defer e.reconcileNativeSlashWorkspaceStates()
 	channelID := effectiveChannelID(msg)
 	channelKey := effectiveWorkspaceChannelKey(msg)
 	projectKey := "project:" + e.name
@@ -8210,6 +8648,7 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
+	oldNativeKey := nativeSlashAgentKey(agent)
 	switcher, ok := agent.(WorkDirSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNotSupported))
@@ -8258,6 +8697,23 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 	if errMsg != "" {
 		e.reply(p, msg.ReplyCtx, errMsg)
 		return
+	}
+	refreshedAgent, _, _, refreshErr := e.commandContext(p, msg)
+	if refreshErr == nil {
+		if !e.multiWorkspace {
+			e.removeNativeSlashState(oldNativeKey)
+		}
+		if _, native := refreshedAgent.(NativeSlashCommandProvider); native {
+			e.refreshNativeSlashCommands(e.ctx, refreshedAgent)
+			if !e.multiWorkspace {
+				e.clearFilesystemCapabilities()
+			}
+		} else if !e.multiWorkspace {
+			e.configureFilesystemCapabilities(refreshedAgent)
+		}
+		e.refreshReadyPlatformCommands()
+	} else {
+		slog.Warn("native slash refresh skipped after directory change", "agent", agent.Name())
 	}
 	if supportsCards(p) {
 		e.replyWithCard(p, msg.ReplyCtx, e.renderDirCardSafe(msg.SessionKey, 1))
@@ -9355,10 +9811,12 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 		})
 	}
 
-	// Collect custom commands from CommandRegistry
-	for _, c := range e.commands.ListAll() {
+	// Collect config/runtime custom commands before native commands. Agent
+	// filesystem commands are legacy fallback and are appended afterwards.
+	customCommands := e.commands.ListAll()
+	appendCustom := func(c *CustomCommand) {
 		if seenCmds[strings.ToLower(c.Name)] {
-			continue
+			return
 		}
 		seenCmds[strings.ToLower(c.Name)] = true
 
@@ -9372,8 +9830,64 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 			Description: desc,
 		})
 	}
+	for _, c := range customCommands {
+		if c.Source != "agent" {
+			appendCustom(c)
+		}
+	}
+
+	// Collect authoritative agent-native commands. Aliases are already legal
+	// for Discord and Telegram and avoid all built-in/config collisions.
+	for _, entry := range e.nativeSlashEntries() {
+		command := entry.command
+		lowerName := strings.ToLower(command.Name)
+		if seenCmds[lowerName] || nativeSlashCommandDisabled(command, disabledCmds) {
+			continue
+		}
+		seenCmds[lowerName] = true
+		desc := command.Description
+		if desc == "" {
+			if command.IsSkill {
+				desc = "Skill"
+			} else {
+				desc = "Native command"
+			}
+		}
+		commands = append(commands, BotCommandInfo{
+			Command:     command.Name,
+			Description: desc,
+			IsSkill:     command.IsSkill,
+			IsNative:    true,
+		})
+	}
+
+	for _, entry := range e.scopedFallbackCommandEntries() {
+		appendCustom(entry.command)
+	}
+
+	for _, c := range customCommands {
+		if c.Source == "agent" {
+			appendCustom(c)
+		}
+	}
 
 	// Collect skills
+	for _, s := range e.scopedFallbackSkills() {
+		lowerName := strings.ToLower(s.Name)
+		if seenCmds[lowerName] || disabledCmds[lowerName] {
+			continue
+		}
+		seenCmds[lowerName] = true
+		desc := s.Description
+		if desc == "" {
+			desc = "Skill"
+		}
+		commands = append(commands, BotCommandInfo{
+			Command:     s.Name,
+			Description: desc,
+			IsSkill:     true,
+		})
+	}
 	for _, s := range e.skills.ListAll() {
 		lowerName := strings.ToLower(s.Name)
 		if seenCmds[lowerName] {
@@ -9399,68 +9913,89 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 	return commands
 }
 
-func (e *Engine) menuCommandsForPlatform(platformName string) ([]BotCommandInfo, bool) {
-	commands := e.GetAllCommands()
-	if !strings.EqualFold(platformName, "telegram") {
-		return commands, false
-	}
-	return telegramMenuCommandsAllOrNone(commands)
+type commandMenuPlan struct {
+	commands      []BotCommandInfo
+	skillsOmitted bool
+	omitted       int
 }
 
-func telegramMenuCommandsAllOrNone(commands []BotCommandInfo) ([]BotCommandInfo, bool) {
-	var nonSkill []BotCommandInfo
-	var skill []BotCommandInfo
+func commandMenuFingerprint(platform Platform, commands []BotCommandInfo) string {
+	hash := sha256.New()
+	keys, hasKeys := platform.(CommandMenuKeyProvider)
 	for _, command := range commands {
-		if command.IsSkill {
-			skill = append(skill, command)
-			continue
+		name := strings.ToLower(strings.TrimSpace(command.Command))
+		if hasKeys {
+			name = keys.CommandMenuKey(command.Command)
 		}
-		nonSkill = append(nonSkill, command)
+		_, _ = fmt.Fprintf(hash, "%d:%s%d:%s:%t:%t;", len(name), name,
+			len(command.Description), command.Description, command.IsSkill, command.IsNative)
 	}
-
-	if len(telegramMenuEntryNames(append(append([]BotCommandInfo{}, nonSkill...), skill...))) <= telegramBotCommandLimit {
-		return commands, false
-	}
-	return nonSkill, len(skill) > 0
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func telegramMenuEntryNames(commands []BotCommandInfo) []string {
-	var names []string
+func (e *Engine) menuCommandsForPlatform(platform Platform) commandMenuPlan {
+	commands := e.GetAllCommands()
+	provider, ok := platform.(CommandMenuPolicyProvider)
+	if !ok {
+		return commandMenuPlan{commands: commands}
+	}
+	key := func(command string) string {
+		if keys, ok := platform.(CommandMenuKeyProvider); ok {
+			return keys.CommandMenuKey(command)
+		}
+		return strings.ToLower(strings.TrimSpace(command))
+	}
+	return applyCommandMenuPolicy(commands, provider.CommandMenuPolicy(), key)
+}
+
+func applyCommandMenuPolicy(commands []BotCommandInfo, policy CommandMenuPolicy, key func(string) string) commandMenuPlan {
+	unique := make([]BotCommandInfo, 0, len(commands))
 	seen := make(map[string]bool)
 	for _, command := range commands {
-		name := sanitizeTelegramMenuCommand(command.Command)
-		if name == "" || seen[name] {
+		menuKey := key(command.Command)
+		if menuKey == "" || seen[menuKey] {
 			continue
 		}
-		seen[name] = true
-		names = append(names, name)
+		seen[menuKey] = true
+		unique = append(unique, command)
 	}
-	return names
-}
+	if policy.Limit <= 0 || len(unique) <= policy.Limit {
+		return commandMenuPlan{commands: unique}
+	}
 
-func sanitizeTelegramMenuCommand(cmd string) string {
-	cmd = strings.ToLower(cmd)
-	var b strings.Builder
-	for _, c := range cmd {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-			b.WriteRune(c)
-		default:
-			b.WriteByte('_')
+	planned := unique
+	skillsOmitted := false
+	if policy.SkillsAllOrNone {
+		nonSkills := make([]BotCommandInfo, 0, len(planned))
+		for _, command := range planned {
+			if command.IsSkill {
+				skillsOmitted = true
+				continue
+			}
+			nonSkills = append(nonSkills, command)
 		}
+		planned = nonSkills
 	}
-	result := b.String()
-	for strings.Contains(result, "__") {
-		result = strings.ReplaceAll(result, "__", "_")
+	if policy.PreserveNative {
+		native := make([]BotCommandInfo, 0, len(planned))
+		other := make([]BotCommandInfo, 0, len(planned))
+		for _, command := range planned {
+			if command.IsNative {
+				native = append(native, command)
+			} else {
+				other = append(other, command)
+			}
+		}
+		planned = append(native, other...)
 	}
-	result = strings.Trim(result, "_")
-	if len(result) == 0 || result[0] < 'a' || result[0] > 'z' {
-		return ""
+	if len(planned) > policy.Limit {
+		planned = planned[:policy.Limit]
 	}
-	if len(result) > 32 {
-		result = result[:32]
+	return commandMenuPlan{
+		commands:      planned,
+		skillsOmitted: skillsOmitted,
+		omitted:       len(unique) - len(planned),
 	}
-	return result
 }
 
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
@@ -10441,14 +10976,14 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		e.cmdProviderAdd(p, msg, switcher, args[1:])
 
 	case "remove", "rm", "delete":
-		e.cmdProviderRemove(p, msg, switcher, args[1:])
+		e.cmdProviderRemove(p, msg, agent, sessions, switcher, args[1:])
 
 	case "switch":
 		if len(args) < 2 {
 			e.reply(p, msg.ReplyCtx, "Usage: /provider switch <name>")
 			return
 		}
-		e.switchProvider(p, msg, sessions, switcher, args[1])
+		e.switchProvider(p, msg, agent, sessions, switcher, args[1])
 
 	case "current":
 		current := switcher.GetActiveProvider()
@@ -10475,10 +11010,11 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 				slog.Error("failed to save provider", "error", err)
 			}
 		}
+		e.scheduleNativeSlashRefresh(agent)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderCleared))
 
 	default:
-		e.switchProvider(p, msg, sessions, switcher, args[0])
+		e.switchProvider(p, msg, agent, sessions, switcher, args[0])
 	}
 }
 
@@ -10568,7 +11104,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderAdded), prov.Name, prov.Name))
 }
 
-func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
+func (e *Engine) cmdProviderRemove(p Platform, msg *Message, agent Agent, sessions *SessionManager, switcher ProviderSwitcher, args []string) {
 	if len(args) == 0 {
 		e.reply(p, msg.ReplyCtx, "Usage: /provider remove <name>")
 		return
@@ -10595,8 +11131,15 @@ func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSw
 	active := switcher.GetActiveProvider()
 	switcher.SetProviders(remaining)
 	if active != nil && active.Name == name {
-		// No active provider after removal
 		slog.Info("removed active provider, clearing selection", "name", name)
+		switcher.SetActiveProvider("")
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		s := sessions.GetOrCreateActive(msg.SessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		s.SetActiveProvider("")
+		sessions.Save()
+		e.scheduleNativeSlashRefresh(agent)
 	}
 
 	// Persist
@@ -10620,7 +11163,7 @@ func (e *Engine) resetAllSessions() {
 	e.sessions.Save()
 }
 
-func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManager, switcher ProviderSwitcher, name string) {
+func (e *Engine) switchProvider(p Platform, msg *Message, agent Agent, sessions *SessionManager, switcher ProviderSwitcher, name string) {
 	if !switcher.SetActiveProvider(name) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
@@ -10647,6 +11190,7 @@ func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManag
 		}
 	}
 
+	e.scheduleNativeSlashRefresh(agent)
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderSwitched), name))
 }
 
@@ -11890,7 +12434,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/config":
 		return e.renderConfigCard()
 	case "/skills":
-		return e.renderSkillsCard()
+		agent, _ := e.sessionContextForKey(sessionKey)
+		return e.renderSkillsCardForAgent(agent)
 	case "/doctor":
 		return e.renderDoctorCard()
 	case "/whoami":
@@ -13577,8 +14122,8 @@ func (e *Engine) renderConfigCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderSkillsCard() *Card {
-	skills := e.skills.ListAll()
+func (e *Engine) renderSkillsCardForAgent(agent Agent) *Card {
+	skills := e.listSkillsForAgent(agent)
 	if len(skills) == 0 {
 		return e.simpleCard(e.i18n.T(MsgCardTitleSkills), "purple", e.i18n.T(MsgSkillsEmpty))
 	}
@@ -14462,7 +15007,8 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	lease := takeWorkspaceTurnLease(msg)
+	go e.processInteractiveMessageWithLease(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey, lease)
 }
 
 // executeShellCommand runs a shell command and sends the output to the user.
@@ -14690,12 +15236,18 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	lease := takeWorkspaceTurnLease(msg)
+	go e.processInteractiveMessageWithLease(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey, lease)
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
 	if !supportsCards(p) {
-		skills := e.skills.ListAll()
+		skills := e.listSkillsForAgent(agent)
 		if len(skills) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSkillsEmpty))
 			return
@@ -14705,53 +15257,27 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		sb.WriteString(e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills)))
 
 		for _, s := range skills {
-			sb.WriteString(fmt.Sprintf("  /%s — %s\n", displayCommandForPlatform(p.Name(), s.Name), s.Description))
+			fmt.Fprintf(&sb, "  /%s — %s\n", displayCommandForPlatform(p, s.Name), s.Description)
 		}
 
 		sb.WriteString("\n" + e.i18n.T(MsgSkillsHint))
-		if _, skillsOmitted := e.menuCommandsForPlatform(p.Name()); skillsOmitted && strings.EqualFold(p.Name(), "telegram") {
+		if plan := e.menuCommandsForPlatform(p); plan.skillsOmitted {
 			sb.WriteString("\n" + e.i18n.T(MsgSkillsTelegramMenuHint))
 		}
 		e.reply(p, msg.ReplyCtx, sb.String())
 		return
 	}
 
-	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard())
+	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCardForAgent(agent))
 }
 
-func displayCommandForPlatform(platformName, command string) string {
-	if !strings.EqualFold(platformName, "telegram") {
-		return command
-	}
-	if sanitized := sanitizeTelegramDisplayCommand(command); sanitized != "" {
-		return sanitized
-	}
-	return command
-}
-
-func sanitizeTelegramDisplayCommand(cmd string) string {
-	cmd = strings.ToLower(cmd)
-	var b strings.Builder
-	for _, c := range cmd {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-			b.WriteRune(c)
-		default:
-			b.WriteByte('_')
+func displayCommandForPlatform(platform Platform, command string) string {
+	if keys, ok := platform.(CommandMenuKeyProvider); ok {
+		if normalized := keys.CommandMenuKey(command); normalized != "" {
+			return normalized
 		}
 	}
-	result := b.String()
-	for strings.Contains(result, "__") {
-		result = strings.ReplaceAll(result, "__", "_")
-	}
-	result = strings.Trim(result, "_")
-	if len(result) == 0 || result[0] < 'a' || result[0] > 'z' {
-		return ""
-	}
-	if len(result) > 32 {
-		result = result[:32]
-	}
-	return result
+	return command
 }
 
 // ── /config command ──────────────────────────────────────────
@@ -16437,6 +16963,7 @@ func (e *Engine) lookupEffectiveWorkspaceBinding(channelKey string) (*WorkspaceB
 			"workspace", b.Workspace, "channel_key", channelKey, "binding_scope", bindingKey)
 		if bindingKey != sharedWorkspaceBindingsKey {
 			e.workspaceBindings.Unbind(bindingKey, channelKey)
+			e.reconcileNativeSlashWorkspaceStates()
 		}
 		return b, bindingKey, false
 	}

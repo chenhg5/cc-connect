@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -135,6 +136,95 @@ func TestCommandRegistry_ListAll(t *testing.T) {
 	}
 	if !names["build"] {
 		t.Error("missing 'build' command from agent dir")
+	}
+}
+
+func TestCommandRegistry_AgentFileFiltersApplyToResolveAndListOnly(t *testing.T) {
+	dir := t.TempDir()
+	for name := range map[string]string{
+		"alias-blocked.md": "alias-blocked prompt",
+		"blocked.md":       "blocked agent prompt",
+		"ignored.md":       "ignored agent prompt",
+		"visible.md":       "visible agent prompt",
+		"disabled-name.md": "hyphen prompt",
+		"disabled_name.md": "underscore prompt",
+		"CaseName.md":      "case prompt",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := NewCommandRegistry()
+	r.SetAgentDirs([]string{dir})
+	r.SetAgentFileFilters(
+		[]string{filepath.Join(dir, "ignored.md")},
+		[]string{"alias-blocked", "blocked", "disabled_name", "casename"},
+	)
+
+	for _, name := range []string{"alias_blocked", "blocked", "ignored"} {
+		if _, ok := r.Resolve(name); ok {
+			t.Errorf("filtered agent file %q resolved", name)
+		}
+	}
+	if command, ok := r.Resolve("visible"); !ok || command.Source != "agent" {
+		t.Fatalf("visible agent command = (%+v, %v), want agent command", command, ok)
+	}
+
+	got := make(map[string]bool)
+	for _, command := range r.ListAll() {
+		got[command.Name] = true
+	}
+	for _, name := range []string{"visible", "disabled-name", "CaseName"} {
+		if !got[name] {
+			t.Errorf("expected exact non-disabled command %q: %v", name, got)
+		}
+	}
+	for _, name := range []string{"blocked", "ignored", "disabled_name"} {
+		if got[name] {
+			t.Errorf("filtered command %q remained listed: %v", name, got)
+		}
+	}
+
+	r.Add("blocked", "config command", "config prompt", "", "", "config")
+	command, ok := r.Resolve("blocked")
+	if !ok || command.Source != "config" {
+		t.Fatalf("registered command should not be filtered: (%+v, %v)", command, ok)
+	}
+}
+
+func TestCommandRegistry_AgentIgnorePathIsCanonicalAndBoundarySafe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires administrator on Windows")
+	}
+	root := t.TempDir()
+	ignoredDir := filepath.Join(root, "ignored", "commands")
+	keptDir := filepath.Join(root, "ignored-sibling", "commands")
+	linkedDir := filepath.Join(root, "linked-commands")
+	for _, dir := range []string{ignoredDir, keptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ignoredDir, "hidden.md"), []byte("hidden"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keptDir, "kept.md"), []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(ignoredDir, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewCommandRegistry()
+	r.SetAgentDirs([]string{linkedDir, keptDir})
+	r.SetAgentFileFilters([]string{filepath.Join(root, "ignored")}, nil)
+
+	if _, ok := r.Resolve("hidden"); ok {
+		t.Fatal("canonical ignored path resolved through symlink")
+	}
+	if _, ok := r.Resolve("kept"); !ok {
+		t.Fatal("same-prefix sibling path was incorrectly ignored")
 	}
 }
 

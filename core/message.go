@@ -376,6 +376,12 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+	// nativeSlash is set by Engine after resolving an agent-native command.
+	// Such prompts must begin with '/' exactly, so sender metadata and platform
+	// reply quotes must not be prepended before the final AgentSession.Send.
+	nativeSlash        bool
+	nativeSlashRefresh bool // successful turn may have changed the native command table
+	workspaceLease     *workspaceState
 }
 
 // EventType distinguishes different kinds of agent output.

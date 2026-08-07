@@ -1723,6 +1723,14 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	return nil
 }
 
+func (p *Platform) CommandMenuPolicy() core.CommandMenuPolicy {
+	return core.CommandMenuPolicy{Limit: 100, SkillsAllOrNone: true}
+}
+
+func (p *Platform) CommandMenuKey(command string) string {
+	return sanitizeTelegramCommand(command)
+}
+
 // extractEntityText extracts a substring from text using Telegram's UTF-16 code unit
 // offset and length. Telegram Bot API entity offsets are measured in UTF-16 code units,
 // not bytes or Unicode code points, so direct byte slicing produces wrong results
