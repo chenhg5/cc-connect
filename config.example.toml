@@ -1132,6 +1132,8 @@ app_secret = "your-feishu-app-secret"
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
+# rich_messages = false     # Opt in to Telegram Bot API Rich Messages for final replies (headings, tables, math, etc.)
+#                           # 为最终回复启用 Telegram Bot API 富文本消息（标题、表格、数学公式等）
 # progress_style = "compact"  # Progress rendering: legacy | compact (default). Telegram has no rich card UI,
 #                             # so "card" is normalized to "compact". Set "legacy" to disable streaming edits.
 #                             # 进度展示：legacy | compact（默认）。Telegram 不支持富卡片，"card" 会被规整为 "compact"。
