@@ -41,7 +41,7 @@ func TestOpencodeHTTPModeLiveServer(t *testing.T) {
 	sendDone := make(chan error, 1)
 	startedAt := time.Now()
 	go func() {
-		sendDone <- session.Send("Reply exactly with CC_CONNECT_LIVE_OK.", nil, nil)
+		sendDone <- session.Send("Reply exactly with CC_CONNECT_LIVE_OK.", "", nil, nil)
 	}()
 
 	var text strings.Builder

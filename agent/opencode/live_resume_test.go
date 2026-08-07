@@ -54,7 +54,7 @@ func TestLivePromptAsync(t *testing.T) {
 	// Send a simple prompt. prompt_async should return 204 quickly.
 	start := time.Now()
 	sendErr := make(chan error, 1)
-	go func() { sendErr <- session.Send("Reply with exactly the word PONG, nothing else.", nil, nil) }()
+	go func() { sendErr <- session.Send("Reply with exactly the word PONG, nothing else.", "", nil, nil) }()
 	select {
 	case err := <-sendErr:
 		if err != nil {

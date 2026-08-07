@@ -409,7 +409,7 @@ func TestOpencodeHTTPMode_StreamsBeforePromptReturnsAndKeepsBackgroundEvents(t *
 	}
 
 	sendDone := make(chan error, 1)
-	go func() { sendDone <- session.Send("hello", nil, nil) }()
+	go func() { sendDone <- session.Send("hello", "", nil, nil) }()
 	select {
 	case <-promptStarted:
 	case <-time.After(time.Second):
@@ -556,7 +556,7 @@ func TestOpencodeHTTPMode_SendReturnsSSEErrorWhenPromptAsyncFails(t *testing.T) 
 		t.Fatal("SSE was not connected before Send")
 	}
 
-	err = session.Send("hello", nil, nil)
+	err = session.Send("hello", "", nil, nil)
 	if err == nil {
 		t.Fatal("Send returned nil, want quota error")
 	}
