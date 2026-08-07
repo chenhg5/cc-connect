@@ -211,6 +211,29 @@ func (s *cujAgentSession) getSentPrompts() []string {
 	return out
 }
 
+// cujSteeringAgent exposes the optional in-flight steering capability while
+// retaining the controllable delayed response behavior of cujAgentSession.
+type cujSteeringAgent struct {
+	session *cujSteeringAgentSession
+}
+
+func (a *cujSteeringAgent) Name() string { return "cuj-steering" }
+func (a *cujSteeringAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	return a.session, nil
+}
+func (a *cujSteeringAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *cujSteeringAgent) Stop() error { return nil }
+
+type cujSteeringAgentSession struct {
+	*cujAgentSession
+}
+
+func (s *cujSteeringAgentSession) SteerTurn(_ string) error {
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // cujEnv bundles the engine + platform stub + agent for a single CUJ run.
 // ---------------------------------------------------------------------------
@@ -1117,6 +1140,99 @@ func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	prompts := sess.getSentPrompts()
 	if len(prompts) < 2 {
 		t.Fatalf("agent received %d prompts across 2 turns, want ≥2", len(prompts))
+	}
+}
+
+// CUJ-A8 · A plain-text follow-up sent while a task is running is appended to
+// that same turn, acknowledged immediately, and retained in /history.
+//
+// User actions: (1) start a slow task, (2) send a follow-up while it is busy,
+// (3) open /history after completion.
+func TestCUJ_A8_BusyFollowUpSteersCurrentTurn(t *testing.T) {
+	dir := t.TempDir()
+	platform := &stubPlatformEngine{n: "test"}
+	baseSession := newCUJAgentSession()
+	baseSession.reply = "finished with the follow-up"
+	baseSession.delayMs = 300
+	steeringSession := &cujSteeringAgentSession{cujAgentSession: baseSession}
+	agent := &cujSteeringAgent{session: steeringSession}
+	engine := NewEngine("test", agent, []Platform{platform}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	engine.SetBusyMessageMode("steer")
+	key := "test:steer-cuj"
+
+	// 1. Start a turn that remains in flight long enough for a follow-up.
+	engine.ReceiveMessage(platform, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "initial",
+		UserID:     "steer-cuj",
+		UserName:   "Steer CUJ",
+		Content:    "prepare the change",
+		ReplyCtx:   "ctx-initial",
+	})
+	waitUntil := func(reason string, cond func() bool) {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s; sent=%v", reason, platform.getSent())
+	}
+	waitUntil("initial turn to start", func() bool {
+		return len(baseSession.getSentPrompts()) == 1
+	})
+
+	// 2. Add information while the same session is busy.
+	engine.ReceiveMessage(platform, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "follow-up",
+		UserID:     "steer-cuj",
+		UserName:   "Steer CUJ",
+		Content:    "also update the documentation",
+		ReplyCtx:   "ctx-follow-up",
+	})
+	waitUntil("steering acknowledgement", func() bool {
+		for _, sent := range platform.getSent() {
+			if strings.Contains(sent, engine.i18n.T(MsgMessageSteered)) {
+				return true
+			}
+		}
+		return false
+	})
+	waitUntil("initial turn completion", func() bool {
+		return !engine.sessions.GetOrCreateActive(key).Busy()
+	})
+	waitUntil("final response", func() bool {
+		for _, sent := range platform.getSent() {
+			if strings.Contains(sent, "finished with the follow-up") {
+				return true
+			}
+		}
+		return false
+	})
+	for _, sent := range platform.getSent() {
+		if strings.Contains(sent, engine.i18n.T(MsgMessageQueued)) {
+			t.Fatalf("user saw a queue acknowledgement instead of steering: %q", sent)
+		}
+	}
+
+	// 3. The user opens history and sees both inputs retained in one task.
+	platform.clearSent()
+	engine.ReceiveMessage(platform, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "history",
+		UserID:     "steer-cuj",
+		Content:    "/history",
+		ReplyCtx:   "ctx-history",
+	})
+	waitUntil("history response", func() bool { return len(platform.getSent()) > 0 })
+	historyOutput := strings.Join(platform.getSent(), "\n")
+	if !strings.Contains(historyOutput, "prepare the change") || !strings.Contains(historyOutput, "also update the documentation") {
+		t.Fatalf("history output does not retain both user messages: %q", historyOutput)
 	}
 }
 
