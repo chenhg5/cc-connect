@@ -304,6 +304,13 @@ const (
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
 	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
+	MsgAgentCurrent          MsgKey = "agent_current"
+	MsgAgentChanged          MsgKey = "agent_changed"
+	MsgAgentChangeFailed     MsgKey = "agent_change_failed"
+	MsgAgentCardSwitched     MsgKey = "agent_card_switched"
+	MsgAgentCardSwitchFailed MsgKey = "agent_card_switch_failed"
+	MsgAgentNotSupported     MsgKey = "agent_not_supported"
+	MsgAgentSwitchRejected   MsgKey = "agent_switch_rejected"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
@@ -338,6 +345,10 @@ const (
 	MsgModelDefault               MsgKey = "model_default"
 	MsgModelListTitle             MsgKey = "model_list_title"
 	MsgModelUsage                 MsgKey = "model_usage"
+	MsgAgentDefault               MsgKey = "agent_default"
+	MsgAgentListTitle             MsgKey = "agent_list_title"
+	MsgAgentListUnavailable       MsgKey = "agent_list_unavailable"
+	MsgAgentUsage                 MsgKey = "agent_usage"
 	MsgReasoningDefault           MsgKey = "reasoning_default"
 	MsgReasoningListTitle         MsgKey = "reasoning_list_title"
 	MsgReasoningUsage             MsgKey = "reasoning_usage"
@@ -346,6 +357,7 @@ const (
 	MsgModeUsage                 MsgKey = "mode_usage"
 	MsgLangSelectPlaceholder     MsgKey = "lang_select_placeholder"
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
+	MsgAgentSelectPlaceholder    MsgKey = "agent_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
 	MsgProviderClearOption       MsgKey = "provider_clear_option"
@@ -355,6 +367,7 @@ const (
 	MsgCardTitleStatus           MsgKey = "card_title_status"
 	MsgCardTitleLanguage         MsgKey = "card_title_language"
 	MsgCardTitleModel            MsgKey = "card_title_model"
+	MsgCardTitleAgent            MsgKey = "card_title_agent"
 	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
 	MsgCardTitleSessions         MsgKey = "card_title_sessions"
@@ -560,6 +573,7 @@ const (
 	MsgBuiltinCmdMemory    MsgKey = "memory"
 	MsgBuiltinCmdAllow     MsgKey = "allow"
 	MsgBuiltinCmdModel     MsgKey = "model"
+	MsgBuiltinCmdAgent     MsgKey = "agent"
 	MsgBuiltinCmdReasoning MsgKey = "reasoning"
 	MsgBuiltinCmdMode      MsgKey = "mode"
 	MsgBuiltinCmdLang      MsgKey = "lang"
@@ -1249,6 +1263,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
 			"/model [switch <name>] — View/switch model\n" +
+			"/agent [switch <name>] — View/switch agent\n" +
 			"/mode [name] — View/switch permission mode\n" +
 			"/provider [list|add|...] — Manage API providers\n" +
 			"/memory [add|global|...] — View/edit memory files\n" +
@@ -1256,6 +1271,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — View/switch language",
 		LangChinese: "**Agent 配置**\n" +
 			"/model [switch <名称>] — 查看/切换模型\n" +
+			"/agent [switch <名称>] — 查看/切换 agent\n" +
 			"/mode [名称] — 查看/切换权限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/编辑记忆文件\n" +
@@ -1263,6 +1279,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切换语言",
 		LangTraditionalChinese: "**Agent 配置**\n" +
 			"/model [switch <名稱>] — 查看/切換模型\n" +
+			"/agent [switch <名稱>] — 查看/切換 agent\n" +
 			"/mode [名稱] — 查看/切換權限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/編輯記憶檔案\n" +
@@ -1270,6 +1287,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切換語言",
 		LangJapanese: "**エージェント設定**\n" +
 			"/model [switch <名前>] — モデルの表示/切り替え\n" +
+			"/agent [switch <名前>] — エージェントの表示/切り替え\n" +
 			"/mode [名前] — 権限モードの表示/切り替え\n" +
 			"/provider [list|add|...] — API プロバイダ管理\n" +
 			"/memory [add|global|...] — メモリの表示/編集\n" +
@@ -1277,6 +1295,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 言語の表示/切り替え",
 		LangSpanish: "**Configuración del agente**\n" +
 			"/model [switch <nombre>] — Ver/cambiar modelo\n" +
+			"/agent [switch <nombre>] — Ver/cambiar agente\n" +
 			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
 			"/provider [list|add|...] — Gestionar proveedores\n" +
 			"/memory [add|global|...] — Ver/editar memoria\n" +
@@ -2243,6 +2262,55 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "このエージェントはモデルの切り替えをサポートしていません。",
 		LangSpanish:            "Este agente no soporta el cambio de modelo.",
 	},
+	MsgAgentCurrent: {
+		LangEnglish:            "Current agent: `%s`",
+		LangChinese:            "当前 Agent: `%s`",
+		LangTraditionalChinese: "當前 Agent: `%s`",
+		LangJapanese:           "現在のエージェント: `%s`",
+		LangSpanish:            "Agente actual: `%s`",
+	},
+	MsgAgentChanged: {
+		LangEnglish:            "Agent switched to `%s`. New sessions will use this agent.",
+		LangChinese:            "Agent 已切换为 `%s`，新会话将使用此 agent。",
+		LangTraditionalChinese: "Agent 已切換為 `%s`，新會話將使用此 agent。",
+		LangJapanese:           "エージェントを `%s` に切り替えました。新しいセッションで使用されます。",
+		LangSpanish:            "Agente cambiado a `%s`. Las nuevas sesiones usarán este agente.",
+	},
+	MsgAgentChangeFailed: {
+		LangEnglish:            "❌ Failed to change agent: %v",
+		LangChinese:            "❌ 切换 Agent 失败: %v",
+		LangTraditionalChinese: "❌ 切換 Agent 失敗: %v",
+		LangJapanese:           "❌ エージェントの切り替えに失敗しました: %v",
+		LangSpanish:            "❌ Error al cambiar el agente: %v",
+	},
+	MsgAgentCardSwitched: {
+		LangEnglish:            "Agent switched to `%s`.",
+		LangChinese:            "Agent 已切换为 `%s`。",
+		LangTraditionalChinese: "Agent 已切換為 `%s`。",
+		LangJapanese:           "エージェントを `%s` に切り替えました。",
+		LangSpanish:            "Agente cambiado a `%s`.",
+	},
+	MsgAgentCardSwitchFailed: {
+		LangEnglish:            "Failed to switch agent: %v",
+		LangChinese:            "切换 Agent 失败: %v",
+		LangTraditionalChinese: "切換 Agent 失敗: %v",
+		LangJapanese:           "エージェントの切り替えに失敗しました: %v",
+		LangSpanish:            "Error al cambiar el agente: %v",
+	},
+	MsgAgentNotSupported: {
+		LangEnglish:            "This agent does not support runtime agent switching.",
+		LangChinese:            "当前 Agent 不支持运行时切换 agent。",
+		LangTraditionalChinese: "當前 Agent 不支援執行階段切換 agent。",
+		LangJapanese:           "このエージェントは実行時のエージェント切り替えをサポートしていません。",
+		LangSpanish:            "Este agente no soporta el cambio de agente en tiempo de ejecución.",
+	},
+	MsgAgentSwitchRejected: {
+		LangEnglish:            "Agent `%s` cannot be used as a primary agent (subagents and unknown agents are rejected). Current agent unchanged.",
+		LangChinese:            "Agent `%s` 不能作为主 agent 使用（subagent 与未知 agent 会被拒绝）。当前 agent 保持不变。",
+		LangTraditionalChinese: "Agent `%s` 不能作為主 agent 使用（subagent 與未知 agent 會被拒絕）。當前 agent 保持不變。",
+		LangJapanese:           "エージェント `%s` はプライマリエージェントとして使用できません（サブエージェントと未知のエージェントは拒否されます）。現在のエージェントは変更されていません。",
+		LangSpanish:            "El agente `%s` no puede usarse como agente principal (los subagentes y agentes desconocidos son rechazados). El agente actual no cambió.",
+	},
 	MsgReasoningCurrent: {
 		LangEnglish:            "Current reasoning effort: %s",
 		LangChinese:            "当前推理强度: %s",
@@ -2468,6 +2536,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`",
 		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
 	},
+	MsgAgentDefault: {
+		LangEnglish:            "Current agent: (not set, using default)",
+		LangChinese:            "当前 Agent: (未设置，使用默认值)",
+		LangTraditionalChinese: "當前 Agent: (未設置，使用預設值)",
+		LangJapanese:           "現在のエージェント: (未設定、デフォルトを使用)",
+		LangSpanish:            "Agente actual: (no configurado, usando el predeterminado)",
+	},
+	MsgAgentListTitle: {
+		LangEnglish:            "Available agents:\n",
+		LangChinese:            "可用 Agent:\n",
+		LangTraditionalChinese: "可用 Agent:\n",
+		LangJapanese:           "利用可能なエージェント:\n",
+		LangSpanish:            "Agentes disponibles:\n",
+	},
+	MsgAgentListUnavailable: {
+		LangEnglish:            "(agent list unavailable — switch by name with `/agent switch <name>`)",
+		LangChinese:            "（可用 agent 列表暂不可用 — 可用 `/agent switch <名称>` 按名称切换）",
+		LangTraditionalChinese: "（可用 agent 列表暫不可用 — 可用 `/agent switch <名稱>` 按名稱切換）",
+		LangJapanese:           "（エージェント一覧を取得できません — `/agent switch <名前>` で名前指定の切り替えが可能です）",
+		LangSpanish:            "(lista de agentes no disponible — cambie por nombre con `/agent switch <nombre>`)",
+	},
+	MsgAgentUsage: {
+		LangEnglish:            "Usage: `/agent` to view; `/agent switch <number>` or `/agent switch <name>` to switch",
+		LangChinese:            "用法: `/agent` 查看；`/agent switch <序号>` 或 `/agent switch <名称>` 切换",
+		LangTraditionalChinese: "用法: `/agent` 查看；`/agent switch <序號>` 或 `/agent switch <名稱>` 切換",
+		LangJapanese:           "使い方: `/agent` で表示；`/agent switch <番号>` または `/agent switch <名前>` で切り替え",
+		LangSpanish:            "Uso: `/agent` para ver; `/agent switch <número>` o `/agent switch <nombre>` para cambiar",
+	},
 	MsgReasoningDefault: {
 		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",
 		LangChinese:            "当前推理强度: (未设置，使用 Codex 默认值)\n",
@@ -2503,6 +2599,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgModelSelectPlaceholder: {
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
 		LangJapanese: "モデルを選択", LangSpanish: "Seleccionar modelo",
+	},
+	MsgAgentSelectPlaceholder: {
+		LangEnglish: "Select agent", LangChinese: "选择 Agent", LangTraditionalChinese: "選擇 Agent",
+		LangJapanese: "エージェントを選択", LangSpanish: "Seleccionar agente",
 	},
 	MsgReasoningSelectPlaceholder: {
 		LangEnglish: "Select reasoning level", LangChinese: "选择推理强度", LangTraditionalChinese: "選擇推理強度",
@@ -2543,6 +2643,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgCardTitleModel: {
 		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
 		LangJapanese: "モデル", LangSpanish: "Modelo",
+	},
+	MsgCardTitleAgent: {
+		LangEnglish: "Agent", LangChinese: "Agent", LangTraditionalChinese: "Agent",
+		LangJapanese: "エージェント", LangSpanish: "Agente",
 	},
 	MsgCardTitleReasoning: {
 		LangEnglish: "Reasoning", LangChinese: "推理强度", LangTraditionalChinese: "推理強度",
@@ -3622,6 +3726,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/切換模型，參數: [名稱]",
 		LangJapanese:           "モデルの表示/切り替え、引数: [名前]",
 		LangSpanish:            "Ver/cambiar modelo, arg: [nombre]",
+	},
+	MsgBuiltinCmdAgent: {
+		LangEnglish:            "View/switch coding agent, arg: [name]",
+		LangChinese:            "查看/切换 coding agent，参数: [名称]",
+		LangTraditionalChinese: "查看/切換 coding agent，參數: [名稱]",
+		LangJapanese:           "エージェントの表示/切り替え、引数: [名前]",
+		LangSpanish:            "Ver/cambiar agente de codificación, arg: [nombre]",
 	},
 	MsgBuiltinCmdReasoning: {
 		LangEnglish:            "View/switch reasoning effort, arg: [level]",
