@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -39,6 +40,11 @@ var hiddenAgentNames = map[string]struct{}{
 	"title":      {},
 	"summary":    {},
 }
+
+// agentValidationSkippedPrefix marks a validation outcome where agent
+// enumeration failed and the check was skipped. Callers log this as
+// "validation skipped" instead of a false "agent invalid" verdict.
+const agentValidationSkippedPrefix = "validation skipped: "
 
 // listAgents runs `opencode agent list` in workDir and parses the output
 // into AgentInfo entries. Internal hidden agents (compaction/title/summary)
@@ -85,4 +91,47 @@ func parseAgentListOutput(out string) []AgentInfo {
 		agents = append(agents, AgentInfo{Name: m[1], Mode: AgentMode(m[2])})
 	}
 	return agents
+}
+
+// ValidateConfiguredAgent checks whether the configured agent is usable as
+// the main agent for the opencode CLI bound to a. An empty configuration is
+// skipped (opencode falls back to its default agent).
+//
+// Return values:
+//   - ("", nil): configuration empty or agent valid (primary/all)
+//   - (problem, available): agent invalid — problem describes the reason and
+//     available lists the usable (non-subagent) agent names
+//   - (problem starting with agentValidationSkippedPrefix, nil): agent
+//     enumeration failed; the check was skipped and nothing can be concluded
+func (a *Agent) ValidateConfiguredAgent(configured string) (problem string, available []string) {
+	if strings.TrimSpace(configured) == "" {
+		return "", nil
+	}
+
+	agents, err := listAgents(context.Background(), a.cmd, a.workDir)
+	if err != nil {
+		return agentValidationSkippedPrefix + err.Error(), nil
+	}
+
+	usable := make([]string, 0, len(agents))
+	mode := AgentMode("")
+	found := false
+	for _, ag := range agents {
+		if ag.Mode != AgentModeSubagent {
+			usable = append(usable, ag.Name)
+		}
+		if ag.Name == configured {
+			found = true
+			mode = ag.Mode
+		}
+	}
+	sort.Strings(usable)
+
+	if !found {
+		return fmt.Sprintf("agent %q does not exist", configured), usable
+	}
+	if mode == AgentModeSubagent {
+		return fmt.Sprintf("agent %q is a subagent and cannot be used as the main agent", configured), usable
+	}
+	return "", nil
 }
