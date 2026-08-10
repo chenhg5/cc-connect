@@ -1296,6 +1296,19 @@ func SaveAgentModel(projectName, model string) error {
 	return patchProjectAgentOption(projectName, "model", model)
 }
 
+// SaveAgentName persists the selected default agent for a project's agent.
+// It uses surgical text editing to preserve comments and unknown fields.
+// An empty name removes the stored value so opencode falls back to its
+// default agent.
+func SaveAgentName(projectName, agentName string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if agentName == "" {
+		return clearProjectAgentOption(projectName, "agent")
+	}
+	return patchProjectAgentOption(projectName, "agent", agentName)
+}
+
 // AddProviderToConfig adds a provider to a project's agent config and saves.
 func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 	configMu.Lock()
@@ -2980,6 +2993,66 @@ func patchProjectAgentOption(projectName, key, value string) error {
 
 	lines = upsertTomlStringKey(lines, projSpan.agentOptionsStart+1, projSpan.agentOptionsEnd, key, value)
 	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
+// clearProjectAgentOption removes a single key from [projects.agent.options]
+// for the given project, preserving all other content. The caller must hold
+// configMu.
+func clearProjectAgentOption(projectName, key string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+	}
+	projSpan := spans[projectIdx]
+	if projSpan.agentOptionsStart < 0 {
+		// No [projects.agent.options] section; nothing to clear.
+		return nil
+	}
+
+	lines = removeTomlStringKey(lines, projSpan.agentOptionsStart+1, projSpan.agentOptionsEnd, key)
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
+// removeTomlStringKey removes the first occurrence of `key = ...` within
+// [start, end], leaving every other line untouched.
+func removeTomlStringKey(lines []string, start, end int, key string) []string {
+	if start < 0 {
+		start = 0
+	}
+	if end >= len(lines) {
+		end = len(lines) - 1
+	}
+	for i := start; i <= end && i < len(lines); i++ {
+		if matchTomlStringKey(lines[i], key) {
+			return append(lines[:i], lines[i+1:]...)
+		}
+	}
+	return lines
 }
 
 // patchTopLevelField does a surgical text-level update of a single top-level
