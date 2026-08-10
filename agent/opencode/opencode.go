@@ -36,7 +36,7 @@ type Agent struct {
 	cliExtraArgs         []string // extra args from cmd after the binary name
 	configEnv            []string // env vars from [projects.agent.options.env]
 	agentName            string // passed as --agent to opencode (for plugin-defined agents)
-	agentList            []core.AgentInfo // cached `opencode agent list` result for runtime switching
+	agentList            []AgentInfo // cached full `opencode agent list` result (incl. subagents) for SetAgent validation
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -545,11 +545,22 @@ func (a *Agent) SetAgent(name string) error {
 	if name == "" {
 		return fmt.Errorf("opencode: agent name cannot be empty")
 	}
+	if len(a.agentList) > 0 {
+		for _, info := range a.agentList {
+			if info.Name != name {
+				continue
+			}
+			if info.Mode == AgentModeSubagent {
+				return fmt.Errorf("opencode: agent %q is a subagent and cannot be used as a primary agent", name)
+			}
+			a.agentName = name
+			slog.Info("opencode: agent changed", "agent", name)
+			return nil
+		}
+		return fmt.Errorf("opencode: unknown agent %q", name)
+	}
 	if isInternalAgentName(name) {
 		return fmt.Errorf("opencode: agent %q is an internal agent and cannot be used as a primary agent", name)
-	}
-	if len(a.agentList) > 0 && !agentListContains(a.agentList, name) {
-		return fmt.Errorf("opencode: unknown agent %q", name)
 	}
 	a.agentName = name
 	slog.Info("opencode: agent changed", "agent", name)
@@ -562,21 +573,35 @@ func (a *Agent) GetAgent() string {
 	return a.agentName
 }
 
+// AvailableAgents enumerates switchable agents (primary/all mode) via
+// `opencode agent list` and caches the full result for SetAgent validation.
+// A nil result means enumeration failed; callers degrade gracefully.
+func (a *Agent) AvailableAgents(ctx context.Context) []core.AgentInfo {
+	agents, err := listAgents(ctx, a.cmd, a.workDir)
+	if err != nil {
+		slog.Warn("opencode: list agents failed", "err", err)
+		return nil
+	}
+	a.mu.Lock()
+	a.agentList = agents
+	a.mu.Unlock()
+
+	out := make([]core.AgentInfo, 0, len(agents))
+	for _, info := range agents {
+		if info.Mode == AgentModeSubagent {
+			continue
+		}
+		out = append(out, core.AgentInfo{Name: info.Name, Mode: string(info.Mode)})
+	}
+	return out
+}
+
 // internalAgentNames are built-in hidden agents that appear in `opencode
 // agent list` but cannot be selected as a primary agent.
 func isInternalAgentName(name string) bool {
 	switch name {
 	case "compaction", "title", "summary":
 		return true
-	}
-	return false
-}
-
-func agentListContains(agents []core.AgentInfo, name string) bool {
-	for _, a := range agents {
-		if a.Name == name {
-			return true
-		}
 	}
 	return false
 }
