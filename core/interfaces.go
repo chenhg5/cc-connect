@@ -512,8 +512,9 @@ type AgentInfo struct {
 // session; the current in-flight session keeps running with the agent it
 // was started with.
 type AgentSwitcher interface {
-	// SetAgent switches the active agent. Names that cannot be used as a
-	// primary agent (subagent, internal, or unknown names) are rejected
+	// SetAgent switches the active agent. An empty name clears the value so
+	// the CLI default agent applies. Non-empty names that cannot be used as
+	// a primary agent (subagent, internal, or unknown names) are rejected
 	// with an error; the current agent is left unchanged.
 	SetAgent(name string) error
 	// GetAgent returns the current agent name. An empty string means the

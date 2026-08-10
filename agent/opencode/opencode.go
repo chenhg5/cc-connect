@@ -532,7 +532,8 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 
 // -- AgentSwitcher --
 
-// SetAgent switches the active --agent value passed to opencode. The target
+// SetAgent switches the active --agent value passed to opencode. An empty
+// name clears the value (the CLI default agent applies). A non-empty target
 // is validated against the last enumeration from `opencode agent list`
 // (populated by AvailableAgents): subagent, internal, and unknown names are
 // rejected. When no enumeration is available (never fetched or fetch
@@ -543,7 +544,9 @@ func (a *Agent) SetAgent(name string) error {
 	defer a.mu.Unlock()
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return fmt.Errorf("opencode: agent name cannot be empty")
+		a.agentName = ""
+		slog.Info("opencode: agent cleared (default applies)")
+		return nil
 	}
 	if len(a.agentList) > 0 {
 		for _, info := range a.agentList {

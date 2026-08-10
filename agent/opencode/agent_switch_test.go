@@ -71,8 +71,27 @@ func TestAgentSwitcher_SetAgent_WithoutEnumerationOnlyRejectsInternal(t *testing
 	if err := a.SetAgent("brainstorm"); err != nil {
 		t.Fatalf("SetAgent(brainstorm) without enumeration error: %v", err)
 	}
-	if err := a.SetAgent(""); err == nil {
-		t.Fatal("SetAgent(\"\") error = nil, want rejection of empty name")
+	if err := a.SetAgent(""); err != nil {
+		t.Fatalf("SetAgent(\"\") error: %v, want clear-to-default to succeed", err)
+	}
+	if got := a.GetAgent(); got != "" {
+		t.Fatalf("GetAgent() = %q, want empty after clear", got)
+	}
+}
+
+func TestAgentSwitcher_SetAgent_ClearRestoresDefault(t *testing.T) {
+	bin := writeFakeAgentListBin(t, strings.Split(realOpencodeAgentListSample, "\n"), 0)
+	a := &Agent{cmd: bin, workDir: t.TempDir()}
+	a.AvailableAgents(context.Background())
+
+	if err := a.SetAgent("brainstorm"); err != nil {
+		t.Fatalf("SetAgent(brainstorm) error: %v", err)
+	}
+	if err := a.SetAgent(""); err != nil {
+		t.Fatalf("SetAgent(\"\") error: %v, want clear to succeed", err)
+	}
+	if got := a.GetAgent(); got != "" {
+		t.Fatalf("GetAgent() = %q, want empty default", got)
 	}
 }
 
