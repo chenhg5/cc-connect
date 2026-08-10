@@ -125,6 +125,7 @@ type Platform struct {
 	doneEmoji                  string
 	allowFrom                  string
 	allowChat                  string
+	allowFromP2p               string // comma-separated open_ids allowed to private-message (p2p) the bot; "" or "*" = all. Group messages are NOT affected.
 	groupOnly                  bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
@@ -207,6 +208,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
+	allowFromP2p, _ := opts["allow_from_p2p"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
@@ -275,6 +277,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
+		allowFromP2p:               allowFromP2p,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
@@ -1024,6 +1027,14 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		return nil
+	}
+
+	// p2p-only allowlist: when set, private (1:1) messages from users not in
+	// allow_from_p2p are dropped. Group messages are unaffected (still gated
+	// only by allow_from / allow_chat). "" or "*" means no restriction.
+	if chatType != "group" && !core.AllowList(p.allowFromP2p, userID) {
+		slog.Debug(p.tag()+": p2p message from unauthorized user, ignoring", "user", userID)
 		return nil
 	}
 
