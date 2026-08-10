@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -146,6 +148,17 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			slog.Warn("codex: session transcript line exceeded scanner buffer; skipping session",
+				"path", path, "error", err)
+		} else {
+			slog.Warn("codex: failed to scan session transcript",
+				"path", path, "error", err)
+		}
+		return nil
+	}
+
 	// Filter by cwd
 	if filterCwd != "" && sessionCwd != "" && sessionCwd != filterCwd {
 		return nil
@@ -255,6 +268,13 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 		case item.Type == "reasoning" && item.Text != "":
 			// skip reasoning items
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return entries, fmt.Errorf("codex: session history line exceeds %d-byte scanner buffer (history truncated): %w", 256*1024, err)
+		}
+		return entries, fmt.Errorf("codex: scan session transcript: %w", err)
 	}
 
 	if limit > 0 && len(entries) > limit {
