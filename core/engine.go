@@ -7080,7 +7080,7 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 			parts = append(parts, contextLeft)
 			hasStatus = true
 		}
-		if model := replyFooterModel(session, agent); model != "" {
+		if model := replyFooterDisplayModel(session, agent); model != "" {
 			parts = append(parts, model)
 			hasStatus = true
 		}
@@ -7135,18 +7135,18 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 	// Line 1: elapsed timer (now always the "done" form since streaming branch returned above)
 	lines = append(lines, formatElapsed(time.Since(turnStart), streaming, e.i18n.currentLang()))
 
-	// Line 2: model + effort + token usage detail + ctx %
+	// Line 2: agent + model + effort + token usage detail + ctx %
 	if e.showContextIndicator {
 		usage := replyFooterSessionContextUsage(session)
-		model := replyFooterModel(session, agent)
+		displayModel := replyFooterDisplayModel(session, agent)
 		effort := replyFooterReasoningEffort(session, agent)
-		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
+		if line := buildClaudeStatusLineFooter(displayModel, effort, usage); line != "" {
 			lines = append(lines, line)
 		} else if fallback := e.replyFooterUsageText(session, agent); fallback != "" {
 			// fallback for non-claudecode agents that still expose UsageReporter
 			parts := []string{}
-			if model != "" {
-				parts = append(parts, model)
+			if displayModel != "" {
+				parts = append(parts, displayModel)
 			}
 			if effort != "" {
 				parts = append(parts, effort)
@@ -7318,6 +7318,36 @@ func replyFooterReasoningEffort(session AgentSession, agent Agent) string {
 		return strings.TrimSpace(getter.GetReasoningEffort())
 	}
 	return ""
+}
+
+func replyFooterAgent(session AgentSession, agent Agent) string {
+	if session != nil {
+		if getter, ok := session.(interface{ GetAgent() string }); ok {
+			if name := strings.TrimSpace(getter.GetAgent()); name != "" {
+				return name
+			}
+		}
+	}
+	if getter, ok := agent.(AgentSwitcher); ok {
+		return strings.TrimSpace(getter.GetAgent())
+	}
+	return ""
+}
+
+// replyFooterDisplayModel returns the model name prefixed with the agent name
+// when one is active (e.g. "brainstorm · deepseek/deepseek-v4-pro"). Used by
+// the legacy footer paths (buildReplyFooter / buildClaudeStatusLineFooter)
+// which are the effective renderers for non-Claude agents and pure-text
+// platforms.
+func replyFooterDisplayModel(session AgentSession, agent Agent) string {
+	model := replyFooterModel(session, agent)
+	if agentName := replyFooterAgent(session, agent); agentName != "" {
+		if model != "" {
+			return agentName + " · " + model
+		}
+		return agentName
+	}
+	return model
 }
 
 func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string {
@@ -7545,7 +7575,7 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 		// Raw model id is preserved (e.g. "claude-opus-4-7[1m]") for diagnostic
 		// clarity over a prettified display name.
 		var line1Parts []string
-		if model := strings.TrimSpace(replyFooterModel(session, agent)); model != "" {
+		if model := strings.TrimSpace(replyFooterDisplayModel(session, agent)); model != "" {
 			line1Parts = append(line1Parts, model)
 		}
 		if effort := strings.TrimSpace(replyFooterReasoningEffort(session, agent)); effort != "" {
