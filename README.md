@@ -53,7 +53,7 @@ Thanks to [Kimi](https://www.kimi.com/code/?aff=cc-connect) for sponsoring this 
 
 With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark, DingTalk, Telegram, Slack, Discord, WeCom, and other instant messaging tools. Wherever you are, you can continue working on local projects through chat and ask Kimi to inspect or modify code, troubleshoot issues, run commands, and handle automation tasks.
 
-**cc-connect already supports Kimi CLI. Try the **[Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect)**, or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com/?aff=cc-connect) | [Global](https://platform.kimi.ai/?aff=cc-connect)).
+**cc-connect already supports Kimi CLI. Try the **[Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect)**, or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect) | [Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)).
 
 ---
 

@@ -53,7 +53,7 @@
 
 通过 cc-connect，你可以将本地运行的 Kimi CLI 连接到飞书、钉钉、Telegram、Slack、Discord、企业微信等即时通讯工具，随时让 Kimi 阅读和修改代码、排查问题、执行命令与处理自动化任务。
 
-**cc-connect 已支持 Kimi CLI。立即体验 **[Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)**，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com/?aff=cc-connect)｜[Global](https://platform.kimi.ai/?aff=cc-connect)）使用 API。
+**cc-connect 已支持 Kimi CLI。立即体验 **[Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)**，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect)｜[Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)）使用 API。
 
 ---
 
