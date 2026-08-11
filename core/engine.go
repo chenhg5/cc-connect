@@ -9653,7 +9653,7 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 					if a.Name == current {
 						marker = "> "
 					}
-					sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, a.Name))
+					fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, a.Name)
 
 					label := a.Name
 					if a.Name == current {
@@ -13118,7 +13118,7 @@ func (e *Engine) renderAgentCard(sessionKey string) *Card {
 			if a.Name == current {
 				marker = "> "
 			}
-			sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, a.Name))
+			fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, a.Name)
 			val := fmt.Sprintf("act:/agent switch %d", i+1)
 			opts = append(opts, CardSelectOption{Text: a.Name, Value: val})
 			if a.Name == current {
