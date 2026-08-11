@@ -703,6 +703,43 @@ func TestSend_TurnFailedServerOverloadedIsRetriable(t *testing.T) {
 	}
 }
 
+func TestCodexErrorKind_RetriableStreamFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    core.ErrorKind
+	}{
+		{
+			name:    "generic processing error with retry hint",
+			message: "stream disconnected before completion: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 0a043d4a-c04a-4ace-becd-deb4cc1f5dd2 in your message.",
+			want:    core.ErrorKindOverloaded,
+		},
+		{
+			name:    "stream closed before response completed",
+			message: "stream disconnected before completion: stream closed before response.completed",
+			want:    core.ErrorKindOverloaded,
+		},
+		{
+			name:    "gateway error",
+			message: "unexpected status 502 Bad Gateway, url: https://aiapi.uu.cc/v1/responses",
+			want:    core.ErrorKindOverloaded,
+		},
+		{
+			name:    "non transient error remains unknown",
+			message: "authentication failed: invalid api key",
+			want:    core.ErrorKindUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexErrorKind("", tc.message); got != tc.want {
+				t.Fatalf("codexErrorKind() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitForArgsFile_WaitsForNonEmptyContent(t *testing.T) {
 	workDir := t.TempDir()
 	argsFile := filepath.Join(workDir, "args.txt")
