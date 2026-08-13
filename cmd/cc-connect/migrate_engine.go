@@ -298,7 +298,11 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		return nil, fmt.Errorf("inventory source config directory: %w", err)
 	}
 	if dataDir != source && dataDirExists {
-		if err := collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report); err != nil {
+		var dataDirExclusions []string
+		if pathStrictlyWithin(dataDir, source) {
+			dataDirExclusions = append(dataDirExclusions, source)
+		}
+		if err := collectMigrationTreeExcluding(dataDir, "data-dir", true, dataDirExclusions, mainDestination, &report); err != nil {
 			return nil, fmt.Errorf("inventory source data_dir: %w", err)
 		}
 	}
