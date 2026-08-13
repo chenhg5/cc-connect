@@ -260,7 +260,10 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		}
 	}
 
-	migratedConfig := rewriteMigratedDataDir(configBytes, target)
+	migratedConfig, err := rewriteMigratedDataDir(configBytes, target)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite config data_dir: %w", err)
+	}
 	var parsed map[string]any
 	if _, err := toml.Decode(string(migratedConfig), &parsed); err != nil {
 		return nil, fmt.Errorf("rewritten config is invalid TOML: %w", err)

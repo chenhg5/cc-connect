@@ -7,9 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 type migrationReport struct {
@@ -177,27 +178,205 @@ func pathsOverlap(a, b string) bool {
 	return contains(a, b) || contains(b, a)
 }
 
-var topLevelDataDirLine = regexp.MustCompile(`^(\s*(?:data_dir|"data_dir"|'data_dir')\s*=\s*)(?:"(?:\\.|[^"])*"|'[^']*')(\s*(?:#.*)?)$`)
-
-func rewriteMigratedDataDir(configBytes []byte, target string) []byte {
-	lines := strings.Split(string(configBytes), "\n")
+func rewriteMigratedDataDir(configBytes []byte, target string) ([]byte, error) {
+	configText := string(configBytes)
 	replacement := strconv.Quote(filepath.ToSlash(target))
-	replaced := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
-			break
+	valueStart, valueEnd, found, err := findTopLevelTOMLStringValue(configText, "data_dir")
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		return []byte(configText[:valueStart] + replacement + configText[valueEnd:]), nil
+	}
+
+	// Distinguish an absent key from a valid spelling the locator failed to
+	// understand. Never prepend a duplicate logical key: that would make an
+	// otherwise valid legacy config fail only after the migration starts.
+	var root map[string]any
+	if _, err := toml.Decode(configText, &root); err != nil {
+		return nil, fmt.Errorf("decode config while locating data_dir: %w", err)
+	}
+	if _, exists := root["data_dir"]; exists {
+		return nil, fmt.Errorf("locate existing top-level data_dir assignment")
+	}
+	return []byte("data_dir = " + replacement + "\n\n" + configText), nil
+}
+
+func findTopLevelTOMLStringValue(src, wantedKey string) (int, int, bool, error) {
+	for pos := 0; pos < len(src); {
+		for pos < len(src) {
+			switch src[pos] {
+			case ' ', '\t', '\r', '\n':
+				pos++
+			case '#':
+				pos = skipTOMLLine(src, pos)
+			default:
+				goto statement
+			}
 		}
-		if match := topLevelDataDirLine.FindStringSubmatch(line); match != nil {
-			lines[i] = match[1] + replacement + match[2]
-			replaced = true
-			break
+		break
+
+	statement:
+		// Once a table header begins, subsequent simple keys belong to that
+		// table; TOML has no syntax for returning to the root table.
+		if src[pos] == '[' {
+			return 0, 0, false, nil
+		}
+
+		equals, err := findTOMLKeyEquals(src, pos)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		keyText := strings.TrimSpace(src[pos:equals])
+		valueStart := equals + 1
+		for valueStart < len(src) && (src[valueStart] == ' ' || src[valueStart] == '\t') {
+			valueStart++
+		}
+		if tomlKeyEquals(keyText, wantedKey) {
+			valueEnd, err := scanTOMLString(src, valueStart)
+			if err != nil {
+				return 0, 0, false, fmt.Errorf("scan top-level %s value: %w", wantedKey, err)
+			}
+			return valueStart, valueEnd, true, nil
+		}
+
+		pos, err = skipTOMLValue(src, valueStart)
+		if err != nil {
+			return 0, 0, false, err
 		}
 	}
-	if !replaced {
-		lines = append([]string{"data_dir = " + replacement, ""}, lines...)
+	return 0, 0, false, nil
+}
+
+func findTOMLKeyEquals(src string, start int) (int, error) {
+	var quote byte
+	escaped := false
+	for i := start; i < len(src); i++ {
+		ch := src[i]
+		if quote != 0 {
+			if quote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if quote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch ch {
+		case '"', '\'':
+			quote = ch
+		case '=':
+			return i, nil
+		case '\n', '#':
+			return 0, fmt.Errorf("top-level TOML statement has no assignment")
+		}
 	}
-	return []byte(strings.Join(lines, "\n"))
+	return 0, fmt.Errorf("unterminated top-level TOML assignment")
+}
+
+func tomlKeyEquals(keyText, wanted string) bool {
+	var decoded map[string]any
+	probe := keyText + " = \"__cc_connect_next_key_probe__\""
+	if _, err := toml.Decode(probe, &decoded); err != nil {
+		return false
+	}
+	value, ok := decoded[wanted]
+	return ok && value == "__cc_connect_next_key_probe__"
+}
+
+func scanTOMLString(src string, start int) (int, error) {
+	if start >= len(src) || (src[start] != '"' && src[start] != '\'') {
+		return 0, fmt.Errorf("value is not a TOML string")
+	}
+	quote := src[start]
+	triple := start+2 < len(src) && src[start+1] == quote && src[start+2] == quote
+	i := start + 1
+	if triple {
+		i = start + 3
+	}
+	for i < len(src) {
+		if quote == '"' && src[i] == '\\' {
+			if i+1 >= len(src) {
+				return 0, fmt.Errorf("unterminated escape sequence")
+			}
+			i += 2
+			continue
+		}
+		if src[i] == quote {
+			if !triple {
+				return i + 1, nil
+			}
+			runStart := i
+			for i < len(src) && src[i] == quote {
+				i++
+			}
+			if i-runStart >= 3 {
+				return i, nil
+			}
+			continue
+		}
+		if !triple && (src[i] == '\n' || src[i] == '\r') {
+			return 0, fmt.Errorf("unterminated single-line string")
+		}
+		i++
+	}
+	return 0, fmt.Errorf("unterminated TOML string")
+}
+
+func skipTOMLValue(src string, start int) (int, error) {
+	squareDepth := 0
+	curlyDepth := 0
+	for i := start; i < len(src); {
+		switch src[i] {
+		case '"', '\'':
+			end, err := scanTOMLString(src, i)
+			if err != nil {
+				return 0, err
+			}
+			i = end
+		case '[':
+			squareDepth++
+			i++
+		case ']':
+			if squareDepth > 0 {
+				squareDepth--
+			}
+			i++
+		case '{':
+			curlyDepth++
+			i++
+		case '}':
+			if curlyDepth > 0 {
+				curlyDepth--
+			}
+			i++
+		case '#':
+			i = skipTOMLLine(src, i)
+			if squareDepth == 0 && curlyDepth == 0 {
+				return i, nil
+			}
+		case '\n':
+			i++
+			if squareDepth == 0 && curlyDepth == 0 {
+				return i, nil
+			}
+		default:
+			i++
+		}
+	}
+	return len(src), nil
+}
+
+func skipTOMLLine(src string, start int) int {
+	if newline := strings.IndexByte(src[start:], '\n'); newline >= 0 {
+		return start + newline + 1
+	}
+	return len(src)
 }
 
 func copyMigrationFile(source, target string) error {

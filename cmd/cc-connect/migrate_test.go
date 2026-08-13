@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestRunMigrateCommandReturnsFailureForMissingSource(t *testing.T) {
@@ -136,6 +138,61 @@ func TestMigrateLegacyDataRewritesQuotedTopLevelDataDir(t *testing.T) {
 			}
 			if got, err := os.ReadFile(filepath.Join(target, "sessions", "demo.json")); err != nil || string(got) != `{"session":"kept"}` {
 				t.Fatalf("quoted data_dir migration lost persistent state: content=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestMigrateLegacyDataRewritesAllTOMLStringForms(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+	}{
+		{name: "multiline basic one line", config: `data_dir = """$SOURCE""" # preserve comment` + "\n"},
+		{name: "multiline literal one line", config: `data_dir = '''$SOURCE''' # preserve comment` + "\n"},
+		{name: "multiline basic across lines", config: "data_dir = \"\"\"\n$SOURCE\"\"\" # preserve comment\n"},
+		{name: "multiline literal across lines", config: "data_dir = '''\n$SOURCE''' # preserve comment\n"},
+		{name: "escaped quoted key", config: `"data\u005fdir" = """$SOURCE"""` + "\n"},
+		{
+			name: "ignore assignment text inside preceding multiline value",
+			config: "note = \"\"\"\n" +
+				`data_dir = "/must-not-match"` + "\n\"\"\"\n" +
+				`data_dir = """$SOURCE"""` + "\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			configText := strings.ReplaceAll(tt.config, "$SOURCE", filepath.ToSlash(source))
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), configText)
+			writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{"session":"kept"}`)
+
+			if _, err := migrateLegacyData(source, target, false, false); err != nil {
+				t.Fatalf("migrateLegacyData() error = %v", err)
+			}
+			configBytes, err := os.ReadFile(filepath.Join(target, "config.toml"))
+			if err != nil {
+				t.Fatalf("read migrated config: %v", err)
+			}
+			var migrated legacyMigrationConfig
+			if _, err := toml.Decode(string(configBytes), &migrated); err != nil {
+				t.Fatalf("decode migrated config: %v\n%s", err, configBytes)
+			}
+			canonicalTarget, err := canonicalExistingDirectory(target)
+			if err != nil {
+				t.Fatalf("canonical target: %v", err)
+			}
+			if got, want := migrated.DataDir, filepath.ToSlash(canonicalTarget); got != want {
+				t.Fatalf("migrated data_dir = %q, want %q\n%s", got, want, configBytes)
+			}
+			if strings.Contains(tt.config, "must-not-match") && !strings.Contains(string(configBytes), `data_dir = "/must-not-match"`) {
+				t.Fatalf("rewriter modified multiline string content: %s", configBytes)
+			}
+			if got, err := os.ReadFile(filepath.Join(target, "sessions", "demo.json")); err != nil || string(got) != `{"session":"kept"}` {
+				t.Fatalf("multiline data_dir migration lost persistent state: content=%q err=%v", got, err)
 			}
 		})
 	}

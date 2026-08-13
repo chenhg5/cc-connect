@@ -3188,7 +3188,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.TForText(MsgQueueFull, msg.Content), depth))
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
@@ -3221,7 +3221,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	e.reply(p, msg.ReplyCtx, e.i18n.TForText(MsgMessageQueued, msg.Content))
 	return true
 }
 
@@ -6326,10 +6326,10 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
-		message := fmt.Sprintf(e.i18n.T(MsgError), reason)
+		message := fmt.Sprintf(e.i18n.TForText(MsgError, q.content), reason)
 		if e.display.CardMode == "rich" {
 			if _, ok := q.platform.(RichCardSupporter); ok {
-				message = e.i18n.T(MsgRichCardErrorBody)
+				message = e.i18n.TForText(MsgRichCardErrorBody, q.content)
 			}
 		}
 		e.send(q.platform, q.replyCtx, message)
@@ -6388,7 +6388,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.TForText(MsgError, queued.content), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}

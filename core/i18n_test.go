@@ -49,6 +49,26 @@ func TestI18n_Tf(t *testing.T) {
 	}
 }
 
+func TestI18n_TForTextUsesMessageLocale(t *testing.T) {
+	i := NewI18n(LangAuto)
+	i.DetectAndSet("こんにちは")
+
+	if got := i.TForText(MsgError, "你好"); got != "❌ 错误: %v" {
+		t.Fatalf("Chinese message-local translation = %q", got)
+	}
+	if got := i.TForText(MsgError, "hello"); got != "❌ Error: %v" {
+		t.Fatalf("English message-local translation = %q", got)
+	}
+	if got := i.T(MsgError); got != "❌ エラー: %v" {
+		t.Fatalf("message-local lookup mutated active language: %q", got)
+	}
+
+	fixed := NewI18n(LangJapanese)
+	if got := fixed.TForText(MsgError, "你好"); got != "❌ エラー: %v" {
+		t.Fatalf("explicit language was not honored: %q", got)
+	}
+}
+
 func TestI18n_AllKeysHaveEnglish(t *testing.T) {
 	for key, langs := range messages {
 		if _, ok := langs[LangEnglish]; !ok {
@@ -59,7 +79,7 @@ func TestI18n_AllKeysHaveEnglish(t *testing.T) {
 
 func TestDetectLanguage(t *testing.T) {
 	tests := []struct {
-		text    string
+		text     string
 		wantLang Language
 	}{
 		// Japanese Hiragana

@@ -4266,6 +4266,13 @@ func (i *I18n) T(key MsgKey) string {
 	return translateMessage(key, lang)
 }
 
+// TForText resolves a message from the locale of its own triggering text.
+// In auto mode this deliberately ignores the mutable engine-wide detected
+// language, which may belong to another concurrent or queued conversation.
+func (i *I18n) TForText(key MsgKey, text string) string {
+	return translateMessage(key, i.languageForText(text))
+}
+
 func translateMessage(key MsgKey, lang Language) string {
 	if msg, ok := messages[key]; ok {
 		if translated, ok := msg[lang]; ok {
@@ -4298,13 +4305,17 @@ func (i *I18n) RichCardCopy() RichCardCopy {
 // instead of the engine-wide auto-detected value. This keeps concurrent
 // sessions independent while still honoring an explicitly configured language.
 func (i *I18n) RichCardCopyForText(text string) RichCardCopy {
+	return richCardCopyForLanguage(i.languageForText(text))
+}
+
+func (i *I18n) languageForText(text string) Language {
 	i.mu.RLock()
 	lang := i.lang
 	i.mu.RUnlock()
 	if lang == LangAuto {
 		lang = DetectLanguage(text)
 	}
-	return richCardCopyForLanguage(lang)
+	return lang
 }
 
 func richCardCopyForLanguage(lang Language) RichCardCopy {

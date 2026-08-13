@@ -2515,6 +2515,54 @@ func TestProcessInteractiveEvents_CapturesRichCardLocalePerTurn(t *testing.T) {
 	}
 }
 
+func TestNotifyDroppedQueuedMessagesUsesEachMessageLocale(t *testing.T) {
+	tests := []struct {
+		name     string
+		cardMode string
+		wantZH   string
+		wantEN   string
+	}{
+		{name: "legacy", cardMode: "legacy", wantZH: "❌ 错误: agent stopped", wantEN: "❌ Error: agent stopped"},
+		{name: "rich", cardMode: "rich", wantZH: "本次处理未能完成，请稍后重试。", wantEN: "This request could not be completed. Please try again."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			makePlatform := func(name string) (Platform, func() []string) {
+				if tt.cardMode == "rich" {
+					p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: name}}
+					return p, p.getSent
+				}
+				p := &stubPlatformEngine{n: name}
+				return p, p.getSent
+			}
+			zhPlatform, zhSent := makePlatform("zh")
+			enPlatform, enSent := makePlatform("en")
+			e := NewEngine("test", &stubAgent{}, []Platform{zhPlatform, enPlatform}, "", LangAuto)
+			e.SetDisplayConfig(DisplayCfg{CardMode: tt.cardMode})
+			// Simulate another conversation changing the shared detected locale
+			// after both queued messages were accepted.
+			e.i18n.DetectAndSet("こんにちは")
+			state := &interactiveState{pendingMessages: []queuedMessage{
+				{platform: zhPlatform, replyCtx: "ctx-zh", content: "请帮我处理"},
+				{platform: enPlatform, replyCtx: "ctx-en", content: "please handle this"},
+			}}
+
+			e.notifyDroppedQueuedMessages(state, errors.New("agent stopped"))
+
+			if got := zhSent(); len(got) != 1 || got[0] != tt.wantZH {
+				t.Fatalf("Chinese queued notification = %v, want %q", got, tt.wantZH)
+			}
+			if got := enSent(); len(got) != 1 || got[0] != tt.wantEN {
+				t.Fatalf("English queued notification = %v, want %q", got, tt.wantEN)
+			}
+			if len(state.pendingMessages) != 0 {
+				t.Fatalf("dropped queue was not drained: %+v", state.pendingMessages)
+			}
+		})
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardErrorRetainsVisiblePartialAnswer(t *testing.T) {
 	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
