@@ -20,6 +20,12 @@ const AGENT_OPTIONS = [
   { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
   { key: 'opencode', label: 'OpenCode' },
   { key: 'qoder', label: 'Qoder' },
+  { key: 'dsh', label: 'DSH (DeepSeek Harness)' },
+  { key: 'reasonix', label: 'Reasonix' },
+  { key: 'kimi', label: 'Kimi CLI' },
+  { key: 'iflow', label: 'iFlow' },
+  { key: 'pi', label: 'Pi' },
+  { key: 'tmux', label: 'tmux' },
 ];
 
 const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolean }[] = [
