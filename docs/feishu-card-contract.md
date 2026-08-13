@@ -32,6 +32,8 @@ If the terminal full-card update itself fails, cc-connect-next removes the stale
 
 When `resolve_mentions = true`, every streaming, completed, and safe-partial failure body resolves `@DisplayName` against the triggering chat before it enters Card 2.0. This preserves the native Feishu mention and notification behavior even though the lifecycle card is updated directly rather than sent through the ordinary `Send`/`Reply` path.
 
+Remote markdown images are uploaded once and reused by URL. A failed fetch or Feishu upload enters a one-minute backoff instead of a permanent denylist; after that window the next card that references the URL retries it. This avoids per-frame retry storms while allowing transient timeouts, rate limits, and network failures to recover without restarting the process.
+
 ## Privacy boundary
 
 Rich-card progress carries event kinds and anonymous counts only. The renderer never receives or emits:

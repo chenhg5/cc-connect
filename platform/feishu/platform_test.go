@@ -1345,17 +1345,22 @@ func TestResolveRichCardMarkdownStreamingStartsUploadWithoutWaiting(t *testing.T
 	}
 }
 
-func TestResolveRichCardMarkdownFailedImageIsNotRetried(t *testing.T) {
+func TestResolveRichCardMarkdownFailedImageRetriesAfterBackoff(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	var (
 		mu    sync.Mutex
 		calls int
+		now   = time.Unix(1_700_000_000, 0)
 	)
+	p.richCardImageNowFunc = func() time.Time { return now }
 	p.richCardImageUploadFunc = func(_ context.Context, _ string) (string, error) {
 		mu.Lock()
+		defer mu.Unlock()
 		calls++
-		mu.Unlock()
-		return "", errors.New("upload failed")
+		if calls == 1 {
+			return "", errors.New("upload failed")
+		}
+		return "img_v3_retried", nil
 	}
 
 	input := "before ![chart](https://example.com/chart.png) after"
@@ -1368,9 +1373,21 @@ func TestResolveRichCardMarkdownFailedImageIsNotRetried(t *testing.T) {
 		}
 	}
 	mu.Lock()
-	defer mu.Unlock()
 	if calls != 1 {
-		t.Fatalf("upload calls = %d, want failed URL cached after first attempt", calls)
+		mu.Unlock()
+		t.Fatalf("upload calls = %d, want one attempt during failure backoff", calls)
+	}
+	mu.Unlock()
+
+	now = now.Add(richCardImageRetryWait + time.Nanosecond)
+	retried := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	if !strings.Contains(retried, "![chart](img_v3_retried)") {
+		t.Fatalf("expired failure should retry and render the image, got %q", retried)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("upload calls = %d, want one retry after backoff", calls)
 	}
 }
 

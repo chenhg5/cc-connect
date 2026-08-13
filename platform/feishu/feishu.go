@@ -172,8 +172,9 @@ type Platform struct {
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
 	richCardImagePending    map[string]*richCardImageUpload
-	richCardImageFailed     map[string]struct{}
+	richCardImageFailed     map[string]time.Time // URL -> retry-at time
 	richCardImageUploadFunc func(context.Context, string) (string, error)
+	richCardImageNowFunc    func() time.Time
 
 	// imageBatch coalesces consecutive image messages from the same session
 	// arriving within imageBatchWindow. Without this, sending N images in rapid
@@ -5499,6 +5500,7 @@ var feishuCardImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)\)`)
 
 const (
 	richCardImageFinalWait = 4 * time.Second
+	richCardImageRetryWait = time.Minute
 	richCardImageMaxBytes  = 10 * 1024 * 1024
 	richCardImageMaxCount  = 4
 )
@@ -5596,8 +5598,7 @@ func (p *Platform) richCardImageKey(rawURL string) (string, bool) {
 func (p *Platform) richCardImageFailedURL(rawURL string) bool {
 	p.richCardImageMu.Lock()
 	defer p.richCardImageMu.Unlock()
-	_, failed := p.richCardImageFailed[rawURL]
-	return failed
+	return p.richCardImageFailureActiveLocked(rawURL)
 }
 
 func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string) *richCardImageUpload {
@@ -5609,7 +5610,7 @@ func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string)
 		p.richCardImagePending = map[string]*richCardImageUpload{}
 	}
 	if p.richCardImageFailed == nil {
-		p.richCardImageFailed = map[string]struct{}{}
+		p.richCardImageFailed = map[string]time.Time{}
 	}
 	if imageKey := p.richCardImageResolved[rawURL]; imageKey != "" {
 		upload := &richCardImageUpload{done: make(chan struct{})}
@@ -5617,7 +5618,7 @@ func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string)
 		p.richCardImageMu.Unlock()
 		return upload
 	}
-	if _, failed := p.richCardImageFailed[rawURL]; failed {
+	if p.richCardImageFailureActiveLocked(rawURL) {
 		p.richCardImageMu.Unlock()
 		return nil
 	}
@@ -5641,9 +5642,9 @@ func (p *Platform) finishRichCardImageUpload(ctx context.Context, rawURL string,
 	delete(p.richCardImagePending, rawURL)
 	if err != nil {
 		if p.richCardImageFailed == nil {
-			p.richCardImageFailed = map[string]struct{}{}
+			p.richCardImageFailed = map[string]time.Time{}
 		}
-		p.richCardImageFailed[rawURL] = struct{}{}
+		p.richCardImageFailed[rawURL] = p.richCardImageNow().Add(richCardImageRetryWait)
 		slog.Debug(p.tag()+": rich card image upload failed", "host", richCardImageURLHost(rawURL), "error", err)
 	} else {
 		if p.richCardImageResolved == nil {
@@ -5653,6 +5654,24 @@ func (p *Platform) finishRichCardImageUpload(ctx context.Context, rawURL string,
 		slog.Debug(p.tag()+": rich card image uploaded", "host", richCardImageURLHost(rawURL), "image_key", imageKey)
 	}
 	close(upload.done)
+}
+
+func (p *Platform) richCardImageFailureActiveLocked(rawURL string) bool {
+	now := p.richCardImageNow()
+	for failedURL, retryAt := range p.richCardImageFailed {
+		if !now.Before(retryAt) {
+			delete(p.richCardImageFailed, failedURL)
+		}
+	}
+	retryAt, failed := p.richCardImageFailed[rawURL]
+	return failed && now.Before(retryAt)
+}
+
+func (p *Platform) richCardImageNow() time.Time {
+	if p.richCardImageNowFunc != nil {
+		return p.richCardImageNowFunc()
+	}
+	return time.Now()
 }
 
 func (p *Platform) uploadRichCardImageURL(ctx context.Context, rawURL string) (string, error) {
