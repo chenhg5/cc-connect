@@ -1,0 +1,1033 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+)
+
+const migrationManifestFilename = "migration-manifest.json"
+
+type migrationOptions struct {
+	Source             string
+	Target             string
+	Home               string
+	RuntimeWorkDir     string
+	Force              bool
+	DryRun             bool
+	IncludeProjectData bool
+}
+
+type migrationManifest struct {
+	Version            int                      `json:"version"`
+	CreatedAt          string                   `json:"created_at"`
+	SourceRoot         string                   `json:"source_root"`
+	SourceWorkDir      string                   `json:"source_work_dir"`
+	SourceDataDir      string                   `json:"source_data_dir"`
+	TargetRoot         string                   `json:"target_root"`
+	Files              []migrationFileRecord    `json:"files"`
+	ProjectDirectories []migrationProjectRecord `json:"project_directories,omitempty"`
+	Backups            []migrationBackupRecord  `json:"backups,omitempty"`
+	SkippedRuntime     int                      `json:"skipped_runtime_entries"`
+	SkippedSymlinks    int                      `json:"skipped_symlinks"`
+}
+
+type migrationFileRecord struct {
+	Scope  string `json:"scope"`
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+type migrationProjectRecord struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Files  int    `json:"files"`
+}
+
+type migrationBackupRecord struct {
+	Target string `json:"target"`
+	Backup string `json:"backup"`
+}
+
+type legacyMigrationConfig struct {
+	DataDir  string                   `toml:"data_dir"`
+	Projects []legacyMigrationProject `toml:"projects"`
+}
+
+type legacyMigrationProject struct {
+	Mode    string `toml:"mode"`
+	BaseDir string `toml:"base_dir"`
+	Agent   struct {
+		Options map[string]any `toml:"options"`
+	} `toml:"agent"`
+}
+
+type plannedMigrationFile struct {
+	Scope        string
+	Source       string
+	Rel          string
+	Size         int64
+	SHA256       string
+	SourceSize   int64
+	SourceSHA256 string
+	ModTime      time.Time
+	Content      []byte
+}
+
+type migrationDestination struct {
+	Scope            string
+	Target           string
+	Files            map[string]plannedMigrationFile
+	Stage            string
+	Backup           string
+	Existed          bool
+	ExistingNonEmpty bool
+}
+
+type preparedMigration struct {
+	SourceRoot    string
+	SourceWorkDir string
+	SourceDataDir string
+	Main          *migrationDestination
+	Projects      []*migrationDestination
+	Report        migrationReport
+	CreatedAt     time.Time
+}
+
+func migrateLegacyDataWithOptions(opts migrationOptions) (migrationReport, error) {
+	plan, err := prepareLegacyMigration(opts)
+	if err != nil {
+		return migrationReport{DryRun: opts.DryRun}, err
+	}
+	if opts.DryRun {
+		return plan.Report, nil
+	}
+
+	destinations := append(append([]*migrationDestination{}, plan.Projects...), plan.Main)
+	for _, destination := range destinations {
+		if err := prepareMigrationStage(destination); err != nil {
+			cleanupMigrationStages(destinations)
+			return plan.Report, fmt.Errorf("prepare target %s: %w", destination.Target, err)
+		}
+	}
+	if err := verifyMigrationSourcesUnchanged(destinations); err != nil {
+		cleanupMigrationStages(destinations)
+		return plan.Report, err
+	}
+
+	manifest := buildMigrationManifest(plan)
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		cleanupMigrationStages(destinations)
+		return plan.Report, fmt.Errorf("encode migration manifest: %w", err)
+	}
+	manifestBytes = append(manifestBytes, '\n')
+	if err := writeStagedContent(plan.Main.Stage, migrationManifestFilename, manifestBytes, sha256Bytes(manifestBytes)); err != nil {
+		cleanupMigrationStages(destinations)
+		return plan.Report, fmt.Errorf("write migration manifest: %w", err)
+	}
+
+	promoted := make([]*migrationDestination, 0, len(destinations))
+	for _, destination := range destinations {
+		if err := promoteMigrationDestination(destination); err != nil {
+			rollbackPromotedDestinations(promoted)
+			cleanupMigrationStages(destinations)
+			return plan.Report, fmt.Errorf("activate target %s: %w", destination.Target, err)
+		}
+		promoted = append(promoted, destination)
+	}
+	finalizeMigrationBackups(destinations)
+	cleanupMigrationStages(destinations)
+	return plan.Report, nil
+}
+
+func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
+	if strings.TrimSpace(opts.Home) == "" {
+		return nil, fmt.Errorf("home directory is required")
+	}
+	source, err := canonicalExistingDirectory(opts.Source)
+	if err != nil {
+		return nil, fmt.Errorf("read source directory: %w", err)
+	}
+	target, err := canonicalDestinationPath(opts.Target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target: %w", err)
+	}
+	if pathsOverlap(source, target) {
+		return nil, fmt.Errorf("source and target must be separate directories")
+	}
+
+	configPath := filepath.Join(source, "config.toml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("read source config: %w", err)
+	}
+	var legacyCfg legacyMigrationConfig
+	if _, err := toml.Decode(string(configBytes), &legacyCfg); err != nil {
+		return nil, fmt.Errorf("source config is invalid TOML: %w", err)
+	}
+	runtimeWorkDir, err := resolveLegacyRuntimeWorkDir(opts.RuntimeWorkDir, source, opts.Home)
+	if err != nil {
+		return nil, err
+	}
+
+	dataDir := source
+	if strings.TrimSpace(legacyCfg.DataDir) != "" {
+		dataDir, err = resolveLegacyConfigPath(legacyCfg.DataDir, runtimeWorkDir, opts.Home)
+		if err != nil {
+			return nil, fmt.Errorf("resolve source data_dir: %w", err)
+		}
+		dataDir, err = canonicalExistingDirectory(dataDir)
+		if err != nil {
+			return nil, fmt.Errorf("read source data_dir: %w", err)
+		}
+	}
+	if pathsOverlap(dataDir, target) {
+		return nil, fmt.Errorf("source data_dir and target must be separate directories")
+	}
+
+	mainDestination := &migrationDestination{
+		Scope:  "data",
+		Target: target,
+		Files:  make(map[string]plannedMigrationFile),
+	}
+	report := migrationReport{
+		DryRun:        opts.DryRun,
+		SourceDataDir: dataDir,
+		SourceWorkDir: runtimeWorkDir,
+		ManifestPath:  filepath.Join(target, migrationManifestFilename),
+	}
+
+	if err := collectMigrationTree(source, "config-root", true, mainDestination, &report); err != nil {
+		return nil, fmt.Errorf("inventory source config directory: %w", err)
+	}
+	if dataDir != source {
+		if err := collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report); err != nil {
+			return nil, fmt.Errorf("inventory source data_dir: %w", err)
+		}
+	}
+
+	migratedConfig := rewriteMigratedDataDir(configBytes, target)
+	var parsed map[string]any
+	if _, err := toml.Decode(string(migratedConfig), &parsed); err != nil {
+		return nil, fmt.Errorf("rewritten config is invalid TOML: %w", err)
+	}
+	addPlannedMigrationFile(mainDestination, plannedMigrationFile{
+		Scope:        "config",
+		Source:       configPath,
+		Rel:          "config.toml",
+		Size:         int64(len(migratedConfig)),
+		SHA256:       sha256Bytes(migratedConfig),
+		SourceSize:   int64(len(configBytes)),
+		SourceSHA256: sha256Bytes(configBytes),
+		Content:      migratedConfig,
+	}, false)
+
+	projectDestinations := []*migrationDestination{}
+	if opts.IncludeProjectData {
+		projectRoots, err := discoverLegacyProjectRoots(legacyCfg, runtimeWorkDir, source, dataDir, opts.Home)
+		if err != nil {
+			return nil, err
+		}
+		for _, projectRoot := range projectRoots {
+			projectSource := filepath.Join(projectRoot, ".cc-connect")
+			projectTarget := filepath.Join(projectRoot, ".cc-connect-next")
+			projectSource, err = canonicalExistingDirectory(projectSource)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, fmt.Errorf("read project-local source %s: %w", projectSource, err)
+			}
+			projectTarget, err = canonicalDestinationPath(projectTarget)
+			if err != nil {
+				return nil, fmt.Errorf("resolve project-local target: %w", err)
+			}
+			if projectSource == source && projectTarget == target {
+				continue
+			}
+			if pathsOverlap(projectSource, projectTarget) || pathsOverlap(projectSource, target) || pathsOverlap(dataDir, projectTarget) {
+				return nil, fmt.Errorf("unsafe overlapping project-local migration path: %s -> %s", projectSource, projectTarget)
+			}
+			destination := &migrationDestination{
+				Scope:  "project-data",
+				Target: projectTarget,
+				Files:  make(map[string]plannedMigrationFile),
+			}
+			if err := collectMigrationTree(projectSource, "project-data", false, destination, &report); err != nil {
+				return nil, fmt.Errorf("inventory project-local data %s: %w", projectSource, err)
+			}
+			if len(destination.Files) == 0 {
+				continue
+			}
+			projectDestinations = append(projectDestinations, destination)
+		}
+	}
+
+	destinations := append(append([]*migrationDestination{}, projectDestinations...), mainDestination)
+	for _, destination := range destinations {
+		if info, err := os.Lstat(destination.Target); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("target must not be a symbolic link: %s", destination.Target)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect target %s: %w", destination.Target, err)
+		}
+		nonEmpty, err := directoryHasEntries(destination.Target)
+		if err != nil {
+			return nil, err
+		}
+		destination.ExistingNonEmpty = nonEmpty
+		if _, err := os.Lstat(destination.Target); err == nil {
+			destination.Existed = true
+		}
+		if nonEmpty && !opts.Force {
+			return nil, fmt.Errorf("target is not empty: %s (use --force to merge deliberately)", destination.Target)
+		}
+	}
+
+	createdAt := time.Now().UTC()
+	for index, destination := range destinations {
+		if destination.Existed {
+			destination.Backup = availableMigrationBackupPath(destination.Target, createdAt, index)
+		}
+		if destination.ExistingNonEmpty {
+			report.Backups = append(report.Backups, migrationBackupRecord{
+				Target: destination.Target,
+				Backup: destination.Backup,
+			})
+		}
+	}
+	if mainDestination.ExistingNonEmpty {
+		report.BackupDir = mainDestination.Backup
+	}
+	report.ProjectDirectories = len(projectDestinations)
+	report.CopiedFiles = len(mainDestination.Files)
+	for _, project := range projectDestinations {
+		report.CopiedFiles += len(project.Files)
+	}
+
+	return &preparedMigration{
+		SourceRoot:    source,
+		SourceWorkDir: runtimeWorkDir,
+		SourceDataDir: dataDir,
+		Main:          mainDestination,
+		Projects:      projectDestinations,
+		Report:        report,
+		CreatedAt:     createdAt,
+	}, nil
+}
+
+func canonicalExistingDirectory(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("not a directory: %s", resolved)
+	}
+	return resolved, nil
+}
+
+func canonicalDestinationPath(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(abs)
+	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil {
+		return filepath.Join(resolvedParent, filepath.Base(abs)), nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return abs, nil
+}
+
+func collectMigrationTree(root, scope string, skipRuntime bool, destination *migrationDestination, report *migrationReport) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if skipRuntime {
+			_, namedRuntime := legacyRuntimeEntries[parts[0]]
+			if namedRuntime || strings.HasSuffix(parts[0], ".lock") {
+				if len(parts) == 1 {
+					report.SkippedRuntime++
+				}
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if rel == "config.toml" || rel == migrationManifestFilename {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			report.SkippedSymlinks++
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			report.SkippedRuntime++
+			return nil
+		}
+		hash, size, err := sha256File(path)
+		if err != nil {
+			return err
+		}
+		addPlannedMigrationFile(destination, plannedMigrationFile{
+			Scope:        scope,
+			Source:       path,
+			Rel:          rel,
+			Size:         size,
+			SHA256:       hash,
+			SourceSize:   size,
+			SourceSHA256: hash,
+			ModTime:      info.ModTime(),
+		}, true)
+		return nil
+	})
+}
+
+func addPlannedMigrationFile(destination *migrationDestination, file plannedMigrationFile, archiveCollision bool) {
+	file.Rel = filepath.Clean(file.Rel)
+	existing, found := destination.Files[file.Rel]
+	if !found {
+		destination.Files[file.Rel] = file
+		return
+	}
+	if existing.SHA256 == file.SHA256 {
+		// The effective data_dir is authoritative when the same bytes also
+		// happen to exist in the config root.
+		destination.Files[file.Rel] = file
+		return
+	}
+	if archiveCollision {
+		archiveRel := filepath.Join("migration-archive", sanitizeMigrationScope(existing.Scope), existing.Rel)
+		archiveRel = availableMigrationRel(destination.Files, archiveRel)
+		existing.Rel = archiveRel
+		destination.Files[archiveRel] = existing
+	}
+	destination.Files[file.Rel] = file
+}
+
+func sanitizeMigrationScope(scope string) string {
+	scope = strings.TrimSpace(strings.ToLower(scope))
+	scope = strings.ReplaceAll(scope, string(filepath.Separator), "-")
+	if scope == "" {
+		return "source"
+	}
+	return scope
+}
+
+func availableMigrationRel(files map[string]plannedMigrationFile, candidate string) string {
+	if _, exists := files[candidate]; !exists {
+		return candidate
+	}
+	ext := filepath.Ext(candidate)
+	base := strings.TrimSuffix(candidate, ext)
+	for i := 2; ; i++ {
+		value := fmt.Sprintf("%s-%d%s", base, i, ext)
+		if _, exists := files[value]; !exists {
+			return value
+		}
+	}
+}
+
+func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourceRoot, dataDir, home string) ([]string, error) {
+	roots := make(map[string]struct{})
+	addRoot := func(raw string) error {
+		if strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		resolved, err := resolveLegacyConfigPath(raw, runtimeWorkDir, home)
+		if err != nil {
+			return err
+		}
+		info, err := os.Stat(resolved)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		canonical, err := filepath.EvalSymlinks(resolved)
+		if err != nil {
+			return err
+		}
+		roots[canonical] = struct{}{}
+		return nil
+	}
+
+	for _, project := range cfg.Projects {
+		if raw, ok := project.Agent.Options["work_dir"].(string); ok {
+			if err := addRoot(raw); err != nil {
+				return nil, fmt.Errorf("resolve project work_dir: %w", err)
+			}
+		}
+		if strings.TrimSpace(project.BaseDir) != "" {
+			baseDir, err := resolveLegacyConfigPath(project.BaseDir, runtimeWorkDir, home)
+			if err != nil {
+				return nil, fmt.Errorf("resolve project base_dir: %w", err)
+			}
+			if err := discoverProjectRootsUnderBase(baseDir, roots); err != nil {
+				return nil, fmt.Errorf("scan project base_dir %s: %w", baseDir, err)
+			}
+		}
+	}
+
+	for _, stateRoot := range []string{dataDir, sourceRoot} {
+		if err := discoverProjectRootsFromState(stateRoot, addRoot); err != nil {
+			return nil, err
+		}
+		if err := discoverProjectRootsFromBindings(stateRoot, addRoot); err != nil {
+			return nil, err
+		}
+	}
+
+	result := make([]string, 0, len(roots))
+	for root := range roots {
+		if info, err := os.Stat(filepath.Join(root, ".cc-connect")); err == nil && info.IsDir() {
+			result = append(result, root)
+		}
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}) error {
+	info, err := os.Stat(baseDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(baseDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 && entry.IsDir() {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() && entry.Name() == ".cc-connect" {
+			root, err := filepath.EvalSymlinks(filepath.Dir(path))
+			if err != nil {
+				return err
+			}
+			roots[root] = struct{}{}
+			return filepath.SkipDir
+		}
+		return nil
+	})
+}
+
+func discoverProjectRootsFromState(dataRoot string, addRoot func(string) error) error {
+	paths, err := filepath.Glob(filepath.Join(dataRoot, "projects", "*.state.json"))
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read project state %s: %w", path, err)
+		}
+		var state struct {
+			WorkDirOverride       string            `json:"work_dir_override"`
+			WorkspaceDirOverrides map[string]string `json:"workspace_dir_overrides"`
+		}
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("parse project state %s: %w", path, err)
+		}
+		if err := addRoot(state.WorkDirOverride); err != nil {
+			return err
+		}
+		for workspace, override := range state.WorkspaceDirOverrides {
+			if err := addRoot(workspace); err != nil {
+				return err
+			}
+			if err := addRoot(override); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func discoverProjectRootsFromBindings(dataRoot string, addRoot func(string) error) error {
+	path := filepath.Join(dataRoot, "workspace_bindings.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read workspace bindings %s: %w", path, err)
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("parse workspace bindings %s: %w", path, err)
+	}
+	var walk func(any) error
+	walk = func(node any) error {
+		switch typed := node.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				if key == "workspace" {
+					if workspace, ok := child.(string); ok {
+						if err := addRoot(workspace); err != nil {
+							return err
+						}
+					}
+				}
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(value)
+}
+
+func resolveLegacyRuntimeWorkDir(override, sourceRoot, home string) (string, error) {
+	if strings.TrimSpace(override) != "" {
+		resolved, err := resolveLegacyConfigPath(override, sourceRoot, home)
+		if err != nil {
+			return "", fmt.Errorf("resolve official runtime work_dir: %w", err)
+		}
+		canonical, err := canonicalExistingDirectory(resolved)
+		if err != nil {
+			return "", fmt.Errorf("read official runtime work_dir: %w", err)
+		}
+		return canonical, nil
+	}
+
+	metadataPath := filepath.Join(sourceRoot, "daemon.json")
+	data, err := os.ReadFile(metadataPath)
+	if err == nil {
+		var metadata struct {
+			WorkDir string `json:"work_dir"`
+		}
+		if json.Unmarshal(data, &metadata) == nil && strings.TrimSpace(metadata.WorkDir) != "" {
+			resolved, resolveErr := resolveLegacyConfigPath(metadata.WorkDir, sourceRoot, home)
+			if resolveErr == nil {
+				if canonical, canonicalErr := canonicalExistingDirectory(resolved); canonicalErr == nil {
+					return canonical, nil
+				}
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read official daemon metadata: %w", err)
+	}
+	return sourceRoot, nil
+}
+
+func resolveLegacyConfigPath(raw, baseDir, home string) (string, error) {
+	var missing []string
+	expanded := os.Expand(raw, func(name string) string {
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			missing = append(missing, name)
+		}
+		return value
+	})
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return "", fmt.Errorf("unset environment variable(s): %s", strings.Join(missing, ", "))
+	}
+	expanded = expandMigrationPath(expanded, home)
+	if !filepath.IsAbs(expanded) {
+		expanded = filepath.Join(baseDir, expanded)
+	}
+	return filepath.Abs(filepath.Clean(expanded))
+}
+
+func prepareMigrationStage(destination *migrationDestination) error {
+	parent := filepath.Dir(destination.Target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(parent, "."+filepath.Base(destination.Target)+".migrate-*")
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(stage, 0o700); err != nil {
+		_ = os.RemoveAll(stage)
+		return err
+	}
+	destination.Stage = stage
+
+	if destination.Existed {
+		if err := copyExistingMigrationTarget(destination.Target, stage); err != nil {
+			return err
+		}
+	}
+
+	rels := make([]string, 0, len(destination.Files))
+	for rel := range destination.Files {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		if err := writePlannedMigrationFile(stage, destination.Files[rel]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyMigrationSourcesUnchanged(destinations []*migrationDestination) error {
+	verified := make(map[string]struct{})
+	for _, destination := range destinations {
+		for _, file := range destination.Files {
+			if file.Source == "" {
+				continue
+			}
+			key := file.Source + "\x00" + file.SourceSHA256
+			if _, ok := verified[key]; ok {
+				continue
+			}
+			hash, size, err := sha256File(file.Source)
+			if err != nil {
+				return fmt.Errorf("verify source %s: %w", file.Source, err)
+			}
+			if hash != file.SourceSHA256 || size != file.SourceSize {
+				return fmt.Errorf("source changed during migration: %s; no target was activated", file.Source)
+			}
+			verified[key] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func copyExistingMigrationTarget(source, stage string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		target := filepath.Join(stage, rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := ensureStagedDirectory(stage, filepath.Dir(rel)); err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		if entry.IsDir() {
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				return err
+			}
+			return os.Chmod(target, 0o700)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("existing target contains unsupported runtime entry %s; stop cc-connect-next before --force", path)
+		}
+		return copyMigrationFile(path, target)
+	})
+}
+
+func writePlannedMigrationFile(stage string, file plannedMigrationFile) error {
+	if err := validateMigrationRel(file.Rel); err != nil {
+		return err
+	}
+	if file.Content != nil {
+		if err := writeStagedContent(stage, file.Rel, file.Content, file.SHA256); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := ensureStagedDirectory(stage, filepath.Dir(file.Rel)); err != nil {
+		return err
+	}
+	target := filepath.Join(stage, file.Rel)
+	if err := removeStagedLeaf(target); err != nil {
+		return err
+	}
+	if err := copyMigrationFile(file.Source, target); err != nil {
+		return fmt.Errorf("copy %s: %w", file.Source, err)
+	}
+	if !file.ModTime.IsZero() {
+		if err := os.Chtimes(target, file.ModTime, file.ModTime); err != nil {
+			return err
+		}
+	}
+	hash, size, err := sha256File(target)
+	if err != nil {
+		return err
+	}
+	if hash != file.SHA256 || size != file.Size {
+		return fmt.Errorf("verification failed for %s: source changed during migration", file.Source)
+	}
+	return nil
+}
+
+func writeStagedContent(stage, rel string, content []byte, expectedHash string) error {
+	if err := validateMigrationRel(rel); err != nil {
+		return err
+	}
+	if err := ensureStagedDirectory(stage, filepath.Dir(rel)); err != nil {
+		return err
+	}
+	target := filepath.Join(stage, rel)
+	if err := removeStagedLeaf(target); err != nil {
+		return err
+	}
+	if err := writeMigrationFile(target, content); err != nil {
+		return err
+	}
+	hash, _, err := sha256File(target)
+	if err != nil {
+		return err
+	}
+	if hash != expectedHash {
+		return fmt.Errorf("verification failed for generated file %s", rel)
+	}
+	return nil
+}
+
+func validateMigrationRel(rel string) error {
+	clean := filepath.Clean(rel)
+	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("unsafe migration path %q", rel)
+	}
+	return nil
+}
+
+func ensureStagedDirectory(stage, rel string) error {
+	if rel == "." || rel == "" {
+		return nil
+	}
+	if err := validateMigrationRel(rel); err != nil {
+		return err
+	}
+	current := stage
+	for _, component := range strings.Split(filepath.Clean(rel), string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o700); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("target path contains a non-directory component: %s", current)
+		}
+	}
+	return nil
+}
+
+func removeStagedLeaf(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return os.RemoveAll(path)
+	}
+	return os.Remove(path)
+}
+
+func availableMigrationBackupPath(target string, createdAt time.Time, index int) string {
+	stamp := createdAt.Format("20060102T150405Z")
+	base := fmt.Sprintf("%s.pre-migration-%s", target, stamp)
+	if index > 0 {
+		base = fmt.Sprintf("%s-%d", base, index+1)
+	}
+	for suffix := 1; ; suffix++ {
+		candidate := base
+		if suffix > 1 {
+			candidate = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate
+		}
+	}
+}
+
+func promoteMigrationDestination(destination *migrationDestination) error {
+	if destination.Existed {
+		if err := os.Rename(destination.Target, destination.Backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(destination.Stage, destination.Target); err != nil {
+		if destination.Existed {
+			_ = os.Rename(destination.Backup, destination.Target)
+		}
+		return err
+	}
+	destination.Stage = ""
+	return nil
+}
+
+func finalizeMigrationBackups(destinations []*migrationDestination) {
+	for _, destination := range destinations {
+		if destination.Existed && !destination.ExistingNonEmpty && destination.Backup != "" {
+			_ = os.Remove(destination.Backup)
+			destination.Backup = ""
+		}
+	}
+}
+
+func rollbackPromotedDestinations(destinations []*migrationDestination) {
+	for i := len(destinations) - 1; i >= 0; i-- {
+		destination := destinations[i]
+		rollbackPath := destination.Target + ".failed-migration"
+		_ = os.RemoveAll(rollbackPath)
+		if err := os.Rename(destination.Target, rollbackPath); err != nil {
+			continue
+		}
+		if destination.Existed && destination.Backup != "" {
+			_ = os.Rename(destination.Backup, destination.Target)
+		}
+		_ = os.RemoveAll(rollbackPath)
+	}
+}
+
+func cleanupMigrationStages(destinations []*migrationDestination) {
+	for _, destination := range destinations {
+		if destination.Stage != "" {
+			_ = os.RemoveAll(destination.Stage)
+			destination.Stage = ""
+		}
+	}
+}
+
+func buildMigrationManifest(plan *preparedMigration) migrationManifest {
+	manifest := migrationManifest{
+		Version:         1,
+		CreatedAt:       plan.CreatedAt.Format(time.RFC3339Nano),
+		SourceRoot:      plan.SourceRoot,
+		SourceWorkDir:   plan.SourceWorkDir,
+		SourceDataDir:   plan.SourceDataDir,
+		TargetRoot:      plan.Main.Target,
+		SkippedRuntime:  plan.Report.SkippedRuntime,
+		SkippedSymlinks: plan.Report.SkippedSymlinks,
+	}
+	destinations := append(append([]*migrationDestination{}, plan.Projects...), plan.Main)
+	for _, destination := range destinations {
+		rels := make([]string, 0, len(destination.Files))
+		for rel := range destination.Files {
+			rels = append(rels, rel)
+		}
+		sort.Strings(rels)
+		for _, rel := range rels {
+			file := destination.Files[rel]
+			manifest.Files = append(manifest.Files, migrationFileRecord{
+				Scope:  file.Scope,
+				Source: file.Source,
+				Target: filepath.Join(destination.Target, file.Rel),
+				Size:   file.Size,
+				SHA256: file.SHA256,
+			})
+		}
+		if destination.Scope == "project-data" {
+			manifest.ProjectDirectories = append(manifest.ProjectDirectories, migrationProjectRecord{
+				Source: filepath.Join(filepath.Dir(destination.Target), ".cc-connect"),
+				Target: destination.Target,
+				Files:  len(destination.Files),
+			})
+		}
+		if destination.ExistingNonEmpty && destination.Backup != "" {
+			manifest.Backups = append(manifest.Backups, migrationBackupRecord{
+				Target: destination.Target,
+				Backup: destination.Backup,
+			})
+		}
+	}
+	sort.Slice(manifest.Files, func(i, j int) bool {
+		if manifest.Files[i].Target == manifest.Files[j].Target {
+			return manifest.Files[i].Source < manifest.Files[j].Source
+		}
+		return manifest.Files[i].Target < manifest.Files[j].Target
+	})
+	return manifest
+}
+
+func sha256File(path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
+}
+
+func sha256Bytes(content []byte) string {
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:])
+}

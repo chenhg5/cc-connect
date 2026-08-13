@@ -16,9 +16,9 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 
-	"github.com/timmyagentic/cc-connect-next/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
@@ -1152,6 +1152,50 @@ func TestBuildRichCard_CompletedAndErrorStatesAreClean(t *testing.T) {
 				t.Fatalf("terminal rich card leaked %q: %q", forbidden, cardJSON)
 			}
 		}
+	}
+}
+
+func TestBuildRichCard_LocalizesLifecycleForEverySupportedLanguage(t *testing.T) {
+	tests := []struct {
+		name     string
+		lang     core.Language
+		thinking string
+		tool     string
+		progress string
+		privacy  string
+		done     string
+		error    string
+	}{
+		{"english", core.LangEnglish, "Thinking…", "Calling tools…", "Reasoning 1 · Tools 1", "details are private", "✅ Done", "⚠️ Not completed"},
+		{"simplified chinese", core.LangChinese, "正在思考…", "正在调用工具…", "推理 1 次 · 工具 1 次", "详情不会展示", "✅ Done", "⚠️ 未完成"},
+		{"traditional chinese", core.LangTraditionalChinese, "正在思考…", "正在呼叫工具…", "推理 1 次 · 工具 1 次", "詳情不會顯示", "✅ Done", "⚠️ 未完成"},
+		{"japanese", core.LangJapanese, "考えています…", "ツールを呼び出しています…", "推論 1 回 · ツール 1 回", "詳細は非公開", "✅ 完了", "⚠️ 未完了"},
+		{"spanish", core.LangSpanish, "Pensando…", "Usando herramientas…", "razonamientos 1 · herramientas 1", "detalles del razonamiento", "✅ Completado", "⚠️ No completado"},
+	}
+	steps := []core.ToolStep{{Kind: core.ToolStepKindThinking}, {Kind: core.ToolStepKindTool}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copy := core.NewI18n(tt.lang).RichCardCopy()
+			thinking := buildRichCardWithCopy(core.CardStatusThinking, "thinking", nil, "", true, copy)
+			tool := buildRichCardWithCopy(core.CardStatusWorking, "tool", steps, "", true, copy)
+			done := buildRichCardWithCopy(core.CardStatusDone, "done", steps, "result", false, copy)
+			failed := buildRichCardWithCopy(core.CardStatusError, "error", steps, "", false, copy)
+			for label, assertion := range map[string]struct {
+				card string
+				want string
+			}{
+				"thinking": {thinking, tt.thinking},
+				"tool":     {tool, tt.tool},
+				"progress": {tool, tt.progress},
+				"privacy":  {tool, tt.privacy},
+				"done":     {done, tt.done},
+				"error":    {failed, tt.error},
+			} {
+				if !strings.Contains(assertion.card, assertion.want) {
+					t.Fatalf("%s card missing %q: %s", label, assertion.want, assertion.card)
+				}
+			}
+		})
 	}
 }
 

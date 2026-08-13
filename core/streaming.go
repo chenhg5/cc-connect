@@ -90,6 +90,32 @@ type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
 }
 
+// RichCardCopy contains fully localized lifecycle text. Keeping this copy in
+// core ensures platform renderers never hardcode one language or need to infer
+// locale from a phase token.
+type RichCardCopy struct {
+	Thinking        string
+	CallingTools    string
+	Answering       string
+	Done            string
+	Error           string
+	CompletedBody   string
+	ErrorBody       string
+	PrivacyNotice   string
+	ProgressFormat  string
+	ThinkingSummary string
+	ToolSummary     string
+	AnswerSummary   string
+	ErrorSummary    string
+}
+
+// LocalizedRichCardSupporter is an optional extension for native rich-card
+// platforms. Engines prefer it over BuildRichCard and pass copy from the
+// active per-conversation locale.
+type LocalizedRichCardSupporter interface {
+	BuildLocalizedRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string, copy RichCardCopy) string
+}
+
 // RichCardMarkdownResolver is an optional interface for platforms that need to
 // pre-process rich-card markdown before it is rendered or streamed.
 //

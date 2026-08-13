@@ -354,6 +354,19 @@ const (
 	MsgCardNext                  MsgKey = "card_next"
 	MsgCardTitleStatus           MsgKey = "card_title_status"
 	MsgCardTitleLanguage         MsgKey = "card_title_language"
+	MsgRichCardThinking          MsgKey = "rich_card_thinking"
+	MsgRichCardCallingTools      MsgKey = "rich_card_calling_tools"
+	MsgRichCardAnswering         MsgKey = "rich_card_answering"
+	MsgRichCardDone              MsgKey = "rich_card_done"
+	MsgRichCardError             MsgKey = "rich_card_error"
+	MsgRichCardCompletedBody     MsgKey = "rich_card_completed_body"
+	MsgRichCardErrorBody         MsgKey = "rich_card_error_body"
+	MsgRichCardPrivacyNotice     MsgKey = "rich_card_privacy_notice"
+	MsgRichCardProgressFormat    MsgKey = "rich_card_progress_format"
+	MsgRichCardThinkingSummary   MsgKey = "rich_card_thinking_summary"
+	MsgRichCardToolSummary       MsgKey = "rich_card_tool_summary"
+	MsgRichCardAnswerSummary     MsgKey = "rich_card_answer_summary"
+	MsgRichCardErrorSummary      MsgKey = "rich_card_error_summary"
 	MsgCardTitleModel            MsgKey = "card_title_model"
 	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
@@ -378,31 +391,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -2540,6 +2553,58 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Language", LangChinese: "语言", LangTraditionalChinese: "語言",
 		LangJapanese: "言語", LangSpanish: "Idioma",
 	},
+	MsgRichCardThinking: {
+		LangEnglish: "Thinking…", LangChinese: "正在思考…", LangTraditionalChinese: "正在思考…",
+		LangJapanese: "考えています…", LangSpanish: "Pensando…",
+	},
+	MsgRichCardCallingTools: {
+		LangEnglish: "Calling tools…", LangChinese: "正在调用工具…", LangTraditionalChinese: "正在呼叫工具…",
+		LangJapanese: "ツールを呼び出しています…", LangSpanish: "Usando herramientas…",
+	},
+	MsgRichCardAnswering: {
+		LangEnglish: "Answering", LangChinese: "正在回答", LangTraditionalChinese: "正在回答",
+		LangJapanese: "回答中", LangSpanish: "Respondiendo",
+	},
+	MsgRichCardDone: {
+		LangEnglish: "Done", LangChinese: "Done", LangTraditionalChinese: "Done",
+		LangJapanese: "完了", LangSpanish: "Completado",
+	},
+	MsgRichCardError: {
+		LangEnglish: "Not completed", LangChinese: "未完成", LangTraditionalChinese: "未完成",
+		LangJapanese: "未完了", LangSpanish: "No completado",
+	},
+	MsgRichCardCompletedBody: {
+		LangEnglish: "Completed.", LangChinese: "已完成。", LangTraditionalChinese: "已完成。",
+		LangJapanese: "完了しました。", LangSpanish: "Completado.",
+	},
+	MsgRichCardErrorBody: {
+		LangEnglish: "This request could not be completed. Please try again.", LangChinese: "本次处理未能完成，请稍后重试。", LangTraditionalChinese: "本次處理未能完成，請稍後再試。",
+		LangJapanese: "今回の処理を完了できませんでした。しばらくしてからもう一度お試しください。", LangSpanish: "No se pudo completar esta solicitud. Inténtalo de nuevo.",
+	},
+	MsgRichCardPrivacyNotice: {
+		LangEnglish: "Reasoning and tool details are private and cannot be expanded.", LangChinese: "推理与工具详情不会展示，也无法展开。", LangTraditionalChinese: "推理與工具詳情不會顯示，也無法展開。",
+		LangJapanese: "推論とツールの詳細は非公開で、展開できません。", LangSpanish: "Los detalles del razonamiento y las herramientas son privados y no se pueden desplegar.",
+	},
+	MsgRichCardProgressFormat: {
+		LangEnglish: "**Progress**: Reasoning %d · Tools %d", LangChinese: "**进度**：推理 %d 次 · 工具 %d 次", LangTraditionalChinese: "**進度**：推理 %d 次 · 工具 %d 次",
+		LangJapanese: "**進捗**：推論 %d 回 · ツール %d 回", LangSpanish: "**Progreso**: razonamientos %d · herramientas %d",
+	},
+	MsgRichCardThinkingSummary: {
+		LangEnglish: "Thinking", LangChinese: "正在思考", LangTraditionalChinese: "正在思考",
+		LangJapanese: "考えています", LangSpanish: "Pensando",
+	},
+	MsgRichCardToolSummary: {
+		LangEnglish: "Calling tools", LangChinese: "正在调用工具", LangTraditionalChinese: "正在呼叫工具",
+		LangJapanese: "ツールを呼び出しています", LangSpanish: "Usando herramientas",
+	},
+	MsgRichCardAnswerSummary: {
+		LangEnglish: "Generating answer", LangChinese: "正在生成回答", LangTraditionalChinese: "正在產生回答",
+		LangJapanese: "回答を生成しています", LangSpanish: "Generando respuesta",
+	},
+	MsgRichCardErrorSummary: {
+		LangEnglish: "Processing failed", LangChinese: "处理失败", LangTraditionalChinese: "處理失敗",
+		LangJapanese: "処理に失敗しました", LangSpanish: "Error de procesamiento",
+	},
 	MsgCardTitleModel: {
 		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
 		LangJapanese: "モデル", LangSpanish: "Modelo",
@@ -4213,6 +4278,27 @@ func (i *I18n) T(key MsgKey) string {
 		}
 	}
 	return string(key)
+}
+
+// RichCardCopy returns the complete lifecycle vocabulary for the active
+// conversation language. Native card platforms receive this copy from the
+// engine instead of embedding user-facing strings in their renderer.
+func (i *I18n) RichCardCopy() RichCardCopy {
+	return RichCardCopy{
+		Thinking:        i.T(MsgRichCardThinking),
+		CallingTools:    i.T(MsgRichCardCallingTools),
+		Answering:       i.T(MsgRichCardAnswering),
+		Done:            i.T(MsgRichCardDone),
+		Error:           i.T(MsgRichCardError),
+		CompletedBody:   i.T(MsgRichCardCompletedBody),
+		ErrorBody:       i.T(MsgRichCardErrorBody),
+		PrivacyNotice:   i.T(MsgRichCardPrivacyNotice),
+		ProgressFormat:  i.T(MsgRichCardProgressFormat),
+		ThinkingSummary: i.T(MsgRichCardThinkingSummary),
+		ToolSummary:     i.T(MsgRichCardToolSummary),
+		AnswerSummary:   i.T(MsgRichCardAnswerSummary),
+		ErrorSummary:    i.T(MsgRichCardErrorSummary),
+	}
 }
 
 func (i *I18n) Tf(key MsgKey, args ...interface{}) string {

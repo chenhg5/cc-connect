@@ -5,21 +5,24 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/BurntSushi/toml"
 )
 
 type migrationReport struct {
-	CopiedFiles     int
-	SkippedRuntime  int
-	SkippedSymlinks int
-	DryRun          bool
+	CopiedFiles        int
+	ProjectDirectories int
+	SkippedRuntime     int
+	SkippedSymlinks    int
+	SourceDataDir      string
+	SourceWorkDir      string
+	BackupDir          string
+	Backups            []migrationBackupRecord
+	ManifestPath       string
+	DryRun             bool
 }
 
 var legacyRuntimeEntries = map[string]struct{}{
@@ -48,9 +51,11 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	target := flags.String("target", filepath.Join(home, ".cc-connect-next"), "cc-connect-next data directory")
 	force := flags.Bool("force", false, "merge into an existing target and overwrite matching files")
 	dryRun := flags.Bool("dry-run", false, "validate and report without writing files")
+	skipProjectData := flags.Bool("skip-project-data", false, "do not copy project-local .cc-connect images and attachments")
+	runtimeWorkDir := flags.String("runtime-work-dir", "", "official runtime working directory for resolving relative config paths (auto-detected)")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(flags.Output(), "Usage: cc-connect-next migrate [--source DIR] [--target DIR] [--dry-run] [--force]")
-		_, _ = fmt.Fprintln(flags.Output(), "Copies configuration and persistent state while excluding daemon, logs, locks, and sockets.")
+		_, _ = fmt.Fprintln(flags.Output(), "Usage: cc-connect-next migrate [--source DIR] [--target DIR] [--runtime-work-dir DIR] [--dry-run] [--force] [--skip-project-data]")
+		_, _ = fmt.Fprintln(flags.Output(), "Copies configuration, the effective data_dir, and project-local state while excluding daemon, logs, locks, and sockets.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -60,7 +65,15 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	report, err := migrateLegacyData(expandMigrationPath(*source, home), expandMigrationPath(*target, home), *force, *dryRun)
+	report, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source:             expandMigrationPath(*source, home),
+		Target:             expandMigrationPath(*target, home),
+		Home:               home,
+		RuntimeWorkDir:     expandMigrationPath(*runtimeWorkDir, home),
+		Force:              *force,
+		DryRun:             *dryRun,
+		IncludeProjectData: !*skipProjectData,
+	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "migrate: %v\n", err)
 		return 1
@@ -84,7 +97,18 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	if !writeOutput("Official runtime work_dir: %s. Effective data_dir: %s. Project-local directories: %d.\n", report.SourceWorkDir, report.SourceDataDir, report.ProjectDirectories) {
+		return 1
+	}
 	if !report.DryRun {
+		for _, backup := range report.Backups {
+			if !writeOutput("Previous target backup: %s -> %s\n", backup.Target, backup.Backup) {
+				return 1
+			}
+		}
+		if !writeOutput("Verification manifest: %s\n", report.ManifestPath) {
+			return 1
+		}
 		if !writeOutput("The official CC Connect installation was not modified or stopped.\n") {
 			return 1
 		}
@@ -96,125 +120,18 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 }
 
 func migrateLegacyData(source, target string, force, dryRun bool) (migrationReport, error) {
-	report := migrationReport{DryRun: dryRun}
-	source, err := filepath.Abs(filepath.Clean(source))
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return report, fmt.Errorf("resolve source: %w", err)
+		return migrationReport{DryRun: dryRun}, fmt.Errorf("resolve home directory: %w", err)
 	}
-	target, err = filepath.Abs(filepath.Clean(target))
-	if err != nil {
-		return report, fmt.Errorf("resolve target: %w", err)
-	}
-	if pathsOverlap(source, target) {
-		return report, fmt.Errorf("source and target must be separate directories")
-	}
-	info, err := os.Stat(source)
-	if err != nil {
-		return report, fmt.Errorf("read source directory: %w", err)
-	}
-	if !info.IsDir() {
-		return report, fmt.Errorf("source is not a directory: %s", source)
-	}
-	if !force {
-		nonEmpty, err := directoryHasEntries(target)
-		if err != nil {
-			return report, err
-		}
-		if nonEmpty {
-			return report, fmt.Errorf("target is not empty: %s (use --force to merge deliberately)", target)
-		}
-	}
-
-	configPath := filepath.Join(source, "config.toml")
-	configBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		return report, fmt.Errorf("read source config: %w", err)
-	}
-	var parsed map[string]any
-	if _, err := toml.Decode(string(configBytes), &parsed); err != nil {
-		return report, fmt.Errorf("source config is invalid TOML: %w", err)
-	}
-	migratedConfig := rewriteMigratedDataDir(configBytes, target)
-	parsed = nil
-	if _, err := toml.Decode(string(migratedConfig), &parsed); err != nil {
-		return report, fmt.Errorf("rewritten config is invalid TOML: %w", err)
-	}
-	report.CopiedFiles++
-
-	if !dryRun {
-		if err := os.MkdirAll(target, 0o700); err != nil {
-			return report, fmt.Errorf("create target directory: %w", err)
-		}
-		if err := os.Chmod(target, 0o700); err != nil {
-			return report, fmt.Errorf("secure target directory: %w", err)
-		}
-		if err := writeMigrationFile(filepath.Join(target, "config.toml"), migratedConfig); err != nil {
-			return report, fmt.Errorf("write migrated config: %w", err)
-		}
-	}
-
-	err = filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		parts := strings.Split(filepath.ToSlash(rel), "/")
-		if _, skip := legacyRuntimeEntries[parts[0]]; skip || strings.HasSuffix(parts[0], ".lock") {
-			if len(parts) == 1 {
-				report.SkippedRuntime++
-			}
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if rel == "config.toml" {
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			report.SkippedSymlinks++
-			return nil
-		}
-		if entry.IsDir() {
-			if !dryRun {
-				dst := filepath.Join(target, rel)
-				if err := os.MkdirAll(dst, 0o700); err != nil {
-					return err
-				}
-				if err := os.Chmod(dst, 0o700); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		entryInfo, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !entryInfo.Mode().IsRegular() {
-			report.SkippedRuntime++
-			return nil
-		}
-		report.CopiedFiles++
-		if dryRun {
-			return nil
-		}
-		dst := filepath.Join(target, rel)
-		if err := copyMigrationFile(path, dst); err != nil {
-			return fmt.Errorf("copy %s: %w", rel, err)
-		}
-		return nil
+	return migrateLegacyDataWithOptions(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               home,
+		Force:              force,
+		DryRun:             dryRun,
+		IncludeProjectData: true,
 	})
-	if err != nil {
-		return report, fmt.Errorf("copy persistent state: %w", err)
-	}
-	return report, nil
 }
 
 func directoryHasEntries(path string) (bool, error) {

@@ -2,7 +2,7 @@
 
 Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), with a native Feishu Card 2.0 response lifecycle.
 
-[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md)
+[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md)
 
 > Status: `0.1.0-beta.1` is under active development. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
@@ -53,7 +53,9 @@ cc-connect-next migrate
 cc-connect-next --config ~/.cc-connect-next/config.toml
 ```
 
-It copies `config.toml` and persistent state such as sessions, projects, cron/timer data, bindings, and local provider configuration. It rewrites `data_dir` to `~/.cc-connect-next` and excludes runtime-only paths including logs, sockets, locks, restart notifications, and daemon metadata. Existing targets are refused unless `--force` is supplied deliberately.
+The one-command migration inventories three layers before writing anything: the official configuration root, the effective `data_dir` (including a custom path), and every project-local `.cc-connect` directory discoverable from configured work directories, multi-workspace roots, project state, or workspace bindings. It therefore preserves configuration, sessions, project overrides, cron/timer and heartbeat state, bindings, local provider configuration, and staged images/attachments. External Agent stores such as Codex or Claude sessions stay in place and their existing IDs remain valid.
+
+Every source file is hashed during preflight. The complete result is built and verified in sibling staging directories, source hashes are checked again, and only then is each destination activated with an atomic rename; if a later destination fails, earlier activations are rolled back. Runtime-only logs, sockets, locks, restart notifications, and daemon metadata are excluded; source symlinks are skipped. Existing targets are refused by default. With an explicit `--force`, the previous target is preserved as a timestamped `*.pre-migration-*` backup before activation. The result includes `migration-manifest.json` with every source, destination, size, and SHA-256. Use `--skip-project-data` only when project-local images and attachments are intentionally not wanted.
 
 Custom locations are supported:
 
@@ -63,6 +65,8 @@ cc-connect-next migrate \
   --target /path/to/next-data \
   --dry-run
 ```
+
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If that metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly.
 
 ## Recommended Feishu configuration
 
@@ -86,6 +90,13 @@ type = "codex"
 [projects.agent.options]
 work_dir = "/absolute/path/to/project"
 
+[projects.references]
+normalize_agents = ["codex", "claudecode"]
+render_platforms = ["feishu"]
+display_path = "smart"
+marker_style = "emoji"
+enclosure_style = "code"
+
 [[projects.platforms]]
 type = "feishu"
 
@@ -97,6 +108,8 @@ done_emoji = "Done"
 ```
 
 Set `card_mode = "legacy"` to opt out and use the inherited CC Connect message rendering.
+
+The exact lifecycle, privacy boundary, fallback behavior, locale coverage, and executable verification commands are defined in the [Feishu answer-card contract](docs/feishu-card-contract.md).
 
 ## Coexistence and switching
 
@@ -131,7 +144,8 @@ First verify the OS/architecture and whether cc-connect is currently running.
 Do not stop, uninstall, overwrite, or edit official CC Connect.
 Use the beta package if it is published; otherwise build the current source. Then run
 `cc-connect-next migrate --dry-run`, report the plan,
-then run the real migration only after confirming the target is ~/.cc-connect-next.
+then run the real one-command migration only after confirming the target is ~/.cc-connect-next.
+Check its migration-manifest.json and report any timestamped pre-migration backups.
 Validate `cc-connect-next --version`, config permissions, independent daemon name,
 and independent API socket. Do not start both runtimes with the same Feishu app.
 ```

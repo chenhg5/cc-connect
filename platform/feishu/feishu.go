@@ -4472,14 +4472,13 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 // streamRichCardText so any sequence on any element/card is monotonic).
 func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cardID == "" {
-		h.mu.Unlock()
 		return fmt.Errorf("%s: updateCardEntity: cardID not set", p.tag())
 	}
 	h.sequence++
 	cardID := h.cardID
 	seq := h.sequence
-	h.mu.Unlock()
 
 	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s", cardID)
 	body := map[string]any{
@@ -6020,19 +6019,23 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 // token counts, context usage, and work directories are deliberately ignored:
 // only anonymous activity counts may appear before the answer starts.
 func buildRichCard(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool, _ string) string {
-	b, err := buildRichCardJSONBytes(status, phase, steps, markdown, streaming)
+	return buildRichCardWithCopy(status, phase, steps, markdown, streaming, core.NewI18n(core.LangChinese).RichCardCopy())
+}
+
+func buildRichCardWithCopy(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool, copy core.RichCardCopy) string {
+	b, err := buildRichCardJSONBytes(status, phase, steps, markdown, streaming, copy)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
 		fallback := strings.TrimSpace(markdown)
 		if fallback == "" {
-			fallback = "本次处理未能完成，请稍后重试。"
+			fallback = copy.ErrorBody
 		}
 		return buildCardJSONWithStatus(fallback, status)
 	}
 	return string(b)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool) ([]byte, error) {
+func buildRichCardJSONBytes(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool, copy core.RichCardCopy) ([]byte, error) {
 	reasoningCount := 0
 	toolCount := 0
 	for _, step := range steps {
@@ -6047,45 +6050,48 @@ func buildRichCardJSONBytes(status core.CardStatus, phase string, steps []core.T
 	answering := (status == core.CardStatusWorking || status == core.CardStatusThinking) &&
 		(phase == "answer" || strings.TrimSpace(markdown) != "")
 	headerTemplate := "blue"
-	headerTitle := "⏳ 正在思考…"
+	headerTitle := "⏳ " + copy.Thinking
 	body := strings.TrimSpace(markdown)
-	summary := "正在思考"
+	summary := copy.ThinkingSummary
 	streamingMode := false
 
 	switch status {
 	case core.CardStatusDone:
 		headerTemplate = "green"
-		headerTitle = "✅ Done"
-		summary = richCardSummary(body, "Done")
+		headerTitle = "✅ " + copy.Done
+		summary = richCardSummary(body, copy.Done)
 		if body == "" {
-			body = "已完成。"
+			body = copy.CompletedBody
 		}
 	case core.CardStatusError:
 		headerTemplate = "red"
-		headerTitle = "⚠️ 未完成"
-		summary = "处理失败"
-		body = "本次处理未能完成，请稍后重试。"
+		headerTitle = "⚠️ " + copy.Error
+		summary = copy.ErrorSummary
+		if body == "" {
+			body = copy.ErrorBody
+		}
 	case core.CardStatusThinking, core.CardStatusWorking:
 		if answering {
-			headerTitle = "✍️ 正在回答"
-			summary = "正在生成回答"
+			headerTitle = "✍️ " + copy.Answering
+			summary = copy.AnswerSummary
 			streamingMode = streaming
 			if body == "" {
 				body = " "
 			}
 		} else {
-			phaseText := "正在思考…"
+			phaseText := copy.Thinking
 			if phase == "tool" {
-				phaseText = "正在调用工具…"
-				summary = "正在调用工具"
+				phaseText = copy.CallingTools
+				summary = copy.ToolSummary
 			}
 			headerTitle = "⏳ " + phaseText
 			lines := []string{phaseText}
 			if reasoningCount > 0 || toolCount > 0 {
-				lines = append(lines, fmt.Sprintf("**进度**：推理 %d 次 · 工具 %d 次", reasoningCount, toolCount))
-				summary = fmt.Sprintf("%s · 推理 %d 次 · 工具 %d 次", strings.TrimSuffix(phaseText, "…"), reasoningCount, toolCount)
+				progress := fmt.Sprintf(copy.ProgressFormat, reasoningCount, toolCount)
+				lines = append(lines, progress)
+				summary = stripRichCardMarkdown(progress)
 			}
-			lines = append(lines, "> 🔒 推理与工具详情不会展示，也无法展开。")
+			lines = append(lines, "> 🔒 "+copy.PrivacyNotice)
 			body = strings.Join(lines, "\n\n")
 		}
 	}
@@ -6125,6 +6131,12 @@ func buildRichCardJSONBytes(status core.CardStatus, phase string, steps []core.T
 		},
 	}
 	return json.Marshal(card)
+}
+
+func stripRichCardMarkdown(text string) string {
+	text = strings.ReplaceAll(text, "**", "")
+	text = strings.ReplaceAll(text, "：", ": ")
+	return strings.TrimSpace(text)
 }
 
 func richCardPrintStep(markdown string) int {
@@ -6182,6 +6194,12 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // uses only the lifecycle phase, anonymous step kinds, and answer markdown.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
 	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+}
+
+// BuildLocalizedRichCard implements core.LocalizedRichCardSupporter. The
+// engine supplies copy for the active conversation locale.
+func (p *Platform) BuildLocalizedRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, _ string, copy core.RichCardCopy) string {
+	return buildRichCardWithCopy(status, title, steps, markdown, streaming, copy)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

@@ -4577,8 +4577,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
+	usesRichCard := func(p Platform) bool {
+		if e.display.CardMode != "rich" {
+			return false
+		}
+		_, ok := p.(RichCardSupporter)
+		return ok
+	}
 
-	if e.display.CardMode != "rich" {
+	if !usesRichCard(state.platform) {
 		if scp, ok := state.platform.(StreamingCardPlatform); ok {
 			if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 				slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
@@ -4592,8 +4599,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
+	buildRichCard := func(p Platform, supporter RichCardSupporter, status CardStatus, phase string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
+		if localized, ok := p.(LocalizedRichCardSupporter); ok {
+			return localized.BuildLocalizedRichCard(status, phase, steps, markdown, streaming, statusFooter, e.i18n.RichCardCopy())
+		}
+		return supporter.BuildRichCard(status, phase, steps, markdown, streaming, statusFooter)
+	}
 	startRichCard := func(p Platform, rctx any) any {
-		if e.display.CardMode != "rich" {
+		if !usesRichCard(p) {
 			return nil
 		}
 		supporter, ok := p.(RichCardSupporter)
@@ -4606,7 +4619,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		// Start with a real, non-empty Card 2.0 document before waiting for the
 		// first agent event. The card contains no model-generated content.
-		card := supporter.BuildRichCard(CardStatusThinking, "thinking", nil, "", true, "")
+		card := buildRichCard(p, supporter, CardStatusThinking, "thinking", nil, "", true, "")
 		handle, err := starter.SendPreviewStart(e.ctx, rctx, card)
 		if err != nil {
 			slog.Debug("rich card: failed to create immediate initial card", "platform", p.Name(), "error", err)
@@ -4614,7 +4627,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		return handle
 	}
-	markRichCardFailed := func(p Platform, handle any) bool {
+	markRichCardFailed := func(p Platform, handle any, safeBody ...string) bool {
 		if handle == nil || e.display.CardMode != "rich" {
 			return false
 		}
@@ -4626,14 +4639,52 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if !ok {
 			return false
 		}
-		// Deliberately use a generic body: raw runtime errors may contain local
-		// paths, commands, credentials, or provider internals.
-		card := supporter.BuildRichCard(CardStatusError, "error", nil, "", false, "")
+		// Deliberately omit raw runtime errors: they may contain local paths,
+		// commands, credentials, or provider internals. A partial assistant
+		// answer is safe to retain because it was already user-visible.
+		body := ""
+		if len(safeBody) > 0 {
+			body = safeBody[0]
+			if resolver, ok := p.(RichCardMarkdownResolver); ok && body != "" {
+				body = resolver.ResolveRichCardMarkdown(e.ctx, body, true)
+			}
+		}
+		card := buildRichCard(p, supporter, CardStatusError, "error", nil, body, false, "")
 		if err := updater.UpdateMessage(e.ctx, handle, card); err != nil {
 			slog.Debug("rich card: failed to update error state", "platform", p.Name(), "error", err)
 			return false
 		}
 		return true
+	}
+	visibleRichPartial := func() string {
+		body := strings.TrimSpace(partialText)
+		if body == "" || couldBeSilentPrefix(body) || isSilentReply(body) {
+			return ""
+		}
+		if stripped, ok := stripTrailingSilent(body); ok {
+			body = strings.TrimSpace(stripped)
+		}
+		return body
+	}
+	partialPersisted := false
+	persistVisibleRichPartial := func(p Platform) string {
+		if cardMessageID == nil || !usesRichCard(p) {
+			return ""
+		}
+		body := visibleRichPartial()
+		if body == "" || partialPersisted {
+			return body
+		}
+		session.AddHistory("assistant", body)
+		sessions.Save()
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventMessageSent,
+			SessionKey: sessionKey,
+			Platform:   p.Name(),
+			Content:    body,
+		})
+		partialPersisted = true
+		return body
 	}
 
 	cardMessageID = startRichCard(state.platform, state.replyCtx)
@@ -4679,7 +4730,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			markRichCardFailed(p, cardMessageID)
+			markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -4701,7 +4752,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				if !markRichCardFailed(p, cardMessageID) {
+				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) {
 					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				}
 				return
@@ -4716,7 +4767,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID) {
+			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) {
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			}
 			e.cleanupInteractiveState(sessionKey, state)
@@ -4730,7 +4781,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID) {
+			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) {
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
 					fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
 			}
@@ -4776,7 +4827,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			markRichCardFailed(p, cardMessageID)
+			markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
 			return
 		}
 
@@ -4786,7 +4837,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			markRichCardFailed(p, cardMessageID)
+			markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
 			return
 		}
 
@@ -4829,7 +4880,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return richMarkdownResolver.ResolveRichCardMarkdown(e.ctx, markdown, final)
 		}
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
-			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
+			return buildRichCard(p, richCardSupporter, status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
 
 		switch event.Type {
@@ -5139,13 +5190,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// one full-card update at the first visible answer chunk so the
 							// progress shell immediately becomes "正在回答" and the anonymous
 							// progress text disappears before typewriter streaming continues.
+							streamer, hasStreamer := p.(RichCardTextStreamer)
 							if cardMessageID != nil && !richAnswerStarted {
-								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, partialText, true, "")
+								// CardKit animates only content delivered through its element
+								// streaming endpoint. Transition the header with an empty body,
+								// then let the first element update print the entire first chunk.
+								// This preserves a visible typewriter effect even when a short
+								// answer arrives in one Agent event. Inline-card fallbacks keep
+								// the partial body in this first full-card update.
+								transitionBody := partialText
+								if hasStreamer {
+									transitionBody = ""
+								}
+								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, transitionBody, true, "")
 								if updater, ok := p.(MessageUpdater); ok {
 									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 										richAnswerStarted = true
-										lastRichCardUpdate = time.Now()
-										lastRichCardLen = len(partialText)
+										if !hasStreamer {
+											lastRichCardUpdate = time.Now()
+											lastRichCardLen = len(partialText)
+										}
 									} else {
 										slog.Debug("rich card: failed to switch to answer phase", "platform", p.Name(), "error", err)
 									}
@@ -5153,7 +5217,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 							// Throttle: cardkit-v1 streaming text path uses tighter limits (200ms / 20 chars)
 							// for smoother typewriter UX; full-card Patch fallback keeps the original 1500ms / 30 chars.
-							streamer, hasStreamer := p.(RichCardTextStreamer)
 							throttleDur := 1500 * time.Millisecond
 							throttleChars := 30
 							if hasStreamer && cardMessageID != nil {
@@ -5462,7 +5525,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyStart := time.Now()
 
 			// --- StreamingCard path ---
-			if streamCard != nil && !streamCard.Failed() {
+			if streamCard != nil && !streamCard.Failed() && !isSilent {
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Build final card content with full response
 				finalContent := buildCardContent(cardThinkingText, cardToolCalls, fullResponse)
@@ -5480,40 +5543,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
 				// preventing a stray done_emoji push.
 				sp.discard()
-				// Rich mode: cardMessageID is tracked independently of sp.previewMsgID,
-				// so sp.discard() doesn't reach it. Without explicit handling the rich
-				// card would stay frozen in "Working" / "Thinking" header state forever
-				// (no Done flip, no Patch).
-				//
-				// Determine the visible body to finalize the card with. partialText
-				// accumulates every EventText chunk this turn, so it captures any
-				// pre-NO_REPLY content the user already saw streaming (e.g. when the
-				// agent wrote "Hello\nNO_REPLY"). Strip the trailing NO_REPLY marker
-				// before rendering. If there is neither body nor tool history, the
-				// card has no answer body, keep a small Done state instead of
-				// deleting it. That preserves the immediate-feedback contract and
-				// avoids Lark's visible "message recalled" artifact.
+				// Rich mode tracks the optimistic card independently of sp. A bare
+				// NO_REPLY is an explicit no-visible-response contract, so remove the
+				// card even if speculative text or anonymous tool progress appeared.
 				if hasRichCard && cardMessageID != nil {
-					silentBody := partialText
-					if stripped, ok := stripTrailingSilent(partialText); ok {
-						silentBody = strings.TrimRight(stripped, " \t\r\n")
-					}
-					card := buildResolvedRichCard(CardStatusDone, "done", toolSteps, silentBody, false, "")
-					if updater, ok := p.(MessageUpdater); ok {
-						if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
-							slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
+					if cleaner, ok := p.(PreviewCleaner); ok {
+						if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+							slog.Debug("rich card: failed to remove silent preview", "platform", p.Name(), "error", err)
 						}
+					} else {
+						slog.Warn("rich card: platform cannot remove silent preview", "platform", p.Name())
 					}
 					cardMessageID = nil
 				}
 				slog.Info("silent reply suppressed", "session", session.ID)
 			} else if hasRichCard {
-				parts := []string{fullResponse}
-				if splitter, ok := p.(MarkdownTableSplitter); ok {
-					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
-				}
-				finalBody := resolveRichCardMarkdown(parts[0], true)
-				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "done", toolSteps, finalBody, false, "")
+				// Keep the entire answer on the one quoted lifecycle card. Feishu's
+				// renderer converts tables beyond its per-card component budget to
+				// fenced text, avoiding extra unquoted overflow cards.
+				finalBody := resolveRichCardMarkdown(fullResponse, true)
+				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. The throttle in the
@@ -5538,14 +5587,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				} else {
 					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
 						slog.Error("failed to send rich card reply", "error", err)
-						return
-					}
-				}
-				for _, overflow := range parts[1:] {
-					overflowBody := resolveRichCardMarkdown(overflow, true)
-					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "done", nil, overflowBody, false, "")
-					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
-						slog.Error("failed to send overflow rich card", "error", err)
 						return
 					}
 				}
@@ -5732,7 +5773,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardAnswerText.Reset()
 
 				// Try to create a new streaming card for the queued turn
-				if e.display.CardMode != "rich" {
+				if !usesRichCard(queued.platform) {
 					if scp, ok := queued.platform.(StreamingCardPlatform); ok {
 						if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
 							slog.Warn("streaming card creation failed for queued turn", "error", err)
@@ -5797,7 +5838,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
-			updatedRichError := hasRichCard && markRichCardFailed(p, cardMessageID)
+			updatedRichError := hasRichCard && markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
 			if event.Error != nil {
 				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
@@ -5839,62 +5880,65 @@ channelClosed:
 	state.mu.Lock()
 	closedPlatform := state.platform
 	state.mu.Unlock()
-	if markRichCardFailed(closedPlatform, cardMessageID) {
+	if len(textParts) == 0 {
+		markRichCardFailed(closedPlatform, cardMessageID)
 		return
 	}
 
-	if len(textParts) > 0 {
-		state.mu.Lock()
-		p := state.platform
-		state.mu.Unlock()
-
-		fullResponse := strings.Join(textParts, "")
-		session.AddHistory("assistant", fullResponse)
-		// Persist immediately — this path runs on abnormal channel close,
-		// so deferring the save until the next foreground turn risks losing
-		// the partial assistant response if the process exits next.
-		sessions.Save()
-
-		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
-		if isSilentReply(fullResponse) {
+	p := closedPlatform
+	fullResponse := strings.Join(textParts, "")
+	// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
+	if isSilentReply(fullResponse) {
+		sp.discard()
+		if cleaner, ok := p.(PreviewCleaner); ok && cardMessageID != nil {
+			if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+				slog.Debug("rich card: failed to remove silent preview", "platform", p.Name(), "error", err)
+			}
+		}
+		slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
+		return
+	}
+	if stripped, ok := stripTrailingSilent(fullResponse); ok {
+		if strings.TrimSpace(stripped) == "" {
 			sp.discard()
-			slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
 			return
 		}
-		if stripped, ok := stripTrailingSilent(fullResponse); ok {
-			if strings.TrimSpace(stripped) == "" {
-				sp.discard()
-				return
-			}
-			fullResponse = stripped
-		}
+		fullResponse = stripped
+	}
 
-		e.hooks.Emit(HookEvent{
-			Event:      HookEventMessageSent,
-			SessionKey: sessionKey,
-			Platform:   p.Name(),
-			Content:    fullResponse,
-		})
+	session.AddHistory("assistant", fullResponse)
+	// Persist before any rich-card or platform update. This path is an
+	// abnormal process exit and no later turn may arrive to trigger a save.
+	sessions.Save()
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventMessageSent,
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Content:    fullResponse,
+	})
 
-		if toolCount > 0 && segmentStart > 0 {
-			sp.discard()
-			if segmentStart < len(textParts) {
-				unsent := strings.Join(textParts[segmentStart:], "")
-				if unsent != "" {
-					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
-						}
+	if markRichCardFailed(p, cardMessageID, fullResponse) {
+		sp.discard()
+		return
+	}
+	if toolCount > 0 && segmentStart > 0 {
+		sp.discard()
+		if segmentStart < len(textParts) {
+			unsent := strings.Join(textParts[segmentStart:], "")
+			if unsent != "" {
+				for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						return
 					}
 				}
 			}
-		} else if sp.finish(fullResponse, "") {
-			slog.Debug("stream preview: finalized in-place (process exited)")
-		} else {
-			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-					return
-				}
+		}
+	} else if sp.finish(fullResponse, "") {
+		slog.Debug("stream preview: finalized in-place (process exited)")
+	} else {
+		for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+			if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+				return
 			}
 		}
 	}
@@ -15792,6 +15836,7 @@ func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
 
 const (
 	ccConnectInstructionMarker       = "<!-- cc-connect-next-instructions -->"
+	ccConnectInstructionEndMarker    = "<!-- /cc-connect-next-instructions -->"
 	legacyCCConnectInstructionMarker = "<!-- cc-connect-instructions -->"
 )
 
@@ -15826,21 +15871,21 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 
 	existing, _ := os.ReadFile(filePath)
 	existingText := string(existing)
-	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
-	idx := strings.Index(existingText, ccConnectInstructionMarker)
-	if legacyIdx := strings.Index(existingText, legacyCCConnectInstructionMarker); idx < 0 || (legacyIdx >= 0 && legacyIdx < idx) {
-		idx = legacyIdx
-	}
-	if idx >= 0 {
-		if strings.Contains(existingText[idx:], AgentSystemPrompt()) {
+	block := ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n" + ccConnectInstructionEndMarker
+	if start, end, current, found := locateGeneratedInstructionBlock(existingText); found {
+		if current {
 			return setupExists, baseName, nil
 		}
-		updated := strings.TrimRight(existingText[:idx], "\n") + block
+		updated := spliceGeneratedInstructionBlock(existingText, start, end, block)
 		if err := os.WriteFile(filePath, []byte(updated), 0o644); err != nil {
 			return setupError, baseName, err
 		}
 		return setupOK, baseName, nil
 	}
+	// A pre-delimiter installation may contain an unknown/customized block.
+	// Its end cannot be inferred safely, so preserve it byte-for-byte and append
+	// the current, explicitly delimited block instead of deleting user content.
+	block = "\n" + block + "\n"
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		return setupError, baseName, err
@@ -15857,6 +15902,76 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	}
 
 	return setupOK, baseName, nil
+}
+
+func locateGeneratedInstructionBlock(text string) (start, end int, current, found bool) {
+	type markerPosition struct {
+		marker string
+		index  int
+	}
+	positions := []markerPosition{
+		{marker: ccConnectInstructionMarker, index: strings.Index(text, ccConnectInstructionMarker)},
+		{marker: legacyCCConnectInstructionMarker, index: strings.Index(text, legacyCCConnectInstructionMarker)},
+	}
+	sort.Slice(positions, func(i, j int) bool {
+		if positions[i].index < 0 {
+			return false
+		}
+		if positions[j].index < 0 {
+			return true
+		}
+		return positions[i].index < positions[j].index
+	})
+
+	legacyPrompt := strings.ReplaceAll(AgentSystemPrompt(), "cc-connect-next", "cc-connect")
+	for _, position := range positions {
+		if position.index < 0 {
+			continue
+		}
+		contentStart := position.index + len(position.marker)
+		for contentStart < len(text) && (text[contentStart] == '\r' || text[contentStart] == '\n') {
+			contentStart++
+		}
+		if strings.HasPrefix(text[contentStart:], AgentSystemPrompt()) {
+			promptEnd := contentStart + len(AgentSystemPrompt())
+			endMarkerStart := promptEnd
+			for endMarkerStart < len(text) && (text[endMarkerStart] == '\r' || text[endMarkerStart] == '\n') {
+				endMarkerStart++
+			}
+			if strings.HasPrefix(text[endMarkerStart:], ccConnectInstructionEndMarker) {
+				return position.index, endMarkerStart + len(ccConnectInstructionEndMarker), true, true
+			}
+			// This is the known pre-delimiter cc-connect-next block. Its exact
+			// prompt boundary is safe to replace while retaining everything after it.
+			return position.index, promptEnd, false, true
+		}
+		if strings.HasPrefix(text[contentStart:], legacyPrompt) {
+			return position.index, contentStart + len(legacyPrompt), false, true
+		}
+		if endOffset := strings.Index(text[contentStart:], ccConnectInstructionEndMarker); endOffset >= 0 {
+			return position.index, contentStart + endOffset + len(ccConnectInstructionEndMarker), false, true
+		}
+	}
+	return 0, 0, false, false
+}
+
+func spliceGeneratedInstructionBlock(text string, start, end int, block string) string {
+	prefix := strings.TrimRight(text[:start], "\r\n")
+	suffix := text[end:]
+	result := prefix
+	if result != "" {
+		result += "\n\n"
+	}
+	result += block
+	if suffix != "" {
+		if !strings.HasPrefix(suffix, "\n") && !strings.HasPrefix(suffix, "\r") {
+			result += "\n"
+		}
+		result += suffix
+	} else {
+		result += "\n"
+	}
+	return result
 }
 
 func (e *Engine) cmdBindSetup(p Platform, msg *Message) {

@@ -1534,6 +1534,13 @@ work_dir = "/path/to/your/project"
 mode = "default"
 # model = "claude-sonnet-4-20250514"
 
+[projects.references]
+normalize_agents = ["codex", "claudecode"]
+render_platforms = ["feishu"]
+display_path = "smart"
+marker_style = "emoji"
+enclosure_style = "code"
+
 # --- Choose at least one platform below ---
 
 # Feishu / Lark (WebSocket, no public IP needed)

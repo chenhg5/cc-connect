@@ -2,7 +2,7 @@
 
 这是 [CC Connect](https://github.com/chenhg5/cc-connect) 的独立后继项目，第一阶段重点是彻底完善飞书原生 Card 2.0 的回答体验。
 
-[English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md)
+[English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md) · [回答卡片契约](docs/feishu-card-contract.md)
 
 > 当前版本：`0.1.0-beta.1`。它不是 MCP、代理、伴生插件或消息快照方案，也不要求官方 CC Connect 做任何修改；它拥有自己的仓库、命令、数据目录、daemon 和 npm 包。
 
@@ -53,7 +53,9 @@ cc-connect-next migrate
 cc-connect-next --config ~/.cc-connect-next/config.toml
 ```
 
-迁移内容包括配置、sessions、projects、cron/timer、本地 provider 配置和绑定状态；`data_dir` 会改写为 `~/.cc-connect-next`。日志、socket、锁、重启通知和 daemon 元数据不会复制。目标目录已有内容时默认拒绝，只有明确传入 `--force` 才会合并覆盖同名文件。
+这一条命令会在写入前清点三层数据：官方配置根目录、配置实际生效的 `data_dir`（包括自定义路径），以及从项目配置、多工作区根目录、项目状态和 workspace bindings 中发现的每个项目内 `.cc-connect`。因此配置、会话、项目覆盖、cron/timer/heartbeat、绑定、本地 provider 配置以及项目内暂存的图片和附件都会迁移。Codex、Claude 等 Agent 自己的外部会话库保持原位，原有 session ID 继续有效。
+
+迁移会先为每个源文件计算 SHA-256，在同级 staging 目录构建并校验完整结果，再次确认源文件没有变化后，才以原子 rename 逐个启用目标；如果后续目标启用失败，已经启用的目标会回滚。日志、socket、锁、重启通知和 daemon 元数据不会复制，源符号链接会跳过。目标已有内容时默认拒绝；显式使用 `--force` 时，旧目标会先完整保留为带时间戳的 `*.pre-migration-*` 备份。最终生成 `migration-manifest.json`，逐项记录源、目标、大小和 SHA-256。只有明确不需要项目内图片和附件时才使用 `--skip-project-data`。
 
 自定义路径：
 
@@ -63,6 +65,8 @@ cc-connect-next migrate \
   --target /path/to/next-data \
   --dry-run
 ```
+
+相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。若该元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`。
 
 ## 推荐飞书配置
 
@@ -86,6 +90,13 @@ type = "codex"
 [projects.agent.options]
 work_dir = "/absolute/path/to/project"
 
+[projects.references]
+normalize_agents = ["codex", "claudecode"]
+render_platforms = ["feishu"]
+display_path = "smart"
+marker_style = "emoji"
+enclosure_style = "code"
+
 [[projects.platforms]]
 type = "feishu"
 
@@ -97,6 +108,8 @@ done_emoji = "Done"
 ```
 
 需要恢复继承自上游的旧消息展示时，可以显式设置 `card_mode = "legacy"`。
+
+完整的状态转换、隐私边界、降级规则、多语言覆盖和可执行验收命令见[飞书回答卡片契约](docs/feishu-card-contract.md)。
 
 ## 与官方版本并存
 
@@ -127,7 +140,8 @@ cc-connect daemon start
 不要停止、卸载、覆盖或修改官方 CC Connect。
 Beta 已发布时使用 npm 包，否则从当前源码构建。先执行
 `cc-connect-next migrate --dry-run`，确认目标目录确实是
-~/.cc-connect-next，再执行真实迁移。验证版本、配置文件权限、独立 daemon 名称
+~/.cc-connect-next，再执行真实的一键迁移；检查 migration-manifest.json，并报告所有
+带时间戳的迁移前备份。验证版本、配置文件权限、独立 daemon 名称
 和独立 API socket。不要让两个运行时同时连接同一个飞书应用。
 ```
 

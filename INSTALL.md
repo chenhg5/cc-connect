@@ -92,7 +92,9 @@ source: ~/.cc-connect
 target: ~/.cc-connect-next
 ```
 
-The command validates TOML, rewrites the top-level `data_dir`, and copies persistent configuration and state. It excludes logs, sockets, locks, restart notifications, and daemon metadata. It does not stop or modify official CC Connect. A non-empty target is rejected unless `--force` is explicitly supplied.
+The command inventories the configuration root, the effective `data_dir` (including a custom location), and project-local `.cc-connect` directories referenced by configured work directories, multi-workspace roots, project state, or workspace bindings. It copies persistent configuration, sessions, project overrides, cron/timer/heartbeat state, bindings, local provider configuration, and project-local images/attachments. Agent-native stores such as Codex and Claude sessions remain in their original locations, so their existing IDs stay valid.
+
+Before activation it hashes every source, builds the complete result in sibling staging directories, verifies the staged files, and checks the sources again. It activates each destination with an atomic rename and rolls back earlier activations if a later one fails, then writes `migration-manifest.json` with source, target, size, and SHA-256 records. Logs, sockets, locks, restart notifications, daemon metadata, and source symlinks are excluded. A non-empty target is rejected unless `--force` is explicit; with `--force`, the previous target is first preserved as a timestamped `*.pre-migration-*` backup. Use `--skip-project-data` only to deliberately omit project-local images and attachments. The official installation is never stopped or modified.
 
 For custom locations:
 
@@ -102,6 +104,8 @@ cc-connect-next migrate \
   --target /absolute/path/to/next-data \
   --dry-run
 ```
+
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If that metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`.
 
 ## 4. Configure native Feishu cards
 
@@ -125,6 +129,13 @@ type = "codex"
 [projects.agent.options]
 work_dir = "/absolute/path/to/project"
 
+[projects.references]
+normalize_agents = ["codex", "claudecode"]
+render_platforms = ["feishu"]
+display_path = "smart"
+marker_style = "emoji"
+enclosure_style = "code"
+
 [[projects.platforms]]
 type = "feishu"
 
@@ -136,6 +147,8 @@ done_emoji = "Done"
 ```
 
 The card appears immediately, shows only anonymous reasoning/tool counts, streams the answer in the same quoted card, and ends as `✅ Done` or a generic `⚠️ 未完成`. Reasoning, tool details, model/token/context metadata, working directories, and reply footers are omitted from the card payload.
+
+See the [Feishu answer-card contract](docs/feishu-card-contract.md) for the exact lifecycle, privacy boundary, fallback behavior, locale coverage, and executable verification commands.
 
 Set `card_mode = "legacy"` only when intentionally opting back into inherited CC Connect rendering.
 
@@ -189,6 +202,7 @@ An installing agent should report each item separately:
 - target OS and architecture;
 - `~/.cc-connect-next` and config permission checks;
 - dry-run migration result and whether a real migration was authorized;
+- migration manifest path and every timestamped pre-migration backup;
 - confirmation that official files and services were not modified during install/migration;
 - independent command, data directory, service, and API socket names;
 - whether live Feishu validation used a separate app;
