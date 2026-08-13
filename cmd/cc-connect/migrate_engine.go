@@ -108,10 +108,32 @@ type migrationDestination struct {
 	Files            map[string]plannedMigrationFile
 	PreserveAccess   bool
 	Access           map[string]migrationAccessMetadata
+	TargetSnapshot   *migrationTargetSnapshot
 	Stage            string
 	Backup           string
 	Existed          bool
 	ExistingNonEmpty bool
+}
+
+type migrationTargetSnapshot struct {
+	Exists  bool
+	Entries map[string]migrationTargetSnapshotEntry
+}
+
+type migrationTargetSnapshotEntry struct {
+	Kind     string
+	Mode     fs.FileMode
+	Size     int64
+	SHA256   string
+	Link     string
+	UID      int
+	GID      int
+	HasOwner bool
+}
+
+type migrationHooks struct {
+	BeforePromotion   func()
+	AfterTargetRename func(target, backup string)
 }
 
 type preparedMigration struct {
@@ -125,6 +147,10 @@ type preparedMigration struct {
 }
 
 func migrateLegacyDataWithOptions(opts migrationOptions) (migrationReport, error) {
+	return migrateLegacyDataWithHooks(opts, migrationHooks{})
+}
+
+func migrateLegacyDataWithHooks(opts migrationOptions, hooks migrationHooks) (migrationReport, error) {
 	plan, err := prepareLegacyMigration(opts)
 	if err != nil {
 		return migrationReport{DryRun: opts.DryRun}, err
@@ -170,10 +196,17 @@ func migrateLegacyDataWithOptions(opts migrationOptions) (migrationReport, error
 		cleanupMigrationStages(destinations)
 		return plan.Report, err
 	}
+	if hooks.BeforePromotion != nil {
+		hooks.BeforePromotion()
+	}
+	if err := verifyMigrationTargetsUnchanged(destinations); err != nil {
+		cleanupMigrationStages(destinations)
+		return plan.Report, err
+	}
 
 	promoted := make([]*migrationDestination, 0, len(destinations))
 	for _, destination := range destinations {
-		if err := promoteMigrationDestination(destination); err != nil {
+		if err := promoteMigrationDestination(destination, hooks); err != nil {
 			rollbackPromotedDestinations(promoted)
 			cleanupMigrationStages(destinations)
 			return plan.Report, fmt.Errorf("activate target %s: %w", destination.Target, err)
@@ -902,6 +935,17 @@ func prepareMigrationStage(destination *migrationDestination) error {
 		return err
 	}
 	destination.Stage = stage
+	targetSnapshot, err := snapshotMigrationTarget(destination.Target)
+	if err != nil {
+		return fmt.Errorf("snapshot existing target: %w", err)
+	}
+	if targetSnapshot.Exists != destination.Existed {
+		return fmt.Errorf("target changed during migration: %s; refusing stale promotion", destination.Target)
+	}
+	if targetSnapshot.Exists && (len(targetSnapshot.Entries) > 1) != destination.ExistingNonEmpty {
+		return fmt.Errorf("target changed during migration: %s; refusing stale promotion", destination.Target)
+	}
+	destination.TargetSnapshot = targetSnapshot
 	access := make(map[string]migrationAccessMetadata)
 	if destination.PreserveAccess && destination.Existed {
 		existingAccess, err := collectMigrationAccess(destination.Target)
@@ -920,6 +964,9 @@ func prepareMigrationStage(destination *migrationDestination) error {
 
 	if destination.Existed {
 		if err := copyExistingMigrationTarget(destination.Target, stage); err != nil {
+			return err
+		}
+		if err := verifyMigrationTargetUnchanged(destination); err != nil {
 			return err
 		}
 	}
@@ -1027,6 +1074,116 @@ func sameSkippedProjects(a, b []migrationSkippedProjectRecord) bool {
 		}
 	}
 	return true
+}
+
+func snapshotMigrationTarget(root string) (*migrationTargetSnapshot, error) {
+	rootInfo, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return &migrationTargetSnapshot{Entries: make(map[string]migrationTargetSnapshotEntry)}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("target must not be a symbolic link: %s", root)
+	}
+	if !rootInfo.IsDir() {
+		return nil, fmt.Errorf("target must be a directory: %s", root)
+	}
+
+	snapshot := &migrationTargetSnapshot{
+		Exists:  true,
+		Entries: make(map[string]migrationTargetSnapshotEntry),
+	}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.Clean(rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			snapshot.Entries[rel] = migrationTargetSnapshotEntry{Kind: "symlink", Link: link}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		kind := "directory"
+		if !info.IsDir() {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("existing target contains unsupported runtime entry %s; stop cc-connect-next before --force", path)
+			}
+			kind = "file"
+		}
+		uid, gid, hasOwner := migrationOwnership(info)
+		record := migrationTargetSnapshotEntry{
+			Kind:     kind,
+			Mode:     info.Mode().Perm(),
+			Size:     info.Size(),
+			UID:      uid,
+			GID:      gid,
+			HasOwner: hasOwner,
+		}
+		if kind == "file" {
+			record.SHA256, record.Size, err = sha256File(path)
+			if err != nil {
+				return err
+			}
+		}
+		snapshot.Entries[rel] = record
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func migrationTargetSnapshotsEqual(before, after *migrationTargetSnapshot) bool {
+	if before == nil || after == nil || before.Exists != after.Exists || len(before.Entries) != len(after.Entries) {
+		return false
+	}
+	for rel, beforeEntry := range before.Entries {
+		if afterEntry, ok := after.Entries[rel]; !ok || afterEntry != beforeEntry {
+			return false
+		}
+	}
+	return true
+}
+
+func verifyMigrationTargetUnchanged(destination *migrationDestination) error {
+	return verifyMigrationTargetSnapshotAt(destination, destination.Target)
+}
+
+func verifyMigrationTargetSnapshotAt(destination *migrationDestination, path string) error {
+	if destination.TargetSnapshot == nil {
+		return fmt.Errorf("target snapshot is missing for %s", destination.Target)
+	}
+	current, err := snapshotMigrationTarget(path)
+	if err != nil {
+		return fmt.Errorf("re-scan target %s: %w", path, err)
+	}
+	if !migrationTargetSnapshotsEqual(destination.TargetSnapshot, current) {
+		return fmt.Errorf("target changed during migration: %s; refusing stale promotion", destination.Target)
+	}
+	return nil
+}
+
+func verifyMigrationTargetsUnchanged(destinations []*migrationDestination) error {
+	for _, destination := range destinations {
+		if err := verifyMigrationTargetUnchanged(destination); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func collectMigrationAccess(root string) (map[string]migrationAccessMetadata, error) {
@@ -1298,9 +1455,28 @@ func availableMigrationBackupPath(target string, createdAt time.Time, index int)
 	}
 }
 
-func promoteMigrationDestination(destination *migrationDestination) error {
+func promoteMigrationDestination(destination *migrationDestination, hooks migrationHooks) error {
+	// Revalidate immediately before the rename as well as before the promotion
+	// loop. This narrows the final write window for later project destinations;
+	// any detected target activity aborts instead of activating a stale merge.
+	if err := verifyMigrationTargetUnchanged(destination); err != nil {
+		return err
+	}
 	if destination.Existed {
 		if err := os.Rename(destination.Target, destination.Backup); err != nil {
+			return err
+		}
+		if hooks.AfterTargetRename != nil {
+			hooks.AfterTargetRename(destination.Target, destination.Backup)
+		}
+		// The rename closes the final path-based TOCTOU window: compare the
+		// frozen old tree at its backup path before activating the stage. If an
+		// already-open writer changed it at the boundary, put that newer tree
+		// back and abort instead of hiding it behind a stale migration.
+		if err := verifyMigrationTargetSnapshotAt(destination, destination.Backup); err != nil {
+			if restoreErr := os.Rename(destination.Backup, destination.Target); restoreErr != nil {
+				return fmt.Errorf("%w; restore changed target from %s: %v", err, destination.Backup, restoreErr)
+			}
 			return err
 		}
 	}

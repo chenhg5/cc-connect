@@ -914,6 +914,167 @@ func TestMigrateLegacyDataForceCreatesRecoverableBackup(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyDataRejectsTargetChangesBeforePromotion(t *testing.T) {
+	tests := []struct {
+		name          string
+		force         bool
+		prepareTarget func(*testing.T, string)
+		mutateTarget  func(*testing.T, string)
+		assertTarget  func(*testing.T, string)
+	}{
+		{
+			name:  "force target receives a newer session write",
+			force: true,
+			prepareTarget: func(t *testing.T, target string) {
+				writeMigrationFixture(t, filepath.Join(target, "sessions", "demo.json"), "old-target-session")
+			},
+			mutateTarget: func(t *testing.T, target string) {
+				writeMigrationFixture(t, filepath.Join(target, "sessions", "demo.json"), "concurrent-target-session")
+				writeMigrationFixture(t, filepath.Join(target, "sessions", "created-concurrently.json"), "concurrent")
+			},
+			assertTarget: func(t *testing.T, target string) {
+				if got, err := os.ReadFile(filepath.Join(target, "sessions", "demo.json")); err != nil || string(got) != "concurrent-target-session" {
+					t.Fatalf("concurrent target state was not preserved: content=%q err=%v", got, err)
+				}
+				if got, err := os.ReadFile(filepath.Join(target, "sessions", "created-concurrently.json")); err != nil || string(got) != "concurrent" {
+					t.Fatalf("concurrently created target state was not preserved: content=%q err=%v", got, err)
+				}
+			},
+		},
+		{
+			name:  "previously absent target appears",
+			force: false,
+			prepareTarget: func(*testing.T, string) {
+			},
+			mutateTarget: func(t *testing.T, target string) {
+				writeMigrationFixture(t, filepath.Join(target, "claimed-by-another-process.txt"), "do-not-overwrite")
+			},
+			assertTarget: func(t *testing.T, target string) {
+				if got, err := os.ReadFile(filepath.Join(target, "claimed-by-another-process.txt")); err != nil || string(got) != "do-not-overwrite" {
+					t.Fatalf("new target was overwritten: content=%q err=%v", got, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+			writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), "legacy-session")
+			tt.prepareTarget(t, target)
+
+			_, err := migrateLegacyDataWithHooks(migrationOptions{
+				Source:             source,
+				Target:             target,
+				Home:               root,
+				Force:              tt.force,
+				IncludeProjectData: true,
+			}, migrationHooks{BeforePromotion: func() { tt.mutateTarget(t, target) }})
+			if err == nil || !strings.Contains(err.Error(), "target changed during migration") {
+				t.Fatalf("migrateLegacyDataWithHooks() error = %v, want target-change refusal", err)
+			}
+			tt.assertTarget(t, target)
+			if _, err := os.Stat(filepath.Join(target, "config.toml")); !os.IsNotExist(err) {
+				t.Fatalf("staged migration was activated despite target drift, err=%v", err)
+			}
+			stages, err := filepath.Glob(filepath.Join(root, ".cc-connect-next.migrate-*"))
+			if err != nil {
+				t.Fatalf("glob migration stages: %v", err)
+			}
+			if len(stages) != 0 {
+				t.Fatalf("target drift left staging directories behind: %v", stages)
+			}
+			backups, err := filepath.Glob(target + ".pre-migration-*")
+			if err != nil {
+				t.Fatalf("glob migration backups: %v", err)
+			}
+			if len(backups) != 0 {
+				t.Fatalf("target drift moved the live target into a backup: %v", backups)
+			}
+		})
+	}
+}
+
+func TestPrepareMigrationStageRejectsEmptyTargetThatBecameNonEmpty(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("create empty target: %v", err)
+	}
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		IncludeProjectData: true,
+	})
+	if err != nil {
+		t.Fatalf("prepare migration: %v", err)
+	}
+	writeMigrationFixture(t, filepath.Join(target, "claimed-concurrently.txt"), "do-not-merge-without-force")
+
+	if err := prepareMigrationStage(plan.Main); err == nil || !strings.Contains(err.Error(), "target changed during migration") {
+		t.Fatalf("prepareMigrationStage() error = %v, want target-change refusal", err)
+	}
+	cleanupMigrationStages([]*migrationDestination{plan.Main})
+	if got, err := os.ReadFile(filepath.Join(target, "claimed-concurrently.txt")); err != nil || string(got) != "do-not-merge-without-force" {
+		t.Fatalf("concurrently claimed target was modified: content=%q err=%v", got, err)
+	}
+}
+
+func TestMigrateLegacyDataRestoresTargetChangedAtRenameBoundary(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), "legacy-session")
+	writeMigrationFixture(t, filepath.Join(target, "sessions", "demo.json"), "old-target-session")
+
+	_, err := migrateLegacyDataWithHooks(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		Force:              true,
+		IncludeProjectData: true,
+	}, migrationHooks{AfterTargetRename: func(_ string, backup string) {
+		// Simulate an already-open target writer completing at the rename
+		// boundary. On Unix that file descriptor now points into the backup.
+		writeMigrationFixture(t, filepath.Join(backup, "sessions", "demo.json"), "rename-boundary-session")
+		writeMigrationFixture(t, filepath.Join(backup, "sessions", "created-at-boundary.json"), "boundary")
+	}})
+	if err == nil || !strings.Contains(err.Error(), "target changed during migration") {
+		t.Fatalf("migrateLegacyDataWithHooks() error = %v, want rename-boundary refusal", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "sessions", "demo.json")); err != nil || string(got) != "rename-boundary-session" {
+		t.Fatalf("rename-boundary target state was not restored: content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "sessions", "created-at-boundary.json")); err != nil || string(got) != "boundary" {
+		t.Fatalf("rename-boundary target addition was not restored: content=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("staged migration was activated despite rename-boundary drift, err=%v", err)
+	}
+	stages, err := filepath.Glob(filepath.Join(root, ".cc-connect-next.migrate-*"))
+	if err != nil {
+		t.Fatalf("glob migration stages: %v", err)
+	}
+	if len(stages) != 0 {
+		t.Fatalf("rename-boundary drift left staging directories behind: %v", stages)
+	}
+	backups, err := filepath.Glob(target + ".pre-migration-*")
+	if err != nil {
+		t.Fatalf("glob migration backups: %v", err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("rename-boundary drift did not restore the target in place: %v", backups)
+	}
+}
+
 func TestPrepareLegacyMigrationRejectsOverlappingDestinations(t *testing.T) {
 	tests := []struct {
 		name       string
