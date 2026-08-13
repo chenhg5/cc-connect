@@ -5469,8 +5469,33 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
-			<-pending.Resolved
-			slog.Info("permission resolved", "request_id", event.RequestID)
+			permissionInterrupted := false
+			select {
+			case <-pending.Resolved:
+				slog.Info("permission resolved", "request_id", event.RequestID)
+			case <-stopCh:
+				permissionInterrupted = true
+			case <-e.ctx.Done():
+				permissionInterrupted = true
+			}
+			if permissionInterrupted {
+				// Remove only this request: a concurrent callback may already have
+				// cleared it. Resolve the channel as well so any other waiter cannot
+				// outlive the stopped turn.
+				state.mu.Lock()
+				if state.pending == pending {
+					state.pending = nil
+				}
+				state.eventsNeedResync = true
+				p := state.platform
+				state.mu.Unlock()
+				pending.resolve()
+				sp.discard()
+				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+					removeRichCardForFallback(p, cardMessageID)
+				}
+				return
+			}
 
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {

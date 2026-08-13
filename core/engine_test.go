@@ -2164,6 +2164,83 @@ func TestEngine_StopFinalizesActiveRichCardBeforeCancelingPlatform(t *testing.T)
 	}
 }
 
+func TestEngine_StopInterruptsPermissionWaitBeforeFinalizingRichCard(t *testing.T) {
+	p := &shutdownAwareRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	sessionKey := "feishu:user-shutdown-permission"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-shutdown-permission")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-shutdown-permission",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	turnDone := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-shutdown-permission", time.Now(), nil, nil, state.replyCtx)
+		close(turnDone)
+	}()
+	agentSession.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-shutdown-permission",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/private",
+		ToolInputRaw: map[string]any{"path": "/tmp/private"},
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not enter the permission wait")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	stopStarted := time.Now()
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(stopStarted); elapsed >= time.Second {
+		t.Fatalf("Stop waited for the shutdown timeout while permission was pending: %v", elapsed)
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("permission-waiting turn did not exit during shutdown")
+	}
+
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	if pending != nil {
+		t.Fatal("shutdown left a stale pending permission")
+	}
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("permission-waiting rich card did not reach a terminal state: %v", updates)
+	}
+	contextErrs, updatedAfterStop := p.lifecycleSnapshot()
+	if len(contextErrs) == 0 || contextErrs[len(contextErrs)-1] != nil {
+		t.Fatalf("terminal card update used a canceled context: %v", contextErrs)
+	}
+	if updatedAfterStop[len(updatedAfterStop)-1] {
+		t.Fatal("terminal card update ran after platform Stop")
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardErrorRetainsVisiblePartialAnswer(t *testing.T) {
 	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
