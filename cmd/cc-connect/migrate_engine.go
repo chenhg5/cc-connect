@@ -256,7 +256,12 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 			if err != nil {
 				return nil, fmt.Errorf("resolve project-local target: %w", err)
 			}
-			if projectSource == source && projectTarget == target {
+			// A configured work_dir may be the home/runtime root, making its
+			// apparent project-local .cc-connect the global config or effective
+			// data directory. De-duplicate by source identity regardless of the
+			// custom migration target; otherwise runtime files can enter the
+			// project inventory and an unrequested sibling target can be created.
+			if projectSource == source || projectSource == dataDir {
 				continue
 			}
 			if pathsOverlap(projectSource, projectTarget) || pathsOverlap(projectSource, target) || pathsOverlap(dataDir, projectTarget) {

@@ -4687,6 +4687,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return body
 	}
 
+	// Product contract: accepted Feishu turns show a non-empty card before the
+	// first Agent event, including during a long provider/tool startup. A future
+	// terminal NO_REPLY cannot be known at this point. We therefore recall the
+	// optimistic card on that exceptional outcome instead of deferring every
+	// normal turn and reintroducing the user-visible blank wait. Feishu clients
+	// may display their own recall notice; docs make this tradeoff explicit.
 	cardMessageID = startRichCard(state.platform, state.replyCtx)
 
 	// Send instant confirmation reply if enabled and no streaming card is active.

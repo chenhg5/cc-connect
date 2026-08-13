@@ -292,6 +292,43 @@ work_dir = "`+filepath.ToSlash(workDir)+`"
 	}
 }
 
+func TestPrepareLegacyMigrationDoesNotTreatGlobalStateAsProjectDataWithCustomTarget(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, "custom-next-target")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(source)+`"
+
+[[projects]]
+name = "home"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(root)+`"
+`)
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{"session":"kept"}`)
+	writeMigrationFixture(t, filepath.Join(source, "run", "api.sock"), "runtime-must-stay-excluded")
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		DryRun:             true,
+		IncludeProjectData: true,
+	})
+	if err != nil {
+		t.Fatalf("prepareLegacyMigration() error = %v", err)
+	}
+	if len(plan.Projects) != 0 || plan.Report.ProjectDirectories != 0 {
+		t.Fatalf("global source was duplicated as project-local data: projects=%d report=%+v", len(plan.Projects), plan.Report)
+	}
+	if _, ok := plan.Main.Files[filepath.ToSlash(filepath.Join("run", "api.sock"))]; ok {
+		t.Fatal("runtime socket entered the main migration inventory")
+	}
+	if got, want := plan.Report.CopiedFiles, 2; got != want {
+		t.Fatalf("copied files = %d, want %d unique persistent files", got, want)
+	}
+}
+
 func TestMigrateLegacyDataResolvesRelativePathsFromOfficialRuntimeWorkDir(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

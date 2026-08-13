@@ -15,9 +15,11 @@ Every accepted interactive turn gets its own Card 2.0 message. The card is creat
 | Completed | Localized Done status | Final answer only |
 | Failed before an answer | Localized generic failure | No runtime error details |
 | Failed after partial answer | Localized failure | The already-visible safe partial answer |
-| Bare `NO_REPLY` | The optimistic card is deleted | Nothing |
+| Bare `NO_REPLY` | The optimistic card is recalled; no answer or Done state remains | No answer body; Feishu may show its own recall notice |
 
 The initial card is non-empty and is sent before waiting for reasoning, tools, or answer text. A queued turn uses its own stored reply context, so it never quotes an earlier question by accident.
+
+Immediate feedback is intentionally higher priority than retroactive invisibility. The runtime cannot know before the first Agent event that a turn will eventually end as `NO_REPLY`; deferring all cards until that decision would restore the long blank wait this card contract is designed to remove. cc-connect-next therefore recalls the optimistic card for `NO_REPLY`. No answer or completion reaction remains, but the Feishu client may render a recall notice.
 
 ## Streaming and fallback
 
@@ -50,4 +52,4 @@ go test ./core -run 'TestProcessInteractiveEvents_RichCard|TestProcessInteractiv
 go test ./core -run TestCUJ -count=1
 ```
 
-These tests cover payload privacy, all supported locales, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, and silent `NO_REPLY`. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.
+These tests cover payload privacy, all supported locales, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.

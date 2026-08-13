@@ -1923,7 +1923,7 @@ func TestProcessInteractiveEvents_RichCardCountsToolWithoutRetainingDetails(t *t
 // stubRichCardSilentPlatform implements the full set of rich-card optional
 // interfaces (RichCardSupporter, PreviewStarter, MessageUpdater,
 // RichCardTextStreamer, PreviewCleaner) and tracks every call so tests can
-// assert that NO_REPLY in rich card mode leaves zero footprint.
+// assert that NO_REPLY leaves no lasting answer card.
 type stubRichCardSilentPlatform struct {
 	stubPlatformEngine
 	mu            sync.Mutex
