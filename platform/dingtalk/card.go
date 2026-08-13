@@ -10,10 +10,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
+)
+
+const (
+	lastMsgProcessingZH = "处理中…"
+	lastMsgProcessingEN = "Thinking…"
+	lastMsgMaxRunes     = 80
 )
 
 // aiCard implements core.StreamingCard for DingTalk AI Card streaming.
@@ -22,6 +30,7 @@ type aiCard struct {
 	outTrackId     string
 	templateKey    string // 卡片模板变量名，默认 "content"
 	platform       *Platform
+	isGroup        bool
 
 	mu              sync.Mutex
 	state           string // "processing" | "finished" | "failed"
@@ -75,10 +84,22 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 		openSpaceId = fmt.Sprintf("dtv1.card//IM_ROBOT.%s", rc.senderStaffId)
 	}
 
-	// Build card data
+	// Build card data. Session-list preview uses lastMessageI18n (space model)
+	// and/or sys_lastMessageI18n (cardParamMap). Without these DingTalk shows
+	// the fixed placeholder "[交互卡片消息]". See #1591.
+	processingLastMsg := processingLastMessageI18n()
+	sysLastMsg, _ := json.Marshal(map[string]string{
+		"zh_CN": lastMsgProcessingZH,
+		"en_US": lastMsgProcessingEN,
+	})
 	cardParamMap := map[string]string{
-		"config":          `{"autoLayout":true,"enableForward":true}`,
-		p.cardTemplateKey: "",
+		"config":             `{"autoLayout":true,"enableForward":true}`,
+		p.cardTemplateKey:    "",
+		"sys_lastMessageI18n": string(sysLastMsg),
+	}
+	spaceModel := map[string]any{
+		"supportForward":  true,
+		"lastMessageI18n": processingLastMsg,
 	}
 
 	payload := map[string]any{
@@ -88,8 +109,8 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 			"cardParamMap": cardParamMap,
 		},
 		"callbackType":          "STREAM",
-		"imGroupOpenSpaceModel": map[string]any{"supportForward": true},
-		"imRobotOpenSpaceModel": map[string]any{"supportForward": true},
+		"imGroupOpenSpaceModel": spaceModel,
+		"imRobotOpenSpaceModel": spaceModel,
 		"openSpaceId":           openSpaceId,
 		"userIdType":            1,
 	}
@@ -209,12 +230,120 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 		outTrackId:     resolvedOutTrackId,
 		templateKey:    p.cardTemplateKey,
 		platform:       p,
+		isGroup:        isGroup,
 		state:          "processing",
 		throttleMs:     p.cardThrottleMs,
 		done:           make(chan struct{}),
 	}
 
 	return card, nil
+}
+
+func processingLastMessageI18n() map[string]string {
+	return map[string]string{
+		"ZH_CN": lastMsgProcessingZH,
+		"EN_US": lastMsgProcessingEN,
+	}
+}
+
+// truncateLastMessage collapses whitespace and truncates for session-list preview.
+func truncateLastMessage(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return lastMsgProcessingZH
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if utf8.RuneCountInString(s) <= lastMsgMaxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:lastMsgMaxRunes]) + "…"
+}
+
+// updateLastMessagePreview refreshes the conversation-list preview after
+// Finalize. Streaming cannot set this field. Create may set both space-model
+// lastMessageI18n and cardParamMap.sys_lastMessageI18n; DingTalk can keep
+// showing the create-time sys_ value unless both are updated.
+func (c *aiCard) updateLastMessagePreview(ctx context.Context, text string) error {
+	token, err := c.platform.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+
+	preview := truncateLastMessage(text)
+	lastMsg := map[string]string{
+		"ZH_CN": preview,
+		"EN_US": preview,
+	}
+	space := map[string]any{
+		"supportForward":  true,
+		"lastMessageI18n": lastMsg,
+	}
+	// Match createAndDeliver: set both space models so DM/group clients
+	// that read either field both pick up the final preview.
+	spacesPayload := map[string]any{
+		"outTrackId":            c.outTrackId,
+		"imGroupOpenSpaceModel": space,
+		"imRobotOpenSpaceModel": space,
+	}
+	if err := c.putJSON(ctx, token, "https://api.dingtalk.com/v1.0/card/instances/spaces", spacesPayload); err != nil {
+		return fmt.Errorf("spaces: %w", err)
+	}
+
+	sysLastMsg, _ := json.Marshal(map[string]string{
+		"zh_CN": preview,
+		"en_US": preview,
+	})
+	cardPayload := map[string]any{
+		"outTrackId": c.outTrackId,
+		"cardData": map[string]any{
+			"cardParamMap": map[string]string{
+				"sys_lastMessageI18n": string(sysLastMsg),
+			},
+		},
+		"cardUpdateOptions": map[string]any{
+			"updateCardDataByKey": true,
+		},
+	}
+	if err := c.putJSON(ctx, token, "https://api.dingtalk.com/v1.0/card/instances", cardPayload); err != nil {
+		return fmt.Errorf("card instances: %w", err)
+	}
+
+	slog.Info("dingtalk: AI card lastMessageI18n updated",
+		"outTrackId", c.outTrackId,
+		"preview", preview,
+		"preview_len", utf8.RuneCountInString(preview),
+		"isGroup", c.isGroup)
+	return nil
+}
+
+func (c *aiCard) putJSON(ctx context.Context, token, url string, payload map[string]any) error {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+
+	resp, err := c.platform.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // Update replaces the card content with the given markdown.
@@ -429,7 +558,16 @@ func (c *aiCard) Finalize(ctx context.Context, content string) error {
 	}
 	c.mu.Unlock()
 
-	return err
+	if err != nil {
+		return err
+	}
+	// Best-effort: refresh session-list preview with the final reply snippet.
+	if updateErr := c.updateLastMessagePreview(ctx, content); updateErr != nil {
+		slog.Warn("dingtalk: AI card lastMessageI18n update failed",
+			"error", updateErr,
+			"outTrackId", c.outTrackId)
+	}
+	return nil
 }
 
 // Failed returns true if the card has entered a failed state.

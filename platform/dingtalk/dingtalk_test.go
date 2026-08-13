@@ -1255,6 +1255,58 @@ func TestExtractAtUserIds(t *testing.T) {
 	}
 }
 
+func TestMarkdownTitle(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty falls back", in: "  ", want: "reply"},
+		{name: "plain chinese kept", in: "你好，需要我帮你做什么？", want: "你好，需要我帮你做什么？"},
+		{name: "strip bold markers", in: "**你好**，世界", want: "你好，世界"},
+		{name: "collapse whitespace", in: "hello\n\n  world", want: "hello world"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := markdownTitle(tt.in); got != tt.want {
+				t.Fatalf("markdownTitle() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReply_UsesContentAsMarkdownTitle(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	if err := p.Reply(context.Background(), rc, "你好，需要我帮你做什么？"); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		md, ok := payload["markdown"].(map[string]any)
+		if !ok {
+			t.Fatalf("markdown missing: %#v", payload)
+		}
+		if md["title"] != "你好，需要我帮你做什么？" {
+			t.Fatalf("title = %v, want Chinese reply snippet", md["title"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
 func TestReply_IncludesExtractedAtUserIds(t *testing.T) {
 	gotPayload := make(chan map[string]any, 1)
 	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

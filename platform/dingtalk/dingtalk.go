@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -847,11 +848,13 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	atUserIds := extractAtUserIds(content)
 
+	title := markdownTitle(content)
 	content = preprocessDingTalkMarkdown(content)
 
+	// DingTalk conversation-list preview for markdown uses "title", not body text.
 	payload := map[string]any{
 		"msgtype":  "markdown",
-		"markdown": map[string]string{"title": "reply", "text": content},
+		"markdown": map[string]string{"title": title, "text": content},
 	}
 	if len(atUserIds) > 0 {
 		payload["at"] = map[string]any{
@@ -1643,6 +1646,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 		return fmt.Errorf("dingtalk: get access token for proactive send: %w", err)
 	}
 
+	title := markdownTitle(content)
 	content = preprocessDingTalkMarkdown(content)
 
 	var apiURL string
@@ -1651,7 +1655,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	if rc.isGroup && rc.conversationId != "" {
 		// Group message via /v1.0/robot/groupMessages/send
 		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
-		msgParam, _ := json.Marshal(map[string]string{"text": content})
+		msgParam, _ := json.Marshal(map[string]string{"title": title, "text": content})
 		requestBody = map[string]any{
 			"robotCode":          p.robotCode,
 			"openConversationId": rc.conversationId,
@@ -1661,7 +1665,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	} else if rc.senderStaffId != "" {
 		// Direct message via /v1.0/robot/oToMessages/batchSend
 		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
-		msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
+		msgParam, _ := json.Marshal(map[string]string{"title": title, "text": content})
 		requestBody = map[string]any{
 			"robotCode": p.robotCode,
 			"userIds":   []string{rc.senderStaffId},
@@ -1714,6 +1718,42 @@ func extractAtUserIds(content string) []string {
 		}
 	}
 	return ids
+}
+
+// markdownTitle builds the DingTalk markdown title used as conversation-list
+// preview. Strip light markup so the list shows readable reply text.
+func markdownTitle(content string) string {
+	s := strings.TrimSpace(content)
+	if s == "" {
+		return "reply"
+	}
+	for {
+		start := strings.Index(s, "```")
+		if start < 0 {
+			break
+		}
+		rest := s[start+3:]
+		end := strings.Index(rest, "```")
+		if end < 0 {
+			s = s[:start]
+			break
+		}
+		s = s[:start] + " " + rest[end+3:]
+	}
+	replacer := strings.NewReplacer(
+		"**", "", "*", "", "__", "", "_", "", "`", "",
+		"# ", "", "## ", "", "### ", "", "> ", "",
+	)
+	s = replacer.Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "reply"
+	}
+	if utf8.RuneCountInString(s) <= lastMsgMaxRunes {
+		return s
+	}
+	return string([]rune(s)[:lastMsgMaxRunes]) + "…"
 }
 
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
