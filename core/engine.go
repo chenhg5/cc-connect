@@ -4736,6 +4736,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		return supporter.BuildRichCard(status, phase, steps, markdown, streaming, statusFooter)
 	}
+	prepareRichCardMarkdown := func(p Platform, rctx any, markdown string, final bool) string {
+		// Preserve the same workspace references and platform-native outbound
+		// semantics as ordinary Send/Reply before resolving card-only assets.
+		markdown = workspaceRenderer(markdown)
+		if transformer, ok := p.(RichCardMarkdownTransformer); ok && markdown != "" {
+			markdown = transformer.TransformRichCardMarkdown(e.ctx, rctx, markdown)
+		}
+		if resolver, ok := p.(RichCardMarkdownResolver); ok && markdown != "" {
+			markdown = resolver.ResolveRichCardMarkdown(e.ctx, markdown, final)
+		}
+		return markdown
+	}
 	startRichCard := func(p Platform, rctx any) any {
 		if !usesRichCard(p) {
 			return nil
@@ -4775,10 +4787,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// answer is safe to retain because it was already user-visible.
 		body := ""
 		if len(safeBody) > 0 {
-			body = workspaceRenderer(safeBody[0])
-			if resolver, ok := p.(RichCardMarkdownResolver); ok && body != "" {
-				body = resolver.ResolveRichCardMarkdown(e.ctx, body, true)
-			}
+			body = prepareRichCardMarkdown(p, replyCtx, safeBody[0], true)
 		}
 		card := buildRichCard(p, supporter, CardStatusError, "error", nil, body, false, "")
 		if err := updater.UpdateMessage(e.ctx, handle, card); err != nil {
@@ -5103,17 +5112,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if e.display.CardMode != "rich" {
 			hasRichCard = false
 		}
-		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
-			// Apply the same configured smart/emoji/code reference rendering as
-			// normal workspace sends before platform-specific image resolution.
-			// Every rich update receives the full raw body, so this remains
+			// Every update receives the full raw body, so transformations remain
 			// deterministic for both streaming and final frames.
-			markdown = workspaceRenderer(markdown)
-			if !hasRichMarkdownResolver || markdown == "" {
-				return markdown
-			}
-			return richMarkdownResolver.ResolveRichCardMarkdown(e.ctx, markdown, final)
+			return prepareRichCardMarkdown(p, replyCtx, markdown, final)
 		}
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return buildRichCard(p, richCardSupporter, status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)

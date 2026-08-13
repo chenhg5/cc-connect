@@ -1991,6 +1991,25 @@ type stubRichCardResolverPlatform struct {
 	calls      []bool
 }
 
+type stubRichCardTransformPlatform struct {
+	*stubRichCardSilentPlatform
+	transformMu       sync.Mutex
+	transformContexts []any
+}
+
+func (p *stubRichCardTransformPlatform) TransformRichCardMarkdown(_ context.Context, replyCtx any, markdown string) string {
+	p.transformMu.Lock()
+	p.transformContexts = append(p.transformContexts, replyCtx)
+	p.transformMu.Unlock()
+	return strings.ReplaceAll(markdown, "@Alice", "<at id=ou_alice></at>")
+}
+
+func (p *stubRichCardTransformPlatform) contexts() []any {
+	p.transformMu.Lock()
+	defer p.transformMu.Unlock()
+	return append([]any(nil), p.transformContexts...)
+}
+
 type stubRichCardSplitPlatform struct {
 	*stubRichCardSilentPlatform
 }
@@ -2122,6 +2141,63 @@ func TestProcessInteractiveEvents_RichCardErrorStaysOnCardAndHidesDetails(t *tes
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no card deletion, got %d", deletes)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPreservesReplyContextTransforms(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []Event
+		status string
+	}{
+		{
+			name: "completed",
+			events: []Event{
+				{Type: EventText, Content: "@Alice please review"},
+				{Type: EventResult, Content: "@Alice please review", Done: true},
+			},
+			status: "status=done",
+		},
+		{
+			name: "failed partial",
+			events: []Event{
+				{Type: EventText, Content: "@Alice partial"},
+				{Type: EventError, Error: errors.New("private failure")},
+			},
+			status: "status=error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := &stubRichCardTransformPlatform{stubRichCardSilentPlatform: base}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+			sessionKey := "feishu:user-rich-transform-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-transform-" + tt.name)
+			replyCtx := "ctx-rich-transform-" + tt.name
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: replyCtx}
+			e.interactiveStates[sessionKey] = state
+			for _, event := range tt.events {
+				agentSession.events <- event
+			}
+
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-transform", time.Now(), nil, nil, replyCtx)
+			_, streams, updates, _ := base.snapshot()
+			rendered := strings.Join(append(streams, updates...), "\n")
+			if !strings.Contains(rendered, tt.status) || !strings.Contains(rendered, "<at id=ou_alice></at>") {
+				t.Fatalf("rich card did not preserve transformed mention: %q", rendered)
+			}
+			if strings.Contains(rendered, "@Alice") {
+				t.Fatalf("rich card retained unresolved mention: %q", rendered)
+			}
+			for _, got := range p.contexts() {
+				if got != replyCtx {
+					t.Fatalf("transform reply context = %#v, want %#v", got, replyCtx)
+				}
+			}
+		})
 	}
 }
 

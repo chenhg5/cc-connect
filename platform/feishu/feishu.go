@@ -1824,6 +1824,10 @@ func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string
 // (before JSON serialization). Reverse-matches against the chat member list,
 // longest name first. Uses the correct at syntax based on predicted message type.
 func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
+	return p.resolveMentionsWithFormat(ctx, chatID, content, predictMsgType(content) == larkim.MsgTypeInteractive)
+}
+
+func (p *Platform) resolveMentionsWithFormat(ctx context.Context, chatID, content string, useCardFormat bool) string {
 	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
 		return content
 	}
@@ -1838,7 +1842,6 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
 
-	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
 	result := content
 	for _, name := range names {
 		pattern := "@" + name
@@ -1861,6 +1864,19 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
+}
+
+// TransformRichCardMarkdown preserves resolve_mentions semantics when the
+// engine updates a Card 2.0 message directly instead of calling Send/Reply.
+// Rich-card markdown always uses Feishu's <at id=...></at> representation,
+// including for short answers that ordinary message prediction would classify
+// as plain text.
+func (p *interactivePlatform) TransformRichCardMarkdown(ctx context.Context, rctx any, markdown string) string {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return markdown
+	}
+	return p.resolveMentionsWithFormat(ctx, rc.chatID, markdown, true)
 }
 
 // chainMessage holds extracted data from one message in a reply chain.

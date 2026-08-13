@@ -32,6 +32,9 @@ func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
 	if _, ok := p.(core.RichCardSupporter); !ok {
 		t.Fatal("expected default Feishu platform to advertise rich-card support")
 	}
+	if _, ok := p.(core.RichCardMarkdownTransformer); !ok {
+		t.Fatal("expected default Feishu platform to advertise rich-card outbound transforms")
+	}
 }
 
 func TestNew_CanDisableInteractiveCards(t *testing.T) {
@@ -47,6 +50,9 @@ func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	}
 	if _, ok := p.(core.LocalizedRichCardSupporter); ok {
 		t.Fatal("disabled Feishu cards must not advertise localized rich-card support")
+	}
+	if _, ok := p.(core.RichCardMarkdownTransformer); ok {
+		t.Fatal("disabled Feishu cards must not advertise rich-card outbound transforms")
 	}
 }
 
@@ -1720,6 +1726,23 @@ func TestResolveMentions_CardFormat(t *testing.T) {
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
 		t.Fatalf("card format should use <at id=...>, got %q", result)
+	}
+}
+
+func TestTransformRichCardMarkdownResolvesShortAnswerMention(t *testing.T) {
+	base := &Platform{platformName: "feishu", resolveMentions: true}
+	base.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	p := &interactivePlatform{Platform: base}
+	input := "@张三 请查看"
+	result := p.TransformRichCardMarkdown(context.Background(), replyContext{chatID: "oc_chat"}, input)
+	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
+		t.Fatalf("short rich-card answer should use card mention syntax, got %q", result)
+	}
+	if strings.Contains(result, "@张三") {
+		t.Fatalf("short rich-card answer retained unresolved mention: %q", result)
 	}
 }
 

@@ -126,6 +126,15 @@ type RichCardMarkdownResolver interface {
 	ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string
 }
 
+// RichCardMarkdownTransformer is an optional reply-context-aware transform
+// applied before a rich-card body is rendered. Platforms use it to preserve
+// native outbound semantics that ordinary Send/Reply paths would otherwise
+// provide, such as resolving a display name into a real mention in the
+// triggering chat.
+type RichCardMarkdownTransformer interface {
+	TransformRichCardMarkdown(ctx context.Context, replyCtx any, markdown string) string
+}
+
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {

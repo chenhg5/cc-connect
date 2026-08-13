@@ -30,6 +30,8 @@ If CardKit creation or element streaming is unavailable, cc-connect-next safely 
 
 If the terminal full-card update itself fails, cc-connect-next removes the stale lifecycle card before sending the readable answer as a normal reply. If a failure-state update fails, the fallback reply contains only any already-visible safe assistant partial plus localized static failure copy; raw provider/process errors are never substituted into chat-visible text.
 
+When `resolve_mentions = true`, every streaming, completed, and safe-partial failure body resolves `@DisplayName` against the triggering chat before it enters Card 2.0. This preserves the native Feishu mention and notification behavior even though the lifecycle card is updated directly rather than sent through the ordinary `Send`/`Reply` path.
+
 ## Privacy boundary
 
 Rich-card progress carries event kinds and anonymous counts only. The renderer never receives or emits:
@@ -56,4 +58,4 @@ go test ./core -run 'TestProcessInteractiveEvents_CapturesRichCardLocalePerTurn|
 go test ./core -run TestCUJ -count=1
 ```
 
-These tests cover payload privacy, all supported locales, per-turn locale isolation, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, shutdown finalization, recalled-trigger cleanup, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.
+These tests cover payload privacy, all supported locales, per-turn locale isolation, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, configured mention resolution, partial-answer failure handling, shutdown finalization, recalled-trigger cleanup, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.
