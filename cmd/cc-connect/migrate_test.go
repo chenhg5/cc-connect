@@ -1075,6 +1075,87 @@ func TestMigrateLegacyDataRestoresTargetChangedAtRenameBoundary(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyDataRollbackPreservesWritesToEarlierPromotedTarget(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	projectA := filepath.Join(root, "a-project")
+	projectB := filepath.Join(root, "b-project")
+	projectATarget := filepath.Join(projectA, ".cc-connect-next")
+	projectBTarget := filepath.Join(projectB, ".cc-connect-next")
+	canonicalProjectATarget, err := canonicalDestinationPath(projectATarget)
+	if err != nil {
+		t.Fatalf("canonicalize project A target: %v", err)
+	}
+	canonicalProjectBTarget, err := canonicalDestinationPath(projectBTarget)
+	if err != nil {
+		t.Fatalf("canonicalize project B target: %v", err)
+	}
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "a"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(projectA)+`"
+
+[[projects]]
+name = "b"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(projectB)+`"
+`)
+	writeMigrationFixture(t, filepath.Join(projectA, ".cc-connect", "attachments", "legacy-a.txt"), "legacy-a")
+	writeMigrationFixture(t, filepath.Join(projectB, ".cc-connect", "attachments", "legacy-b.txt"), "legacy-b")
+	writeMigrationFixture(t, filepath.Join(projectATarget, "original-a.txt"), "pre-migration-a")
+	writeMigrationFixture(t, filepath.Join(projectBTarget, "original-b.txt"), "pre-migration-b")
+
+	_, err = migrateLegacyDataWithHooks(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		Force:              true,
+		IncludeProjectData: true,
+	}, migrationHooks{AfterPromotion: func(promotedTarget string) {
+		if promotedTarget != canonicalProjectATarget {
+			return
+		}
+		writeMigrationFixture(t, filepath.Join(canonicalProjectATarget, "sessions", "written-after-promotion.json"), "fresh-a")
+		// Make the next destination fail its final target revalidation so the
+		// already-promoted A destination must be rolled back.
+		writeMigrationFixture(t, filepath.Join(canonicalProjectBTarget, "sessions", "written-before-promotion.json"), "fresh-b")
+	}})
+	if err == nil || !strings.Contains(err.Error(), "rollback preserved promoted targets for recovery") {
+		t.Fatalf("migrateLegacyDataWithHooks() error = %v, want preserved-recovery report", err)
+	}
+
+	if got, err := os.ReadFile(filepath.Join(projectATarget, "original-a.txt")); err != nil || string(got) != "pre-migration-a" {
+		t.Fatalf("project A pre-migration target was not restored: content=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(projectATarget, "sessions", "written-after-promotion.json")); !os.IsNotExist(err) {
+		t.Fatalf("fresh project A write remained mixed into restored target, err=%v", err)
+	}
+	recoveries, err := filepath.Glob(filepath.Join(projectA, ".cc-connect-next.failed-migration-*", "preserved"))
+	if err != nil {
+		t.Fatalf("glob project A recovery: %v", err)
+	}
+	if len(recoveries) != 1 {
+		t.Fatalf("project A recovery paths = %v, want one preserved tree", recoveries)
+	}
+	if got, err := os.ReadFile(filepath.Join(recoveries[0], "sessions", "written-after-promotion.json")); err != nil || string(got) != "fresh-a" {
+		t.Fatalf("fresh project A write was not preserved: content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(recoveries[0], "attachments", "legacy-a.txt")); err != nil || string(got) != "legacy-a" {
+		t.Fatalf("promoted project A migration was not preserved: content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(projectBTarget, "sessions", "written-before-promotion.json")); err != nil || string(got) != "fresh-b" {
+		t.Fatalf("failing project B target write was not preserved: content=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("global target was activated after project rollback, err=%v", err)
+	}
+}
+
 func TestPrepareLegacyMigrationRejectsOverlappingDestinations(t *testing.T) {
 	tests := []struct {
 		name       string

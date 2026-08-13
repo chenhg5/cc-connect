@@ -134,6 +134,7 @@ type migrationTargetSnapshotEntry struct {
 type migrationHooks struct {
 	BeforePromotion   func()
 	AfterTargetRename func(target, backup string)
+	AfterPromotion    func(target string)
 }
 
 type preparedMigration struct {
@@ -207,11 +208,21 @@ func migrateLegacyDataWithHooks(opts migrationOptions, hooks migrationHooks) (mi
 	promoted := make([]*migrationDestination, 0, len(destinations))
 	for _, destination := range destinations {
 		if err := promoteMigrationDestination(destination, hooks); err != nil {
-			rollbackPromotedDestinations(promoted)
+			recoveryPaths, rollbackErr := rollbackPromotedDestinations(promoted)
 			cleanupMigrationStages(destinations)
-			return plan.Report, fmt.Errorf("activate target %s: %w", destination.Target, err)
+			migrationErr := fmt.Errorf("activate target %s: %w", destination.Target, err)
+			if len(recoveryPaths) > 0 {
+				migrationErr = errors.Join(migrationErr, fmt.Errorf("rollback preserved promoted targets for recovery: %s", strings.Join(recoveryPaths, ", ")))
+			}
+			if rollbackErr != nil {
+				migrationErr = errors.Join(migrationErr, fmt.Errorf("rollback was incomplete: %w", rollbackErr))
+			}
+			return plan.Report, migrationErr
 		}
 		promoted = append(promoted, destination)
+		if hooks.AfterPromotion != nil {
+			hooks.AfterPromotion(destination.Target)
+		}
 	}
 	finalizeMigrationBackups(destinations)
 	cleanupMigrationStages(destinations)
@@ -1482,7 +1493,9 @@ func promoteMigrationDestination(destination *migrationDestination, hooks migrat
 	}
 	if err := os.Rename(destination.Stage, destination.Target); err != nil {
 		if destination.Existed {
-			_ = os.Rename(destination.Backup, destination.Target)
+			if restoreErr := os.Rename(destination.Backup, destination.Target); restoreErr != nil {
+				return errors.Join(err, fmt.Errorf("restore pre-migration target %s from retained backup %s: %w", destination.Target, destination.Backup, restoreErr))
+			}
 		}
 		return err
 	}
@@ -1499,19 +1512,35 @@ func finalizeMigrationBackups(destinations []*migrationDestination) {
 	}
 }
 
-func rollbackPromotedDestinations(destinations []*migrationDestination) {
+func rollbackPromotedDestinations(destinations []*migrationDestination) ([]string, error) {
+	recoveryPaths := make([]string, 0, len(destinations))
+	rollbackErrors := make([]error, 0)
 	for i := len(destinations) - 1; i >= 0; i-- {
 		destination := destinations[i]
-		rollbackPath := destination.Target + ".failed-migration"
-		_ = os.RemoveAll(rollbackPath)
-		if err := os.Rename(destination.Target, rollbackPath); err != nil {
+		recoveryRoot, err := os.MkdirTemp(filepath.Dir(destination.Target), filepath.Base(destination.Target)+".failed-migration-*")
+		if err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("create recovery directory for %s: %w", destination.Target, err))
 			continue
 		}
-		if destination.Existed && destination.Backup != "" {
-			_ = os.Rename(destination.Backup, destination.Target)
+		if err := os.Chmod(recoveryRoot, 0o700); err != nil {
+			_ = os.Remove(recoveryRoot)
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("protect recovery directory for %s: %w", destination.Target, err))
+			continue
 		}
-		_ = os.RemoveAll(rollbackPath)
+		recoveryPath := filepath.Join(recoveryRoot, "preserved")
+		if err := os.Rename(destination.Target, recoveryPath); err != nil {
+			_ = os.Remove(recoveryRoot)
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("preserve promoted target %s: %w", destination.Target, err))
+			continue
+		}
+		recoveryPaths = append(recoveryPaths, recoveryPath)
+		if destination.Existed && destination.Backup != "" {
+			if err := os.Rename(destination.Backup, destination.Target); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore pre-migration target %s from %s: %w", destination.Target, destination.Backup, err))
+			}
+		}
 	}
+	return recoveryPaths, errors.Join(rollbackErrors...)
 }
 
 func cleanupMigrationStages(destinations []*migrationDestination) {
