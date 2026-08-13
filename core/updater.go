@@ -119,7 +119,6 @@ func SelfUpdate(tag string, _ bool) error {
 	}
 
 	var binary []byte
-	err = nil
 	if goos == "windows" {
 		binary, err = extractBinaryFromZip(data)
 	} else {
