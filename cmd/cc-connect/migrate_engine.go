@@ -277,6 +277,9 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if pathsOverlap(dataDir, target) {
 		return nil, fmt.Errorf("source data_dir and target must be separate directories")
 	}
+	if dataDir != source && pathStrictlyWithin(dataDir, source) {
+		return nil, fmt.Errorf("source data_dir must be dedicated: %s contains the source config directory %s; refusing to inventory unrelated files", dataDir, source)
+	}
 
 	mainDestination := &migrationDestination{
 		Scope:  "data",
@@ -298,11 +301,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		return nil, fmt.Errorf("inventory source config directory: %w", err)
 	}
 	if dataDir != source && dataDirExists {
-		var dataDirExclusions []string
-		if pathStrictlyWithin(dataDir, source) {
-			dataDirExclusions = append(dataDirExclusions, source)
-		}
-		if err := collectMigrationTreeExcluding(dataDir, "data-dir", true, dataDirExclusions, mainDestination, &report); err != nil {
+		if err := collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report); err != nil {
 			return nil, fmt.Errorf("inventory source data_dir: %w", err)
 		}
 	}

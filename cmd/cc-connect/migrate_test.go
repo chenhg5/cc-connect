@@ -618,34 +618,26 @@ func TestPrepareLegacyMigrationExcludesNestedDataDirFromConfigInventory(t *testi
 	}
 }
 
-func TestPrepareLegacyMigrationExcludesConfigRootFromAncestorDataDirInventory(t *testing.T) {
+func TestPrepareLegacyMigrationRejectsAncestorDataDir(t *testing.T) {
 	dataDir := t.TempDir()
 	source := filepath.Join(dataDir, ".cc-connect")
 	target := filepath.Join(t.TempDir(), ".cc-connect-next")
 	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(dataDir)+`"`+"\n")
 	writeMigrationFixture(t, filepath.Join(source, "projects", "demo.state.json"), `{"project":"config-root"}`)
 	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"session":"data-dir"}`)
+	writeMigrationFixture(t, filepath.Join(dataDir, ".ssh", "id_private"), "must-not-be-inventoried")
 
-	plan, err := prepareLegacyMigration(migrationOptions{
+	_, err := prepareLegacyMigration(migrationOptions{
 		Source: source,
 		Target: target,
 		Home:   dataDir,
 		DryRun: true,
 	})
-	if err != nil {
-		t.Fatalf("prepare ancestor data_dir migration: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "source data_dir must be dedicated") {
+		t.Fatalf("prepare ancestor data_dir error = %v, want dedicated-directory refusal", err)
 	}
-	if _, duplicated := plan.Main.Files[filepath.Join(".cc-connect", "projects", "demo.state.json")]; duplicated {
-		t.Fatalf("config root was duplicated under its ancestor data_dir path: %+v", plan.Main.Files)
-	}
-	if _, copied := plan.Main.Files[filepath.Join("projects", "demo.state.json")]; !copied {
-		t.Fatalf("config-root state was not mapped to the target root: %+v", plan.Main.Files)
-	}
-	if _, copied := plan.Main.Files[filepath.Join("sessions", "demo.json")]; !copied {
-		t.Fatalf("effective ancestor data_dir state was not mapped to the target root: %+v", plan.Main.Files)
-	}
-	if got, want := plan.Report.CopiedFiles, 3; got != want {
-		t.Fatalf("copied files = %d, want %d unique files", got, want)
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("unsafe ancestor data_dir created target before refusal: %v", statErr)
 	}
 }
 
