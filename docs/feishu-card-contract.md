@@ -20,6 +20,8 @@ Every accepted interactive turn gets its own Card 2.0 message. The card is creat
 
 The initial card is non-empty and is sent before waiting for reasoning, tools, or answer text. A queued turn uses its own stored reply context, so it never quotes an earlier question by accident.
 
+Rendering configuration is snapshotted when a turn begins. A management hot reload therefore cannot switch an already-created Rich Card into the legacy completion path; the new configuration takes effect when the next queued or newly accepted turn begins.
+
 Immediate feedback is intentionally higher priority than retroactive invisibility. The runtime cannot know before the first Agent event that a turn will eventually end as `NO_REPLY`; deferring all cards until that decision would restore the long blank wait this card contract is designed to remove. cc-connect-next therefore recalls the optimistic card for `NO_REPLY`. No answer or completion reaction remains, but the Feishu client may render a recall notice.
 
 ## Streaming and fallback

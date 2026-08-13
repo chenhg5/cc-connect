@@ -337,6 +337,7 @@ type Engine struct {
 	i18n                  *I18n
 	speech                SpeechCfg
 	tts                   *TTSCfg
+	displayMu             sync.RWMutex
 	display               DisplayCfg
 	injectSender          bool
 	attachmentSendEnabled bool
@@ -918,7 +919,41 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
-	e.display = cfg
+	e.displayMu.Lock()
+	e.display = cloneDisplayCfg(cfg)
+	e.displayMu.Unlock()
+}
+
+func cloneDisplayCfg(cfg DisplayCfg) DisplayCfg {
+	if cfg.HistoryMaxLen != nil {
+		limit := *cfg.HistoryMaxLen
+		cfg.HistoryMaxLen = &limit
+	}
+	return cfg
+}
+
+func cloneStreamPreviewCfg(cfg StreamPreviewCfg) StreamPreviewCfg {
+	cfg.DisabledPlatforms = append([]string(nil), cfg.DisabledPlatforms...)
+	return cfg
+}
+
+// displayRuntimeSnapshot returns one immutable rendering configuration for a
+// turn. Hot reloads affect the next turn rather than switching an in-flight
+// reply between Rich Card and legacy paths.
+func (e *Engine) displayRuntimeSnapshot() (DisplayCfg, StreamPreviewCfg) {
+	e.displayMu.RLock()
+	display := cloneDisplayCfg(e.display)
+	preview := cloneStreamPreviewCfg(e.streamPreview)
+	e.displayMu.RUnlock()
+	return display, preview
+}
+
+func (e *Engine) updateDisplayConfig(update func(*DisplayCfg)) DisplayCfg {
+	e.displayMu.Lock()
+	update(&e.display)
+	display := cloneDisplayCfg(e.display)
+	e.displayMu.Unlock()
+	return display
 }
 
 // SetInstantReply configures the immediate confirmation reply.
@@ -1322,7 +1357,9 @@ func (e *Engine) checkRateLimit(msg *Message) bool {
 
 // SetStreamPreviewCfg configures the streaming preview behavior.
 func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
-	e.streamPreview = cfg
+	e.displayMu.Lock()
+	e.streamPreview = cloneStreamPreviewCfg(cfg)
+	e.displayMu.Unlock()
 }
 
 // SetMaxTurnTime sets an absolute wall-clock limit on how long a single agent turn
@@ -4656,6 +4693,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	if !hasTurnRichCardCopy {
 		turnRichCardCopy = e.i18n.RichCardCopy()
 	}
+	turnDisplay, turnStreamPreview := e.displayRuntimeSnapshot()
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
@@ -4709,7 +4747,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 	usesRichCard := func(p Platform) bool {
-		if e.display.CardMode != "rich" {
+		if turnDisplay.CardMode != "rich" {
 			return false
 		}
 		_, ok := p.(RichCardSupporter)
@@ -4726,7 +4764,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 		}
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	sp := newStreamPreview(turnStreamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
@@ -4771,7 +4809,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return handle
 	}
 	markRichCardFailed := func(p Platform, handle any, safeBody ...string) bool {
-		if handle == nil || e.display.CardMode != "rich" {
+		if handle == nil || turnDisplay.CardMode != "rich" {
 			return false
 		}
 		supporter, ok := p.(RichCardSupporter)
@@ -5109,10 +5147,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is enabled by the default card_mode = "rich".
 		// Explicit "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if turnDisplay.CardMode != "rich" {
 			hasRichCard = false
 		}
-		richCardPreviewEnabled := hasRichCard && streamPreviewEnabledForPlatform(e.streamPreview, p.Name())
+		richCardPreviewEnabled := hasRichCard && streamPreviewEnabledForPlatform(turnStreamPreview, p.Name())
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
 			// Every update receives the full raw body, so transformations remain
 			// deterministic for both streaming and final frames.
@@ -5157,8 +5195,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !turnDisplay.ThinkingMessages && len(textParts) > segmentStart {
+				if turnDisplay.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -5178,10 +5216,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ThinkingMessages && event.Content != "" {
+			if turnDisplay.ThinkingMessages && event.Content != "" {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
-					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
+					cardThinkingText = truncateIf(event.Content, turnDisplay.ThinkingMaxLen)
 					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					continue // skip original independent message sending
 				}
@@ -5204,7 +5242,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+				preview := truncateIf(event.Content, turnDisplay.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
 					sendWorkspace(p, replyCtx, thinkingMsg)
@@ -5242,8 +5280,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !turnDisplay.ToolMessages && len(textParts) > segmentStart {
+				if turnDisplay.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -5263,7 +5301,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ToolMessages {
+			if turnDisplay.ToolMessages {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					toolInput := event.ToolInput
@@ -5341,13 +5379,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if hasRichCard {
 				break
 			}
-			if e.display.ToolMessages {
+			if turnDisplay.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
 				}
 				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
+					result = truncateIf(result, turnDisplay.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
@@ -5416,7 +5454,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					partialText += event.Content
 					if hasRichCard {
 						if !silentHold && richCardPreviewEnabled {
-							previewBody := truncateStreamPreviewText(partialText, e.streamPreview.MaxChars)
+							previewBody := truncateStreamPreviewText(partialText, turnStreamPreview.MaxChars)
 							// Lazy creation: if we held during the first text events and
 							// only released this chunk, the initial-create branch above
 							// won't fire (textParts is non-empty by now). Build the card
@@ -5468,10 +5506,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// Rich cards share the public stream_preview contract with the
 							// legacy preview path. The first body frame is immediate; later
 							// frames must satisfy both configured minimums and remain capped.
-							interval := time.Duration(e.streamPreview.IntervalMs) * time.Millisecond
+							interval := time.Duration(turnStreamPreview.IntervalMs) * time.Millisecond
 							elapsedReady := lastRichCardUpdate.IsZero() || interval <= 0 || time.Since(lastRichCardUpdate) >= interval
 							delta := utf8.RuneCountInString(previewBody) - utf8.RuneCountInString(lastRichCardPreview)
-							deltaReady := lastRichCardUpdate.IsZero() || delta >= e.streamPreview.MinDeltaChars
+							deltaReady := lastRichCardUpdate.IsZero() || delta >= turnStreamPreview.MinDeltaChars
 							if cardMessageID != nil && previewBody != lastRichCardPreview && elapsedReady && deltaReady {
 								// Prefer per-element streaming text update (cardkit-v1) when available;
 								// it engages Lark's native typewriter rendering. Falls back to
@@ -5584,7 +5622,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
 			} else {
-				permLimit := e.display.ToolMaxLen
+				permLimit := turnDisplay.ToolMaxLen
 				if permLimit > 0 {
 					permLimit = permLimit * 8 / 5
 				}
@@ -5691,7 +5729,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Keep the terminal marker for the silent-reply branch below.
 			} else if len(textParts) > 0 && hasRichCard {
 				fullResponse = strings.Join(textParts, "")
-			} else if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			} else if len(textParts) > 0 && segmentStart == 0 && !turnDisplay.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -5870,7 +5908,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// may have skipped the last small/recent chunk; this catches it up
 					// when previews are enabled. ErrNotSupported (no cardID) and any
 					// error are silent — the subsequent UpdateMessage rewrites the body.
-					if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(e.streamPreview, p.Name()) {
+					if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(turnStreamPreview, p.Name()) {
 						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
 							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
 						}
@@ -6045,6 +6083,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.i18n.DetectAndSet(queued.content)
 				turnRichCardCopy = e.i18n.RichCardCopyForText(queued.content)
 				state.setTurnRichCardCopy(queued.messageID, turnRichCardCopy)
+				turnDisplay, turnStreamPreview = e.displayRuntimeSnapshot()
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
@@ -6075,7 +6114,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				sp = newStreamPreview(turnStreamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				// Reset streaming card state for the next turn
@@ -6325,9 +6364,10 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
 	state.mu.Unlock()
+	display, _ := e.displayRuntimeSnapshot()
 	for _, q := range remaining {
 		message := fmt.Sprintf(e.i18n.TForText(MsgError, q.content), reason)
-		if e.display.CardMode == "rich" {
+		if display.CardMode == "rich" {
 			if _, ok := q.platform.(RichCardSupporter); ok {
 				message = e.i18n.TForText(MsgRichCardErrorBody, q.content)
 			}
@@ -8681,12 +8721,13 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
 			}
 		}
+		display, _ := e.displayRuntimeSnapshot()
 		thinkingStr := e.i18n.T(MsgDisabledShort)
-		if e.display.ThinkingMessages {
+		if display.ThinkingMessages {
 			thinkingStr = e.i18n.T(MsgEnabledShort)
 		}
 		toolStr := e.i18n.T(MsgDisabledShort)
-		if e.display.ToolMessages {
+		if display.ToolMessages {
 			toolStr = e.i18n.T(MsgEnabledShort)
 		}
 		modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
@@ -9100,12 +9141,13 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
 		}
 	}
+	display, _ := e.displayRuntimeSnapshot()
 	thinkingStr := e.i18n.T(MsgDisabledShort)
-	if e.display.ThinkingMessages {
+	if display.ThinkingMessages {
 		thinkingStr = e.i18n.T(MsgEnabledShort)
 	}
 	toolStr := e.i18n.T(MsgDisabledShort)
-	if e.display.ToolMessages {
+	if display.ToolMessages {
 		toolStr = e.i18n.T(MsgEnabledShort)
 	}
 	modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
@@ -9265,8 +9307,9 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) historyEntryMaxLen() int {
-	if e.display.HistoryMaxLen != nil {
-		return *e.display.HistoryMaxLen
+	display, _ := e.displayRuntimeSnapshot()
+	if display.HistoryMaxLen != nil {
+		return *display.HistoryMaxLen
 	}
 	return defaultHistoryMaxLen
 }
@@ -10101,7 +10144,8 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 			return
 		}
 	} else {
-		switch e.display.Mode {
+		display, _ := e.displayRuntimeSnapshot()
+		switch display.Mode {
 		case "full", "":
 			newMode = "quiet"
 		case "quiet":
@@ -10111,19 +10155,21 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		}
 	}
 
-	e.display.Mode = newMode
-	switch newMode {
-	case "compact", "quiet":
-		e.display.ThinkingMessages = false
-		e.display.ToolMessages = false
-	default:
-		e.display.ThinkingMessages = true
-		e.display.ToolMessages = true
-	}
+	display := e.updateDisplayConfig(func(cfg *DisplayCfg) {
+		cfg.Mode = newMode
+		switch newMode {
+		case "compact", "quiet":
+			cfg.ThinkingMessages = false
+			cfg.ToolMessages = false
+		default:
+			cfg.ThinkingMessages = true
+			cfg.ToolMessages = true
+		}
+	})
 
 	if e.displaySaveFunc != nil {
-		tm := e.display.ThinkingMessages
-		tool := e.display.ToolMessages
+		tm := display.ThinkingMessages
+		tool := display.ToolMessages
 		if err := e.displaySaveFunc(&newMode, &tm, nil, nil, &tool); err != nil {
 			slog.Error("failed to persist display config after /quiet", "error", err)
 		}
@@ -14994,27 +15040,26 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Display mode: full, compact, quiet",
 			descZh: "显示模式: full, compact, quiet",
 			getFunc: func() string {
-				if e.display.Mode == "" {
+				display, _ := e.displayRuntimeSnapshot()
+				if display.Mode == "" {
 					return "full"
 				}
-				return e.display.Mode
+				return display.Mode
 			},
 			setFunc: func(v string) error {
 				switch v {
-				case "full":
-					e.display.Mode = "full"
-					e.display.ThinkingMessages = true
-					e.display.ToolMessages = true
-				case "compact", "quiet":
-					e.display.Mode = v
-					e.display.ThinkingMessages = false
-					e.display.ToolMessages = false
+				case "full", "compact", "quiet":
 				default:
 					return fmt.Errorf("must be full, compact, or quiet")
 				}
+				display := e.updateDisplayConfig(func(cfg *DisplayCfg) {
+					cfg.Mode = v
+					cfg.ThinkingMessages = v == "full"
+					cfg.ToolMessages = v == "full"
+				})
 				if e.displaySaveFunc != nil {
-					tm := e.display.ThinkingMessages
-					tool := e.display.ToolMessages
+					tm := display.ThinkingMessages
+					tool := display.ToolMessages
 					return e.displaySaveFunc(&v, &tm, nil, nil, &tool)
 				}
 				return nil
@@ -15025,14 +15070,17 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Whether thinking messages are shown (true/false)",
 			descZh: "是否显示思考消息 (true/false)",
 			getFunc: func() string {
-				return fmt.Sprintf("%t", e.display.ThinkingMessages)
+				display, _ := e.displayRuntimeSnapshot()
+				return fmt.Sprintf("%t", display.ThinkingMessages)
 			},
 			setFunc: func(v string) error {
 				b, err := strconv.ParseBool(v)
 				if err != nil {
 					return fmt.Errorf("invalid boolean: %s", v)
 				}
-				e.display.ThinkingMessages = b
+				e.updateDisplayConfig(func(cfg *DisplayCfg) {
+					cfg.ThinkingMessages = b
+				})
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, &b, nil, nil, nil)
 				}
@@ -15044,7 +15092,8 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Max chars for thinking messages (0=no truncation)",
 			descZh: "思考消息最大长度 (0=不截断)",
 			getFunc: func() string {
-				return fmt.Sprintf("%d", e.display.ThinkingMaxLen)
+				display, _ := e.displayRuntimeSnapshot()
+				return fmt.Sprintf("%d", display.ThinkingMaxLen)
 			},
 			setFunc: func(v string) error {
 				n, err := strconv.Atoi(v)
@@ -15054,7 +15103,9 @@ func (e *Engine) configItems() []configItem {
 				if n < 0 {
 					return fmt.Errorf("value must be >= 0")
 				}
-				e.display.ThinkingMaxLen = n
+				e.updateDisplayConfig(func(cfg *DisplayCfg) {
+					cfg.ThinkingMaxLen = n
+				})
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, &n, nil, nil)
 				}
@@ -15066,14 +15117,17 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Whether tool progress messages are shown (true/false)",
 			descZh: "是否显示工具进度消息 (true/false)",
 			getFunc: func() string {
-				return fmt.Sprintf("%t", e.display.ToolMessages)
+				display, _ := e.displayRuntimeSnapshot()
+				return fmt.Sprintf("%t", display.ToolMessages)
 			},
 			setFunc: func(v string) error {
 				b, err := strconv.ParseBool(v)
 				if err != nil {
 					return fmt.Errorf("invalid boolean: %s", v)
 				}
-				e.display.ToolMessages = b
+				e.updateDisplayConfig(func(cfg *DisplayCfg) {
+					cfg.ToolMessages = b
+				})
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, nil, nil, &b)
 				}
@@ -15085,7 +15139,8 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Max chars for tool use messages (0=no truncation)",
 			descZh: "工具消息最大长度 (0=不截断)",
 			getFunc: func() string {
-				return fmt.Sprintf("%d", e.display.ToolMaxLen)
+				display, _ := e.displayRuntimeSnapshot()
+				return fmt.Sprintf("%d", display.ToolMaxLen)
 			},
 			setFunc: func(v string) error {
 				n, err := strconv.Atoi(v)
@@ -15095,7 +15150,9 @@ func (e *Engine) configItems() []configItem {
 				if n < 0 {
 					return fmt.Errorf("value must be >= 0")
 				}
-				e.display.ToolMaxLen = n
+				e.updateDisplayConfig(func(cfg *DisplayCfg) {
+					cfg.ToolMaxLen = n
+				})
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, nil, &n, nil)
 				}

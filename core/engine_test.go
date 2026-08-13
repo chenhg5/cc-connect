@@ -9981,6 +9981,82 @@ func TestProcessInteractiveEvents_QueuedRichCardsQuoteEachOwnTrigger(t *testing.
 	}
 }
 
+func TestProcessInteractiveEvents_SnapshotsDisplayConfigPerQueuedTurn(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sess := newQueuingSession("qs-rich-config-reload")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich", Mode: "compact"})
+
+	key := "feishu:user-rich-config-reload"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", messageID: "msg-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveStates[key] = state
+	session.AddHistory("user", "initial-msg")
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-turn1", time.Now(), nil, nil, "ctx-turn1")
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		starts, _, _, _ := p.snapshot()
+		if len(starts) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first turn did not create its immediate rich card")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Simulate management hot reload after the first turn has already chosen
+	// Rich Card. That turn must finish on its existing card, while the queued
+	// turn must pick up the new legacy mode when it begins.
+	e.SetDisplayConfig(DisplayCfg{CardMode: "legacy", Mode: "compact"})
+	sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+
+	for {
+		sess.sendMu.Lock()
+		sent := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if sent == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queued turn did not start after the first result")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("display-reload queued turns did not finish")
+	}
+
+	starts, _, updates, _ := p.snapshot()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want only the in-flight rich turn; starts=%v", len(starts), starts)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], "response1") {
+		t.Fatalf("in-flight rich turn did not finish on its original card: %v", updates)
+	}
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "response2" {
+		t.Fatalf("queued turn did not use reloaded legacy mode: %v", sent)
+	}
+}
+
 // TestIssue814_QueuedMessageAfterCleanEventResult_UsesOwnReplyCtx is a
 // regression test for issue #814 ("Bot replies with the previous
 // message's answer instead of the current one"). The reported symptom is

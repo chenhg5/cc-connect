@@ -422,6 +422,43 @@ work_dir = "`+filepath.ToSlash(root)+`"
 	}
 }
 
+func TestPrepareLegacyMigrationRefusesProjectTargetInsideOfficialSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	dataDir := filepath.Join(root, "official-state")
+	target := filepath.Join(root, ".cc-connect-next")
+	project := filepath.Join(source, "projects", "demo")
+	projectTarget := filepath.Join(project, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(dataDir)+`"
+
+[[projects]]
+name = "demo"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(project)+`"
+`)
+	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"session":"kept"}`)
+	writeMigrationFixture(t, filepath.Join(project, ".cc-connect", "attachments", "prompt.txt"), "project-data")
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		DryRun:             true,
+		IncludeProjectData: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsafe overlapping project-local migration path") {
+		t.Fatalf("prepareLegacyMigration() error = %v, want official-source overlap refusal", err)
+	}
+	if _, statErr := os.Stat(projectTarget); !os.IsNotExist(statErr) {
+		t.Fatalf("overlap preflight created project target inside official source, err=%v", statErr)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("overlap preflight created main target, err=%v", statErr)
+	}
+}
+
 func TestResolveLegacyConfigPathMatchesOfficialBracedEnvSyntax(t *testing.T) {
 	base := t.TempDir()
 	expandedRoot := filepath.Join(base, "expanded")

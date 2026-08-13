@@ -317,7 +317,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 			if projectSource == source || projectSource == dataDir {
 				continue
 			}
-			if pathsOverlap(projectSource, projectTarget) || pathsOverlap(projectSource, target) || pathsOverlap(dataDir, projectTarget) {
+			if pathsOverlap(projectSource, projectTarget) || pathsOverlap(projectSource, target) || pathsOverlap(source, projectTarget) || pathsOverlap(dataDir, projectTarget) {
 				return nil, fmt.Errorf("unsafe overlapping project-local migration path: %s -> %s", projectSource, projectTarget)
 			}
 			destination := &migrationDestination{
