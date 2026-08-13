@@ -32,6 +32,11 @@
   misleading "new sessions" wording that made users think they needed `/new` to
   see the change take effect (#1368).
 
+## Unreleased
+
+### Fixed
+- **Tool cards leaked when `tool_messages = false` + `progress_style = compact`**: under `progress_style = "compact"` + `enable_feishu_card = true` on Feishu, MCP tool calls (e.g. `mcp__plugin_context7_context7__query-docs`) could surface as standalone cards even with `display.tool_messages = false`. The `EventToolUse` branch now has an explicit early-return when tool messages are suppressed, so neither the rich-card panel nor the compact-progress preview nor the legacy fallback can render tool info when the user has explicitly hidden it. Pre-tool text segments still flush so the post-tool answer arrives as its own message (#1344).
+
 ## v1.3.3 (2026-06-15)
 
 First stable release of the 1.3.3 series. Stabilizes the v1.3.3-beta.1 → v1.3.3-beta.5

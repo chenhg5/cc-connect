@@ -1751,6 +1751,163 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 }
 
+// TestProcessInteractiveEvents_ToolMessagesFalse_Compact_HidesMCPTool — issue #1344
+// tool_messages=false + progress_style=compact + MCP tool name → tool info must
+// not surface in any user-facing message (Send, preview start, or preview edit).
+func TestProcessInteractiveEvents_ToolMessagesFalse_Compact_HidesMCPTool(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		ThinkingMessages: false,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       200,
+		ToolMessages:     false,
+	})
+	sessionKey := "feishu:issue1344-mcp"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-mcp")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-mcp"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Looking up docs"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "mcp__plugin_context7_context7__query-docs", ToolInput: `{"libraryId":"/larksuite/cli","query":"how to use cli"}`}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "mcp__plugin_context7_context7__query-docs", ToolResult: "result body", ToolStatus: "completed"}
+	agentSession.events <- Event{Type: EventResult, Content: "Final answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-mcp", time.Now(), nil, nil, nil)
+
+	assertNoToolLeak(t, p, []string{"mcp__plugin_context7", "query-docs", "libraryId"})
+}
+
+// TestProcessInteractiveEvents_ToolMessagesFalse_Compact_HidesCoreTool — issue #1344
+// tool_messages=false + progress_style=compact + core tool name (Bash) → tool
+// info must not surface in any user-facing message.
+func TestProcessInteractiveEvents_ToolMessagesFalse_Compact_HidesCoreTool(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		ThinkingMessages: false,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       200,
+		ToolMessages:     false,
+	})
+	sessionKey := "feishu:issue1344-core"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-core")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-core"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Running ls"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls -la /tmp"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "file1\nfile2", ToolStatus: "completed"}
+	agentSession.events <- Event{Type: EventResult, Content: "Done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-core", time.Now(), nil, nil, nil)
+
+	assertNoToolLeak(t, p, []string{"Bash", "ls -la", "file1", "file2"})
+}
+
+// TestProcessInteractiveEvents_ToolMessagesTrue_Compact_RendersMCPTool — issue #1344
+// Regression guard: tool_messages=true + progress_style=compact + MCP tool name
+// must still render the tool card (no false-negative suppression).
+func TestProcessInteractiveEvents_ToolMessagesTrue_Compact_RendersMCPTool(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		ThinkingMessages: false,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       200,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:issue1344-true"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-true")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-true"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Looking up"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "mcp__plugin_context7_context7__query-docs", ToolInput: `{"libraryId":"/larksuite/cli"}`}
+	agentSession.events <- Event{Type: EventResult, Content: "Final", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-true", time.Now(), nil, nil, nil)
+
+	starts := p.getPreviewStarts()
+	edits := p.getPreviewEdits()
+	combined := append(append([]string{}, starts...), edits...)
+	found := false
+	for _, s := range combined {
+		if strings.Contains(s, "mcp__plugin_context7") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected MCP tool card in preview when tool_messages=true; starts=%v edits=%v", starts, edits)
+	}
+}
+
+// TestProcessInteractiveEvents_ToolMessagesFalse_Card_HidesTool — issue #1344
+// Regression guard: tool_messages=false + progress_style=card must also hide
+// tool info (regardless of platform card rendering path).
+func TestProcessInteractiveEvents_ToolMessagesFalse_Card_HidesTool(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		ThinkingMessages: false,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       200,
+		ToolMessages:     false,
+	})
+	sessionKey := "feishu:issue1344-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-card"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Looking up"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "mcp__plugin_context7_context7__query-docs", ToolInput: `{"libraryId":"/larksuite/cli"}`}
+	agentSession.events <- Event{Type: EventResult, Content: "Final", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-card", time.Now(), nil, nil, nil)
+
+	assertNoToolLeak(t, p, []string{"mcp__plugin_context7", "libraryId"})
+}
+
+// assertNoToolLeak verifies that none of the platform's user-facing messages
+// (plain Send, preview start, preview edit) contains any of the given
+// substrings. Used by issue #1344 regression tests to assert that tool info
+// stays hidden when display.tool_messages=false.
+func assertNoToolLeak(t *testing.T, p *stubCompactProgressPlatform, forbidden []string) {
+	t.Helper()
+	all := []struct {
+		label string
+		msgs  []string
+	}{
+		{"sent", p.getSent()},
+		{"previewStarts", p.getPreviewStarts()},
+		{"previewEdits", p.getPreviewEdits()},
+	}
+	for _, bucket := range all {
+		for _, msg := range bucket.msgs {
+			for _, needle := range forbidden {
+				if needle == "" {
+					continue
+				}
+				if strings.Contains(msg, needle) {
+					t.Errorf("tool info %q leaked into %s: %q", needle, bucket.label, msg)
+				}
+			}
+		}
+	}
+}
+
 func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("TransformLocalReferences path handling assumes Unix separators")
