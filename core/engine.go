@@ -5397,10 +5397,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
-			// When tool progress is hidden, segmentStart stays 0 and textParts
-			// contains ALL text across tool boundaries. Prefer the full accumulated
-			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			// Rich cards always hide tool details regardless of the legacy
+			// ToolMessages setting, so textParts is the authoritative answer across
+			// every tool boundary. EventResult.Content may contain only the final
+			// assistant segment. The non-rich hidden-tool path has the same shape
+			// while segmentStart remains zero. A terminal NO_REPLY is deliberately
+			// authoritative even if speculative text was streamed before it.
+			if isSilentReply(fullResponse) {
+				// Keep the terminal marker for the silent-reply branch below.
+			} else if len(textParts) > 0 && hasRichCard {
+				fullResponse = strings.Join(textParts, "")
+			} else if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -15909,25 +15916,35 @@ func locateGeneratedInstructionBlock(text string) (start, end int, current, foun
 		marker string
 		index  int
 	}
-	positions := []markerPosition{
-		{marker: ccConnectInstructionMarker, index: strings.Index(text, ccConnectInstructionMarker)},
-		{marker: legacyCCConnectInstructionMarker, index: strings.Index(text, legacyCCConnectInstructionMarker)},
+	var positions []markerPosition
+	for _, marker := range []string{ccConnectInstructionMarker, legacyCCConnectInstructionMarker} {
+		for searchFrom := 0; searchFrom < len(text); {
+			offset := strings.Index(text[searchFrom:], marker)
+			if offset < 0 {
+				break
+			}
+			index := searchFrom + offset
+			positions = append(positions, markerPosition{marker: marker, index: index})
+			searchFrom = index + len(marker)
+		}
 	}
 	sort.Slice(positions, func(i, j int) bool {
-		if positions[i].index < 0 {
-			return false
-		}
-		if positions[j].index < 0 {
-			return true
-		}
 		return positions[i].index < positions[j].index
 	})
 
-	legacyPrompt := strings.ReplaceAll(AgentSystemPrompt(), "cc-connect-next", "cc-connect")
-	for _, position := range positions {
-		if position.index < 0 {
-			continue
+	type replacementCandidate struct {
+		start int
+		end   int
+	}
+	var candidate *replacementCandidate
+	recordCandidate := func(start, end int) {
+		if candidate == nil {
+			candidate = &replacementCandidate{start: start, end: end}
 		}
+	}
+
+	legacyPrompt := strings.ReplaceAll(AgentSystemPrompt(), "cc-connect-next", "cc-connect")
+	for i, position := range positions {
 		contentStart := position.index + len(position.marker)
 		for contentStart < len(text) && (text[contentStart] == '\r' || text[contentStart] == '\n') {
 			contentStart++
@@ -15939,18 +15956,47 @@ func locateGeneratedInstructionBlock(text string) (start, end int, current, foun
 				endMarkerStart++
 			}
 			if strings.HasPrefix(text[endMarkerStart:], ccConnectInstructionEndMarker) {
-				return position.index, endMarkerStart + len(ccConnectInstructionEndMarker), true, true
+				candidateEnd := endMarkerStart + len(ccConnectInstructionEndMarker)
+				if position.marker == ccConnectInstructionMarker {
+					// Prefer an intact current block wherever it appears. An unknown
+					// older marker may precede it and must remain byte-for-byte intact.
+					return position.index, candidateEnd, true, true
+				}
+				recordCandidate(position.index, candidateEnd)
+				continue
 			}
 			// This is the known pre-delimiter cc-connect-next block. Its exact
 			// prompt boundary is safe to replace while retaining everything after it.
-			return position.index, promptEnd, false, true
+			recordCandidate(position.index, promptEnd)
+			continue
 		}
 		if strings.HasPrefix(text[contentStart:], legacyPrompt) {
-			return position.index, contentStart + len(legacyPrompt), false, true
+			recordCandidate(position.index, contentStart+len(legacyPrompt))
+			continue
 		}
-		if endOffset := strings.Index(text[contentStart:], ccConnectInstructionEndMarker); endOffset >= 0 {
-			return position.index, contentStart + endOffset + len(ccConnectInstructionEndMarker), false, true
+		if position.marker != ccConnectInstructionMarker {
+			// Official legacy blocks had no end delimiter. Never pair an
+			// unknown/customized legacy start with an end marker belonging to a
+			// later cc-connect-next block.
+			continue
 		}
+		endOffset := strings.Index(text[contentStart:], ccConnectInstructionEndMarker)
+		if endOffset < 0 {
+			continue
+		}
+		endMarkerStart := contentStart + endOffset
+		nextMarkerStart := len(text)
+		if i+1 < len(positions) {
+			nextMarkerStart = positions[i+1].index
+		}
+		if endMarkerStart < nextMarkerStart {
+			// Explicit current delimiters make this replacement boundary safe,
+			// even if the generated contents were manually customized.
+			recordCandidate(position.index, endMarkerStart+len(ccConnectInstructionEndMarker))
+		}
+	}
+	if candidate != nil {
+		return candidate.start, candidate.end, false, true
 	}
 	return 0, 0, false, false
 }

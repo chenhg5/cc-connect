@@ -29,6 +29,9 @@ func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
 	if _, ok := p.(core.CardSender); !ok {
 		t.Fatal("expected default Feishu platform to implement core.CardSender")
 	}
+	if _, ok := p.(core.RichCardSupporter); !ok {
+		t.Fatal("expected default Feishu platform to advertise rich-card support")
+	}
 }
 
 func TestNew_CanDisableInteractiveCards(t *testing.T) {
@@ -38,6 +41,12 @@ func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	}
 	if _, ok := p.(core.CardSender); ok {
 		t.Fatal("expected disabled Feishu platform to fall back to plain text")
+	}
+	if _, ok := p.(core.RichCardSupporter); ok {
+		t.Fatal("disabled Feishu cards must not advertise rich-card support")
+	}
+	if _, ok := p.(core.LocalizedRichCardSupporter); ok {
+		t.Fatal("disabled Feishu cards must not advertise localized rich-card support")
 	}
 }
 

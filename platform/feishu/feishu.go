@@ -6189,16 +6189,17 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	return parts
 }
 
-// BuildRichCard implements core.RichCardSupporter. The privacy-first Feishu
-// renderer deliberately ignores the legacy title/details/footer fields and
-// uses only the lifecycle phase, anonymous step kinds, and answer markdown.
-func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+// BuildRichCard implements core.RichCardSupporter only on the interactive
+// wrapper. A plain *Platform returned for enable_feishu_card=false must not
+// advertise this capability or the engine would select rich mode and send the
+// card JSON through the plain-text fallback.
+func (p *interactivePlatform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
 	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
 }
 
 // BuildLocalizedRichCard implements core.LocalizedRichCardSupporter. The
 // engine supplies copy for the active conversation locale.
-func (p *Platform) BuildLocalizedRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, _ string, copy core.RichCardCopy) string {
+func (p *interactivePlatform) BuildLocalizedRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, _ string, copy core.RichCardCopy) string {
 	return buildRichCardWithCopy(status, title, steps, markdown, streaming, copy)
 }
 

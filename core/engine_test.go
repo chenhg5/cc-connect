@@ -2287,6 +2287,43 @@ func TestProcessInteractiveEvents_RichCardKeepsTableOverflowOnPrimaryCard(t *tes
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardPreservesTextAcrossToolBoundaries(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-text-tool-text"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-text-tool-text")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-text-tool-text"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Before the tool. "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "private result"}
+	agentSession.events <- Event{Type: EventText, Content: "After the tool."}
+	agentSession.events <- Event{Type: EventResult, Content: "After the tool.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-text-tool-text", time.Now(), nil, nil, state.replyCtx)
+
+	want := "Before the tool. After the tool."
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], want) {
+		t.Fatalf("final rich card lost pre-tool text: updates=%v", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != want {
+		t.Fatalf("history lost pre-tool text: %+v", history)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("rich-card text should stay on the primary card, got side messages %v", sent)
+	}
+}
+
 // A bare NO_REPLY turn removes the optimistic immediate card so the agent's
 // explicit silent-response contract leaves no lasting answer card.
 func TestProcessInteractiveEvents_RichCard_NoReplySingleChunk(t *testing.T) {
@@ -7756,6 +7793,35 @@ func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "cc-connect-next send --image") {
 		t.Fatalf("expected a current, delimited instruction block to be appended, got %q", string(content))
+	}
+}
+
+func TestSetupMemoryFile_UnknownLegacyBeforeCurrentBlockIsIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	existing := "project preface\n\n" +
+		legacyCCConnectInstructionMarker + "\ncustomized legacy instructions\n\n" +
+		"## User notes\nkeep this forever\n\n" +
+		ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n" + ccConnectInstructionEndMarker +
+		"\n\nproject trailer\n"
+	if err := os.WriteFile(memFile, []byte(existing), 0o644); err != nil {
+		t.Fatalf("write mixed legacy/current instructions: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupExists || err != nil {
+		t.Fatalf("result = %d, err = %v; want setupExists", result, err)
+	}
+	content, err := os.ReadFile(memFile)
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	if string(content) != existing {
+		t.Fatalf("idempotent setup modified mixed legacy/current content:\n%s", content)
 	}
 }
 
