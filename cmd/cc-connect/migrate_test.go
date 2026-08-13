@@ -647,18 +647,86 @@ func TestMigrateLegacyDataForceCreatesRecoverableBackup(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacyDataPreflightFailureLeavesTargetUntouched(t *testing.T) {
+func TestPrepareLegacyMigrationRejectsOverlappingDestinations(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetPath func(string) string
+	}{
+		{name: "same target", targetPath: func(project string) string { return filepath.Join(project, ".cc-connect-next") }},
+		{name: "nested target", targetPath: func(project string) string { return filepath.Join(project, ".cc-connect-next", "main") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			project := filepath.Join(root, "project")
+			target := tt.targetPath(project)
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "demo"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(project)+`"
+`)
+			writeMigrationFixture(t, filepath.Join(project, ".cc-connect", "images", "input.png"), "image")
+
+			_, err := prepareLegacyMigration(migrationOptions{
+				Source:             source,
+				Target:             target,
+				Home:               root,
+				Force:              true,
+				DryRun:             true,
+				IncludeProjectData: true,
+			})
+			if err == nil || !strings.Contains(err.Error(), "migration destinations overlap") {
+				t.Fatalf("prepareLegacyMigration() error = %v, want destination-overlap refusal", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(project, ".cc-connect-next")); !os.IsNotExist(statErr) {
+				t.Fatalf("overlap preflight created a destination, err=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestMigrateLegacyDataTreatsMissingConfiguredDataDirAsEmpty(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
 	target := filepath.Join(root, ".cc-connect-next")
 	missingData := filepath.Join(root, "missing-state")
 	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(missingData)+`"`+"\n")
+	writeMigrationFixture(t, filepath.Join(source, "backups", "config.toml.bak"), "backup")
 
-	if _, err := migrateLegacyData(source, target, false, false); err == nil {
-		t.Fatal("migrateLegacyData() error = nil, want missing custom data_dir failure")
+	report, err := migrateLegacyData(source, target, false, false)
+	if err != nil {
+		t.Fatalf("missing lazy data_dir blocked config migration: %v", err)
 	}
-	if _, err := os.Stat(target); !os.IsNotExist(err) {
-		t.Fatalf("failed preflight created or modified target, err=%v", err)
+	if got, want := report.CopiedFiles, 2; got != want {
+		t.Fatalf("copied files = %d, want %d config-root files", got, want)
+	}
+	canonicalMissingData, err := canonicalDestinationPath(missingData)
+	if err != nil {
+		t.Fatalf("canonical missing data_dir: %v", err)
+	}
+	if report.SourceDataDir != canonicalMissingData {
+		t.Fatalf("reported data_dir = %q, want %q", report.SourceDataDir, canonicalMissingData)
+	}
+	if _, err := os.Stat(missingData); !os.IsNotExist(err) {
+		t.Fatalf("migration created the absent legacy data_dir, err=%v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "backups", "config.toml.bak")); err != nil || string(got) != "backup" {
+		t.Fatalf("config-root persistent file was not migrated: content=%q err=%v", got, err)
+	}
+	configBytes, err := os.ReadFile(filepath.Join(target, "config.toml"))
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	canonicalTarget, err := canonicalExistingDirectory(target)
+	if err != nil {
+		t.Fatalf("canonical target: %v", err)
+	}
+	if !strings.Contains(string(configBytes), `data_dir = "`+filepath.ToSlash(canonicalTarget)+`"`) {
+		t.Fatalf("migrated config did not rewrite missing data_dir to isolated target: %s", configBytes)
 	}
 }
 

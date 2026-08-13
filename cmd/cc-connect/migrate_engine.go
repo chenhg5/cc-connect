@@ -192,12 +192,17 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	}
 
 	dataDir := source
+	dataDirExists := true
 	if strings.TrimSpace(legacyCfg.DataDir) != "" {
-		dataDir, err = resolveLegacyConfigPath(legacyCfg.DataDir, runtimeWorkDir, opts.Home)
+		dataDirCandidate, err := resolveLegacyConfigPath(legacyCfg.DataDir, runtimeWorkDir, opts.Home)
 		if err != nil {
 			return nil, fmt.Errorf("resolve source data_dir: %w", err)
 		}
-		dataDir, err = canonicalExistingDirectory(dataDir)
+		dataDir, err = canonicalExistingDirectory(dataDirCandidate)
+		if errors.Is(err, os.ErrNotExist) {
+			dataDirExists = false
+			dataDir, err = canonicalDestinationPath(dataDirCandidate)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read source data_dir: %w", err)
 		}
@@ -225,7 +230,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if err := collectMigrationTreeExcluding(source, "config-root", true, configRootExclusions, mainDestination, &report); err != nil {
 		return nil, fmt.Errorf("inventory source config directory: %w", err)
 	}
-	if dataDir != source {
+	if dataDir != source && dataDirExists {
 		if err := collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report); err != nil {
 			return nil, fmt.Errorf("inventory source data_dir: %w", err)
 		}
@@ -314,6 +319,13 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	report.SkippedProjects = append([]migrationSkippedProjectRecord(nil), skippedProjects...)
 
 	destinations := append(append([]*migrationDestination{}, projectDestinations...), mainDestination)
+	for i := 0; i < len(destinations); i++ {
+		for j := i + 1; j < len(destinations); j++ {
+			if pathsOverlap(destinations[i].Target, destinations[j].Target) {
+				return nil, fmt.Errorf("migration destinations overlap: %s and %s", destinations[i].Target, destinations[j].Target)
+			}
+		}
+	}
 	for _, destination := range destinations {
 		if info, err := os.Lstat(destination.Target); err == nil {
 			if info.Mode()&os.ModeSymlink != 0 {

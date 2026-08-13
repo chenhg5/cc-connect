@@ -68,7 +68,7 @@ cc-connect-next migrate \
 
 Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If that metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly.
 
-Configuration paths use the same `${NAME}` placeholder rules as official CC Connect. If optional project data cannot be read, or project state/binding metadata is malformed, the global migration continues and still copies that metadata verbatim; every skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
+Configuration paths use the same `${NAME}` placeholder rules as official CC Connect. A configured `data_dir` that has not been created yet is treated as empty, so the valid configuration root still migrates. If optional project data cannot be read, or project state/binding metadata is malformed, the global migration continues and still copies that metadata verbatim; every skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
 ## Recommended Feishu configuration
 
