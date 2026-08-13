@@ -2566,7 +2566,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "回答中", LangSpanish: "Respondiendo",
 	},
 	MsgRichCardDone: {
-		LangEnglish: "Done", LangChinese: "Done", LangTraditionalChinese: "Done",
+		LangEnglish: "Done", LangChinese: "已完成", LangTraditionalChinese: "已完成",
 		LangJapanese: "完了", LangSpanish: "Completado",
 	},
 	MsgRichCardError: {

@@ -148,7 +148,7 @@ reply_to_trigger = true
 done_emoji = "Done"
 ```
 
-The card appears immediately, shows only anonymous reasoning/tool counts, streams the answer in the same quoted card, and ends as `✅ Done` or a generic `⚠️ 未完成`. Reasoning, tool details, model/token/context metadata, working directories, and reply footers are omitted from the card payload.
+The card appears immediately, shows only anonymous reasoning/tool counts, streams the answer in the same quoted card, and ends with a localized completion label (`✅ Done` in English, `✅ 已完成` in Chinese) or a localized generic failure label. Reasoning, tool details, model/token/context metadata, working directories, and reply footers are omitted from the card payload.
 
 See the [Feishu answer-card contract](docs/feishu-card-contract.md) for the exact lifecycle, privacy boundary, fallback behavior, locale coverage, and executable verification commands.
 

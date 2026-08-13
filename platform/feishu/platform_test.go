@@ -1147,7 +1147,7 @@ func TestBuildRichCard_CompletedAndErrorStatesAreClean(t *testing.T) {
 	done := buildRichCard(core.CardStatusDone, "done", steps, "最终答案", false, "model · token · ctx")
 	failed := buildRichCard(core.CardStatusError, "error", steps, "", false, "model · token · ctx")
 
-	for _, want := range []string{"✅ Done", "最终答案"} {
+	for _, want := range []string{"✅ 已完成", "最终答案"} {
 		if !strings.Contains(done, want) {
 			t.Fatalf("completed card should contain %q, got %q", want, done)
 		}
@@ -1176,8 +1176,8 @@ func TestBuildRichCard_LocalizesLifecycleForEverySupportedLanguage(t *testing.T)
 		error    string
 	}{
 		{"english", core.LangEnglish, "Thinking…", "Calling tools…", "Reasoning 1 · Tools 1", "details are private", "✅ Done", "⚠️ Not completed"},
-		{"simplified chinese", core.LangChinese, "正在思考…", "正在调用工具…", "推理 1 次 · 工具 1 次", "详情不会展示", "✅ Done", "⚠️ 未完成"},
-		{"traditional chinese", core.LangTraditionalChinese, "正在思考…", "正在呼叫工具…", "推理 1 次 · 工具 1 次", "詳情不會顯示", "✅ Done", "⚠️ 未完成"},
+		{"simplified chinese", core.LangChinese, "正在思考…", "正在调用工具…", "推理 1 次 · 工具 1 次", "详情不会展示", "✅ 已完成", "⚠️ 未完成"},
+		{"traditional chinese", core.LangTraditionalChinese, "正在思考…", "正在呼叫工具…", "推理 1 次 · 工具 1 次", "詳情不會顯示", "✅ 已完成", "⚠️ 未完成"},
 		{"japanese", core.LangJapanese, "考えています…", "ツールを呼び出しています…", "推論 1 回 · ツール 1 回", "詳細は非公開", "✅ 完了", "⚠️ 未完了"},
 		{"spanish", core.LangSpanish, "Pensando…", "Usando herramientas…", "razonamientos 1 · herramientas 1", "detalles del razonamiento", "✅ Completado", "⚠️ No completado"},
 	}

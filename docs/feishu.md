@@ -131,7 +131,7 @@ done_emoji = "Done"
 # image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
 ```
 
-> `card_mode = "rich"` 是 cc-connect-next 的默认飞书回答形态：收到消息后立即引用回复一张非空 Card 2.0 卡片，只展示匿名的推理/工具次数；答案开始后在同一卡片中流式更新正文，结束时显示 `Done`。推理文本、工具名称/参数/结果、模型、token、上下文、工作目录和 footer 不会进入这张回答卡片，也不存在可展开详情。需要上游旧展示时显式设置 `card_mode = "legacy"`。精确行为和验收命令见[回答卡片契约](feishu-card-contract.md)。
+> `card_mode = "rich"` 是 cc-connect-next 的默认飞书回答形态：收到消息后立即引用回复一张非空 Card 2.0 卡片，只展示匿名的推理/工具次数；答案开始后在同一卡片中流式更新正文，结束时显示当前语言对应的完成文案（中文为 `已完成`）。推理文本、工具名称/参数/结果、模型、token、上下文、工作目录和 footer 不会进入这张回答卡片，也不存在可展开详情。需要上游旧展示时显式设置 `card_mode = "legacy"`。精确行为和验收命令见[回答卡片契约](feishu-card-contract.md)。
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
@@ -299,7 +299,7 @@ level=INFO msg="cc-connect-next is running" projects=1
 cc-connect-next: ⏳ 正在思考…
 cc-connect-next: ⏳ 正在调用工具…（推理 1 次 · 工具 1 次）
 cc-connect-next: ✍️ 正在回答（同一张卡片流式更新正文）
-cc-connect-next: ✅ Done
+cc-connect-next: ✅ 已完成
 ```
 
 ---
