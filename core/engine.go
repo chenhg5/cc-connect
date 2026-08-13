@@ -510,6 +510,10 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
+	turnCancelCh             chan struct{}
+	turnCancelMessageID      string
+	turnCancelClosed         bool
+	discardTurnMessageID     string
 	pending                  *pendingPermission
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
@@ -697,6 +701,44 @@ func (s *interactiveState) markStopped() {
 		s.stopCh = make(chan struct{})
 	}
 	close(s.stopCh)
+}
+
+// silentTurnCancellationSignal is separate from stopCh because sessions that
+// support CancelTurn remain reusable after a recalled trigger. The message ID
+// scopes the signal to one turn so a later turn on the same session starts with
+// a fresh channel.
+func (s *interactiveState) silentTurnCancellationSignal(messageID string) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnCancelCh == nil || s.turnCancelMessageID != messageID {
+		s.turnCancelCh = make(chan struct{})
+		s.turnCancelMessageID = messageID
+		s.turnCancelClosed = false
+	}
+	if messageID != "" && s.discardTurnMessageID == messageID && !s.turnCancelClosed {
+		close(s.turnCancelCh)
+		s.turnCancelClosed = true
+	}
+	return s.turnCancelCh
+}
+
+func (s *interactiveState) cancelTurnSilently(messageID string) {
+	if messageID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discardTurnMessageID = messageID
+	if s.turnCancelCh != nil && s.turnCancelMessageID == messageID && !s.turnCancelClosed {
+		close(s.turnCancelCh)
+		s.turnCancelClosed = true
+	}
+}
+
+func (s *interactiveState) shouldDiscardTurn(messageID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return messageID != "" && s.discardTurnMessageID == messageID
 }
 
 // resolve safely closes the Resolved channel exactly once.
@@ -4587,6 +4629,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.currentMessageID = msgID
 		state.mu.Unlock()
 	}
+	silentCancelCh := state.silentTurnCancellationSignal(msgID)
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
@@ -4772,6 +4815,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		partialPersisted = true
 		return body
 	}
+	discardSilentTurn := func() {
+		sp.discard()
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		p := state.platform
+		state.mu.Unlock()
+		removeRichCardForFallback(p, cardMessageID)
+	}
 
 	// Product contract: accepted Feishu turns show a non-empty card before the
 	// first Agent event, including during a long provider/tool startup. A future
@@ -4779,6 +4830,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// optimistic card on that exceptional outcome instead of deferring every
 	// normal turn and reintroducing the user-visible blank wait. Feishu clients
 	// may display their own recall notice; docs make this tradeoff explicit.
+	if state.shouldDiscardTurn(msgID) {
+		discardSilentTurn()
+		return
+	}
 	cardMessageID = startRichCard(state.platform, state.replyCtx)
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -4817,7 +4872,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		var ok bool
 
 		select {
+		case <-silentCancelCh:
+			discardSilentTurn()
+			return
 		case <-stopCh:
+			if state.shouldDiscardTurn(msgID) {
+				discardSilentTurn()
+				return
+			}
 			sp.discard()
 			state.mu.Lock()
 			p := state.platform
@@ -4932,6 +4994,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
+			if state.shouldDiscardTurn(msgID) {
+				discardSilentTurn()
+				return
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
@@ -4942,6 +5008,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 		}
 
+		if state.shouldDiscardTurn(msgID) {
+			discardSilentTurn()
+			return
+		}
 		if state.isStopped() {
 			sp.discard()
 			state.mu.Lock()
@@ -5473,6 +5543,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			select {
 			case <-pending.Resolved:
 				slog.Info("permission resolved", "request_id", event.RequestID)
+			case <-silentCancelCh:
+				permissionInterrupted = true
 			case <-stopCh:
 				permissionInterrupted = true
 			case <-e.ctx.Done():
@@ -5490,6 +5562,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				p := state.platform
 				state.mu.Unlock()
 				pending.resolve()
+				if state.shouldDiscardTurn(msgID) {
+					discardSilentTurn()
+					return
+				}
 				sp.discard()
 				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
 					removeRichCardForFallback(p, cardMessageID)
@@ -5909,6 +5985,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
+				silentCancelCh = state.silentTurnCancellationSignal(msgID)
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
@@ -10101,7 +10178,11 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	pending := state.pending
 	state.pending = nil
 	agentSession := state.agentSession
+	currentMessageID := state.currentMessageID
 	state.mu.Unlock()
+	if !notifyQueued {
+		state.cancelTurnSilently(currentMessageID)
+	}
 
 	// If the agent session supports graceful turn cancellation (e.g. ACP),
 	// send a cancel notification and keep the session alive for the next

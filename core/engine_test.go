@@ -2019,6 +2019,17 @@ type shutdownAwareRichCardPlatform struct {
 	updatedAfterStop  []bool
 }
 
+type cancelTurnControllableSession struct {
+	*controllableAgentSession
+	cancelOnce   sync.Once
+	cancelCalled chan struct{}
+}
+
+func (s *cancelTurnControllableSession) CancelTurn() error {
+	s.cancelOnce.Do(func() { close(s.cancelCalled) })
+	return nil
+}
+
 func (p *shutdownAwareRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
 	p.lifecycleMu.Lock()
 	p.updateContextErrs = append(p.updateContextErrs, ctx.Err())
@@ -2238,6 +2249,101 @@ func TestEngine_StopInterruptsPermissionWaitBeforeFinalizingRichCard(t *testing.
 	}
 	if updatedAfterStop[len(updatedAfterStop)-1] {
 		t.Fatal("terminal card update ran after platform Stop")
+	}
+}
+
+func TestHandleMessageRecallDeletesRichCardWithoutPersistingPartialOutput(t *testing.T) {
+	for _, supportsCancelTurn := range []bool{false, true} {
+		name := "close-session"
+		if supportsCancelTurn {
+			name = "cancel-turn"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+			sessionKey := "feishu:user-rich-recall-" + name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			baseAgentSession := newControllableSession("s-rich-recall-" + name)
+			var agentSession AgentSession = baseAgentSession
+			var cancelCalled <-chan struct{}
+			if supportsCancelTurn {
+				cancellable := &cancelTurnControllableSession{
+					controllableAgentSession: baseAgentSession,
+					cancelCalled:             make(chan struct{}),
+				}
+				agentSession = cancellable
+				cancelCalled = cancellable.cancelCalled
+			}
+			state := &interactiveState{
+				agentSession: agentSession,
+				platform:     p,
+				replyCtx:     "ctx-rich-recall",
+			}
+			e.interactiveStates[sessionKey] = state
+
+			turnDone := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-recall", time.Now(), nil, nil, state.replyCtx)
+				close(turnDone)
+			}()
+			baseAgentSession.events <- Event{Type: EventText, Content: "partial answer that must disappear"}
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				starts, streams, updates, _ := p.snapshot()
+				rendered := strings.Join(append(append([]string{}, streams...), updates...), "\n")
+				if len(starts) == 1 && strings.Contains(rendered, "partial answer that must disappear") {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("rich card did not expose the partial answer before recall: starts=%v rendered=%q", starts, rendered)
+				}
+				time.Sleep(time.Millisecond)
+			}
+
+			e.ReceiveMessage(p, &Message{Platform: "feishu", MessageID: "m-rich-recall", Recalled: true})
+			select {
+			case <-turnDone:
+			case <-time.After(time.Second):
+				t.Fatal("recalled rich-card turn did not exit")
+			}
+			if cancelCalled != nil {
+				select {
+				case <-cancelCalled:
+				case <-time.After(time.Second):
+					t.Fatal("recalled turn did not call CancelTurn")
+				}
+			}
+
+			_, _, updates, deletes := p.snapshot()
+			if deletes != 1 {
+				t.Fatalf("recalled rich card deletes = %d, want 1", deletes)
+			}
+			for _, update := range updates {
+				if strings.Contains(update, "status=error") {
+					t.Fatalf("recalled rich card was converted to a visible error: %v", updates)
+				}
+			}
+			for _, entry := range session.GetHistory(0) {
+				if entry.Role == "assistant" {
+					t.Fatalf("recalled partial output entered history: %+v", entry)
+				}
+			}
+			if sent := p.getSent(); len(sent) != 0 {
+				t.Fatalf("recall emitted side messages: %v", sent)
+			}
+		})
+	}
+}
+
+func TestSilentTurnCancellationSignalKeepsEmptyMessageIDActive(t *testing.T) {
+	state := &interactiveState{}
+	ch := state.silentTurnCancellationSignal("")
+	select {
+	case <-ch:
+		t.Fatal("an empty message ID was treated as an already-recalled turn")
+	default:
 	}
 }
 
