@@ -456,6 +456,38 @@ func TestAgent_StartSession(t *testing.T) {
 	if !ps.Alive() {
 		t.Error("session should be alive")
 	}
+	// CC_PERMISSION_MODE 必须被注入，permission-gate 扩展才能感知全自动模式。
+	found := false
+	for _, e := range ps.extraEnv {
+		if e == "CC_PERMISSION_MODE=yolo" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("extraEnv = %v, want CC_PERMISSION_MODE=yolo", ps.extraEnv)
+	}
+}
+
+func TestAgent_StartSession_NoModeNoEnv(t *testing.T) {
+	a := &Agent{cmd: "echo", workDir: "/tmp"} // mode 为空
+
+	sess, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	ps := sess.(*piSession)
+	for _, e := range ps.extraEnv {
+		if len(e) >= len("CC_PERMISSION_MODE=") && e[:len("CC_PERMISSION_MODE=")] == "CC_PERMISSION_MODE=" {
+			t.Errorf("extraEnv = %v, CC_PERMISSION_MODE should be absent when mode is empty", ps.extraEnv)
+		}
+	}
 }
 
 // ── extractToolInput ─────────────────────────────────────────

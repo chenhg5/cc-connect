@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,59 @@ type wireAskOption struct {
 	Description string `json:"description,omitempty"`
 }
 
+// humanizeToolArgs converts reasonix's JSON tool args (e.g. bash
+// {"command":"ls -la"} or read_file {"path":"/etc/hosts"}) into a compact
+// human-readable string for IM cards. Unknown JSON falls back to the raw
+// string; non-JSON input is returned unchanged.
+func humanizeToolArgs(args string) string {
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return trimmed
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+		return trimmed
+	}
+	// bash/shell calls: always show the actual command, not a description.
+	if _, isBash := m["command"]; isBash {
+		if v, ok := m["command"].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	// Non-shell tools: prefer a concise description, then path/file.
+	if v, ok := m["description"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := m["path"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := m["file"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	// Fall back to a compact key=value rendering, trimmed to a sane length.
+	var parts []string
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			parts = append(parts, k+"="+val)
+		case float64:
+			parts = append(parts, fmt.Sprintf("%s=%g", k, val))
+		default:
+			b, _ := json.Marshal(val)
+			parts = append(parts, k+"="+string(b))
+		}
+	}
+	sort.Strings(parts)
+	out := strings.Join(parts, " ")
+	if len(out) > 300 {
+		out = out[:300] + "…"
+	}
+	return out
+}
+
 // ── Session ──────────────────────────────────────────────────────
 
 // reasonixSession manages a single conversation session with reasonix serve.
@@ -73,6 +127,12 @@ type reasonixSession struct {
 	workDir   string
 	sessionID string
 	mode      string
+
+	// platformPrompt carries the cc-connect capabilities prompt
+	// (core.AgentSystemPrompt). reasonix serve has its own workspace context
+	// and never reads cc-connect's memory files, so the prompt is prepended
+	// to every submitted turn.
+	platformPrompt string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -145,9 +205,27 @@ func newSession(ctx context.Context, serveURL, workDir, sessionID, mode string) 
 
 // ── core.AgentSession implementation ─────────────────────────────
 
+// setPlatformPrompt stores the cc-connect capabilities prompt. It is called
+// by the Agent before the session's first turn (see StartSession).
+func (s *reasonixSession) setPlatformPrompt(prompt string) {
+	s.mu.Lock()
+	s.platformPrompt = prompt
+	s.mu.Unlock()
+}
+
 func (s *reasonixSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("reasonix: session is closed")
+	}
+
+	// Prepend the cc-connect capabilities prompt on every turn. It is
+	// idempotent enough to repeat: the model treats it as standing
+	// instructions, and serve's /submit accepts a single input string.
+	s.mu.Lock()
+	ccPrompt := s.platformPrompt
+	s.mu.Unlock()
+	if strings.TrimSpace(ccPrompt) != "" {
+		prompt = ccPrompt + "\n\n" + prompt
 	}
 
 	// Save images/files to disk and append references
@@ -190,6 +268,25 @@ func (s *reasonixSession) RespondPermission(requestID string, result core.Permis
 		"session": false,
 	}
 	return s.httpPost("/approve", body)
+}
+
+// SetLiveMode switches the reasonix serve permission mode in real time.
+// "yolo" (and legacy aliases "auto"/"force") turns on tool auto-approval so
+// serve stops emitting approval_request events; "default"/"plan" turns it off
+// (interactive approval per tool). It implements core.LiveModeSwitcher so the
+// engine's /mode command applies immediately to the running session.
+func (s *reasonixSession) SetLiveMode(mode string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	on := normalizeMode(map[string]any{"mode": mode}) == "yolo"
+	body := map[string]any{"on": on}
+	if err := s.httpPost("/auto-approve-tools", body); err != nil {
+		slog.Warn("reasonix: set live mode failed", "mode", mode, "on", on, "error", err)
+		return false
+	}
+	slog.Info("reasonix: live mode set", "mode", mode, "auto_approve", on)
+	return true
 }
 
 func (s *reasonixSession) Events() <-chan core.Event {
@@ -370,10 +467,18 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 
 	case "tool_dispatch":
 		s.flushThinking()
+		// Parse the JSON args into a human-readable summary (e.g. bash
+		// {"command":"ls -la"} → "ls -la") so Feishu/Telegram cards show the
+		// command instead of raw JSON.
+		toolInput := humanizeToolArgs(we.Tool.Args)
 		s.emit(core.Event{
 			Type:     core.EventToolUse,
 			ToolName: we.Tool.Name,
-			Content:  we.Tool.Args,
+			Content:  toolInput,
+			// ToolInput drives the engine's tool-call display (rich card
+			// summary / streaming card); without it the command is blank
+			// even though it executes (same gap as approval_request).
+			ToolInput: toolInput,
 		})
 
 	case "tool_result":
@@ -393,11 +498,16 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 		s.mu.Lock()
 		s.pendingApprovalID = we.Approval.ID
 		s.mu.Unlock()
+		// Subject is usually plain text already; humanize defensively in case
+		// it carries JSON args (e.g. tool args serialized as an object).
+		subject := humanizeToolArgs(we.Approval.Subject)
 		s.emit(core.Event{
 			Type:      core.EventPermissionRequest,
 			RequestID: we.Approval.ID,
-			Content:   we.Approval.Subject,
+			Content:   subject,
 			ToolName:  we.Approval.Tool,
+			// ToolInput 用于渲染权限卡片的命令内容。
+			ToolInput: subject,
 		})
 
 	case "ask_request":

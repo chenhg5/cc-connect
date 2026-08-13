@@ -23,10 +23,11 @@ func init() {
 
 // Agent drives a remote reasonix serve instance.
 type Agent struct {
-	mu       sync.RWMutex
-	serveURL string // e.g. "http://localhost:8080"
-	workDir  string // local project directory (for /dir and display)
-	mode     string // permission mode: "default", "yolo", "plan"
+	mu             sync.RWMutex
+	serveURL       string // e.g. "http://localhost:8080"
+	workDir        string // local project directory (for /dir and display)
+	mode           string // permission mode: "default", "yolo", "plan"
+	platformPrompt string // cc-connect capabilities prompt (AgentSystemPrompt)
 }
 
 // New creates a Reasonix agent.
@@ -83,8 +84,38 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	if err != nil {
 		return nil, fmt.Errorf("reasonix: start session: %w", err)
 	}
+
+	// Inject the cc-connect capabilities prompt (AgentSystemPrompt) so the
+	// model knows how to use `cc-connect send` for images/files/voice and the
+	// cron/timer commands. reasonix serve does not read cc-connect's memory
+	// files, so the prompt must travel with each submitted turn.
+	a.mu.RLock()
+	s.setPlatformPrompt(a.platformPrompt)
+	a.mu.RUnlock()
+
+	// Apply the configured permission mode to the serve instance so a
+	// persisted mode (e.g. mode = "yolo" in cc-connect config) takes effect
+	// immediately instead of only after the user sends /mode in chat.
+	if a.mode != "" {
+		s.SetLiveMode(a.mode)
+	}
+
 	return s, nil
 }
+
+// SetPlatformPrompt implements core.PlatformPromptInjector: the engine calls
+// it before StartSession with platform formatting instructions. It is stored
+// and relayed to each new session.
+func (a *Agent) SetPlatformPrompt(prompt string) {
+	a.mu.Lock()
+	a.platformPrompt = prompt
+	a.mu.Unlock()
+}
+
+// HasSystemPromptSupport implements core.SystemPromptSupporter: cc-connect
+// treats the agent as able to carry its system prompt natively, so it skips
+// the memory-file fallback (REASONIX.md) that serve would never read.
+func (a *Agent) HasSystemPromptSupport() bool { return true }
 
 // ListSessions returns nil because reasonix doesn't expose session listing.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -159,3 +190,5 @@ var _ core.ModeSwitcher = (*Agent)(nil)          // mode switching
 var _ core.WorkDirSwitcher = (*Agent)(nil)       // work dir switching
 var _ core.ContextCompressor = (*Agent)(nil)     // compact support
 var _ core.MemoryFileProvider = (*Agent)(nil)    // memory file support
+var _ core.PlatformPromptInjector = (*Agent)(nil) // platform prompt injection
+var _ core.SystemPromptSupporter = (*Agent)(nil)  // native system prompt support

@@ -227,6 +227,53 @@ func TestReasonixSession_SSE_MapsEventTypes(t *testing.T) {
 	assert.Contains(t, types, core.EventText, "should contain text event")
 	assert.Contains(t, types, core.EventToolUse, "should contain tool_use event")
 	assert.Contains(t, types, core.EventToolResult, "should contain tool_result event")
+
+	// ToolUse must carry ToolInput so the engine's tool-call display
+	// (rich card summary / streaming card) is not blank.
+	for _, evt := range events {
+		if evt.Type == core.EventToolUse {
+			assert.Equal(t, "read_file", evt.ToolName)
+			assert.Equal(t, "main.go", evt.Content)
+			assert.Equal(t, "main.go", evt.ToolInput, "ToolUse.ToolInput must carry the command for display")
+			break
+		}
+	}
+}
+
+// ── Test: approval_request maps to EventPermissionRequest with ToolInput ──
+func TestReasonixSession_ApprovalRequest_MapsToolInput(t *testing.T) {
+	ts, sseCh := sseServer(t)
+	defer ts.Close()
+
+	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
+	require.NoError(t, err)
+	defer func() { _ = sess.Close() }()
+
+	go func() {
+		sseCh <- mustJSON(wireEvent{Kind: "approval_request", Approval: &wireApproval{
+			ID: "req-1", Tool: "bash", Subject: "touch /tmp/perm-test.txt",
+		}})
+		sseCh <- mustJSON(wireEvent{Kind: "turn_done"})
+	}()
+
+	go func() {
+		_ = sess.Send("test", "", nil, nil)
+	}()
+
+	events := drainEvents(sess.Events(), 2, 5*time.Second)
+
+	var perm *core.Event
+	for i := range events {
+		if events[i].Type == core.EventPermissionRequest {
+			perm = &events[i]
+			break
+		}
+	}
+	require.NotNil(t, perm, "should emit EventPermissionRequest")
+	assert.Equal(t, "req-1", perm.RequestID)
+	assert.Equal(t, "bash", perm.ToolName)
+	assert.Equal(t, "touch /tmp/perm-test.txt", perm.Content)
+	assert.Equal(t, "touch /tmp/perm-test.txt", perm.ToolInput, "ToolInput must carry the command so the permission card shows it")
 }
 
 // ── Test: SSE reconnect with backoff ─────────────────────────────
@@ -355,12 +402,158 @@ func TestReasonixAgent_PermissionMode(t *testing.T) {
 	}
 }
 
+// ── Test: SetLiveMode toggles serve auto-approve ────────────────
+
+func TestReasonixSession_SetLiveMode_PostsAutoApprove(t *testing.T) {
+	var (
+		calls    []map[string]any
+		callsMu  sync.Mutex
+		calledCh = make(chan struct{}, 4)
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /submit", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("POST /new", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /auto-approve-tools", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		callsMu.Lock()
+		calls = append(calls, body)
+		callsMu.Unlock()
+		calledCh <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /events", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		// Keep the SSE connection open until the test finishes.
+		<-r.Context().Done()
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
+	require.NoError(t, err)
+	defer func() { _ = sess.Close() }()
+
+	require.True(t, sess.SetLiveMode("yolo"))
+	require.True(t, sess.SetLiveMode("default"))
+
+	select {
+	case <-calledCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("auto-approve-tools was not called")
+	}
+	select {
+	case <-calledCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("auto-approve-tools was not called second time")
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	require.Len(t, calls, 2)
+	assert.Equal(t, true, calls[0]["on"], "yolo should enable auto-approve")
+	assert.Equal(t, false, calls[1]["on"], "default should disable auto-approve")
+}
+
+// ── Test: platform prompt is prepended to every submit ──────────
+
+func TestReasonixSession_PlatformPrompt_PrependedToSubmit(t *testing.T) {
+	var (
+		submits   []string
+		submitsMu sync.Mutex
+		submitted = make(chan struct{}, 4)
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /submit", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		submitsMu.Lock()
+		submits = append(submits, body.Input)
+		submitsMu.Unlock()
+		submitted <- struct{}{}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("POST /new", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /events", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		// Keep the stream open and emit turn_done shortly so Send() unblocks.
+		select {
+		case <-time.After(100 * time.Millisecond):
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(wireEvent{Kind: "turn_done"}))
+			flusher.Flush()
+		case <-r.Context().Done():
+		}
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	sess, err := newSession(context.Background(), ts.URL, ".", "test", "default")
+	require.NoError(t, err)
+	defer func() { _ = sess.Close() }()
+
+	sess.setPlatformPrompt("CC-ADAPTER-PROMPT")
+	require.NoError(t, sess.Send("first message", "m1", nil, nil))
+
+	select {
+	case <-submitted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("submit was not called")
+	}
+
+	submitsMu.Lock()
+	defer submitsMu.Unlock()
+	require.Len(t, submits, 1)
+	assert.True(t, strings.HasPrefix(submits[0], "CC-ADAPTER-PROMPT"), "submit should start with the platform prompt")
+	assert.Contains(t, submits[0], "first message")
+}
+
+// ── Test: humanizeToolArgs converts JSON args to readable text ──
+
+func TestHumanizeToolArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+		want string
+	}{
+		{"empty", "", ""},
+		{"empty object", "{}", ""},
+		{"bash command", `{"command": "ls -la"}`, "ls -la"},
+		{"bash with space", `{"command":"echo hello > /tmp/x"}`, "echo hello > /tmp/x"},
+		{"read_file path", `{"path": "/etc/hosts"}`, "/etc/hosts"},
+		{"edit file", `{"path":"main.go","old_string":"a","new_string":"b"}`, "main.go"},
+		{"bash ignores description", `{"description":"List files","command":"ls"}`, "ls"},
+		{"non-bash description preferred", `{"description":"Read config","path":"/etc/hosts"}`, "Read config"},
+		{"non-json passthrough", "plain text", "plain text"},
+		{"unknown fields kv", `{"timeout":5,"retries":2}`, "retries=2 timeout=5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := humanizeToolArgs(tc.args)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // ── Test: static interface assertions ────────────────────────────
 
 // These compile-time checks ensure Agent and reasonixSession remain compliant
 // with core.Agent and core.AgentSession respectively.
 var _ core.Agent = (*Agent)(nil)
 var _ core.AgentSession = (*reasonixSession)(nil)
+var _ core.LiveModeSwitcher = (*reasonixSession)(nil) // /mode applies live to serve
 
 // ── Test: respond permission posts to /approve ───────────────────
 

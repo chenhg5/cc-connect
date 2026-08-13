@@ -39,6 +39,7 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	stdin             io.WriteCloser
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -96,6 +97,17 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	}
 	cmd.Env = env
 
+	// Use io.Pipe for stdin to keep it open for permission replies.
+	// OpenCode in --format json mode passes prompts as positional args
+	// and reads permission replies from stdin.
+	stdinReader, stdinWriter := io.Pipe()
+	cmd.Stdin = stdinReader
+	// Close previous pipe if any
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+	}
+	s.stdin = stdinWriter
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("opencodeSession: stdout pipe: %w", err)
@@ -103,7 +115,6 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
-	cmd.Stdin = strings.NewReader(prompt)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opencodeSession: start: %w", err)
@@ -188,6 +199,11 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 		args = append(args, "--file", imagePath)
 	}
 
+	// Pass prompt as positional argument (keeps stdin free for permission replies)
+	if prompt != "" {
+		args = append(args, prompt)
+	}
+
 	return args
 }
 
@@ -264,6 +280,8 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 		s.handleText(raw)
 	case "tool_use":
 		s.handleToolUse(raw)
+	case "permission_asked":
+		s.handlePermissionAsked(raw)
 	case "reasoning":
 		s.handleReasoning(raw)
 	case "step_start":
@@ -506,8 +524,83 @@ func (s *opencodeSession) sendEventResult() {
 	}
 }
 
-// RespondPermission is a no-op — OpenCode handles permissions internally.
-func (s *opencodeSession) RespondPermission(_ string, _ core.PermissionResult) error {
+// handlePermissionAsked handles permission_asked events emitted by OpenCode
+// in --format json mode when it needs user approval for a tool call.
+func (s *opencodeSession) handlePermissionAsked(raw map[string]any) {
+	permission, _ := raw["permission"].(map[string]any)
+	if permission == nil {
+		return
+	}
+
+	requestID, _ := permission["id"].(string)
+	permName, _ := permission["permission"].(string)
+
+	// Build tool input summary for display
+	toolInput := ""
+	if tool, ok := permission["tool"].(map[string]any); ok {
+		if callID, ok := tool["callID"].(string); ok {
+			toolInput = callID
+		}
+	}
+	if patterns, ok := permission["patterns"].([]any); ok {
+		for _, p := range patterns {
+			if s, ok := p.(string); ok && s != "*" {
+				if toolInput == "" {
+					toolInput = s
+				} else {
+					toolInput += " " + s
+				}
+			}
+		}
+	}
+
+	slog.Info("opencodeSession: permission requested", "request_id", requestID, "tool", permName, "input", toolInput)
+
+	evt := core.Event{
+		Type:      core.EventPermissionRequest,
+		RequestID: requestID,
+		ToolName:  permName,
+		ToolInput: toolInput,
+		SessionID: s.CurrentSessionID(),
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
+}
+
+// RespondPermission writes a permission reply back to OpenCode's stdin.
+// OpenCode reads JSON lines like {"requestID": "...", "reply": "once|always|reject"}.
+func (s *opencodeSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	if s.stdin == nil {
+		return fmt.Errorf("cannot respond to permission: stdin pipe not available")
+	}
+
+	reply := map[string]any{
+		"requestID": requestID,
+		"reply":     result.Behavior, // "allow" -> "once", "deny" -> "reject"
+	}
+	// Map engine behavior to opencode's reply format
+	switch result.Behavior {
+	case "allow":
+		reply["reply"] = "once"
+	case "deny":
+		reply["reply"] = "reject"
+	default:
+		reply["reply"] = result.Behavior
+	}
+
+	data, err := json.Marshal(reply)
+	if err != nil {
+		return fmt.Errorf("marshal permission reply: %w", err)
+	}
+	data = append(data, '\n')
+
+	_, err = s.stdin.Write(data)
+	if err != nil {
+		return fmt.Errorf("write permission reply to stdin: %w", err)
+	}
+	slog.Info("opencodeSession: permission reply sent", "request_id", requestID, "reply", reply["reply"])
 	return nil
 }
 
