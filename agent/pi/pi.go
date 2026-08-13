@@ -141,12 +141,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
-	// 把权限模式注入 pi 进程环境变量，供 permission-gate 扩展读取：
-	// yolo（全自动）时扩展自动放行所有工具，不再弹出权限确认卡片。
-	// 模式切换会触发会话重建（pi 未实现 LiveModeSwitcher），新进程拿到新值。
-	if mode != "" {
-		extraEnv = append(extraEnv, "CC_PERMISSION_MODE="+mode)
-	}
+	// 注入权限模式环境变量，供 permission-gate 扩展读取：yolo（全自动）时扩展
+	// 自动放行所有工具，不再弹出权限确认卡片。模式切换会触发会话重建（pi 未实现
+	// LiveModeSwitcher），新进程拿到新值。core.InjectedAgentEnv 追加在
+	// configEnv/sessionEnv 之后，因此用户显式设置的 CC_PERMISSION_MODE 排在前、
+	// 优先生效（getenv 返回第一个匹配项）。
+	extraEnv = append(extraEnv, core.InjectedAgentEnv(mode)...)
 	rpc := a.rpc
 	a.mu.Unlock()
 	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, rpc, sessionID, extraEnv)

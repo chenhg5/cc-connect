@@ -490,6 +490,41 @@ func TestAgent_StartSession_NoModeNoEnv(t *testing.T) {
 	}
 }
 
+func TestAgent_StartSession_UserOverrideWins(t *testing.T) {
+	// 回归保护：引擎注入的 CC_PERMISSION_MODE 必须追加在 configEnv/sessionEnv
+	// 之后，这样用户显式设置的 CC_PERMISSION_MODE 排在前面、优先生效（getenv
+	// 返回第一个匹配项）。若未来重构把它提前，引擎值会反过来覆盖用户的显式设置。
+	a := &Agent{cmd: "echo", workDir: "/tmp", mode: "yolo"}
+	a.SetSessionEnv([]string{"CC_PERMISSION_MODE=default"})
+
+	sess, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	ps := sess.(*piSession)
+	userIdx, engineIdx := -1, -1
+	for i, e := range ps.extraEnv {
+		switch e {
+		case "CC_PERMISSION_MODE=default":
+			userIdx = i
+		case "CC_PERMISSION_MODE=yolo":
+			engineIdx = i
+		}
+	}
+	if userIdx == -1 || engineIdx == -1 {
+		t.Fatalf("extraEnv = %v, want both user (default) and engine (yolo) CC_PERMISSION_MODE entries", ps.extraEnv)
+	}
+	if userIdx > engineIdx {
+		t.Errorf("user CC_PERMISSION_MODE at %d must precede engine value at %d so user override wins", userIdx, engineIdx)
+	}
+}
+
 // ── extractToolInput ─────────────────────────────────────────
 
 func TestExtractToolInput(t *testing.T) {

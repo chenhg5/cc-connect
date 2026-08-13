@@ -49,6 +49,19 @@ func TestUnauthorizedAccessMessage(t *testing.T) {
 	}
 }
 
+func TestInjectedAgentEnv(t *testing.T) {
+	// Empty mode must yield no injected var (do-no-harm for non-yolo sessions).
+	if got := InjectedAgentEnv(""); got != nil {
+		t.Fatalf("InjectedAgentEnv(\"\") = %v, want nil", got)
+	}
+
+	// Non-empty mode must produce the single CC_PERMISSION_MODE entry.
+	got := InjectedAgentEnv("yolo")
+	if len(got) != 1 || got[0] != "CC_PERMISSION_MODE=yolo" {
+		t.Fatalf("InjectedAgentEnv(\"yolo\") = %v, want [CC_PERMISSION_MODE=yolo]", got)
+	}
+}
+
 // TestSaveFilesToDisk_RejectsPathTraversal is a regression test for a real
 // path-traversal vulnerability in SaveFilesToDisk: the attachment FileName
 // (which comes from user-controlled IM/HTTP upload metadata) was passed
