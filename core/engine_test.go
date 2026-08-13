@@ -2206,6 +2206,50 @@ func TestProcessInteractiveEvents_RichCardResolvesMarkdownImages(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardRendersWorkspaceReferences(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+	sessionKey := "feishu:user-rich-reference"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-reference")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-reference",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "/root/code/demo-repo/src/services/user_profile_service.ts:42"
+	agentSession.events <- Event{Type: EventResult, Content: raw, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-reference", time.Now(), nil, nil, state.replyCtx)
+
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("expected a final rich-card update")
+	}
+	final := updates[len(updates)-1]
+	want := "📄 `demo-repo/src/services/user_profile_service.ts:42`"
+	if !strings.Contains(final, want) {
+		t.Fatalf("rich card did not apply workspace reference rendering: %q", final)
+	}
+	if strings.Contains(final, raw) {
+		t.Fatalf("rich card retained the raw absolute path: %q", final)
+	}
+}
+
 // runRichCardSilentScenario exercises processInteractiveEvents in rich
 // (Card 2.0) mode, sending the given EventText chunks followed by a terminal
 // EventResult. Returns call counts so each test case can assert the no-trace
@@ -2321,6 +2365,80 @@ func TestProcessInteractiveEvents_RichCardPreservesTextAcrossToolBoundaries(t *t
 	}
 	if sent := p.getSent(); len(sent) != 0 {
 		t.Fatalf("rich-card text should stay on the primary card, got side messages %v", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPermissionDoesNotFlushAnswerText(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ToolMessages:     true,
+	})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: false})
+	sessionKey := "feishu:user-rich-permission"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-permission")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-permission"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-permission", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	agentSession.events <- Event{Type: EventText, Content: "Before permission. "}
+	agentSession.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-rich-permission",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/private",
+		ToolInputRaw: map[string]any{"path": "/tmp/private"},
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for rich-card permission request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Before permission.") {
+			t.Fatalf("rich-card answer text was flushed as a side message before permission: %q", sent)
+		}
+	}
+	if !e.handlePendingPermission(p, &Message{SessionKey: sessionKey, ReplyCtx: state.replyCtx}, "allow", sessionKey) {
+		t.Fatal("expected permission response to resolve the pending request")
+	}
+
+	agentSession.events <- Event{Type: EventText, Content: "After permission."}
+	agentSession.events <- Event{Type: EventResult, Content: "After permission.", Done: true}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("rich-card permission turn did not complete")
+	}
+
+	want := "Before permission. After permission."
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], want) {
+		t.Fatalf("final rich card lost text across permission boundary: %v", updates)
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Before permission.") || strings.Contains(sent, "After permission.") {
+			t.Fatalf("rich-card answer text escaped into a side message: %q", sent)
+		}
 	}
 }
 

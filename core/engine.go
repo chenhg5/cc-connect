@@ -4874,6 +4874,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
+			// Apply the same configured smart/emoji/code reference rendering as
+			// normal workspace sends before platform-specific image resolution.
+			// Every rich update receives the full raw body, so this remains
+			// deterministic for both streaming and final frames.
+			markdown = workspaceRenderer(markdown)
 			if !hasRichMarkdownResolver || markdown == "" {
 				return markdown
 			}
@@ -5292,23 +5297,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Flush accumulated text segment before permission prompt
-			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
-				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+			// Legacy previews become permanent before a permission prompt. Rich
+			// cards keep accumulated answer text on the lifecycle card instead;
+			// flushing here would duplicate it as an unquoted side message.
+			if !hasRichCard {
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
-			}
-			sp.freeze()
-			if previewActive {
-				sp.detachPreview() // keep frozen preview visible as permanent message
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
 			}
 
 			slog.Info("permission request",
