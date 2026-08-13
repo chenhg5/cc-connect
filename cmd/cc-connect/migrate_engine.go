@@ -892,10 +892,11 @@ func resolveLegacyRuntimeWorkDir(override, sourceRoot, home string) (string, err
 		}
 		if json.Unmarshal(data, &metadata) == nil && strings.TrimSpace(metadata.WorkDir) != "" {
 			resolved, resolveErr := resolveLegacyConfigPath(metadata.WorkDir, sourceRoot, home)
-			if resolveErr == nil {
-				if canonical, canonicalErr := canonicalExistingDirectory(resolved); canonicalErr == nil {
-					return canonical, nil
-				}
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve official daemon work_dir: %w", resolveErr)
+			}
+			if canonical, canonicalErr := canonicalExistingDirectory(resolved); canonicalErr == nil {
+				return canonical, nil
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -907,17 +908,26 @@ func resolveLegacyRuntimeWorkDir(override, sourceRoot, home string) (string, err
 var legacyEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 func resolveLegacyConfigPath(raw, baseDir, _ string) (string, error) {
-	// Match config.resolveEnvPlaceholders exactly: only ${NAME} expands. Bare
-	// $NAME and ~ remain literal config path components, and unset braced
-	// placeholders become empty strings just as they do in the running legacy
-	// process.
+	// Match config.resolveEnvPlaceholders syntax exactly: only ${NAME} expands,
+	// while bare $NAME and ~ remain literal config path components. Migration is
+	// intentionally stricter than startup for an unset placeholder: the daemon
+	// may have captured an environment value that this interactive process did
+	// not inherit, so substituting an empty string could inventory the wrong tree.
+	var missingEnv string
 	expanded := legacyEnvPlaceholderPattern.ReplaceAllStringFunc(raw, func(match string) string {
 		parts := legacyEnvPlaceholderPattern.FindStringSubmatch(match)
 		if len(parts) != 2 {
 			return match
 		}
-		return os.Getenv(parts[1])
+		value, ok := os.LookupEnv(parts[1])
+		if !ok && missingEnv == "" {
+			missingEnv = parts[1]
+		}
+		return value
 	})
+	if missingEnv != "" {
+		return "", fmt.Errorf("environment variable %s referenced by legacy path is not set", missingEnv)
+	}
 	if !filepath.IsAbs(expanded) {
 		expanded = filepath.Join(baseDir, expanded)
 	}

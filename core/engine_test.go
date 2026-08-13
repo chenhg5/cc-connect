@@ -1991,6 +1991,18 @@ type stubRichCardResolverPlatform struct {
 	calls      []bool
 }
 
+type stubDelayedRichCardResolverPlatform struct {
+	*stubRichCardSilentPlatform
+	imageMarkdown string
+}
+
+func (p *stubDelayedRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
+	if final {
+		return strings.ReplaceAll(markdown, p.imageMarkdown, "![chart](img_uploaded_later)")
+	}
+	return strings.ReplaceAll(markdown, p.imageMarkdown, "")
+}
+
 type stubRichCardTransformPlatform struct {
 	*stubRichCardSilentPlatform
 	transformMu       sync.Mutex
@@ -2754,6 +2766,45 @@ func TestProcessInteractiveEvents_RichCardErrorOmitsUnrenderedPartialAnswer(t *t
 				t.Fatalf("history = %v, want only last rendered prefix %q", assistants, tt.wantVisible)
 			}
 		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorRetainsOnlyResolvedVisiblePartial(t *testing.T) {
+	const imageMarkdown = "![chart](https://example.com/pending.png)"
+	p := &stubDelayedRichCardResolverPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		imageMarkdown:              imageMarkdown,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, MinDeltaChars: 1})
+	sessionKey := "feishu:user-rich-resolved-partial-error"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-resolved-partial-error")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-resolved-partial-error"}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "visible before\n\n" + imageMarkdown + "\n\nvisible after"
+	visible := strings.TrimSpace(strings.ReplaceAll(raw, imageMarkdown, ""))
+	agentSession.events <- Event{Type: EventText, Content: raw}
+	agentSession.events <- Event{Type: EventError, Error: errors.New("private failure")}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-resolved-partial-error", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	if len(streams) == 0 || streams[len(streams)-1] != visible {
+		t.Fatalf("streamed body = %v, want resolved visible body %q", streams, visible)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "visible before") || !strings.Contains(updates[len(updates)-1], "visible after") {
+		t.Fatalf("terminal error card did not retain resolved visible body: %v", updates)
+	}
+	for _, forbidden := range []string{"https://example.com/pending.png", "img_uploaded_later"} {
+		if strings.Contains(updates[len(updates)-1], forbidden) {
+			t.Fatalf("terminal error card newly exposed unrendered image %q: %q", forbidden, updates[len(updates)-1])
+		}
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != visible {
+		t.Fatalf("history = %+v, want only resolved visible partial %q", history, visible)
 	}
 }
 
@@ -14781,6 +14832,59 @@ func TestEngineStopDiscardsActiveStreamingCard(t *testing.T) {
 	}
 	if card.finalized.Load() {
 		t.Fatal("engine shutdown bypassed the platform discard capability")
+	}
+}
+
+func TestEngineStopDiscardsStreamingCardWhileWaitingForPermission(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "dingtalk:user-stop-permission-stream-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stop-permission-stream-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-stop-permission-stream-card"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stop-permission-stream-card", time.Now(), nil, nil, state.replyCtx)
+	}()
+	agentSession.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-stop-permission-stream-card",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/private",
+		ToolInputRaw: map[string]any{"path": "/tmp/private"},
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil && p.cardCreated.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not enter its permission wait with an active streaming card")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission wait did not exit after shutdown")
+	}
+
+	card := p.getCard()
+	if card == nil || !card.discarded.Load() {
+		t.Fatal("shutdown during permission wait left its streaming card active")
+	}
+	if card.finalized.Load() {
+		t.Fatal("shutdown during permission wait bypassed the platform discard capability")
 	}
 }
 

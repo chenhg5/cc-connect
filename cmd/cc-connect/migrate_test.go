@@ -481,6 +481,55 @@ func TestResolveLegacyConfigPathMatchesOfficialBracedEnvSyntax(t *testing.T) {
 	}
 }
 
+func TestResolveLegacyConfigPathRejectsUnsetBracedEnv(t *testing.T) {
+	base := t.TempDir()
+	const envName = "CC_CONNECT_MIGRATION_TEST_UNSET_PATH"
+	oldValue, hadValue := os.LookupEnv(envName)
+	if err := os.Unsetenv(envName); err != nil {
+		t.Fatalf("unset test environment variable: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadValue {
+			_ = os.Setenv(envName, oldValue)
+		} else {
+			_ = os.Unsetenv(envName)
+		}
+	})
+
+	_, err := resolveLegacyConfigPath("${"+envName+"}/state", base, base)
+	if err == nil || !strings.Contains(err.Error(), envName) || !strings.Contains(err.Error(), "is not set") {
+		t.Fatalf("resolve unset placeholder error = %v, want fail-closed variable error", err)
+	}
+}
+
+func TestPrepareLegacyMigrationRejectsUnsetDataDirEnvBeforeTargetWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	const envName = "CC_CONNECT_MIGRATION_TEST_UNSET_DATA_DIR"
+	oldValue, hadValue := os.LookupEnv(envName)
+	if err := os.Unsetenv(envName); err != nil {
+		t.Fatalf("unset test environment variable: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadValue {
+			_ = os.Setenv(envName, oldValue)
+		} else {
+			_ = os.Unsetenv(envName)
+		}
+	})
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "${`+envName+`}/state"`+"\n")
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{}`)
+
+	_, err := prepareLegacyMigration(migrationOptions{Source: source, Target: target, Home: root, DryRun: true})
+	if err == nil || !strings.Contains(err.Error(), envName) || !strings.Contains(err.Error(), "is not set") {
+		t.Fatalf("prepare migration error = %v, want unset data_dir variable refusal", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("unset data_dir variable created a target before refusal: %v", statErr)
+	}
+}
+
 func TestPrepareLegacyMigrationSkipsInaccessibleOptionalProjectRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission-mode test is Unix-specific")

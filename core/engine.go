@@ -4704,6 +4704,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	firstEventLogged := false
 	var toolSteps []ToolStep
 	var lastRichCardUpdate time.Time
+	var lastRichCardInput string
 	var lastRichCardPreview string
 	var cardMessageID any
 	var partialText string
@@ -5184,6 +5185,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return buildRichCard(p, richCardSupporter, status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
+		buildResolvedRichCardFrame := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) (string, string) {
+			resolved := resolveRichCardMarkdown(markdown, !streaming)
+			return buildRichCard(p, richCardSupporter, status, title, steps, resolved, streaming, statusFooter), resolved
+		}
 
 		switch event.Type {
 		case EventThinking:
@@ -5203,6 +5208,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							slog.Debug("rich card: failed to create initial thinking card", "platform", p.Name(), "error", err)
 						} else {
 							cardMessageID = handle
+							lastRichCardInput = ""
 							lastRichCardPreview = ""
 						}
 					}
@@ -5215,6 +5221,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					} else {
+						lastRichCardInput = ""
 						lastRichCardPreview = ""
 					}
 				}
@@ -5291,6 +5298,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							slog.Debug("rich card: failed to create initial tool card", "platform", p.Name(), "error", err)
 						} else {
 							cardMessageID = handle
+							lastRichCardInput = ""
 							lastRichCardPreview = ""
 						}
 					}
@@ -5303,6 +5311,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					} else {
+						lastRichCardInput = ""
 						lastRichCardPreview = ""
 					}
 				}
@@ -5474,6 +5483,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 										slog.Debug("rich card: failed to create initial text card", "platform", p.Name(), "error", err)
 									} else {
 										cardMessageID = handle
+										lastRichCardInput = ""
 										lastRichCardPreview = ""
 									}
 								}
@@ -5493,7 +5503,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// here using the accumulated partialText so the card emerges
 							// with the post-prefix content already in body.
 							if cardMessageID == nil {
-								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, previewBody, true, "")
+								card, resolvedPreviewBody := buildResolvedRichCardFrame(CardStatusWorking, "answer", toolSteps, previewBody, true, "")
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -5502,7 +5512,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 										cardMessageID = handle
 										richAnswerStarted = true
 										lastRichCardUpdate = time.Now()
-										lastRichCardPreview = previewBody
+										lastRichCardInput = previewBody
+										lastRichCardPreview = resolvedPreviewBody
 									}
 								}
 							}
@@ -5522,11 +5533,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								if hasStreamer {
 									transitionBody = ""
 								}
-								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, transitionBody, true, "")
+								card, resolvedTransitionBody := buildResolvedRichCardFrame(CardStatusWorking, "answer", toolSteps, transitionBody, true, "")
 								if updater, ok := p.(MessageUpdater); ok {
 									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 										richAnswerStarted = true
-										lastRichCardPreview = transitionBody
+										lastRichCardInput = transitionBody
+										lastRichCardPreview = resolvedTransitionBody
 										if !hasStreamer {
 											lastRichCardUpdate = time.Now()
 										}
@@ -5540,9 +5552,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// frames must satisfy both configured minimums and remain capped.
 							interval := time.Duration(turnStreamPreview.IntervalMs) * time.Millisecond
 							elapsedReady := lastRichCardUpdate.IsZero() || interval <= 0 || time.Since(lastRichCardUpdate) >= interval
-							delta := utf8.RuneCountInString(previewBody) - utf8.RuneCountInString(lastRichCardPreview)
+							delta := utf8.RuneCountInString(previewBody) - utf8.RuneCountInString(lastRichCardInput)
 							deltaReady := lastRichCardUpdate.IsZero() || delta >= turnStreamPreview.MinDeltaChars
-							if cardMessageID != nil && previewBody != lastRichCardPreview && elapsedReady && deltaReady {
+							if cardMessageID != nil && previewBody != lastRichCardInput && elapsedReady && deltaReady {
 								// Prefer per-element streaming text update (cardkit-v1) when available;
 								// it engages Lark's native typewriter rendering. Falls back to
 								// full-card Patch on ErrNotSupported (handle without cardID) or any error.
@@ -5551,18 +5563,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									streamBody := resolveRichCardMarkdown(previewBody, false)
 									if err := streamer.StreamRichCardText(e.ctx, cardMessageID, streamBody); err == nil {
 										lastRichCardUpdate = time.Now()
-										lastRichCardPreview = previewBody
+										lastRichCardInput = previewBody
+										lastRichCardPreview = streamBody
 										streamed = true
 									} else if !errors.Is(err, ErrNotSupported) {
 										slog.Debug("rich card: streaming text update failed, falling back to full Patch", "platform", p.Name(), "error", err)
 									}
 								}
 								if !streamed {
-									card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, previewBody, true, "")
+									card, resolvedPreviewBody := buildResolvedRichCardFrame(CardStatusWorking, "answer", toolSteps, previewBody, true, "")
 									if updater, ok := p.(MessageUpdater); ok {
 										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 											lastRichCardUpdate = time.Now()
-											lastRichCardPreview = previewBody
+											lastRichCardInput = previewBody
+											lastRichCardPreview = resolvedPreviewBody
 										} else {
 											slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
 										}
@@ -5698,6 +5712,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return
 				}
 				sp.discard()
+				discardStreamingCard()
 				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
 					removeRichCardForFallback(p, cardMessageID)
 				}
@@ -6142,6 +6157,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				partialText = ""
 				richAnswerStarted = false
 				lastRichCardUpdate = time.Time{}
+				lastRichCardInput = ""
 				lastRichCardPreview = ""
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
