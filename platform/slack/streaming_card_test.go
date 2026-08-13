@@ -138,3 +138,36 @@ func TestStreamingCard_UpdateSkipsOversizedPayload(t *testing.T) {
 		t.Fatalf("chat.update calls after oversized Update = %d, want 0 (silent skip)", got)
 	}
 }
+
+func TestStreamingCard_DiscardDeletesPostedMessage(t *testing.T) {
+	var deleteCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat.postMessage":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C1", "ts": "1700000000.0001"})
+		case "/chat.delete":
+			atomic.AddInt32(&deleteCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C1", "ts": "1700000000.0001"})
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := slack.New("xoxb-test", slack.OptionAPIURL(srv.URL+"/"))
+	card := &slackStreamingCard{client: client, channel: "C1"}
+	if err := card.Update(context.Background(), "temporary"); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if err := card.Discard(context.Background()); err != nil {
+		t.Fatalf("Discard() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&deleteCalls); got != 1 {
+		t.Fatalf("chat.delete calls = %d, want 1", got)
+	}
+	if !card.closed || card.ts != "" {
+		t.Fatalf("discarded card state = closed:%v ts:%q", card.closed, card.ts)
+	}
+}

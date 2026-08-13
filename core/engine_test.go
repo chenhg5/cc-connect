@@ -2808,6 +2808,30 @@ func TestProcessInteractiveEvents_RichCardErrorFallbackPreservesSafePartial(t *t
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardErrorFallbackUsesTurnLocale(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangAuto)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	sessionKey := "feishu:user-rich-error-turn-locale"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-error-turn-locale")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-error-turn-locale"}
+	state.setTurnRichCardCopy("m-rich-error-turn-locale", e.i18n.RichCardCopyForText("你好"))
+	e.interactiveStates[sessionKey] = state
+
+	// Simulate a concurrent English turn changing the engine-wide auto locale
+	// after this Chinese turn already captured its immutable card vocabulary.
+	e.i18n.DetectAndSet("hello")
+	agentSession.events <- Event{Type: EventError, Error: errors.New("simulated private failure")}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error-turn-locale", time.Now(), nil, nil, state.replyCtx)
+
+	want := NewI18n(LangChinese).T(MsgRichCardErrorBody)
+	if sent := base.getSent(); len(sent) != 1 || sent[0] != want {
+		t.Fatalf("error fallback sent = %q, want captured turn locale %q", sent, want)
+	}
+}
+
 // runRichCardSilentScenario exercises processInteractiveEvents in rich
 // (Card 2.0) mode, sending the given EventText chunks followed by a terminal
 // EventResult. Returns call counts so each test case can assert the no-trace
@@ -14201,6 +14225,8 @@ type stubStreamingCardPlatform struct {
 	stubPlatformEngine
 	cardCreated atomic.Bool
 	cardFail    bool // when true, CreateStreamingCard returns an error
+	cardMu      sync.Mutex
+	card        *stubStreamingCard
 }
 
 func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
@@ -14208,15 +14234,58 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 		return nil, fmt.Errorf("stub: card_template_id not configured")
 	}
 	p.cardCreated.Store(true)
-	return &stubStreamingCard{}, nil
+	p.cardMu.Lock()
+	defer p.cardMu.Unlock()
+	p.card = &stubStreamingCard{}
+	return p.card, nil
+}
+
+func (p *stubStreamingCardPlatform) getCard() *stubStreamingCard {
+	p.cardMu.Lock()
+	defer p.cardMu.Unlock()
+	return p.card
 }
 
 // stubStreamingCard is a minimal StreamingCard for tests.
-type stubStreamingCard struct{}
+type stubStreamingCard struct {
+	discarded atomic.Bool
+	finalized atomic.Bool
+}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
-func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                               { return false }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error {
+	c.finalized.Store(true)
+	return nil
+}
+func (c *stubStreamingCard) Discard(_ context.Context) error {
+	c.discarded.Store(true)
+	return nil
+}
+func (c *stubStreamingCard) Failed() bool { return false }
+
+func TestProcessInteractiveEvents_SilentReplyDiscardsStreamingCard(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "dingtalk:user-silent-stream-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-silent-stream-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-silent-stream-card"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-silent-stream-card", time.Now(), nil, nil, state.replyCtx)
+
+	card := p.getCard()
+	if card == nil || !card.discarded.Load() {
+		t.Fatal("silent turn did not discard its eager streaming card")
+	}
+	if card.finalized.Load() {
+		t.Fatal("engine bypassed the platform discard capability")
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("silent streaming-card turn emitted side messages: %v", sent)
+	}
+}
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

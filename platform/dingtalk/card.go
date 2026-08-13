@@ -36,8 +36,11 @@ type aiCard struct {
 	done           chan struct{} // closed when finalized or failed
 }
 
-// Ensure aiCard implements core.StreamingCard
-var _ core.StreamingCard = (*aiCard)(nil)
+// Ensure aiCard implements the streaming-card lifecycle contracts.
+var (
+	_ core.StreamingCard          = (*aiCard)(nil)
+	_ core.StreamingCardDiscarder = (*aiCard)(nil)
+)
 
 // generateOutTrackID generates a unique outTrackId for AI Card.
 func generateOutTrackID() string {
@@ -430,6 +433,14 @@ func (c *aiCard) Finalize(ctx context.Context, content string) error {
 	c.mu.Unlock()
 
 	return err
+}
+
+// Discard terminates an eagerly delivered AI card without exposing agent
+// output. DingTalk's streaming endpoint has no separate recall operation for
+// this card path, so an empty final frame is used to ensure the card cannot
+// remain permanently in its processing state.
+func (c *aiCard) Discard(ctx context.Context) error {
+	return c.Finalize(ctx, "")
 }
 
 // Failed returns true if the card has entered a failed state.

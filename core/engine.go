@@ -4805,7 +4805,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// normal chat message. Remove the stale lifecycle card when possible and
 		// send only an already-visible assistant partial plus localized static copy.
 		removeRichCardForFallback(p, handle)
-		content := e.i18n.T(MsgRichCardErrorBody)
+		content := turnRichCardCopy.ErrorBody
+		if content == "" {
+			content = e.i18n.T(MsgRichCardErrorBody)
+		}
 		if len(safeBody) > 0 && strings.TrimSpace(safeBody[0]) != "" {
 			content = strings.TrimSpace(safeBody[0]) + "\n\n" + content
 		}
@@ -4820,6 +4823,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			body = strings.TrimSpace(stripped)
 		}
 		return body
+	}
+	discardStreamingCard := func() {
+		if streamCard == nil {
+			return
+		}
+		var err error
+		if discarder, ok := streamCard.(StreamingCardDiscarder); ok {
+			err = discarder.Discard(e.ctx)
+		} else if !streamCard.Failed() {
+			// Compatibility fallback for third-party implementations written
+			// before StreamingCardDiscarder existed. An empty final frame is
+			// preferable to leaving an eager card permanently processing.
+			err = streamCard.Finalize(e.ctx, "")
+		}
+		if err != nil {
+			slog.Debug("streaming card: failed to discard silent turn", "error", err)
+		}
+		streamCard = nil
 	}
 	partialPersisted := false
 	persistVisibleRichPartial := func(p Platform) string {
@@ -4843,6 +4864,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	discardSilentTurn := func() {
 		sp.discard()
+		discardStreamingCard()
 		state.mu.Lock()
 		state.eventsNeedResync = true
 		p := state.platform
@@ -5799,6 +5821,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
 				// preventing a stray done_emoji push.
 				sp.discard()
+				discardStreamingCard()
 				// Rich mode tracks the optimistic card independently of sp. A bare
 				// NO_REPLY is an explicit no-visible-response contract, so remove the
 				// card even if speculative text or anonymous tool progress appeared.
@@ -6176,6 +6199,7 @@ channelClosed:
 	// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
 	if isSilentReply(fullResponse) {
 		sp.discard()
+		discardStreamingCard()
 		if cleaner, ok := p.(PreviewCleaner); ok && cardMessageID != nil {
 			if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
 				slog.Debug("rich card: failed to remove silent preview", "platform", p.Name(), "error", err)
@@ -6187,6 +6211,7 @@ channelClosed:
 	if stripped, ok := stripTrailingSilent(fullResponse); ok {
 		if strings.TrimSpace(stripped) == "" {
 			sp.discard()
+			discardStreamingCard()
 			return
 		}
 		fullResponse = stripped

@@ -41,6 +41,7 @@ type slackStreamingCard struct {
 	mu         sync.Mutex
 	ts         string // empty until the first post
 	failed     bool
+	closed     bool
 	lastUpdate time.Time
 	lastSent   string
 }
@@ -95,7 +96,7 @@ func (c *slackStreamingCard) render(ctx context.Context, rendered string) error 
 func (c *slackStreamingCard) Update(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || content == "" {
+	if c.failed || c.closed || content == "" {
 		return nil
 	}
 	if c.ts != "" && time.Since(c.lastUpdate) < cardUpdateMinInterval {
@@ -128,7 +129,7 @@ func (c *slackStreamingCard) Update(ctx context.Context, content string) error {
 func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed {
+	if c.failed || c.closed {
 		return nil
 	}
 	rendered := core.MarkdownToSlackMrkdwn(content)
@@ -157,6 +158,25 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 	return nil
 }
 
+// Discard removes a lazily posted streaming message, if one exists. A card
+// that never received visible content has no Slack message to clean up.
+func (c *slackStreamingCard) Discard(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	if c.ts != "" {
+		if _, _, err := c.client.DeleteMessageContext(ctx, c.channel, c.ts); err != nil {
+			c.failed = true
+			return fmt.Errorf("slack: discard streaming card: %w", err)
+		}
+		c.ts = ""
+	}
+	c.closed = true
+	return nil
+}
+
 // Failed reports whether the card has entered a terminal failed state.
 func (c *slackStreamingCard) Failed() bool {
 	c.mu.Lock()
@@ -165,3 +185,4 @@ func (c *slackStreamingCard) Failed() bool {
 }
 
 var _ core.StreamingCardPlatform = (*Platform)(nil)
+var _ core.StreamingCardDiscarder = (*slackStreamingCard)(nil)

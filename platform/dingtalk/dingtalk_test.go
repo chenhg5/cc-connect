@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/timmyagentic/cc-connect-next/core"
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -59,6 +59,53 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 	}
 
 	t.Logf("Completed %d concurrent token requests without deadlock", numGoroutines)
+}
+
+type dingtalkRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f dingtalkRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestAICardDiscardFinalizesEmpty(t *testing.T) {
+	var payload map[string]any
+	client := &http.Client{Transport: dingtalkRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1.0/card/streaming" {
+			t.Fatalf("request = %s %s, want PUT /v1.0/card/streaming", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"success":true}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	p := &Platform{
+		httpClient:  client,
+		accessToken: "test-token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+	card := &aiCard{
+		outTrackId:  "track-1",
+		templateKey: "content",
+		platform:    p,
+		state:       "processing",
+		done:        make(chan struct{}),
+	}
+
+	if err := card.Discard(context.Background()); err != nil {
+		t.Fatalf("Discard() error = %v", err)
+	}
+	if payload["content"] != "" || payload["isFinalize"] != true {
+		t.Fatalf("discard payload = %#v, want empty finalized frame", payload)
+	}
+	if card.state != "finished" {
+		t.Fatalf("card state = %q, want finished", card.state)
+	}
 }
 
 func TestGetAccessToken_MutexExists(t *testing.T) {

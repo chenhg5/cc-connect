@@ -680,6 +680,14 @@ type StreamingCard interface {
 	Failed() bool
 }
 
+// StreamingCardDiscarder is an optional capability for removing or otherwise
+// terminating a streaming card when a turn intentionally produces no visible
+// reply. Implementations that cannot delete an already-delivered card should
+// still leave it in a terminal, non-processing state.
+type StreamingCardDiscarder interface {
+	Discard(ctx context.Context) error
+}
+
 // StreamingCardPlatform is an optional interface for platforms that support
 // aggregating an entire agent turn into a single updatable card message
 // (e.g. DingTalk AI Card). When the engine detects this interface, it
