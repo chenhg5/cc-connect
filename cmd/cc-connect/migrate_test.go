@@ -400,6 +400,67 @@ work_dir = "`+filepath.ToSlash(privateProject)+`"
 	}
 }
 
+func TestMigrateLegacyDataSkipsMalformedOptionalProjectDiscoveryMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		rel    string
+		reason string
+	}{
+		{name: "project state", rel: filepath.Join("projects", "broken.state.json"), reason: "malformed project state"},
+		{name: "workspace bindings", rel: "workspace_bindings.json", reason: "malformed workspace bindings"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+			writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{}`)
+			writeMigrationFixture(t, filepath.Join(source, tt.rel), `{`)
+
+			report, err := migrateLegacyDataWithOptions(migrationOptions{
+				Source:             source,
+				Target:             target,
+				Home:               root,
+				IncludeProjectData: true,
+			})
+			if err != nil {
+				t.Fatalf("malformed optional metadata blocked global migration: %v", err)
+			}
+			if got, want := report.CopiedFiles, 3; got != want {
+				t.Fatalf("global persistent files = %d, want %d", got, want)
+			}
+			canonicalSource, err := canonicalExistingDirectory(source)
+			if err != nil {
+				t.Fatalf("canonical source: %v", err)
+			}
+			wantSkippedSource := filepath.Join(canonicalSource, tt.rel)
+			if len(report.SkippedProjects) != 1 || report.SkippedProjects[0].Source != wantSkippedSource || report.SkippedProjects[0].Reason != tt.reason {
+				t.Fatalf("optional discovery skip = %+v, want %s (%s)", report.SkippedProjects, wantSkippedSource, tt.reason)
+			}
+			if got, err := os.ReadFile(filepath.Join(target, tt.rel)); err != nil || string(got) != `{` {
+				t.Fatalf("malformed metadata was not copied verbatim: content=%q err=%v", got, err)
+			}
+
+			manifestBytes, err := os.ReadFile(filepath.Join(target, migrationManifestFilename))
+			if err != nil {
+				t.Fatalf("read migration manifest: %v", err)
+			}
+			if !bytes.Contains(manifestBytes, []byte(`"skipped_project_discovery"`)) {
+				t.Fatalf("manifest JSON does not expose skipped discovery records: %s", manifestBytes)
+			}
+			var manifest migrationManifest
+			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+				t.Fatalf("parse migration manifest: %v", err)
+			}
+			if len(manifest.SkippedProjects) != 1 || manifest.SkippedProjects[0] != report.SkippedProjects[0] {
+				t.Fatalf("manifest did not record optional discovery skip: %+v", manifest.SkippedProjects)
+			}
+		})
+	}
+}
+
 func TestPrepareLegacyMigrationExcludesNestedDataDirFromConfigInventory(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

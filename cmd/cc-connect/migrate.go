@@ -99,7 +99,7 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if len(report.SkippedProjects) > 0 {
-		if !writeOutput("Skipped %d inaccessible optional project-local directories; grant access and rerun before relying on project-local completeness.\n", len(report.SkippedProjects)) {
+		if !writeOutput("Skipped %d optional project-data discovery entries; grant access or repair malformed metadata and rerun before relying on project-local completeness.\n", len(report.SkippedProjects)) {
 			return 1
 		}
 		for _, skipped := range report.SkippedProjects {

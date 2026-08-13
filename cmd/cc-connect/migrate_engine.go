@@ -39,7 +39,7 @@ type migrationManifest struct {
 	TargetRoot         string                          `json:"target_root"`
 	Files              []migrationFileRecord           `json:"files"`
 	ProjectDirectories []migrationProjectRecord        `json:"project_directories,omitempty"`
-	SkippedProjects    []migrationSkippedProjectRecord `json:"skipped_project_directories,omitempty"`
+	SkippedProjects    []migrationSkippedProjectRecord `json:"skipped_project_discovery,omitempty"`
 	Backups            []migrationBackupRecord         `json:"backups,omitempty"`
 	SkippedRuntime     int                             `json:"skipped_runtime_entries"`
 	SkippedSymlinks    int                             `json:"skipped_symlinks"`
@@ -257,22 +257,25 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		}
 		for _, projectRoot := range projectRoots {
 			projectSourceCandidate := filepath.Join(projectRoot, ".cc-connect")
+			projectTargetCandidate := filepath.Join(projectRoot, ".cc-connect-next")
 			projectSource := projectSourceCandidate
-			projectTarget := filepath.Join(projectRoot, ".cc-connect-next")
+			projectTarget := projectTargetCandidate
 			projectSource, err = canonicalExistingDirectory(projectSource)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
+				reason := "project data unavailable"
 				if errors.Is(err, os.ErrPermission) {
-					skippedProjects = appendMigrationSkippedProject(skippedProjects, projectSourceCandidate, "permission denied")
-					continue
+					reason = "permission denied"
 				}
-				return nil, fmt.Errorf("read project-local source %s: %w", projectSourceCandidate, err)
+				skippedProjects = appendMigrationSkippedProject(skippedProjects, projectSourceCandidate, reason)
+				continue
 			}
 			projectTarget, err = canonicalDestinationPath(projectTarget)
 			if err != nil {
-				return nil, fmt.Errorf("resolve project-local target: %w", err)
+				skippedProjects = appendMigrationSkippedProject(skippedProjects, projectTargetCandidate, "project target unavailable")
+				continue
 			}
 			// A configured work_dir may be the home/runtime root, making its
 			// apparent project-local .cc-connect the global config or effective
@@ -292,11 +295,12 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 			}
 			var projectReport migrationReport
 			if err := collectMigrationTree(projectSource, "project-data", false, destination, &projectReport); err != nil {
+				reason := "project data inventory failed"
 				if errors.Is(err, os.ErrPermission) {
-					skippedProjects = appendMigrationSkippedProject(skippedProjects, projectSource, "permission denied")
-					continue
+					reason = "permission denied"
 				}
-				return nil, fmt.Errorf("inventory project-local data %s: %w", projectSource, err)
+				skippedProjects = appendMigrationSkippedProject(skippedProjects, projectSource, reason)
+				continue
 			}
 			if len(destination.Files) == 0 {
 				continue
@@ -553,66 +557,65 @@ func availableMigrationRel(files map[string]plannedMigrationFile, candidate stri
 func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourceRoot, dataDir, home string) ([]string, []migrationSkippedProjectRecord, error) {
 	roots := make(map[string]struct{})
 	skipped := make(map[string]migrationSkippedProjectRecord)
-	recordPermissionSkip := func(path string) {
+	recordSkip := func(path, reason string) {
 		path = filepath.Clean(path)
-		skipped[path] = migrationSkippedProjectRecord{Source: path, Reason: "permission denied"}
+		skipped[path] = migrationSkippedProjectRecord{Source: path, Reason: reason}
 	}
-	addRoot := func(raw string) error {
+	addRoot := func(raw string) {
 		if strings.TrimSpace(raw) == "" {
-			return nil
+			return
 		}
 		resolved, err := resolveLegacyConfigPath(raw, runtimeWorkDir, home)
 		if err != nil {
-			return err
+			recordSkip(raw, "project path resolution failed")
+			return
 		}
 		info, err := os.Stat(resolved)
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return
 		}
 		if errors.Is(err, os.ErrPermission) {
-			recordPermissionSkip(resolved)
-			return nil
+			recordSkip(resolved, "permission denied")
+			return
 		}
 		if err != nil {
-			return err
+			recordSkip(resolved, "project path unavailable")
+			return
 		}
 		if !info.IsDir() {
-			return nil
+			return
 		}
 		canonical, err := filepath.EvalSymlinks(resolved)
 		if errors.Is(err, os.ErrPermission) {
-			recordPermissionSkip(resolved)
-			return nil
+			recordSkip(resolved, "permission denied")
+			return
 		}
 		if err != nil {
-			return err
+			recordSkip(resolved, "project path resolution failed")
+			return
 		}
 		roots[canonical] = struct{}{}
-		return nil
 	}
 
 	for _, project := range cfg.Projects {
 		if raw, ok := project.Agent.Options["work_dir"].(string); ok {
-			if err := addRoot(raw); err != nil {
-				return nil, nil, fmt.Errorf("resolve project work_dir: %w", err)
-			}
+			addRoot(raw)
 		}
 		if strings.TrimSpace(project.BaseDir) != "" {
 			baseDir, err := resolveLegacyConfigPath(project.BaseDir, runtimeWorkDir, home)
 			if err != nil {
-				return nil, nil, fmt.Errorf("resolve project base_dir: %w", err)
+				recordSkip(project.BaseDir, "workspace base path resolution failed")
+				continue
 			}
-			if err := discoverProjectRootsUnderBase(baseDir, roots, recordPermissionSkip); err != nil {
-				return nil, nil, fmt.Errorf("scan project base_dir %s: %w", baseDir, err)
-			}
+			discoverProjectRootsUnderBase(baseDir, roots, recordSkip)
 		}
 	}
 
 	for _, stateRoot := range []string{dataDir, sourceRoot} {
-		if err := discoverProjectRootsFromState(stateRoot, addRoot); err != nil {
+		if err := discoverProjectRootsFromState(stateRoot, addRoot, recordSkip); err != nil {
 			return nil, nil, err
 		}
-		if err := discoverProjectRootsFromBindings(stateRoot, addRoot); err != nil {
+		if err := discoverProjectRootsFromBindings(stateRoot, addRoot, recordSkip); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -623,7 +626,9 @@ func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourc
 		if info, err := os.Stat(projectData); err == nil && info.IsDir() {
 			result = append(result, root)
 		} else if errors.Is(err, os.ErrPermission) {
-			recordPermissionSkip(projectData)
+			recordSkip(projectData, "permission denied")
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			recordSkip(projectData, "project data unavailable")
 		}
 	}
 	sort.Strings(result)
@@ -645,31 +650,33 @@ func appendMigrationSkippedProject(records []migrationSkippedProjectRecord, sour
 	return append(records, migrationSkippedProjectRecord{Source: source, Reason: reason})
 }
 
-func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}, recordPermissionSkip func(string)) error {
+func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}, recordSkip func(string, string)) {
 	info, err := os.Stat(baseDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return
 	}
 	if errors.Is(err, os.ErrPermission) {
-		recordPermissionSkip(baseDir)
-		return nil
+		recordSkip(baseDir, "permission denied")
+		return
 	}
 	if err != nil {
-		return err
+		recordSkip(baseDir, "workspace base unavailable")
+		return
 	}
 	if !info.IsDir() {
-		return nil
+		return
 	}
-	return filepath.WalkDir(baseDir, func(path string, entry fs.DirEntry, walkErr error) error {
+	_ = filepath.WalkDir(baseDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			reason := "workspace scan failed"
 			if errors.Is(walkErr, os.ErrPermission) {
-				recordPermissionSkip(path)
-				if entry != nil && entry.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
+				reason = "permission denied"
 			}
-			return walkErr
+			recordSkip(path, reason)
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 && entry.IsDir() {
 			return filepath.SkipDir
@@ -677,11 +684,12 @@ func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}, re
 		if entry.IsDir() && entry.Name() == ".cc-connect" {
 			root, err := filepath.EvalSymlinks(filepath.Dir(path))
 			if errors.Is(err, os.ErrPermission) {
-				recordPermissionSkip(filepath.Dir(path))
+				recordSkip(filepath.Dir(path), "permission denied")
 				return filepath.SkipDir
 			}
 			if err != nil {
-				return err
+				recordSkip(filepath.Dir(path), "workspace path resolution failed")
+				return filepath.SkipDir
 			}
 			roots[root] = struct{}{}
 			return filepath.SkipDir
@@ -690,7 +698,7 @@ func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}, re
 	})
 }
 
-func discoverProjectRootsFromState(dataRoot string, addRoot func(string) error) error {
+func discoverProjectRootsFromState(dataRoot string, addRoot func(string), recordSkip func(string, string)) error {
 	paths, err := filepath.Glob(filepath.Join(dataRoot, "projects", "*.state.json"))
 	if err != nil {
 		return err
@@ -698,42 +706,40 @@ func discoverProjectRootsFromState(dataRoot string, addRoot func(string) error) 
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read project state %s: %w", path, err)
+			recordSkip(path, "project state unreadable")
+			continue
 		}
 		var state struct {
 			WorkDirOverride       string            `json:"work_dir_override"`
 			WorkspaceDirOverrides map[string]string `json:"workspace_dir_overrides"`
 		}
 		if err := json.Unmarshal(data, &state); err != nil {
-			return fmt.Errorf("parse project state %s: %w", path, err)
+			recordSkip(path, "malformed project state")
+			continue
 		}
-		if err := addRoot(state.WorkDirOverride); err != nil {
-			return err
-		}
+		addRoot(state.WorkDirOverride)
 		for workspace, override := range state.WorkspaceDirOverrides {
-			if err := addRoot(workspace); err != nil {
-				return err
-			}
-			if err := addRoot(override); err != nil {
-				return err
-			}
+			addRoot(workspace)
+			addRoot(override)
 		}
 	}
 	return nil
 }
 
-func discoverProjectRootsFromBindings(dataRoot string, addRoot func(string) error) error {
+func discoverProjectRootsFromBindings(dataRoot string, addRoot func(string), recordSkip func(string, string)) error {
 	path := filepath.Join(dataRoot, "workspace_bindings.json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read workspace bindings %s: %w", path, err)
+		recordSkip(path, "workspace bindings unreadable")
+		return nil
 	}
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
-		return fmt.Errorf("parse workspace bindings %s: %w", path, err)
+		recordSkip(path, "malformed workspace bindings")
+		return nil
 	}
 	var walk func(any) error
 	walk = func(node any) error {
@@ -742,9 +748,7 @@ func discoverProjectRootsFromBindings(dataRoot string, addRoot func(string) erro
 			for key, child := range typed {
 				if key == "workspace" {
 					if workspace, ok := child.(string); ok {
-						if err := addRoot(workspace); err != nil {
-							return err
-						}
+						addRoot(workspace)
 					}
 				}
 				if err := walk(child); err != nil {

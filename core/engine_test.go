@@ -2313,8 +2313,9 @@ func TestProcessInteractiveEvents_FailedRichCardRendersWorkspaceReferences(t *te
 
 func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *testing.T) {
 	tests := []struct {
-		name     string
-		platform func(*stubRichCardSilentPlatform) Platform
+		name        string
+		platform    func(*stubRichCardSilentPlatform) Platform
+		wantDeletes int
 	}{
 		{
 			name: "start failure",
@@ -2327,6 +2328,7 @@ func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *test
 			platform: func(base *stubRichCardSilentPlatform) Platform {
 				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
 			},
+			wantDeletes: 1,
 		},
 	}
 
@@ -2353,7 +2355,94 @@ func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *test
 			if strings.Contains(sent[0], "rich:status=") {
 				t.Fatalf("fallback exposed rich-card JSON as message text: %q", sent[0])
 			}
+			_, _, _, deletes := base.snapshot()
+			if deletes != tt.wantDeletes {
+				t.Fatalf("stale-card deletes = %d, want %d", deletes, tt.wantDeletes)
+			}
 		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorFallbackIsGenericAndCleansStaleCard(t *testing.T) {
+	tests := []struct {
+		name        string
+		platform    func(*stubRichCardSilentPlatform) Platform
+		wantDeletes int
+	}{
+		{
+			name: "start failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardStartFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+		},
+		{
+			name: "update failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+			wantDeletes: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := tt.platform(base)
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			sessionKey := "feishu:user-rich-error-fallback-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-error-fallback-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-error-fallback"}
+			e.interactiveStates[sessionKey] = state
+
+			privateError := "private token, Bash command, and /Users/example/secret"
+			agentSession.events <- Event{Type: EventError, Error: errors.New(privateError)}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error-fallback", time.Now(), nil, nil, state.replyCtx)
+
+			sent := base.getSent()
+			want := NewI18n(LangEnglish).T(MsgRichCardErrorBody)
+			if len(sent) != 1 || sent[0] != want {
+				t.Fatalf("error fallback sent = %q, want only localized generic failure %q", sent, want)
+			}
+			if strings.Contains(sent[0], privateError) || strings.Contains(sent[0], "/Users/example/secret") {
+				t.Fatalf("error fallback leaked private details: %q", sent[0])
+			}
+			_, _, _, deletes := base.snapshot()
+			if deletes != tt.wantDeletes {
+				t.Fatalf("stale-card deletes = %d, want %d", deletes, tt.wantDeletes)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorFallbackPreservesSafePartial(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	sessionKey := "feishu:user-rich-error-fallback-partial"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-error-fallback-partial")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-error-fallback-partial"}
+	e.interactiveStates[sessionKey] = state
+
+	safePartial := "Safe partial answer."
+	privateError := "private token at /Users/example/secret"
+	agentSession.events <- Event{Type: EventText, Content: safePartial}
+	agentSession.events <- Event{Type: EventError, Error: errors.New(privateError)}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error-fallback-partial", time.Now(), nil, nil, state.replyCtx)
+
+	sent := base.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], safePartial) || !strings.Contains(sent[0], NewI18n(LangEnglish).T(MsgRichCardErrorBody)) {
+		t.Fatalf("partial error fallback = %q, want safe partial plus generic failure", sent)
+	}
+	if strings.Contains(sent[0], privateError) || strings.Contains(sent[0], "/Users/example/secret") {
+		t.Fatalf("partial error fallback leaked private details: %q", sent[0])
+	}
+	_, _, _, deletes := base.snapshot()
+	if deletes != 1 {
+		t.Fatalf("stale-card deletes = %d, want 1", deletes)
 	}
 }
 

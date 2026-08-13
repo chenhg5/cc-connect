@@ -27,6 +27,8 @@ When Feishu returns a CardKit `card_id`, answer deltas update the `main_text` el
 
 If CardKit creation or element streaming is unavailable, cc-connect-next safely falls back to updating the inline card in the same quoted message. Tables beyond Feishu's per-card component budget are rendered as fenced text in that same card rather than creating overflow answer messages.
 
+If the terminal full-card update itself fails, cc-connect-next removes the stale lifecycle card before sending the readable answer as a normal reply. If a failure-state update fails, the fallback reply contains only any already-visible safe assistant partial plus localized static failure copy; raw provider/process errors are never substituted into chat-visible text.
+
 ## Privacy boundary
 
 Rich-card progress carries event kinds and anonymous counts only. The renderer never receives or emits:
@@ -52,4 +54,4 @@ go test ./core -run 'TestProcessInteractiveEvents_RichCard|TestProcessInteractiv
 go test ./core -run TestCUJ -count=1
 ```
 
-These tests cover payload privacy, all supported locales, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.
+These tests cover payload privacy, all supported locales, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.

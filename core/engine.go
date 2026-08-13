@@ -4656,6 +4656,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		return true
 	}
+	removeRichCardForFallback := func(p Platform, handle any) {
+		if handle == nil {
+			return
+		}
+		cleaner, ok := p.(PreviewCleaner)
+		if !ok {
+			slog.Warn("rich card: platform cannot remove stale fallback preview", "platform", p.Name())
+			return
+		}
+		if err := cleaner.DeletePreviewMessage(e.ctx, handle); err != nil {
+			slog.Debug("rich card: failed to remove stale fallback preview", "platform", p.Name(), "error", err)
+		}
+	}
+	sendGenericRichFailure := func(p Platform, rctx any, handle any, safeBody ...string) {
+		// A failed card update must never turn a private runtime error into a
+		// normal chat message. Remove the stale lifecycle card when possible and
+		// send only an already-visible assistant partial plus localized static copy.
+		removeRichCardForFallback(p, handle)
+		content := e.i18n.T(MsgRichCardErrorBody)
+		if len(safeBody) > 0 && strings.TrimSpace(safeBody[0]) != "" {
+			content = strings.TrimSpace(safeBody[0]) + "\n\n" + content
+		}
+		sendWorkspace(p, rctx, content)
+	}
 	visibleRichPartial := func() string {
 		body := strings.TrimSpace(partialText)
 		if body == "" || couldBeSilentPrefix(body) || isSilentReply(body) {
@@ -4736,7 +4760,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
+			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+				removeRichCardForFallback(p, cardMessageID)
+			}
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -4758,8 +4784,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) {
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				safePartial := persistVisibleRichPartial(p)
+				if !markRichCardFailed(p, cardMessageID, safePartial) {
+					if usesRichCard(p) {
+						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+					} else {
+						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+					}
 				}
 				return
 			}
@@ -4773,8 +4804,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) {
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			safePartial := persistVisibleRichPartial(p)
+			if !markRichCardFailed(p, cardMessageID, safePartial) {
+				if usesRichCard(p) {
+					sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+				} else {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+				}
 			}
 			e.cleanupInteractiveState(sessionKey, state)
 			return
@@ -4787,9 +4823,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) {
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-					fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			safePartial := persistVisibleRichPartial(p)
+			if !markRichCardFailed(p, cardMessageID, safePartial) {
+				if usesRichCard(p) {
+					sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+				} else {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+						fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+				}
 			}
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
@@ -4833,7 +4874,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
+			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+				removeRichCardForFallback(p, cardMessageID)
+			}
 			return
 		}
 
@@ -4843,7 +4886,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
+			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+				removeRichCardForFallback(p, cardMessageID)
+			}
 			return
 		}
 
@@ -5609,9 +5654,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
+							removeRichCardForFallback(p, cardMessageID)
 							if !sendAnswerFallback() {
 								return
 							}
+						}
+					} else {
+						removeRichCardForFallback(p, cardMessageID)
+						if !sendAnswerFallback() {
+							return
 						}
 					}
 				} else {
@@ -5867,7 +5918,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
-			updatedRichError := hasRichCard && markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p))
+			safePartial := persistVisibleRichPartial(p)
+			updatedRichError := hasRichCard && markRichCardFailed(p, cardMessageID, safePartial)
 			if event.Error != nil {
 				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
@@ -5877,16 +5929,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
+				if !updatedRichError {
+					if usesRichCard(p) {
+						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+					} else {
+						userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
+						for _, h := range agentErrorHandlers {
+							if strings.Contains(errMsg, h.contains) {
+								userMsg = e.i18n.T(h.msgKey)
+								break
+							}
+						}
+						e.send(p, replyCtx, userMsg)
 					}
 				}
-				if !updatedRichError {
-					e.send(p, replyCtx, userMsg)
-				}
+			} else if !updatedRichError && usesRichCard(p) {
+				sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -5910,7 +5968,9 @@ channelClosed:
 	closedPlatform := state.platform
 	state.mu.Unlock()
 	if len(textParts) == 0 {
-		markRichCardFailed(closedPlatform, cardMessageID)
+		if !markRichCardFailed(closedPlatform, cardMessageID) && usesRichCard(closedPlatform) {
+			sendGenericRichFailure(closedPlatform, replyCtx, cardMessageID)
+		}
 		return
 	}
 
@@ -5949,6 +6009,9 @@ channelClosed:
 	if markRichCardFailed(p, cardMessageID, fullResponse) {
 		sp.discard()
 		return
+	}
+	if usesRichCard(p) {
+		removeRichCardForFallback(p, cardMessageID)
 	}
 	if toolCount > 0 && segmentStart > 0 {
 		sp.discard()
@@ -6029,7 +6092,13 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+		message := fmt.Sprintf(e.i18n.T(MsgError), reason)
+		if e.display.CardMode == "rich" {
+			if _, ok := q.platform.(RichCardSupporter); ok {
+				message = e.i18n.T(MsgRichCardErrorBody)
+			}
+		}
+		e.send(q.platform, q.replyCtx, message)
 	}
 }
 
