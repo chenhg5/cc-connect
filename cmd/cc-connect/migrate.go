@@ -39,7 +39,7 @@ func runMigrate(args []string) int {
 func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(stderr, "migrate: resolve home directory: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "migrate: resolve home directory: %v\n", err)
 		return 1
 	}
 	flags := flag.NewFlagSet("migrate", flag.ContinueOnError)
@@ -49,8 +49,8 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	force := flags.Bool("force", false, "merge into an existing target and overwrite matching files")
 	dryRun := flags.Bool("dry-run", false, "validate and report without writing files")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: cc-connect-next migrate [--source DIR] [--target DIR] [--dry-run] [--force]")
-		fmt.Fprintln(flags.Output(), "Copies configuration and persistent state while excluding daemon, logs, locks, and sockets.")
+		_, _ = fmt.Fprintln(flags.Output(), "Usage: cc-connect-next migrate [--source DIR] [--target DIR] [--dry-run] [--force]")
+		_, _ = fmt.Fprintln(flags.Output(), "Copies configuration and persistent state while excluding daemon, logs, locks, and sockets.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -62,20 +62,35 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 
 	report, err := migrateLegacyData(expandMigrationPath(*source, home), expandMigrationPath(*target, home), *force, *dryRun)
 	if err != nil {
-		fmt.Fprintf(stderr, "migrate: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "migrate: %v\n", err)
 		return 1
+	}
+	writeOutput := func(format string, args ...any) bool {
+		if _, err := fmt.Fprintf(stdout, format, args...); err != nil {
+			_, _ = fmt.Fprintf(stderr, "migrate: write output: %v\n", err)
+			return false
+		}
+		return true
 	}
 	verb := "Migrated"
 	if report.DryRun {
 		verb = "Would migrate"
 	}
-	fmt.Fprintf(stdout, "%s %d persistent files from %s to %s.\n", verb, report.CopiedFiles, *source, *target)
+	if !writeOutput("%s %d persistent files from %s to %s.\n", verb, report.CopiedFiles, *source, *target) {
+		return 1
+	}
 	if report.SkippedRuntime > 0 || report.SkippedSymlinks > 0 {
-		fmt.Fprintf(stdout, "Skipped %d runtime entries and %d symlinks.\n", report.SkippedRuntime, report.SkippedSymlinks)
+		if !writeOutput("Skipped %d runtime entries and %d symlinks.\n", report.SkippedRuntime, report.SkippedSymlinks) {
+			return 1
+		}
 	}
 	if !report.DryRun {
-		fmt.Fprintln(stdout, "The official CC Connect installation was not modified or stopped.")
-		fmt.Fprintln(stdout, "Next: cc-connect-next --config "+filepath.Join(expandMigrationPath(*target, home), "config.toml"))
+		if !writeOutput("The official CC Connect installation was not modified or stopped.\n") {
+			return 1
+		}
+		if !writeOutput("Next: cc-connect-next --config %s\n", filepath.Join(expandMigrationPath(*target, home), "config.toml")) {
+			return 1
+		}
 	}
 	return 0
 }
@@ -210,7 +225,7 @@ func directoryHasEntries(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("inspect target: %w", err)
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	if info, err := dir.Stat(); err != nil {
 		return false, err
 	} else if !info.IsDir() {
@@ -262,7 +277,7 @@ func copyMigrationFile(source, target string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return err
 	}
@@ -290,17 +305,17 @@ func writeMigrationFile(target string, content []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
