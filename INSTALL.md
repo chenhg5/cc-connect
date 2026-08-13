@@ -107,6 +107,8 @@ cc-connect-next migrate \
 
 Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If that metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`.
 
+Configuration paths follow official CC Connect's `${NAME}` placeholder semantics. An unreadable optional project-local directory does not discard the global migration: its path is printed and recorded in `migration-manifest.json`. Grant access and rerun before treating project-local migration as complete.
+
 ## 4. Configure native Feishu cards
 
 New configs default to privacy-first Rich Card mode. The relevant settings are:

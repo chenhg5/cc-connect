@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -30,17 +31,18 @@ type migrationOptions struct {
 }
 
 type migrationManifest struct {
-	Version            int                      `json:"version"`
-	CreatedAt          string                   `json:"created_at"`
-	SourceRoot         string                   `json:"source_root"`
-	SourceWorkDir      string                   `json:"source_work_dir"`
-	SourceDataDir      string                   `json:"source_data_dir"`
-	TargetRoot         string                   `json:"target_root"`
-	Files              []migrationFileRecord    `json:"files"`
-	ProjectDirectories []migrationProjectRecord `json:"project_directories,omitempty"`
-	Backups            []migrationBackupRecord  `json:"backups,omitempty"`
-	SkippedRuntime     int                      `json:"skipped_runtime_entries"`
-	SkippedSymlinks    int                      `json:"skipped_symlinks"`
+	Version            int                             `json:"version"`
+	CreatedAt          string                          `json:"created_at"`
+	SourceRoot         string                          `json:"source_root"`
+	SourceWorkDir      string                          `json:"source_work_dir"`
+	SourceDataDir      string                          `json:"source_data_dir"`
+	TargetRoot         string                          `json:"target_root"`
+	Files              []migrationFileRecord           `json:"files"`
+	ProjectDirectories []migrationProjectRecord        `json:"project_directories,omitempty"`
+	SkippedProjects    []migrationSkippedProjectRecord `json:"skipped_project_directories,omitempty"`
+	Backups            []migrationBackupRecord         `json:"backups,omitempty"`
+	SkippedRuntime     int                             `json:"skipped_runtime_entries"`
+	SkippedSymlinks    int                             `json:"skipped_symlinks"`
 }
 
 type migrationFileRecord struct {
@@ -55,6 +57,11 @@ type migrationProjectRecord struct {
 	Source string `json:"source"`
 	Target string `json:"target"`
 	Files  int    `json:"files"`
+}
+
+type migrationSkippedProjectRecord struct {
+	Source string `json:"source"`
+	Reason string `json:"reason"`
 }
 
 type migrationBackupRecord struct {
@@ -211,7 +218,11 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		ManifestPath:  filepath.Join(target, migrationManifestFilename),
 	}
 
-	if err := collectMigrationTree(source, "config-root", true, mainDestination, &report); err != nil {
+	var configRootExclusions []string
+	if dataDir != source && pathStrictlyWithin(source, dataDir) {
+		configRootExclusions = append(configRootExclusions, dataDir)
+	}
+	if err := collectMigrationTreeExcluding(source, "config-root", true, configRootExclusions, mainDestination, &report); err != nil {
 		return nil, fmt.Errorf("inventory source config directory: %w", err)
 	}
 	if dataDir != source {
@@ -237,20 +248,27 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	}, false)
 
 	projectDestinations := []*migrationDestination{}
+	var skippedProjects []migrationSkippedProjectRecord
 	if opts.IncludeProjectData {
-		projectRoots, err := discoverLegacyProjectRoots(legacyCfg, runtimeWorkDir, source, dataDir, opts.Home)
+		var projectRoots []string
+		projectRoots, skippedProjects, err = discoverLegacyProjectRoots(legacyCfg, runtimeWorkDir, source, dataDir, opts.Home)
 		if err != nil {
 			return nil, err
 		}
 		for _, projectRoot := range projectRoots {
-			projectSource := filepath.Join(projectRoot, ".cc-connect")
+			projectSourceCandidate := filepath.Join(projectRoot, ".cc-connect")
+			projectSource := projectSourceCandidate
 			projectTarget := filepath.Join(projectRoot, ".cc-connect-next")
 			projectSource, err = canonicalExistingDirectory(projectSource)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
-				return nil, fmt.Errorf("read project-local source %s: %w", projectSource, err)
+				if errors.Is(err, os.ErrPermission) {
+					skippedProjects = appendMigrationSkippedProject(skippedProjects, projectSourceCandidate, "permission denied")
+					continue
+				}
+				return nil, fmt.Errorf("read project-local source %s: %w", projectSourceCandidate, err)
 			}
 			projectTarget, err = canonicalDestinationPath(projectTarget)
 			if err != nil {
@@ -272,15 +290,24 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 				Target: projectTarget,
 				Files:  make(map[string]plannedMigrationFile),
 			}
-			if err := collectMigrationTree(projectSource, "project-data", false, destination, &report); err != nil {
+			var projectReport migrationReport
+			if err := collectMigrationTree(projectSource, "project-data", false, destination, &projectReport); err != nil {
+				if errors.Is(err, os.ErrPermission) {
+					skippedProjects = appendMigrationSkippedProject(skippedProjects, projectSource, "permission denied")
+					continue
+				}
 				return nil, fmt.Errorf("inventory project-local data %s: %w", projectSource, err)
 			}
 			if len(destination.Files) == 0 {
 				continue
 			}
+			report.SkippedRuntime += projectReport.SkippedRuntime
+			report.SkippedSymlinks += projectReport.SkippedSymlinks
 			projectDestinations = append(projectDestinations, destination)
 		}
 	}
+	sort.Slice(skippedProjects, func(i, j int) bool { return skippedProjects[i].Source < skippedProjects[j].Source })
+	report.SkippedProjects = append([]migrationSkippedProjectRecord(nil), skippedProjects...)
 
 	destinations := append(append([]*migrationDestination{}, projectDestinations...), mainDestination)
 	for _, destination := range destinations {
@@ -395,9 +422,29 @@ func resolvePathThroughExistingAncestor(path string) (string, error) {
 }
 
 func collectMigrationTree(root, scope string, skipRuntime bool, destination *migrationDestination, report *migrationReport) error {
+	return collectMigrationTreeExcluding(root, scope, skipRuntime, nil, destination, report)
+}
+
+func pathStrictlyWithin(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, excludedRoots []string, destination *migrationDestination, report *migrationReport) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		for _, excluded := range excludedRoots {
+			if filepath.Clean(path) == filepath.Clean(excluded) {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -503,8 +550,13 @@ func availableMigrationRel(files map[string]plannedMigrationFile, candidate stri
 	}
 }
 
-func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourceRoot, dataDir, home string) ([]string, error) {
+func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourceRoot, dataDir, home string) ([]string, []migrationSkippedProjectRecord, error) {
 	roots := make(map[string]struct{})
+	skipped := make(map[string]migrationSkippedProjectRecord)
+	recordPermissionSkip := func(path string) {
+		path = filepath.Clean(path)
+		skipped[path] = migrationSkippedProjectRecord{Source: path, Reason: "permission denied"}
+	}
 	addRoot := func(raw string) error {
 		if strings.TrimSpace(raw) == "" {
 			return nil
@@ -517,6 +569,10 @@ func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourc
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
+		if errors.Is(err, os.ErrPermission) {
+			recordPermissionSkip(resolved)
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -524,6 +580,10 @@ func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourc
 			return nil
 		}
 		canonical, err := filepath.EvalSymlinks(resolved)
+		if errors.Is(err, os.ErrPermission) {
+			recordPermissionSkip(resolved)
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -534,42 +594,64 @@ func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourc
 	for _, project := range cfg.Projects {
 		if raw, ok := project.Agent.Options["work_dir"].(string); ok {
 			if err := addRoot(raw); err != nil {
-				return nil, fmt.Errorf("resolve project work_dir: %w", err)
+				return nil, nil, fmt.Errorf("resolve project work_dir: %w", err)
 			}
 		}
 		if strings.TrimSpace(project.BaseDir) != "" {
 			baseDir, err := resolveLegacyConfigPath(project.BaseDir, runtimeWorkDir, home)
 			if err != nil {
-				return nil, fmt.Errorf("resolve project base_dir: %w", err)
+				return nil, nil, fmt.Errorf("resolve project base_dir: %w", err)
 			}
-			if err := discoverProjectRootsUnderBase(baseDir, roots); err != nil {
-				return nil, fmt.Errorf("scan project base_dir %s: %w", baseDir, err)
+			if err := discoverProjectRootsUnderBase(baseDir, roots, recordPermissionSkip); err != nil {
+				return nil, nil, fmt.Errorf("scan project base_dir %s: %w", baseDir, err)
 			}
 		}
 	}
 
 	for _, stateRoot := range []string{dataDir, sourceRoot} {
 		if err := discoverProjectRootsFromState(stateRoot, addRoot); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := discoverProjectRootsFromBindings(stateRoot, addRoot); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	result := make([]string, 0, len(roots))
 	for root := range roots {
-		if info, err := os.Stat(filepath.Join(root, ".cc-connect")); err == nil && info.IsDir() {
+		projectData := filepath.Join(root, ".cc-connect")
+		if info, err := os.Stat(projectData); err == nil && info.IsDir() {
 			result = append(result, root)
+		} else if errors.Is(err, os.ErrPermission) {
+			recordPermissionSkip(projectData)
 		}
 	}
 	sort.Strings(result)
-	return result, nil
+	skippedResult := make([]migrationSkippedProjectRecord, 0, len(skipped))
+	for _, record := range skipped {
+		skippedResult = append(skippedResult, record)
+	}
+	sort.Slice(skippedResult, func(i, j int) bool { return skippedResult[i].Source < skippedResult[j].Source })
+	return result, skippedResult, nil
 }
 
-func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}) error {
+func appendMigrationSkippedProject(records []migrationSkippedProjectRecord, source, reason string) []migrationSkippedProjectRecord {
+	source = filepath.Clean(source)
+	for _, record := range records {
+		if record.Source == source {
+			return records
+		}
+	}
+	return append(records, migrationSkippedProjectRecord{Source: source, Reason: reason})
+}
+
+func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}, recordPermissionSkip func(string)) error {
 	info, err := os.Stat(baseDir)
 	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if errors.Is(err, os.ErrPermission) {
+		recordPermissionSkip(baseDir)
 		return nil
 	}
 	if err != nil {
@@ -580,6 +662,13 @@ func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}) er
 	}
 	return filepath.WalkDir(baseDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrPermission) {
+				recordPermissionSkip(path)
+				if entry != nil && entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return walkErr
 		}
 		if entry.Type()&os.ModeSymlink != 0 && entry.IsDir() {
@@ -587,6 +676,10 @@ func discoverProjectRootsUnderBase(baseDir string, roots map[string]struct{}) er
 		}
 		if entry.IsDir() && entry.Name() == ".cc-connect" {
 			root, err := filepath.EvalSymlinks(filepath.Dir(path))
+			if errors.Is(err, os.ErrPermission) {
+				recordPermissionSkip(filepath.Dir(path))
+				return filepath.SkipDir
+			}
 			if err != nil {
 				return err
 			}
@@ -703,20 +796,20 @@ func resolveLegacyRuntimeWorkDir(override, sourceRoot, home string) (string, err
 	return sourceRoot, nil
 }
 
-func resolveLegacyConfigPath(raw, baseDir, home string) (string, error) {
-	var missing []string
-	expanded := os.Expand(raw, func(name string) string {
-		value, ok := os.LookupEnv(name)
-		if !ok {
-			missing = append(missing, name)
+var legacyEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+func resolveLegacyConfigPath(raw, baseDir, _ string) (string, error) {
+	// Match config.resolveEnvPlaceholders exactly: only ${NAME} expands. Bare
+	// $NAME and ~ remain literal config path components, and unset braced
+	// placeholders become empty strings just as they do in the running legacy
+	// process.
+	expanded := legacyEnvPlaceholderPattern.ReplaceAllStringFunc(raw, func(match string) string {
+		parts := legacyEnvPlaceholderPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
 		}
-		return value
+		return os.Getenv(parts[1])
 	})
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		return "", fmt.Errorf("unset environment variable(s): %s", strings.Join(missing, ", "))
-	}
-	expanded = expandMigrationPath(expanded, home)
 	if !filepath.IsAbs(expanded) {
 		expanded = filepath.Join(baseDir, expanded)
 	}
@@ -1002,6 +1095,7 @@ func buildMigrationManifest(plan *preparedMigration) migrationManifest {
 		TargetRoot:      plan.Main.Target,
 		SkippedRuntime:  plan.Report.SkippedRuntime,
 		SkippedSymlinks: plan.Report.SkippedSymlinks,
+		SkippedProjects: append([]migrationSkippedProjectRecord(nil), plan.Report.SkippedProjects...),
 	}
 	destinations := append(append([]*migrationDestination{}, plan.Projects...), plan.Main)
 	for _, destination := range destinations {

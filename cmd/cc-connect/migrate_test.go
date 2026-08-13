@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -326,6 +327,104 @@ work_dir = "`+filepath.ToSlash(root)+`"
 	}
 	if got, want := plan.Report.CopiedFiles, 2; got != want {
 		t.Fatalf("copied files = %d, want %d unique persistent files", got, want)
+	}
+}
+
+func TestResolveLegacyConfigPathMatchesOfficialBracedEnvSyntax(t *testing.T) {
+	base := t.TempDir()
+	expandedRoot := filepath.Join(base, "expanded")
+	t.Setenv("CC_CONNECT_MIGRATION_TEST_ROOT", expandedRoot)
+
+	braced, err := resolveLegacyConfigPath("${CC_CONNECT_MIGRATION_TEST_ROOT}/state", base, base)
+	if err != nil {
+		t.Fatalf("resolve braced placeholder: %v", err)
+	}
+	if got, want := braced, filepath.Join(expandedRoot, "state"); got != want {
+		t.Fatalf("braced placeholder = %q, want %q", got, want)
+	}
+
+	bare, err := resolveLegacyConfigPath("$CC_CONNECT_MIGRATION_TEST_ROOT/state", base, base)
+	if err != nil {
+		t.Fatalf("resolve bare variable: %v", err)
+	}
+	if got, want := bare, filepath.Join(base, "$CC_CONNECT_MIGRATION_TEST_ROOT", "state"); got != want {
+		t.Fatalf("bare variable = %q, want literal official-config path %q", got, want)
+	}
+}
+
+func TestPrepareLegacyMigrationSkipsInaccessibleOptionalProjectRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission-mode test is Unix-specific")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	lockedParent := filepath.Join(root, "locked")
+	privateProject := filepath.Join(lockedParent, "private-project")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "private"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(privateProject)+`"
+`)
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{}`)
+	writeMigrationFixture(t, filepath.Join(privateProject, ".cc-connect", "images", "private.png"), "private")
+	if err := os.Chmod(lockedParent, 0); err != nil {
+		t.Fatalf("lock optional project parent: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedParent, 0o700) })
+	if _, err := os.Stat(privateProject); !errors.Is(err, os.ErrPermission) {
+		t.Skipf("filesystem does not enforce the permission fixture: %v", err)
+	}
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		DryRun:             true,
+		IncludeProjectData: true,
+	})
+	if err != nil {
+		t.Fatalf("inaccessible optional project blocked global migration: %v", err)
+	}
+	if len(plan.Projects) != 0 || len(plan.Report.SkippedProjects) != 1 {
+		t.Fatalf("optional project skip was not reported: projects=%d report=%+v", len(plan.Projects), plan.Report)
+	}
+	manifest := buildMigrationManifest(plan)
+	if len(manifest.SkippedProjects) != 1 || manifest.SkippedProjects[0].Source != filepath.Clean(privateProject) {
+		t.Fatalf("optional project skip is missing from the manifest: %+v", manifest.SkippedProjects)
+	}
+	if got, want := plan.Report.CopiedFiles, 2; got != want {
+		t.Fatalf("global persistent inventory = %d, want %d", got, want)
+	}
+}
+
+func TestPrepareLegacyMigrationExcludesNestedDataDirFromConfigInventory(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "state"`+"\n")
+	writeMigrationFixture(t, filepath.Join(source, "daemon.json"), `{"work_dir":"`+filepath.ToSlash(source)+`"}`)
+	writeMigrationFixture(t, filepath.Join(source, "state", "sessions", "demo.json"), `{"session":"nested"}`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   root,
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("prepare nested data_dir migration: %v", err)
+	}
+	if _, duplicated := plan.Main.Files[filepath.Join("state", "sessions", "demo.json")]; duplicated {
+		t.Fatalf("nested data_dir was duplicated under its config-root path: %+v", plan.Main.Files)
+	}
+	if _, copied := plan.Main.Files[filepath.Join("sessions", "demo.json")]; !copied {
+		t.Fatalf("effective nested data_dir was not mapped to the target root: %+v", plan.Main.Files)
+	}
+	if got, want := plan.Report.CopiedFiles, 2; got != want {
+		t.Fatalf("copied files = %d, want %d unique files", got, want)
 	}
 }
 

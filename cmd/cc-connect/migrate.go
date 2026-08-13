@@ -17,6 +17,7 @@ type migrationReport struct {
 	ProjectDirectories int
 	SkippedRuntime     int
 	SkippedSymlinks    int
+	SkippedProjects    []migrationSkippedProjectRecord
 	SourceDataDir      string
 	SourceWorkDir      string
 	BackupDir          string
@@ -95,6 +96,16 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	if report.SkippedRuntime > 0 || report.SkippedSymlinks > 0 {
 		if !writeOutput("Skipped %d runtime entries and %d symlinks.\n", report.SkippedRuntime, report.SkippedSymlinks) {
 			return 1
+		}
+	}
+	if len(report.SkippedProjects) > 0 {
+		if !writeOutput("Skipped %d inaccessible optional project-local directories; grant access and rerun before relying on project-local completeness.\n", len(report.SkippedProjects)) {
+			return 1
+		}
+		for _, skipped := range report.SkippedProjects {
+			if !writeOutput("  - %s (%s)\n", skipped.Source, skipped.Reason) {
+				return 1
+			}
 		}
 	}
 	if !writeOutput("Official runtime work_dir: %s. Effective data_dir: %s. Project-local directories: %d.\n", report.SourceWorkDir, report.SourceDataDir, report.ProjectDirectories) {
