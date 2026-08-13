@@ -350,6 +350,10 @@ type modelsJSON struct {
 // (e.g. "deepseek/deepseek-v4-pro") and the fully-qualified
 // provider/ID (e.g. "my-provider/my-model").
 // Returns nil on any error (caller falls back to 200K).
+//
+// Note: models.json is distinct from models-store.json — models.json carries
+// per-model context-window sizes, while models-store.json is the provider
+// catalog that readModelsStore uses to build the /model list.
 func loadModelsContextWindows() map[string]int {
 	dir := piSettingsDir()
 	if dir == "" {

@@ -216,6 +216,41 @@ func TestAgent_AvailableModels(t *testing.T) {
 	}
 }
 
+func TestAgent_AvailableModels_FallsBackToStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	// settings.json with empty enabledModels → readSettingsModels returns empty.
+	settings := map[string]any{"enabledModels": []string{}}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	// models-store.json with two models.
+	store := map[string]any{
+		"deepseek": map[string]any{
+			"models": []any{
+				map[string]any{"id": "deepseek-chat", "name": "DeepSeek Chat"},
+				map[string]any{"id": "deepseek-reasoner", "name": "DeepSeek Reasoner"},
+			},
+		},
+	}
+	sdata, _ := json.Marshal(store)
+	if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), sdata, 0o644); err != nil {
+		t.Fatalf("write models-store.json: %v", err)
+	}
+
+	a := &Agent{}
+	models := a.AvailableModels(context.Background())
+	if len(models) != 2 {
+		t.Fatalf("AvailableModels() = %d models, want 2 (fallback to models-store.json)", len(models))
+	}
+	if models[0].Name != "deepseek/deepseek-chat" || models[1].Name != "deepseek/deepseek-reasoner" {
+		t.Errorf("AvailableModels() = %+v, want store models in sorted order", models)
+	}
+}
+
 func TestReadSettingsModels(t *testing.T) {
 	// Save and restore settings path.
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
@@ -275,6 +310,86 @@ func TestReadSettingsModels(t *testing.T) {
 			t.Errorf("models[%d].Alias = %q, want %q", i, models[i].Alias, tt.alias)
 		}
 	}
+}
+
+func TestReadModelsStore(t *testing.T) {
+	writeStore := func(t *testing.T, store any) {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+		data, _ := json.Marshal(store)
+		if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), data, 0o644); err != nil {
+			t.Fatalf("write models-store.json: %v", err)
+		}
+	}
+
+	t.Run("missing file returns nil", func(t *testing.T) {
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		if got := readModelsStore(); got != nil {
+			t.Errorf("readModelsStore() = %v, want nil for missing models-store.json", got)
+		}
+	})
+
+	t.Run("valid file returns sorted provider-qualified models", func(t *testing.T) {
+		writeStore(t, map[string]any{
+			"openai": map[string]any{
+				"models": []any{
+					map[string]any{"id": "gpt-4", "name": "GPT-4"},
+					map[string]any{"id": "gpt-4o", "name": "GPT-4o"},
+				},
+			},
+			"deepseek": map[string]any{
+				"models": []any{
+					map[string]any{"id": "deepseek-chat", "name": "DeepSeek Chat"},
+					map[string]any{"id": "deepseek-reasoner", "name": "DeepSeek Reasoner"},
+				},
+			},
+		})
+		got := readModelsStore()
+		want := []core.ModelOption{
+			{Name: "deepseek/deepseek-chat", Alias: "deepseek-chat", Desc: "DeepSeek Chat"},
+			{Name: "deepseek/deepseek-reasoner", Alias: "deepseek-reasoner", Desc: "DeepSeek Reasoner"},
+			{Name: "openai/gpt-4", Alias: "gpt-4", Desc: "GPT-4"},
+			{Name: "openai/gpt-4o", Alias: "gpt-4o", Desc: "GPT-4o"},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("got[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("empty id model is skipped", func(t *testing.T) {
+		writeStore(t, map[string]any{
+			"openai": map[string]any{
+				"models": []any{
+					map[string]any{"id": "", "name": "Empty"},
+					map[string]any{"id": "gpt-4", "name": "GPT-4"},
+				},
+			},
+		})
+		got := readModelsStore()
+		if len(got) != 1 {
+			t.Fatalf("got %d models, want 1 (empty-id skipped): %+v", len(got), got)
+		}
+		if got[0].Name != "openai/gpt-4" || got[0].Alias != "gpt-4" || got[0].Desc != "GPT-4" {
+			t.Errorf("got[0] = %+v, want openai/gpt-4", got[0])
+		}
+	})
+
+	t.Run("malformed json returns nil", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+		if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), []byte("{invalid json"), 0o644); err != nil {
+			t.Fatalf("write models-store.json: %v", err)
+		}
+		if got := readModelsStore(); got != nil {
+			t.Errorf("readModelsStore() = %v, want nil for malformed models-store.json", got)
+		}
+	})
 }
 
 func TestReadDefaultModel(t *testing.T) {
