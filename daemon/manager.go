@@ -17,7 +17,7 @@ import (
 const (
 	DefaultLogMaxSize    = 10 * 1024 * 1024 // 10 MB
 	DefaultLogMaxBackups = 3                // active + .1 + .2 + .3
-	ServiceName          = "cc-connect"
+	ServiceName          = "cc-connect-next"
 )
 
 type Config struct {
@@ -61,16 +61,16 @@ func NewManager() (Manager, error) {
 
 func DefaultLogFile() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc-connect", "logs", "cc-connect.log")
+	return filepath.Join(home, ".cc-connect-next", "logs", "cc-connect-next.log")
 }
 
 func DefaultDataDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc-connect")
+	return filepath.Join(home, ".cc-connect-next")
 }
 
 // ── Metadata ────────────────────────────────────────────────
-// Stored at ~/.cc-connect/daemon.json so that `logs`, `status`,
+// Stored at ~/.cc-connect-next/daemon.json so that `logs`, `status`,
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {
@@ -207,7 +207,7 @@ var configEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]
 
 // captureConfigEnvPlaceholders scans configPath for ${ENV_NAME} placeholders
 // and, for each one set in the current process environment, copies it into
-// env. cc-connect resolves these placeholders at startup using os.ExpandEnv;
+// env. cc-connect-next resolves these placeholders at startup using os.ExpandEnv;
 // if the daemon's service file doesn't carry the values, the started daemon
 // process will see empty strings and fail to authenticate to any platform.
 //

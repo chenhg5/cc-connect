@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -1163,7 +1163,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
-	workDir := filepath.Join(homeDir, "codes", "cc-connect")
+	workDir := filepath.Join(homeDir, "codes", "cc-connect-next")
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1354,7 +1354,7 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 			model:           "gpt-5.4",
 			reasoningEffort: "xhigh",
 		},
-		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+		workDir: filepath.Join(homeDir, "codes", "cc-connect-next"),
 		report: &UsageReport{
 			Buckets: []UsageBucket{{
 				Name: "Rate limit",
@@ -1396,7 +1396,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
-	if err := os.MkdirAll(filepath.Join(homeDir, "codes", "cc-connect"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(homeDir, "codes", "cc-connect-next"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1426,7 +1426,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	agentSession := newControllableSession("s-footer-runtime")
 	agentSession.model = "gpt-5.4"
 	agentSession.reasoningEffort = "xhigh"
-	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect")
+	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect-next")
 	agentSession.workDir = sessionWorkDir
 	agentSession.report = &UsageReport{
 		Buckets: []UsageBucket{{
@@ -1824,7 +1824,7 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 }
 
-func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
+func TestProcessInteractiveEvents_RichCardStartsImmediatelyAndHidesThinking(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -1832,10 +1832,10 @@ func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		ThinkingMessages: true,
+		ThinkingMessages: false,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
-		ToolMessages:     true,
+		ToolMessages:     false,
 		Mode:             "full",
 		CardMode:         "rich",
 	})
@@ -1859,12 +1859,19 @@ func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want 1", len(starts))
 	}
-	if !strings.Contains(starts[0], "Inspecting event routing") {
-		t.Fatalf("rich card start should contain thinking content, got %q", starts[0])
+	if !strings.Contains(starts[0], "title=thinking") || strings.Contains(starts[0], "Kind:thinking") {
+		t.Fatalf("first rich card must be the immediate state before any agent event, got %q", starts[0])
+	}
+	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
+	if strings.Contains(rendered, "Inspecting event routing") {
+		t.Fatalf("rich card must not retain reasoning content, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Kind:thinking") {
+		t.Fatalf("rich card should expose an anonymous reasoning count, got %q", rendered)
 	}
 }
 
-func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
+func TestProcessInteractiveEvents_RichCardCountsToolWithoutRetainingDetails(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -1872,10 +1879,10 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		ThinkingMessages: true,
+		ThinkingMessages: false,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
-		ToolMessages:     true,
+		ToolMessages:     false,
 		Mode:             "full",
 		CardMode:         "rich",
 	})
@@ -1903,9 +1910,12 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 		t.Fatalf("preview starts = %d, want only the rich card start and no separate progress card", len(starts))
 	}
 	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
-	for _, want := range []string{"echo hi", "completed", "hi"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("rich card should contain %q, got %q", want, rendered)
+	if !strings.Contains(rendered, "Kind:tool") {
+		t.Fatalf("rich card should expose an anonymous tool count, got %q", rendered)
+	}
+	for _, forbidden := range []string{"Bash", "echo hi", "Status:completed", "Result:hi"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("rich card retained private tool detail %q: %q", forbidden, rendered)
 		}
 	}
 }
@@ -1986,6 +1996,53 @@ func (p *stubRichCardResolverPlatform) resolverCallModes() []bool {
 	out := make([]bool, len(p.calls))
 	copy(out, p.calls)
 	return out
+}
+
+func TestProcessInteractiveEvents_RichCardErrorStaysOnCardAndHidesDetails(t *testing.T) {
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-error"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-error")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-error",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	privateError := "private token at /Users/example/project"
+	agentSession.events <- Event{Type: EventError, Error: errors.New(privateError)}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error", time.Now(), nil, nil, state.replyCtx)
+	starts, streams, updates, deletes := p.snapshot()
+
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+		t.Fatalf("expected one immediate thinking card, got %d: %v", len(starts), starts)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("expected same-card error update, got %d: %v", len(updates), updates)
+	}
+	rendered := strings.Join(append(append(starts, streams...), updates...), "\n")
+	if strings.Contains(rendered, privateError) {
+		t.Fatalf("rich card leaked private error details: %q", rendered)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no separate raw error message, got %v", sent)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no card deletion, got %d", deletes)
+	}
 }
 
 func TestProcessInteractiveEvents_RichCardResolvesMarkdownImages(t *testing.T) {
@@ -2081,41 +2138,35 @@ func runRichCardSilentScenario(t *testing.T, name string, chunks []string, final
 	return p.snapshot()
 }
 
-// TestProcessInteractiveEvents_RichCard_NoReplySingleChunk asserts that a
-// single-chunk NO_REPLY response in rich card mode leaves zero trace: no
-// preview card created, no streaming text update, no card deletion. Lark
-// would otherwise render the Send-then-Delete lifecycle as a "撤回了一条消息"
-// gray bar.
+// A NO_REPLY turn still uses the immediate card and finalizes it in place.
+// Deleting it would create a visible "message recalled" artifact in Lark.
 func TestProcessInteractiveEvents_RichCard_NoReplySingleChunk(t *testing.T) {
 	starts, streams, updates, deletes := runRichCardSilentScenario(t, "single", []string{"NO_REPLY"}, "NO_REPLY")
-	if len(starts) != 0 {
-		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+		t.Fatalf("expected one immediate thinking card, got %d: %v", len(starts), starts)
 	}
 	if len(streams) != 0 {
 		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
 	}
-	if len(updates) != 0 {
-		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("expected final Done update, got %d: %v", len(updates), updates)
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
 	}
 }
 
-// TestProcessInteractiveEvents_RichCard_NoReplyChunked asserts the same
-// no-trace invariant when the agent emits NO_REPLY across two text chunks
-// ("NO_R" + "EPLY"). The silentHold gate must hold across chunks until the
-// segment proves it is no longer a NO_REPLY prefix (or stays one).
+// The same lifecycle applies when NO_REPLY arrives across multiple chunks.
 func TestProcessInteractiveEvents_RichCard_NoReplyChunked(t *testing.T) {
 	starts, streams, updates, deletes := runRichCardSilentScenario(t, "chunked", []string{"NO_R", "EPLY"}, "NO_REPLY")
-	if len(starts) != 0 {
-		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+		t.Fatalf("expected one immediate thinking card, got %d: %v", len(starts), starts)
 	}
 	if len(streams) != 0 {
 		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
 	}
-	if len(updates) != 0 {
-		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("expected final Done update, got %d: %v", len(updates), updates)
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
@@ -2124,15 +2175,16 @@ func TestProcessInteractiveEvents_RichCard_NoReplyChunked(t *testing.T) {
 
 // TestProcessInteractiveEvents_RichCard_PrefixThenContent verifies that a
 // stream which starts with a NO_REPLY prefix ("N") but continues into real
-// content ("ote that...") releases the silentHold and lazily creates the
-// preview card with the accumulated content already in the body. No recall.
+// content ("ote that...") releases the silentHold and switches the already
+// created card into the answer phase. No recall.
 func TestProcessInteractiveEvents_RichCard_PrefixThenContent(t *testing.T) {
-	starts, _, _, deletes := runRichCardSilentScenario(t, "prefix-then-content", []string{"N", "ote that the answer is 42"}, "Note that the answer is 42")
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "prefix-then-content", []string{"N", "ote that the answer is 42"}, "Note that the answer is 42")
 	if len(starts) != 1 {
-		t.Fatalf("expected exactly 1 SendPreviewStart (lazy create after release), got %d: %v", len(starts), starts)
+		t.Fatalf("expected exactly 1 immediate SendPreviewStart, got %d: %v", len(starts), starts)
 	}
-	if !strings.Contains(starts[0], "Note that the answer is 42") {
-		t.Fatalf("lazy-created card should contain accumulated content, got %q", starts[0])
+	rendered := strings.Join(append(streams, updates...), "\n")
+	if !strings.Contains(rendered, "Note that the answer is 42") {
+		t.Fatalf("answer-phase updates should contain accumulated content, got %q", rendered)
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
@@ -2259,13 +2311,13 @@ func TestProcessInteractiveEvents_RichCard_ToolThenNoReply(t *testing.T) {
 
 func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	prompt := AgentSystemPrompt()
-	if !strings.Contains(prompt, "cc-connect send --image") {
+	if !strings.Contains(prompt, "cc-connect-next send --image") {
 		t.Fatalf("prompt missing image send instructions: %q", prompt)
 	}
-	if !strings.Contains(prompt, "cc-connect send --file") {
+	if !strings.Contains(prompt, "cc-connect-next send --file") {
 		t.Fatalf("prompt missing file send instructions: %q", prompt)
 	}
-	if !strings.Contains(prompt, "cc-connect send --tts") {
+	if !strings.Contains(prompt, "cc-connect-next send --tts") {
 		t.Fatalf("prompt missing tts send instructions: %q", prompt)
 	}
 	if !strings.Contains(prompt, "NO_REPLY") {
@@ -3626,7 +3678,7 @@ func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if got := p.sent[0]; got != e.i18n.T(MsgHelp) {
 		t.Fatalf("help text = %q, want legacy help text", got)
 	}
-	if strings.Contains(p.sent[0], "cc-connect 帮助") {
+	if strings.Contains(p.sent[0], "cc-connect-next 帮助") {
 		t.Fatalf("help text = %q, should not be card title fallback", p.sent[0])
 	}
 	if !strings.Contains(p.sent[0], "/cron [add|list|exec|del|enable|disable]") {
@@ -3673,7 +3725,7 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Focus") {
 		t.Fatalf("current text = %q, want session name 'Focus'", p.sent[0])
 	}
-	if strings.Contains(p.sent[0], "cc-connect") {
+	if strings.Contains(p.sent[0], "cc-connect-next") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
 	}
 }
@@ -5515,7 +5567,7 @@ func TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 }
 
 // TestSwitchProvider_PersistsToSession verifies that `/provider switch <name>`
-// records the choice on the Session so it survives a cc-connect process
+// records the choice on the Session so it survives a cc-connect-next process
 // restart. Without this, the agent_session_id keeps the conversation alive
 // while the in-memory active provider reverts to default — see internal
 // task t-20260614-qp7xnl.
@@ -6153,7 +6205,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 
 	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 	// Register all agent sessions with the session manager so they pass the
-	// owned-session filter (simulates cc-connect having created each session).
+	// owned-session filter (simulates cc-connect-next having created each session).
 	var internalIDs []string
 	for i, s := range sessions {
 		sess := e.sessions.NewSession("test:user1", "session-"+string(rune('A'+i)))
@@ -7499,7 +7551,7 @@ func TestSetupMemoryFile_WritesInstructions(t *testing.T) {
 	if !strings.Contains(string(content), ccConnectInstructionMarker) {
 		t.Error("expected instruction marker in file")
 	}
-	if !strings.Contains(string(content), "cc-connect cron add") {
+	if !strings.Contains(string(content), "cc-connect-next cron add") {
 		t.Error("expected cron instructions in file")
 	}
 }
@@ -7520,6 +7572,31 @@ func TestSetupMemoryFile_Idempotent(t *testing.T) {
 	r2, _, _ := e.setupMemoryFile()
 	if r2 != setupExists {
 		t.Fatalf("second call: result = %d, want setupExists", r2)
+	}
+}
+
+func TestSetupMemoryFile_RecognizesOfficialMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	existing := "project notes\n\n" + legacyCCConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	if err := os.WriteFile(memFile, []byte(existing), 0o644); err != nil {
+		t.Fatalf("write official instructions: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupExists || err != nil {
+		t.Fatalf("result = %d, err = %v; want setupExists", result, err)
+	}
+	content, err := os.ReadFile(memFile)
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	if got := strings.Count(string(content), "<!-- cc-connect"); got != 1 {
+		t.Fatalf("instruction marker count = %d, want 1; content=%q", got, content)
 	}
 }
 
@@ -7544,7 +7621,7 @@ func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	if strings.Contains(string(content), "legacy instructions") {
 		t.Fatalf("legacy instructions should be refreshed, got %q", string(content))
 	}
-	if !strings.Contains(string(content), "cc-connect send --image") {
+	if !strings.Contains(string(content), "cc-connect-next send --image") {
 		t.Fatalf("expected refreshed attachment instructions, got %q", string(content))
 	}
 }
@@ -7590,7 +7667,7 @@ func TestCmdCronSetup_WritesAndReplies(t *testing.T) {
 		t.Errorf("reply = %q, want to contain filename", p.sent[0])
 	}
 	if !strings.Contains(p.sent[0], "attachment send-back") {
-		t.Errorf("reply = %q, want unified cc-connect setup success message", p.sent[0])
+		t.Errorf("reply = %q, want unified cc-connect-next setup success message", p.sent[0])
 	}
 
 	content, _ := os.ReadFile(memFile)
@@ -10212,7 +10289,7 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e.SetInjectSender(true)
 
 	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123", "")
-	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
+	expected := "[cc-connect-next sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10243,7 +10320,7 @@ func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
 	e.SetInjectSender(true)
 
 	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1", "")
-	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
+	expected := "[cc-connect-next sender_id=user1 platform=feishu chat_id=ch]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10254,7 +10331,7 @@ func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
 	e.SetInjectSender(true)
 
 	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
-	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
+	expected := "[cc-connect-next sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10330,7 +10407,7 @@ func TestBuildSenderPrompt_ChannelKeyOverridesSessionKey(t *testing.T) {
 	// When channelKey is provided, it should be used as chat_id instead of
 	// extracting from sessionKey (which would give "g" for dingtalk).
 	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "cidXXX")
-	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	expected := "[cc-connect-next sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10343,7 +10420,7 @@ func TestBuildSenderPrompt_FallbackWithoutChannelKey(t *testing.T) {
 	// When channelKey is empty, extractChannelID heuristic should detect
 	// the 4-segment format and extract the correct channel.
 	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "")
-	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	expected := "[cc-connect-next sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -14266,7 +14343,7 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 }
 
 // TestCmdList_FilterExternalSessionsEnabled verifies that when
-// filter_external_sessions is enabled, only cc-connect-tracked sessions
+// filter_external_sessions is enabled, only cc-connect-next-tracked sessions
 // appear in /list.
 func TestCmdList_FilterExternalSessionsEnabled(t *testing.T) {
 	agentSessions := []AgentSessionInfo{
@@ -14347,7 +14424,7 @@ func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // setupFilterTestEngine creates a test Engine with 3 agent sessions, 2 tracked
-// by cc-connect and 1 external. Returns (engine, platform, userKey, agentSessions).
+// by cc-connect-next and 1 external. Returns (engine, platform, userKey, agentSessions).
 func setupFilterTestEngine(t *testing.T, filterEnabled bool) (*Engine, *stubPlatformEngine, string, []AgentSessionInfo) {
 	t.Helper()
 	agentSessions := []AgentSessionInfo{
@@ -14961,7 +15038,7 @@ func TestHandlePendingPermission_StalePermissionCallback_Dropped(t *testing.T) {
 
 // ─── Permission keyword tokenization (t-20260614-ayc85z) ────────────────
 // Group-chat platforms (wecom in particular) require the user to
-// @mention the bot for the message to reach cc-connect, so permission
+// @mention the bot for the message to reach cc-connect-next, so permission
 // replies arrive as "@bot 允许" / "允许 @bot" / etc. rather than the
 // bare keyword. The matchers must tolerate the surrounding mention
 // without losing word-boundary discipline (e.g. must NOT match
@@ -15016,8 +15093,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15045,7 +15122,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
@@ -15180,7 +15257,7 @@ func TestHandlePendingPermission_ApproveAllWithMention(t *testing.T) {
 }
 
 // ─── Audio / Video routing (t-20260615-cqjbk1) ────────────────────────
-// `cc-connect send --audio` / `--video` must reach AudioSender /
+// `cc-connect-next send --audio` / `--video` must reach AudioSender /
 // VideoSender — NOT SendFile. PR #1202 made the CLI flags exist but
 // silently routed clips through SendFile, defeating the
 // transcoding-and-render-as-native-bubble pipeline.

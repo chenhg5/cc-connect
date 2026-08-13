@@ -8,18 +8,18 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/chenhg5/cc-connect/config"
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/config"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func runWeb(args []string) {
 	configPath := resolveConfigPath("")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Config file not found: %s\nRun cc-connect first to create a default config.\n", configPath)
+		fmt.Fprintf(os.Stderr, "Config file not found: %s\nRun cc-connect-next first to create a default config.\n", configPath)
 		os.Exit(1)
 	}
 
-	// Use LoadPermissive so `cc-connect web` works even before any platforms
+	// Use LoadPermissive so `cc-connect-next web` works even before any platforms
 	// are configured (e.g. during initial setup via the Web Admin UI).
 	cfg, err := config.LoadPermissive(configPath)
 	if err != nil {
@@ -48,7 +48,7 @@ func runWeb(args []string) {
 		port = result.ManagementPort
 		token = result.ManagementToken
 		fmt.Printf("Web admin configured on port %d.\n", port)
-		fmt.Println("Restart cc-connect for the changes to take effect.")
+		fmt.Println("Restart cc-connect-next for the changes to take effect.")
 	}
 
 	baseURL := fmt.Sprintf("http://localhost:%d", port)
@@ -74,7 +74,7 @@ func runWeb(args []string) {
 		fmt.Printf("\nCould not open browser automatically.\n")
 		fmt.Printf("Open this URL in your browser:\n")
 		fmt.Printf("  %s/login?token=%s\n", baseURL, token)
-		fmt.Printf("\nNote: make sure cc-connect is running (it hosts the web admin on port %d).\n", port)
+		fmt.Printf("\nNote: make sure cc-connect-next is running (it hosts the web admin on port %d).\n", port)
 	}
 }
 

@@ -5,7 +5,7 @@ package core
 // runas_audit.go — isolation leak-audit probe for the run_as_user sandbox.
 //
 // The preflight gates in runas_check.go answer the question "can
-// cc-connect spawn as the target user without errors?". This file
+// cc-connect-next spawn as the target user without errors?". This file
 // answers the stronger question: "once the target user IS spawned, can
 // it still read things it shouldn't be able to?".
 //

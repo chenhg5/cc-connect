@@ -1,11 +1,11 @@
 # 钉钉 (DingTalk) 接入指南
 
-本文档介绍如何将 **cc-connect** 接入钉钉，让你可以通过钉钉机器人远程调用 Claude Code。
+本文档介绍如何将 **cc-connect-next** 接入钉钉，让你可以通过钉钉机器人远程调用 Claude Code。
 
 ## 前置要求
 
 - 钉钉账号（个人或企业均可）
-- 一台可运行 cc-connect 的设备（无需公网 IP）
+- 一台可运行 cc-connect-next 的设备（无需公网 IP）
 - Claude Code 已安装并配置完成
 
 > 💡 **优势**：使用 Stream 模式（WebSocket 长连接），无需公网 IP、无需域名、无需反向代理
@@ -30,7 +30,7 @@
 
 | 字段 | 填写建议 |
 |------|---------|
-| 应用名称 | `cc-connect` 或你喜欢的名称 |
+| 应用名称 | `cc-connect-next` 或你喜欢的名称 |
 | 应用描述 | `Claude Code 远程助手` |
 | 应用图标 | 上传一个喜欢的图标 |
 
@@ -51,11 +51,11 @@ AppKey:     dingxxxxxxxxxxxxxxx
 AppSecret:  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-> ⚠️ **重要**：请妥善保存这两个凭证，后续配置 cc-connect 时需要用到。AppSecret 只会显示一次。
+> ⚠️ **重要**：请妥善保存这两个凭证，后续配置 cc-connect-next 时需要用到。AppSecret 只会显示一次。
 
-### 2.3 配置到 cc-connect
+### 2.3 配置到 cc-connect-next
 
-将凭证配置到 cc-connect 的 `config.toml` 中：
+将凭证配置到 cc-connect-next 的 `config.toml` 中：
 
 ```toml
 [[projects]]
@@ -100,7 +100,7 @@ done_emoji = "none"            # 可选：完成回复后贴的表情，例如 "
 
 | 配置项 | 建议值 |
 |-------|--------|
-| 机器人名称 | `cc-connect` |
+| 机器人名称 | `cc-connect-next` |
 | 机器人描述 | `Claude Code 远程助手` |
 | 机器人头像 | 与应用图标一致 |
 
@@ -159,7 +159,7 @@ done_emoji = "none"            # 可选：完成回复后贴的表情，例如 "
 ┌─────────────────────────────────────────────────────────────┐
 │                      你的本地环境                            │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► 你的项目代码         │
+│   cc-connect-next ◄──► Claude Code CLI ◄──► 你的项目代码         │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -185,24 +185,24 @@ done_emoji = "none"            # 可选：完成回复后贴的表情，例如 "
 
 ---
 
-## 第六步：启动 cc-connect
+## 第六步：启动 cc-connect-next
 
 ### 6.1 启动服务
 
 ```bash
-cc-connect
+cc-connect-next
 # 或指定配置文件
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 ### 6.2 验证连接
 
-启动后，cc-connect 会自动与钉钉建立 Stream 长连接。你会在日志中看到：
+启动后，cc-connect-next 会自动与钉钉建立 Stream 长连接。你会在日志中看到：
 
 ```
 level=INFO msg="dingtalk: stream connected" client_id=dingxxxxxxxxxxxxxxx
 level=INFO msg="platform started" project=my-project platform=dingtalk
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 ```
 
 ---
@@ -246,9 +246,9 @@ level=INFO msg="cc-connect is running" projects=1
 ```
 用户: 帮我分析一下当前项目的结构
 
-cc-connect: 🤔 思考中...
-cc-connect: 🔧 执行: Bash(ls -la)
-cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
+cc-connect-next: 🤔 思考中...
+cc-connect-next: 🔧 执行: Bash(ls -la)
+cc-connect-next: ✅ 这是一个 Node.js 项目，包含以下目录...
 ```
 
 ---
@@ -276,12 +276,12 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 ### Q: 长连接断开怎么办？
 
-cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
+cc-connect-next 内置了自动重连机制，断开后会自动尝试重新连接。
 
 ### Q: 消息发送后没有响应？
 
 检查以下项目：
-1. cc-connect 服务是否正常运行
+1. cc-connect-next 服务是否正常运行
 2. Stream 连接是否建立成功（查看日志）
 3. 事件订阅是否配置正确
 

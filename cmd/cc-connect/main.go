@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	ccconnect "github.com/chenhg5/cc-connect"
-	"github.com/chenhg5/cc-connect/config"
-	"github.com/chenhg5/cc-connect/core"
-	"github.com/chenhg5/cc-connect/daemon"
+	ccconnect "github.com/timmyagentic/cc-connect-next"
+	"github.com/timmyagentic/cc-connect-next/config"
+	"github.com/timmyagentic/cc-connect-next/core"
+	"github.com/timmyagentic/cc-connect-next/daemon"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -36,7 +36,7 @@ var (
 var globalAPIServer *core.APIServer
 
 // defaultResetOnIdleMins is applied when a project does not set
-// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
+// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect-next
 // rotates to a fresh session for the next message instead of resuming the
 // previous transcript via --continue. This avoids "context drift" where stale
 // chat history (failed commands, debugging noise, abandoned tangents) is
@@ -216,6 +216,11 @@ func main() {
 		case "update":
 			runUpdate()
 			return
+		case "migrate":
+			if code := runMigrate(os.Args[2:]); code != 0 {
+				os.Exit(code)
+			}
+			return
 		case "check-update":
 			checkUpdate()
 			return
@@ -279,7 +284,7 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
-	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
+	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect-next/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
 	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
@@ -304,11 +309,11 @@ func main() {
 	}
 
 	if *showVersion {
-		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
+		fmt.Printf("cc-connect-next %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
 		return
 	}
 
-	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
+	core.VersionInfo = fmt.Sprintf("cc-connect-next %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
 	core.CurrentVersion = version
 	core.CurrentCommit = commit
 	core.CurrentBuildTime = buildTime
@@ -337,7 +342,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Created default config at %s\n", configPath)
-		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect again.")
+		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect-next again.")
 		os.Exit(0)
 	}
 
@@ -353,7 +358,7 @@ func main() {
 	if len(cfg.Projects) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
 		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
-		fmt.Fprintln(os.Stderr, "  cc-connect init")
+		fmt.Fprintln(os.Stderr, "  cc-connect-next init")
 		os.Exit(1)
 	}
 
@@ -1303,7 +1308,7 @@ func main() {
 		apiSrv.Start()
 	}
 
-	slog.Info("cc-connect is running", "projects", len(engines))
+	slog.Info("cc-connect-next is running", "projects", len(engines))
 
 	// After startup, check if we were restarted and queue the success
 	// notification. The engine dispatches it on the first OnPlatformReady
@@ -1475,7 +1480,7 @@ func resolveClaudeProjectDir(workDir string) string {
 		return ""
 	}
 	// Claude Code encodes paths by replacing os.PathSeparator with "-"
-	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
+	// e.g. /home/leigh/workspace/cc-connect-next -> -home-leigh-workspace-cc-connect-next
 	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
 	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
@@ -1485,7 +1490,7 @@ func resolveClaudeProjectDir(workDir string) string {
 }
 
 // resolveConfigPath determines which config file to use.
-// Priority: explicit flag → ./config.toml → ~/.cc-connect/config.toml
+// Priority: explicit flag → ./config.toml → ~/.cc-connect-next/config.toml
 func resolveConfigPath(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -1494,21 +1499,29 @@ func resolveConfigPath(explicit string) string {
 		return "config.toml"
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect", "config.toml")
+		return filepath.Join(home, ".cc-connect-next", "config.toml")
 	}
 	return "config.toml"
 }
 
 func bootstrapConfig(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 
-	const tmpl = `# cc-connect configuration
-# Docs: https://github.com/chenhg5/cc-connect
+	const tmpl = `# cc-connect-next configuration
+# Docs: https://github.com/timmyagentic/cc-connect-next
 
 [log]
 level = "info"
+
+[display]
+mode = "compact"
+card_mode = "rich"
+thinking_messages = false
+tool_messages = false
+show_context_indicator = false
+reply_footer = false
 
 [[projects]]
 name = "my-project"
@@ -1530,11 +1543,13 @@ type = "feishu"
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
+reply_to_trigger = true
+done_emoji = "Done"
 
 # For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
-# see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
+# see: https://github.com/timmyagentic/cc-connect-next/blob/main/config.example.toml
 `
-	return os.WriteFile(path, []byte(tmpl), 0o644)
+	return os.WriteFile(path, []byte(tmpl), 0o600)
 }
 
 func printUsage() {
@@ -1557,21 +1572,21 @@ func printUsage() {
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
   Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
-  GitHub:  https://github.com/chenhg5/cc-connect
-  Docs:    https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md
+  GitHub:  https://github.com/timmyagentic/cc-connect-next
+  Docs:    https://github.com/timmyagentic/cc-connect-next/blob/main/INSTALL.md
 
 Usage:
-  cc-connect [flags]
-  cc-connect <command> [args]
+  cc-connect-next [flags]
+  cc-connect-next <command> [args]
 
 Flags:
-  --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
+  --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect-next/config.toml)
   --force            Kill any existing instance with the same config before starting
   --version          Print version and exit
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
+  daemon             Manage cc-connect-next as a background service (systemd/launchd/schtasks)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
     start            Start the daemon
@@ -1620,21 +1635,23 @@ Commands:
     path             Print the resolved config file path
 
   update             Check for updates and upgrade the binary (--pre for beta)
+  migrate            Copy official CC Connect config/state into ~/.cc-connect-next
   check-update       Check if a newer version is available
   config-example     (deprecated: use 'config example' instead)
 
 Examples:
-  cc-connect                          Start with default config
-  cc-connect --config /path/to.toml   Start with a specific config file
-  cc-connect daemon install           Install as a system service
-  cc-connect daemon logs -f           Follow daemon logs
-  cc-connect send -m "hello"          Send a message to the active session
-  cc-connect cron list                List all scheduled tasks
-  cc-connect feishu setup             Setup Feishu/Lark bot credentials
-  cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
-  cc-connect update                   Update to the latest version
-  cc-connect config format            Format the config file
-  cc-connect config example > c.toml  Save example config to a file
+  cc-connect-next                          Start with default config
+  cc-connect-next --config /path/to.toml   Start with a specific config file
+  cc-connect-next daemon install           Install as a system service
+  cc-connect-next daemon logs -f           Follow daemon logs
+  cc-connect-next send -m "hello"          Send a message to the active session
+  cc-connect-next cron list                List all scheduled tasks
+  cc-connect-next feishu setup             Setup Feishu/Lark bot credentials
+  cc-connect-next weixin setup             Setup Weixin (ilink) with QR or --token
+  cc-connect-next update                   Update to the latest version
+  cc-connect-next migrate --dry-run        Preview migration from official CC Connect
+  cc-connect-next config format            Format the config file
+  cc-connect-next config example > c.toml  Save example config to a file
 
 `, v, updateHint)
 }

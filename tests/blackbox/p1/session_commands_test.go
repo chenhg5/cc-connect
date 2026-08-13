@@ -3,7 +3,7 @@
 // Package p1 contains P1 blackbox tests.
 //
 // Session commands (/help, /current, /name, /switch, /delete, /status, /version)
-// are dispatched by cc-connect's engine directly, so they respond within
+// are dispatched by cc-connect-next's engine directly, so they respond within
 // seconds regardless of agent speed.
 //
 // Run:
@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
-	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
+	"github.com/timmyagentic/cc-connect-next/core"
+	"github.com/timmyagentic/cc-connect-next/tests/blackbox/helper"
+	bbplatform "github.com/timmyagentic/cc-connect-next/tests/blackbox/platform"
 )
 
 const cmdTimeout = 30 * time.Second // engine-handled commands are near-instant

@@ -111,7 +111,7 @@
       },
       {
         "command": "/version",
-        "description": "Show cc-connect version",
+        "description": "Show cc-connect-next version",
         "should_escape": false
       },
       {
@@ -185,7 +185,7 @@
       },
       {
         "command": "/restart",
-        "description": "Restart cc-connect service",
+        "description": "Restart cc-connect-next service",
         "should_escape": false
       },
       {

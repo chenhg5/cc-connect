@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 type sendRecord struct {
@@ -214,6 +214,26 @@ func (p *mediaPlatform) waitTextContaining(t *testing.T, substr string) string {
 	return ""
 }
 
+func (p *mediaPlatform) waitTextCountContaining(t *testing.T, substr string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		texts, _, _, _ := p.snapshot()
+		count := 0
+		for _, text := range texts {
+			if strings.Contains(strings.ToLower(text), strings.ToLower(substr)) {
+				count++
+			}
+		}
+		if count >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	texts, _, _, _ := p.snapshot()
+	t.Fatalf("timeout waiting for %d texts containing %q, got %#v", want, substr, texts)
+}
+
 func newMediaEngine(t *testing.T) (*core.Engine, *recordingAgent, *mediaPlatform) {
 	t.Helper()
 	agent := newRecordingAgent()
@@ -295,6 +315,7 @@ func TestQueuedMessagePreservesFiles(t *testing.T) {
 	if len(records[1].files) != 1 || records[1].files[0].FileName != "queued.txt" || string(records[1].files[0].Data) != "queued-file" {
 		t.Fatalf("queued file not preserved: %#v", records[1].files)
 	}
+	platform.waitTextContaining(t, "media ok")
 }
 
 func TestSendToSessionWithAttachmentsDeliversTextImagesAndFiles(t *testing.T) {
@@ -421,7 +442,11 @@ func TestSendToSessionWithAttachmentsRequiresSessionWhenMultipleSessionsHaveAtta
 	engine.ReceiveMessage(platform, first)
 	engine.ReceiveMessage(platform, second)
 	agent.session.waitRecords(t, 2)
-	platform.waitTextContaining(t, "media ok")
+	// Both event loops must finish before the TempDir cleanup runs. Waiting for
+	// only the first reply leaves the second session able to persist state while
+	// the test directory is being removed, which makes this test flaky under a
+	// parallel full-suite run.
+	platform.waitTextCountContaining(t, "media ok", 2)
 
 	err := engine.SendToSessionWithAttachments(
 		"",

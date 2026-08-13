@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // ── normalizeMode ────────────────────────────────────────────
@@ -488,7 +488,7 @@ func TestTruncStr(t *testing.T) {
 // ── saveImagesToDisk ─────────────────────────────────────────
 
 func TestSaveImagesToDisk(t *testing.T) {
-	attachDir := filepath.Join(t.TempDir(), ".cc-connect", "attachments", "pi-test")
+	attachDir := filepath.Join(t.TempDir(), ".cc-connect-next", "attachments", "pi-test")
 	images := []core.ImageAttachment{
 		{MimeType: "image/png", Data: []byte("png-data"), FileName: "test.png"},
 		{MimeType: "image/jpeg", Data: []byte("jpg-data")},
@@ -546,10 +546,10 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 // issue and fix in core.SaveFilesToDisk.
 func TestSaveImagesToDisk_RejectsPathTraversal(t *testing.T) {
 	workDir := t.TempDir()
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(workDir, ".cc-connect-next", "attachments")
 
 	images := []core.ImageAttachment{
-		// Two levels up — escapes attachments/ and .cc-connect/.
+		// Two levels up — escapes attachments/ and .cc-connect-next/.
 		{MimeType: "image/png", Data: []byte("payload"), FileName: "../../escape.png"},
 		// Three levels up — would land outside workDir entirely.
 		{MimeType: "image/png", Data: []byte("payload"), FileName: "../../../way-up.png"},
@@ -617,7 +617,7 @@ func TestSanitizePiAttachmentName(t *testing.T) {
 
 func TestCleanAttachments(t *testing.T) {
 	tmpDir := t.TempDir()
-	attachDir := filepath.Join(tmpDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(tmpDir, ".cc-connect-next", "attachments")
 	os.MkdirAll(attachDir, 0o755)
 
 	// Create some files.

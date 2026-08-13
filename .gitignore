@@ -1,8 +1,8 @@
 # ============================================================================
 # Binary outputs
 # ============================================================================
-/cc-connect
-cc-connect.bak-*
+/cc-connect-next
+cc-connect-next.bak-*
 *.exe
 *.exe~
 *.dll
@@ -47,7 +47,7 @@ config.*.toml
 *.toml.lock
 
 # CC-Connect runtime state
-.cc-connect/
+.cc-connect-next/
 
 # npm / pnpm (for npm package distribution and web admin)
 .npmrc
@@ -152,4 +152,4 @@ secrets/
 credentials/
 
 .codex
-cc-connect-new
+cc-connect-next-new

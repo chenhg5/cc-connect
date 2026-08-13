@@ -1,11 +1,11 @@
 # Matrix 配置指南
 
-本指南将帮助你把 **cc-connect** 连接到 [Matrix](https://matrix.org/)——一个去中心化通信的开放标准。配置完成后，你可以通过任何 Matrix 客户端（Element、FluffyChat、Nheko 等）与本地 AI 编码助手对话。
+本指南将帮助你把 **cc-connect-next** 连接到 [Matrix](https://matrix.org/)——一个去中心化通信的开放标准。配置完成后，你可以通过任何 Matrix 客户端（Element、FluffyChat、Nheko 等）与本地 AI 编码助手对话。
 
 ## 前提条件
 
 - 一个 Matrix 账号（可使用 `matrix.org` 等公共服务器，也可自建）
-- 一台可以运行 cc-connect 的机器（无需公网 IP）
+- 一台可以运行 cc-connect-next 的机器（无需公网 IP）
 - 已安装并配置好 Claude Code（或其他支持的编码助手）
 
 > **优势**：使用 `/sync` 长轮询——无需公网 IP、无需域名、无需反向代理。在 NAT 和防火墙后也能正常工作。
@@ -27,7 +27,7 @@
 
 ## 第 2 步：获取 Access Token
 
-你需要一个 access token 让 cc-connect 以你的 Matrix 用户身份进行认证。
+你需要一个 access token 让 cc-connect-next 以你的 Matrix 用户身份进行认证。
 
 ### 通过 curl（推荐）
 
@@ -58,13 +58,13 @@ curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
 
 ## 第 3 步：查找用户 ID（可选）
 
-你的用户 ID 格式为 `@username:matrix.org`。cc-connect 可以从 access token 自动检测，但你也可以在配置中显式指定。
+你的用户 ID 格式为 `@username:matrix.org`。cc-connect-next 可以从 access token 自动检测，但你也可以在配置中显式指定。
 
 在 Element 中：点击头像，顶部显示的就是你的用户 ID。
 
 ---
 
-## 第 4 步：配置 cc-connect
+## 第 4 步：配置 cc-connect-next
 
 在 `config.toml` 中添加 Matrix 平台：
 
@@ -101,12 +101,12 @@ access_token = "syt_xxx_xxx"
 
 ---
 
-## 第 5 步：启动 cc-connect
+## 第 5 步：启动 cc-connect-next
 
 ```bash
-cc-connect
+cc-connect-next
 # 或指定配置文件
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 你应该能看到类似日志：
@@ -115,7 +115,7 @@ cc-connect -config /path/to/config.toml
 level=INFO msg="matrix: E2EE enabled" device_id=CC-CONNECT
 level=INFO msg="matrix: connected" user=@bot:matrix.org
 level=INFO msg="platform started" project=my-project platform=matrix
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 ```
 
 如果看到 `E2EE not available`，说明加密初始化失败，加密房间的消息将无法正常收发。请参考下方常见问题。
@@ -128,7 +128,7 @@ level=INFO msg="cc-connect is running" projects=1
 
 1. 打开你的 Matrix 客户端（Element、FluffyChat 等）
 2. 向机器人的用户 ID（如 `@bot:matrix.org`）发起新的私聊
-3. 发送消息——cc-connect 会回复
+3. 发送消息——cc-connect-next 会回复
 
 ### 6.2 群聊
 
@@ -156,7 +156,7 @@ level=INFO msg="cc-connect is running" projects=1
 ┌─────────────────────────────────────────────────────────────┐
 │                    你的本地机器                                │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► 你的项目代码           │
+│   cc-connect-next ◄──► Claude Code CLI ◄──► 你的项目代码           │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -184,7 +184,7 @@ level=INFO msg="cc-connect is running" projects=1
 
 ### 机器人不回复消息？
 
-1. cc-connect 是否在运行，且日志中显示 `matrix: connected`？
+1. cc-connect-next 是否在运行，且日志中显示 `matrix: connected`？
 2. access token 是否有效？尝试重新生成。
 3. 在群聊中，机器人是否被 @ 提及？或是否设置了 `group_reply_all = true`？
 4. 如果日志显示 `E2EE not available` 或 `decrypt failed`，请参考下方 E2EE 相关问题。
@@ -199,34 +199,34 @@ allow_from = "@alice:matrix.org,@bob:matrix.org"
 
 ### 机器人不加入房间？
 
-确保 `auto_join = true`（这是默认值）。如果机器人在 cc-connect 启动之前就被邀请了，请重新邀请一次。
+确保 `auto_join = true`（这是默认值）。如果机器人在 cc-connect-next 启动之前就被邀请了，请重新邀请一次。
 
 ### E2EE（端到端加密）
 
-cc-connect 需要使用 `goolm` build tag 编译才能支持加密房间（E2EE）。启动时如果看到 `matrix: E2EE enabled`，说明加密功能正常。如果看到 `matrix: E2EE not available (build with -tags goolm to enable)`，需要重新编译：
+cc-connect-next 需要使用 `goolm` build tag 编译才能支持加密房间（E2EE）。启动时如果看到 `matrix: E2EE enabled`，说明加密功能正常。如果看到 `matrix: E2EE not available (build with -tags goolm to enable)`，需要重新编译：
 
-> **数据存储**：E2EE 加密数据存储在 `~/.cc-connect/` 目录下（目录权限为 `0700`）：
+> **数据存储**：E2EE 加密数据存储在 `~/.cc-connect-next/` 目录下（目录权限为 `0700`）：
 > - `matrix-crypto-<device_id>.db` — 加密密钥数据库（每个设备一个）
 > - `matrix-cross-signing-<device_id>.json` — 跨签名种子文件（每个设备一个）
 >
-> 如需重置 E2EE（例如更换设备或重新安装），删除这些文件后重启 cc-connect 即可：
+> 如需重置 E2EE（例如更换设备或重新安装），删除这些文件后重启 cc-connect-next 即可：
 > ```bash
-> rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json
+> rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json
 > ```
 
 ```bash
 go build -tags goolm ./cmd/cc-connect
 ```
 
-> **注意**：要消除机器人消息上的红问号（"由未经其所有者验证的设备加密"），需要完成跨签名设置。cc-connect 会在首次运行时自动设置，但部分服务器需要在配置中设置 `cross_signing_password`。详见下方红问号相关常见问题。
+> **注意**：要消除机器人消息上的红问号（"由未经其所有者验证的设备加密"），需要完成跨签名设置。cc-connect-next 会在首次运行时自动设置，但部分服务器需要在配置中设置 `cross_signing_password`。详见下方红问号相关常见问题。
 
 #### 日志显示 "E2EE not available"？
 
 可能原因和解决方案：
 
 1. **`device ID not available from whoami`** — 服务器未返回 device ID。请使用 curl 创建带 `device_id` 的专用设备。
-2. **`not marked as shared, but there are keys on the server`** — 旧的加密数据与当前设备冲突。cc-connect 会自动尝试修复。如果持续失败，删除旧的加密数据库和跨签名种子：`rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
-3. **`mismatching device ID in client and crypto store`** — token 对应的 device ID 与加密数据库不匹配。删除数据库和种子文件：`rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
+2. **`not marked as shared, but there are keys on the server`** — 旧的加密数据与当前设备冲突。cc-connect-next 会自动尝试修复。如果持续失败，删除旧的加密数据库和跨签名种子：`rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json`
+3. **`mismatching device ID in client and crypto store`** — token 对应的 device ID 与加密数据库不匹配。删除数据库和种子文件：`rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json`
 
 #### 日志显示 "decrypt failed: no session found"？
 
@@ -234,7 +234,7 @@ go build -tags goolm ./cmd/cc-connect
 
 1. **复用了 Element 的 access token** — Element 的设备 ID 和 bot 的加密密钥冲突。请使用 curl 创建专用设备（见第 2 步）。
 2. **刚更换了 access token** — 对方客户端可能还没发现 bot 的新设备。等待 1-2 分钟后重新发送消息。
-3. **加密数据库损坏** — 删除数据库和种子文件后重启：`rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
+3. **加密数据库损坏** — 删除数据库和种子文件后重启：`rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json`
 
 #### 如何获取专用的 access token（推荐方式）？
 
@@ -256,7 +256,7 @@ curl -XPOST "https://your-homeserver.com/_matrix/client/v3/login" \
 
 #### 机器人消息有红问号（"由未经其所有者验证的设备加密"）？
 
-这说明机器人的设备未被跨签名。cc-connect 首次运行时会自动设置跨签名，但部分 Matrix 服务器需要密码认证（UIA）才能发布跨签名密钥。
+这说明机器人的设备未被跨签名。cc-connect-next 首次运行时会自动设置跨签名，但部分 Matrix 服务器需要密码认证（UIA）才能发布跨签名密钥。
 
 如果日志显示 `no supported UIA flow for cross-signing`，需要提供 bot 账号的密码。可以在配置文件中设置：
 
@@ -274,7 +274,7 @@ export MATRIX_CROSS_SIGNING_PASSWORD="你的bot密码"
 
 #### 如何验证机器人的设备？
 
-cc-connect 会自动接受 SAS 密钥验证请求（`auto_verify = true`，默认开启）。从 Element 验证机器人的步骤：
+cc-connect-next 会自动接受 SAS 密钥验证请求（`auto_verify = true`，默认开启）。从 Element 验证机器人的步骤：
 
 1. 打开与机器人的私聊
 2. 点击机器人头像 → **验证**（或在 **设置** → **安全** 中找到机器人的设备）
@@ -285,7 +285,7 @@ cc-connect 会自动接受 SAS 密钥验证请求（`auto_verify = true`，默�
 
 ### 如何使用自建 Matrix 服务器？
 
-将 `homeserver` 设为你的服务器 URL（如 `https://synapse.example.com`）。确保运行 cc-connect 的机器可以访问该 URL。
+将 `homeserver` 设为你的服务器 URL（如 `https://synapse.example.com`）。确保运行 cc-connect-next 的机器可以访问该 URL。
 
 ### 如何使用代理？
 

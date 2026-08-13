@@ -1,4 +1,4 @@
-# cc-connect 管理 API 规范
+# cc-connect-next 管理 API 规范
 
 > **版本：** 1.0-draft  
 > **状态：** 草案 — 实现前可能变更  
@@ -8,13 +8,13 @@
 
 ## 1. 概述
 
-cc-connect 管理 API 是基于 HTTP 的 REST API，供外部应用（Web 控制台、TUI 客户端、GUI 桌面应用、Mac 托盘应用等）管理和监控 cc-connect 实例。它是对现有内部 Unix 套接字 API 的补充，提供可通过网络访问、基于令牌认证的接口，适用于远程和本地管理工具。
+cc-connect-next 管理 API 是基于 HTTP 的 REST API，供外部应用（Web 控制台、TUI 客户端、GUI 桌面应用、Mac 托盘应用等）管理和监控 cc-connect-next 实例。它是对现有内部 Unix 套接字 API 的补充，提供可通过网络访问、基于令牌认证的接口，适用于远程和本地管理工具。
 
 ### 1.1 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         cc-connect Process                               │
+│                         cc-connect-next Process                               │
 │                                                                          │
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐  │
 │  │  Unix Socket API │    │  Management API   │    │  Bridge Server   │  │
@@ -184,7 +184,7 @@ GET /api/v1/status?token=mgmt-secret
 
 | 字段                   | 类型     | 说明                                      |
 |------------------------|----------|-------------------------------------------|
-| `version`               | string   | cc-connect 版本（如 `v1.2.0`）            |
+| `version`               | string   | cc-connect-next 版本（如 `v1.2.0`）            |
 | `uptime_seconds`       | number   | 进程运行时长（秒）                        |
 | `connected_platforms`  | string[] | 当前已连接的平台类型                      |
 | `projects_count`       | number   | 已配置项目数量                            |
@@ -252,7 +252,7 @@ GET /api/v1/status?token=mgmt-secret
 {
   "ok": true,
   "data": {
-    "data_dir": "/home/user/.cc-connect",
+    "data_dir": "/home/user/.cc-connect-next",
     "language": "en",
     "projects": [
       {
@@ -309,7 +309,7 @@ GET /api/v1/status?token=mgmt-secret
         "time": "2026-03-10T10:30:00Z",
         "level": "info",
         "message": "api server started",
-        "attrs": {"socket": "/home/user/.cc-connect/run/api.sock"}
+        "attrs": {"socket": "/home/user/.cc-connect-next/run/api.sock"}
       }
     ]
   }

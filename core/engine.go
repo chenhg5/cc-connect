@@ -406,7 +406,7 @@ type Engine struct {
 	showWorkdirIndicator bool
 	replyFooterEnabled   bool
 
-	// When true, /list etc. only show sessions tracked by cc-connect,
+	// When true, /list etc. only show sessions tracked by cc-connect-next,
 	// hiding sessions created by direct CLI usage in the same work_dir.
 	// Default false = show all sessions.
 	filterExternalSessions bool
@@ -948,7 +948,7 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
 //
-//	[cc-connect sender_id=ou_abc123 platform=feishu]
+//	[cc-connect-next sender_id=ou_abc123 platform=feishu]
 //
 // This allows the agent to identify who sent the message and adjust behavior
 // accordingly (e.g. personal task views, role-based access control).
@@ -3795,7 +3795,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// this, per-workspace agents silently bypass the project-level
 	// run_as_user config because their opts map is freshly constructed
 	// above, not inherited from the project-level opts that main.go
-	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
+	// already decorated. See upstream cc-connect#496 and core/runas.go
 	// preamble for why run_as_user has to survive this copy.
 	if _, ok := opts["run_as_user"]; !ok {
 		if u := e.runAsUser(); u != "" {
@@ -3827,8 +3827,11 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	// Create per-workspace session manager
 	h := sha256.Sum256([]byte(workspace))
-	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
-		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	sessionFile := ""
+	if storePath := e.sessions.StorePath(); storePath != "" {
+		sessionFile = filepath.Join(filepath.Dir(storePath),
+			fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	}
 	sessions := NewSessionManager(sessionFile)
 
 	ws.agent = agent
@@ -3927,7 +3930,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		ccKey = ccSessionKey
 	}
 
-	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
+	// Inject per-session env vars so the agent subprocess can call `cc-connect-next cron add` etc.
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
@@ -3970,11 +3973,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	// Restore the agent's active provider from the session before starting a
 	// new sub-process. The provider choice is persisted to disk by
-	// `/provider switch`; without restoring it here, a cc-connect process
+	// `/provider switch`; without restoring it here, a cc-connect-next process
 	// restart silently drops the user's choice while keeping the resumed
 	// agent_session_id, producing "model X does not exist" errors when
 	// the model name is sent to the wrong base_url
-	// (cc-connect internal task t-20260614-qp7xnl).
+	// (upstream cc-connect internal task t-20260614-qp7xnl).
 	restoreActiveProviderFromSession(agent, session)
 
 	// Resume only when we have a concrete saved agent session ID. If the session
@@ -3983,7 +3986,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	startSessionID := session.GetAgentSessionID()
 	// Cross-project session leakage guard (issue #599): if a session ID was
 	// inherited from a different project's workspace (e.g. another
-	// cc-connect project that happens to share a Session row), the agent
+	// cc-connect-next project that happens to share a Session row), the agent
 	// can detect the mismatch and we should clear the ID rather than
 	// resume a conversation that has nothing to do with this project.
 	if startSessionID != "" {
@@ -4534,6 +4537,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var lastRichCardLen int
 	var cardMessageID any
 	var partialText string
+	var richAnswerStarted bool
 	triggerAutoCompress := false
 	pendingSend := sendDone
 
@@ -4574,22 +4578,70 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
-		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
-			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
-		} else {
-			streamCard = sc
-			slog.Info("streaming card created for turn", "session", sessionKey)
+	if e.display.CardMode != "rich" {
+		if scp, ok := state.platform.(StreamingCardPlatform); ok {
+			if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
+				slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
+			} else {
+				streamCard = sc
+				slog.Info("streaming card created for turn", "session", sessionKey)
+			}
 		}
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
+	startRichCard := func(p Platform, rctx any) any {
+		if e.display.CardMode != "rich" {
+			return nil
+		}
+		supporter, ok := p.(RichCardSupporter)
+		if !ok {
+			return nil
+		}
+		starter, ok := p.(PreviewStarter)
+		if !ok {
+			return nil
+		}
+		// Start with a real, non-empty Card 2.0 document before waiting for the
+		// first agent event. The card contains no model-generated content.
+		card := supporter.BuildRichCard(CardStatusThinking, "thinking", nil, "", true, "")
+		handle, err := starter.SendPreviewStart(e.ctx, rctx, card)
+		if err != nil {
+			slog.Debug("rich card: failed to create immediate initial card", "platform", p.Name(), "error", err)
+			return nil
+		}
+		return handle
+	}
+	markRichCardFailed := func(p Platform, handle any) bool {
+		if handle == nil || e.display.CardMode != "rich" {
+			return false
+		}
+		supporter, ok := p.(RichCardSupporter)
+		if !ok {
+			return false
+		}
+		updater, ok := p.(MessageUpdater)
+		if !ok {
+			return false
+		}
+		// Deliberately use a generic body: raw runtime errors may contain local
+		// paths, commands, credentials, or provider internals.
+		card := supporter.BuildRichCard(CardStatusError, "error", nil, "", false, "")
+		if err := updater.UpdateMessage(e.ctx, handle, card); err != nil {
+			slog.Debug("rich card: failed to update error state", "platform", p.Name(), "error", err)
+			return false
+		}
+		return true
+	}
+
+	cardMessageID = startRichCard(state.platform, state.replyCtx)
+
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
+	if e.instantReply.Enabled && streamCard == nil && cardMessageID == nil {
 		replyContent := e.instantReply.Content
 		if replyContent == "" {
 			replyContent = e.i18n.T(MsgStarting)
@@ -4624,6 +4676,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		select {
 		case <-stopCh:
 			sp.discard()
+			state.mu.Lock()
+			p := state.platform
+			state.mu.Unlock()
+			markRichCardFailed(p, cardMessageID)
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -4645,7 +4701,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				if !markRichCardFailed(p, cardMessageID) {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				}
 				return
 			}
 			continue
@@ -4658,7 +4716,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			if !markRichCardFailed(p, cardMessageID) {
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			}
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
@@ -4670,8 +4730,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			if !markRichCardFailed(p, cardMessageID) {
+				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+					fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			}
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
 			// write its final state before dying (preserves --resume ability).
@@ -4712,7 +4774,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-e.ctx.Done():
 			state.mu.Lock()
 			state.eventsNeedResync = true
+			p := state.platform
 			state.mu.Unlock()
+			markRichCardFailed(p, cardMessageID)
 			return
 		}
 
@@ -4720,7 +4784,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
+			p := state.platform
 			state.mu.Unlock()
+			markRichCardFailed(p, cardMessageID)
 			return
 		}
 
@@ -4750,8 +4816,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// sessionQuiet which we drop. e.display.ThinkingMessages /
 		// ToolMessages handle user-level quiet in the fallback branches.
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
-		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
-		// Default "legacy" keeps upstream behavior for all platforms.
+		// Card 2.0 rich-card path is enabled by the default card_mode = "rich".
+		// Explicit "legacy" keeps upstream behavior for all platforms.
 		if e.display.CardMode != "rich" {
 			hasRichCard = false
 		}
@@ -4772,20 +4838,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				break
 			}
 			if hasRichCard {
-				// When thinking messages are suppressed, skip card creation.
-				if !e.display.ThinkingMessages {
-					break
-				}
-				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
-					toolSteps = append(toolSteps, ToolStep{
-						Kind:    ToolStepKindThinking,
-						Name:    "Thinking",
-						Summary: thinking,
-						Done:    true,
-					})
-				}
+				// Rich mode records an anonymous event count only. Raw reasoning is
+				// never copied into card state, even when legacy thinking_messages is
+				// enabled for other platforms.
+				toolSteps = append(toolSteps, ToolStep{Kind: ToolStepKindThinking})
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "thinking", toolSteps, "", true, "")
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -4795,7 +4853,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "thinking", toolSteps, "", true, "")
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
@@ -4862,17 +4920,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if hasRichCard {
-				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
-					break
-				}
-				toolSteps = append(toolSteps, ToolStep{
-					Kind:    ToolStepKindTool,
-					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
-				})
+				// Count the call without retaining its name or arguments. This makes
+				// the privacy boundary true at the engine layer, not just cosmetic.
+				toolSteps = append(toolSteps, ToolStep{Kind: ToolStepKindTool})
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "tool", toolSteps, "", true, "")
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -4882,7 +4934,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "tool", toolSteps, "", true, "")
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
@@ -4986,6 +5038,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			// The matching EventToolUse already advanced the anonymous counter.
+			// Never retain or render tool result details in privacy-first rich mode.
+			if hasRichCard {
+				break
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -4995,26 +5052,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					result = truncateIf(result, e.display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
-					if hasRichCard {
-						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
-						if cardMessageID == nil {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
-							if starter, ok := p.(PreviewStarter); ok {
-								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
-								if err != nil {
-									slog.Debug("rich card: failed to create tool-result card", "platform", p.Name(), "error", err)
-								} else {
-									cardMessageID = handle
-								}
-							}
-						} else if updater, ok := p.(MessageUpdater); ok {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
-							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
-								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
-							}
-						}
-						break
-					}
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
 						Kind:     ProgressEntryToolResult,
@@ -5063,7 +5100,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if len(textParts) == 0 {
 						if hasRichCard {
 							if cardMessageID == nil && !silentHold {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, "", true, "")
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -5087,13 +5124,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// here using the accumulated partialText so the card emerges
 							// with the post-prefix content already in body.
 							if cardMessageID == nil {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, partialText, true, "")
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
 										slog.Debug("rich card: failed to create deferred text card", "platform", p.Name(), "error", err)
 									} else {
 										cardMessageID = handle
+										richAnswerStarted = true
+									}
+								}
+							}
+							// A CardKit element update cannot change the card header. Perform
+							// one full-card update at the first visible answer chunk so the
+							// progress shell immediately becomes "正在回答" and the anonymous
+							// progress text disappears before typewriter streaming continues.
+							if cardMessageID != nil && !richAnswerStarted {
+								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, partialText, true, "")
+								if updater, ok := p.(MessageUpdater); ok {
+									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+										richAnswerStarted = true
+										lastRichCardUpdate = time.Now()
+										lastRichCardLen = len(partialText)
+									} else {
+										slog.Debug("rich card: failed to switch to answer phase", "platform", p.Name(), "error", err)
 									}
 								}
 							}
@@ -5122,7 +5176,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									}
 								}
 								if !streamed {
-									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+									card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, partialText, true, "")
 									if updater, ok := p.(MessageUpdater); ok {
 										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 											lastRichCardUpdate = time.Now()
@@ -5353,15 +5407,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// statusFooter holds the structured CCD-style footer separately so
 			// platforms implementing StatusFooterSender / StatusFooterUpdater
 			// can render it with smaller/dim styling. Other paths inline-append
-			// it via appendReplyFooter as a fallback. The default
-			// (non-CCD) reply footer keeps its existing inline behavior since
-			// it's a single short line that does not benefit from a separate
-			// card element. In rich mode, the inline-append fallback is
-			// suppressed — the rich card renders an equivalent statusFooter
-			// through BuildRichCard, so re-appending the legacy footer here
-			// would double-print model/ctx/workdir into the card body.
+			// it via appendReplyFooter as a fallback. Privacy-first rich cards
+			// intentionally do not consume this footer at all.
 			var statusFooter string
-			var legacyStatusFooter string
 			if !isSilent {
 				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
 				if e.showContextIndicator {
@@ -5377,7 +5425,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					statusFooter = status
 				} else if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
 					statusFooter = footer
-					legacyStatusFooter = footer
 				}
 			}
 			fullResponse = cleanResponse
@@ -5443,26 +5490,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// pre-NO_REPLY content the user already saw streaming (e.g. when the
 				// agent wrote "Hello\nNO_REPLY"). Strip the trailing NO_REPLY marker
 				// before rendering. If there is neither body nor tool history, the
-				// card has nothing visible worth keeping; delete to avoid an
-				// orphaned shell. Finalizing-in-place avoids the "撤回了一条消息"
-				// gray bar that DeletePreviewMessage would leave in Lark.
+				// card has no answer body, keep a small Done state instead of
+				// deleting it. That preserves the immediate-feedback contract and
+				// avoids Lark's visible "message recalled" artifact.
 				if hasRichCard && cardMessageID != nil {
 					silentBody := partialText
 					if stripped, ok := stripTrailingSilent(partialText); ok {
 						silentBody = strings.TrimRight(stripped, " \t\r\n")
 					}
-					if silentBody != "" || len(toolSteps) > 0 {
-						card := buildResolvedRichCard(CardStatusDone, "", toolSteps, silentBody, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
-						if updater, ok := p.(MessageUpdater); ok {
-							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
-								slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
-							}
-						}
-					} else {
-						if cleaner, ok := p.(PreviewCleaner); ok {
-							if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
-								slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
-							}
+					card := buildResolvedRichCard(CardStatusDone, "done", toolSteps, silentBody, false, "")
+					if updater, ok := p.(MessageUpdater); ok {
+						if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+							slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
 						}
 					}
 					cardMessageID = nil
@@ -5473,12 +5512,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
-				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
-				if legacyStatusFooter != "" {
-					richStatusFooter = formatElapsed(time.Since(turnStart), false, e.i18n.currentLang()) + "\n" + legacyStatusFooter
-				}
 				finalBody := resolveRichCardMarkdown(parts[0], true)
-				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, finalBody, false, richStatusFooter)
+				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. The throttle in the
@@ -5508,7 +5543,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				for _, overflow := range parts[1:] {
 					overflowBody := resolveRichCardMarkdown(overflow, true)
-					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflowBody, false, richStatusFooter)
+					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "done", nil, overflowBody, false, "")
 					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
 						slog.Error("failed to send overflow rich card", "error", err)
 						return
@@ -5681,6 +5716,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardMessageID = nil
 				toolSteps = nil
 				partialText = ""
+				richAnswerStarted = false
 				lastRichCardUpdate = time.Time{}
 				lastRichCardLen = 0
 				queuedRenderer := func(content string) string {
@@ -5696,16 +5732,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardAnswerText.Reset()
 
 				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
-					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
-						slog.Warn("streaming card creation failed for queued turn", "error", err)
-					} else {
-						streamCard = sc
+				if e.display.CardMode != "rich" {
+					if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+						if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
+							slog.Warn("streaming card creation failed for queued turn", "error", err)
+						} else {
+							streamCard = sc
+						}
 					}
 				}
+				cardMessageID = startRichCard(queued.platform, queued.replyCtx)
 
 				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
+				if e.instantReply.Enabled && streamCard == nil && cardMessageID == nil {
 					replyContent := e.instantReply.Content
 					if replyContent == "" {
 						replyContent = e.i18n.T(MsgStarting)
@@ -5742,9 +5781,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			// Add a "done" reaction after the final answer when supported. Skip
-			// silent turns and rich card mode (the card itself shows done status).
-			if !isSilent && !hasRichCard {
+			// Add a "done" reaction after the final answer when configured. Rich
+			// cards also use it as an optional push notification.
+			if !isSilent {
 				if doneTI, ok := p.(TypingIndicatorDone); ok {
 					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 				}
@@ -5758,14 +5797,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
-			if hasRichCard && cardMessageID != nil {
-				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
-				if updater, ok := p.(MessageUpdater); ok {
-					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
-						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
-					}
-				}
-			}
+			updatedRichError := hasRichCard && markRichCardFailed(p, cardMessageID)
 			if event.Error != nil {
 				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
@@ -5782,7 +5814,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						break
 					}
 				}
-				e.send(p, replyCtx, userMsg)
+				if !updatedRichError {
+					e.send(p, replyCtx, userMsg)
+				}
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -5802,6 +5836,12 @@ channelClosed:
 	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
+	state.mu.Lock()
+	closedPlatform := state.platform
+	state.mu.Unlock()
+	if markRichCardFailed(closedPlatform, cardMessageID) {
+		return
+	}
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -6323,7 +6363,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.executeSkill(p, msg, skill, args)
 			return true
 		}
-		// Not a cc-connect command — notify user, then fall through to agent
+		// Not a cc-connect-next command — notify user, then fall through to agent
 		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
 		return false
 	}
@@ -6600,7 +6640,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 // applySessionFilter conditionally filters agent sessions based on the
 // filter_external_sessions config. When disabled (default), all sessions are
-// returned. When enabled, only sessions tracked by cc-connect are shown.
+// returned. When enabled, only sessions tracked by cc-connect-next are shown.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
 	if !e.filterExternalSessions {
 		return sessions
@@ -6608,7 +6648,7 @@ func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionMana
 	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
 }
 
-// filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
+// filterOwnedSessions removes agent sessions that are not tracked by cc-connect-next's
 // session manager. This prevents external CLI sessions in the same work_dir from
 // appearing in /list, /switch, /delete, etc. If the session manager has no tracked
 // agent sessions at all (e.g. first run), all sessions are returned unfiltered.
@@ -10418,10 +10458,10 @@ func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManag
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	// Persist the provider choice so that a subsequent --resume after a
-	// cc-connect process restart can re-bind the agent's activeIdx; without
+	// cc-connect-next process restart can re-bind the agent's activeIdx; without
 	// this the agent reverts to its default provider while the saved
 	// agent_session_id keeps the conversation going, producing "model X
-	// does not exist" errors against the wrong base_url. See cc-connect
+	// does not exist" errors against the wrong base_url. See cc-connect-next
 	// internal task t-20260614-qp7xnl.
 	s.SetActiveProvider(name)
 	sessions.Save()
@@ -10982,7 +11022,7 @@ func normalizeSendWorkDir(workDir, base string) (string, error) {
 }
 
 // SendTTSToSession synthesizes and sends a voice message to an active session.
-// It is used by the local API/CLI so agents can call `cc-connect send --tts`.
+// It is used by the local API/CLI so agents can call `cc-connect-next send --tts`.
 func (e *Engine) SendTTSToSession(sessionKey, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -10998,7 +11038,7 @@ func (e *Engine) SendTTSToSession(sessionKey, text string) error {
 // SendAudiosToSession routes outbound audio attachments to the
 // platform's AudioSender (native voice bubble + transcoding) when
 // supported, falling back to FileSender otherwise. Used by
-// `cc-connect send --audio`. Mirrors SendToSessionWithAttachments for
+// `cc-connect-next send --audio`. Mirrors SendToSessionWithAttachments for
 // audio-typed clips so they don't get dispatched as generic files.
 func (e *Engine) SendAudiosToSession(sessionKey string, audios []FileAttachment) error {
 	if len(audios) == 0 {
@@ -11043,7 +11083,7 @@ func (e *Engine) SendAudiosToSession(sessionKey string, audios []FileAttachment)
 
 // SendVideosToSession routes outbound video attachments to the
 // platform's VideoSender (native video bubble) when supported, falling
-// back to FileSender otherwise. Used by `cc-connect send --video`.
+// back to FileSender otherwise. Used by `cc-connect-next send --video`.
 func (e *Engine) SendVideosToSession(sessionKey string, videos []FileAttachment) error {
 	if len(videos) == 0 {
 		return nil
@@ -15750,7 +15790,10 @@ func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
 	e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBound), strings.Join(parts, " ↔ ")))
 }
 
-const ccConnectInstructionMarker = "<!-- cc-connect-instructions -->"
+const (
+	ccConnectInstructionMarker       = "<!-- cc-connect-next-instructions -->"
+	legacyCCConnectInstructionMarker = "<!-- cc-connect-instructions -->"
+)
 
 type setupResult int
 
@@ -15784,7 +15827,11 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	existing, _ := os.ReadFile(filePath)
 	existingText := string(existing)
 	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
-	if idx := strings.Index(existingText, ccConnectInstructionMarker); idx >= 0 {
+	idx := strings.Index(existingText, ccConnectInstructionMarker)
+	if legacyIdx := strings.Index(existingText, legacyCCConnectInstructionMarker); idx < 0 || (legacyIdx >= 0 && legacyIdx < idx) {
+		idx = legacyIdx
+	}
+	if idx >= 0 {
 		if strings.Contains(existingText[idx:], AgentSystemPrompt()) {
 			return setupExists, baseName, nil
 		}
@@ -15842,9 +15889,9 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 	}
 	if userName != "" {
 		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
-		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
+		return fmt.Sprintf("[cc-connect-next sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
 	}
-	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+	return fmt.Sprintf("[cc-connect-next sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
 func extractChannelID(sessionKey string) string {
@@ -16633,7 +16680,7 @@ func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
 
 // restoreActiveProviderFromSession syncs the agent's active provider to the
 // one persisted in the session, but only when the choice survived a
-// cc-connect process restart (i.e. the in-memory active provider is not
+// cc-connect-next process restart (i.e. the in-memory active provider is not
 // already the desired one). It is a no-op when:
 //   - the agent does not implement ProviderSwitcher,
 //   - the session never recorded a provider choice (`/provider switch` was

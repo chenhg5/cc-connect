@@ -1,10 +1,10 @@
-# CODEOWNERS for cc-connect.
+# CODEOWNERS for cc-connect-next.
 #
 # GitHub uses this file to auto-request reviews from listed owners
 # whenever a PR touches the matching paths.
 #
 # Project owner / default reviewer.
-*                                   @chenhg5
+*                                   @timmyagentic
 
 # ---------------------------------------------------------------------------
 # Critical paths — changes here should be reviewed with extra care because
@@ -22,32 +22,32 @@
 # ---------------------------------------------------------------------------
 
 # Engine core: message routing, command handling, interactive state.
-/core/engine.go                     @chenhg5
-/core/engine_test.go                @chenhg5
+/core/engine.go                     @timmyagentic
+/core/engine_test.go                @timmyagentic
 
 # Session manager: persistence, history, agent_session_id binding.
-/core/session.go                    @chenhg5
-/core/session_test.go               @chenhg5
+/core/session.go                    @timmyagentic
+/core/session_test.go               @timmyagentic
 
 # Scheduled task implementations.
-/core/cron.go                       @chenhg5
-/core/cron_test.go                  @chenhg5
-/core/timer.go                      @chenhg5
-/core/timer_test.go                 @chenhg5
+/core/cron.go                       @timmyagentic
+/core/cron_test.go                  @timmyagentic
+/core/timer.go                      @timmyagentic
+/core/timer_test.go                 @timmyagentic
 
 # Permission flow + bridge that talks to the agent.
-/core/bridge.go                     @chenhg5
-/core/interfaces.go                 @chenhg5
+/core/bridge.go                     @timmyagentic
+/core/interfaces.go                 @timmyagentic
 
 # i18n strings — user-facing copy must be reviewed for clarity and
 # all-language consistency.
-/core/i18n.go                       @chenhg5
+/core/i18n.go                       @timmyagentic
 
 # CUJ test framework itself — guards against regressions in the
 # tests that guard against regressions.
-/core/cuj_test.go                   @chenhg5
+/core/cuj_test.go                   @timmyagentic
 
 # Build / CI / project policy.
-/AGENTS.md                          @chenhg5
-/.github/                           @chenhg5
-/Makefile                           @chenhg5
+/AGENTS.md                          @timmyagentic
+/.github/                           @timmyagentic
+/Makefile                           @timmyagentic

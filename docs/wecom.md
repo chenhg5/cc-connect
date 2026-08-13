@@ -1,6 +1,6 @@
 # 企业微信 (WeChat Work) 接入指南
 
-本文档介绍如何将 **cc-connect** 接入企业微信，让你可以通过企业微信（甚至个人微信）远程调用 Claude Code。
+本文档介绍如何将 **cc-connect-next** 接入企业微信，让你可以通过企业微信（甚至个人微信）远程调用 Claude Code。
 
 > 💡 **特色功能**：配置完成后，**个人微信用户也可以直接对话** —— 只需在企业微信管理后台关联微信插件即可。
 
@@ -15,12 +15,12 @@
 
 ## 模式一：WebSocket 长连接（推荐）
 
-企业微信「智能机器人」支持 WebSocket 长连接模式，cc-connect 主动连接企业微信服务器，无需公网 URL、无需消息加解密、无需 IP 白名单，配置最简单。
+企业微信「智能机器人」支持 WebSocket 长连接模式，cc-connect-next 主动连接企业微信服务器，无需公网 URL、无需消息加解密、无需 IP 白名单，配置最简单。
 
 ### 前置要求
 
 - 企业微信管理员权限
-- 一台可运行 cc-connect 的服务器（**无需公网 IP**）
+- 一台可运行 cc-connect-next 的服务器（**无需公网 IP**）
 - Claude Code 已安装并配置完成
 
 ### 第一步：创建智能机器人
@@ -37,7 +37,7 @@ Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 > ⚠️ Secret 只会显示一次，请立即保存！
 
-### 第二步：配置 cc-connect
+### 第二步：配置 cc-connect-next
 
 将凭证配置到 `config.toml` 中：
 
@@ -74,7 +74,7 @@ allow_from = "*"
 ### 第三步：启动并验证
 
 ```bash
-cc-connect
+cc-connect-next
 ```
 
 你应该看到类似日志：
@@ -104,7 +104,7 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 ### 前置要求
 
 - 企业微信管理员权限
-- 一台可运行 cc-connect 的服务器
+- 一台可运行 cc-connect-next 的服务器
 - **公网可访问的 URL**（用于接收企业微信回调）
 - Claude Code 已安装并配置完成
 
@@ -123,7 +123,7 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 
 | 字段 | 填写建议 |
 |------|---------|
-| 应用名称 | `cc-connect` |
+| 应用名称 | `cc-connect-next` |
 | 应用Logo | 上传一个喜欢的图标 |
 | 可见范围 | 选择需要使用的部门/成员 |
 
@@ -166,7 +166,7 @@ CorpId: wwxxxxxxxxxxxxxx
 | **Token** | 自定义一个随机字符串 |
 | **EncodingAESKey** | 点击「随机获取」生成（43 个字符） |
 
-> ⚠️ **暂时不要点保存！** 需要先启动 cc-connect 再回来保存（因为保存时企业微信会立即验证回调 URL）。
+> ⚠️ **暂时不要点保存！** 需要先启动 cc-connect-next 再回来保存（因为保存时企业微信会立即验证回调 URL）。
 
 ### 3.3 记录配置
 
@@ -237,7 +237,7 @@ curl -s https://ifconfig.me
 
 ---
 
-## 第六步：配置 cc-connect
+## 第六步：配置 cc-connect-next
 
 将凭证配置到 `config.toml` 中：
 
@@ -293,19 +293,19 @@ enable_markdown = false
 
 ## 第七步：启动并验证
 
-### 7.1 启动 cc-connect
+### 7.1 启动 cc-connect-next
 
 ```bash
-cc-connect
+cc-connect-next
 # 或指定配置文件
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 你应该看到类似日志：
 
 ```
 level=INFO msg="platform started" project=my-project platform=wecom
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 level=INFO msg="wecom: webhook server listening" port=8081 path=/wecom/callback
 ```
 
@@ -357,7 +357,7 @@ vim /etc/tinyproxy/tinyproxy.conf
 systemctl restart tinyproxy
 ```
 
-2. 在 cc-connect 配置中添加 proxy：
+2. 在 cc-connect-next 配置中添加 proxy：
 
 ```toml
 [projects.platforms.options]
@@ -367,7 +367,7 @@ proxy = "http://vps-ip:8888"
 
 3. 将 VPS 的公网 IP 添加到企业可信 IP 白名单
 
-这样 cc-connect 调用企业微信 API 时会通过 VPS 代理，出口 IP 固定为 VPS 的 IP。
+这样 cc-connect-next 调用企业微信 API 时会通过 VPS 代理，出口 IP 固定为 VPS 的 IP。
 
 ---
 
@@ -386,7 +386,7 @@ proxy = "http://vps-ip:8888"
 ┌─────────────────────────────────────────────────────────────┐
 │                    你的服务器                                  │
 │                                                              │
-│   cloudflared ──→ cc-connect ──→ Claude Code CLI             │
+│   cloudflared ──→ cc-connect-next ──→ Claude Code CLI             │
 │   / ngrok            │                                       │
 │                      │ (可选) proxy                          │
 │                      ▼                                       │
@@ -401,7 +401,7 @@ proxy = "http://vps-ip:8888"
 
 ### Q: 回调验证失败？
 
-1. 确认 cc-connect 已启动且 webhook server 在监听
+1. 确认 cc-connect-next 已启动且 webhook server 在监听
 2. 确认公网隧道（cloudflared/ngrok）正在运行
 3. 检查 URL 是否能公网访问：`curl https://你的域名/wecom/callback`
 4. 检查 Token 和 EncodingAESKey 是否与管理后台一致

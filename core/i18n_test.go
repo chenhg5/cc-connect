@@ -108,7 +108,7 @@ func TestIsChinese(t *testing.T) {
 }
 
 // TestI18n_ConcurrentAccess is a regression test for a real data race on
-// I18n's lang/detected fields. cc-connect fans out platform message
+// I18n's lang/detected fields. cc-connect-next fans out platform message
 // handlers concurrently; each one calls DetectAndSet (writes detected),
 // while typing/reply paths call T / CurrentLang concurrently (read
 // lang/detected). Without a mutex `go test -race` flagged real races on

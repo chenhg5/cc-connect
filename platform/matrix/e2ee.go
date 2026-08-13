@@ -174,7 +174,7 @@ func (p *Platform) initCrypto(ctx context.Context, client *mautrix.Client) (*cry
 	if err != nil {
 		return nil, fmt.Errorf("get home dir: %w", err)
 	}
-	cryptoDir := filepath.Join(homeDir, ".cc-connect")
+	cryptoDir := filepath.Join(homeDir, ".cc-connect-next")
 	if err := os.MkdirAll(cryptoDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}

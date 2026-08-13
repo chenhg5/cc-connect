@@ -391,7 +391,7 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 
 	// Check data directory
 	if home, err := os.UserHomeDir(); err == nil {
-		dataDir := filepath.Join(home, ".cc-connect")
+		dataDir := filepath.Join(home, ".cc-connect-next")
 		if info, err := os.Stat(dataDir); err != nil {
 			results = append(results, DoctorCheckResult{
 				Name:   "Data Directory",

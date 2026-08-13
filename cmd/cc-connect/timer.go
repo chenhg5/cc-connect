@@ -145,7 +145,7 @@ func runTimerAdd(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -216,7 +216,7 @@ func runTimerList(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -306,7 +306,7 @@ func runTimerDel(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -344,13 +344,13 @@ func runTimerInfo(args []string) {
 
 	if id == "" {
 		fmt.Fprintln(os.Stderr, "Error: timer ID is required")
-		fmt.Fprintln(os.Stderr, "Usage: cc-connect timer info <id>")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect-next timer info <id>")
 		os.Exit(1)
 	}
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -388,7 +388,7 @@ func runTimerInfo(args []string) {
 }
 
 func printTimerUsage() {
-	fmt.Println(`Usage: cc-connect timer <command> [options]
+	fmt.Println(`Usage: cc-connect-next timer <command> [options]
 
 Commands:
   add       Create a one-shot timer
@@ -396,11 +396,11 @@ Commands:
   info <id> Show detailed info of a timer
   del <id>  Cancel a timer
 
-Run 'cc-connect timer <command> --help' for details.`)
+Run 'cc-connect-next timer <command> --help' for details.`)
 }
 
 func printTimerAddUsage() {
-	fmt.Println(`Usage: cc-connect timer add [options] <delay> <prompt>
+	fmt.Println(`Usage: cc-connect-next timer add [options] <delay> <prompt>
 
 Create a one-shot timer (fires once after the specified delay).
 
@@ -415,12 +415,12 @@ Options:
       --session-mode <mode>  reuse (default) or new-per-run
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30)
       --mute                 Suppress all messages (start + result)
-      --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --data-dir <path>      Data directory (default: ~/.cc-connect-next)
   -h, --help                 Show this help
 
 Examples:
-  cc-connect timer add --delay 2h --prompt "Check PR status"
-  cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
-  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
-  cc-connect timer add 2h Check PR status`)
+  cc-connect-next timer add --delay 2h --prompt "Check PR status"
+  cc-connect-next timer add --delay 30m --exec "df -h" --desc "Disk check"
+  cc-connect-next timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+  cc-connect-next timer add 2h Check PR status`)
 }

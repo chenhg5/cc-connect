@@ -180,7 +180,7 @@ func BuildSpawnCommand(ctx context.Context, opts SpawnOptions, name string, args
 
 // FilterEnvForSpawn strips env down to the merged allowlist when
 // opts.IsolationMode() is true. Belt-and-braces with sudo's own
-// --preserve-env, but having cc-connect's spawn argv be the single
+// --preserve-env, but having cc-connect-next's spawn argv be the single
 // source of truth keeps test assertions clean.
 func FilterEnvForSpawn(env []string, opts SpawnOptions) []string {
 	if !opts.IsolationMode() {
@@ -230,7 +230,7 @@ func (ExecSudoRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 // next spawn re-verifies fresh.
 //
 // The expensive checks (work_dir access, isolation probe) live in the
-// preflight and audit packages and only run at startup / via `cc-connect
+// preflight and audit packages and only run at startup / via `cc-connect-next
 // doctor user-isolation`.
 func VerifyRunAsUserCheap(ctx context.Context, runner SudoRunner, runAsUser string) error {
 	if runAsUser == "" {

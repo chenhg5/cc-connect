@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // copilotSession manages a long-running Copilot CLI process using
@@ -216,7 +216,7 @@ func (cs *copilotSession) sessionConfig(sessionID string) copilotSessionConfig {
 	includeSubAgentStreaming := true
 	return copilotSessionConfig{
 		SessionID:                      sessionID,
-		ClientName:                     "cc-connect",
+		ClientName:                     "cc-connect-next",
 		Model:                          strings.TrimSpace(cs.model),
 		Provider:                       cs.provider,
 		RequestPermission:              &requestPermission,
@@ -230,7 +230,7 @@ func (cs *copilotSession) sessionConfig(sessionID string) copilotSessionConfig {
 func newCopilotSessionID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("cc-connect-%d", time.Now().UnixNano())
+		return fmt.Sprintf("cc-connect-next-%d", time.Now().UnixNano())
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
@@ -859,7 +859,7 @@ func (cs *copilotSession) Close() error {
 // saveImagesToTempDir saves image attachments to a temp directory under workDir
 // and returns their file paths for inclusion in the prompt.
 func saveImagesToTempDir(workDir string, images []core.ImageAttachment) ([]string, error) {
-	imgDir := filepath.Join(workDir, ".cc-connect", "images")
+	imgDir := filepath.Join(workDir, ".cc-connect-next", "images")
 	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		return nil, fmt.Errorf("saveImagesToTempDir: mkdir: %w", err)
 	}

@@ -18,11 +18,10 @@ import (
 )
 
 const (
-	githubRepo   = "chenhg5/cc-connect"
+	githubRepo   = "timmyagentic/cc-connect-next"
 	githubAPI    = "https://api.github.com/repos/" + githubRepo + "/releases/latest"
 	githubAllAPI = "https://api.github.com/repos/" + githubRepo + "/releases"
 	downloadBase = "https://github.com/" + githubRepo + "/releases/download"
-	giteeAPI     = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases/latest"
 )
 
 // cachedLatestVersion 缓存最新版本信息，避免频繁请求API
@@ -41,17 +40,13 @@ type githubRelease struct {
 	Prerelease bool   `json:"prerelease"`
 }
 
-// fetchLatestStableReleaseAsync 异步获取最新稳定版本（非pre-release）
-// 优先使用Gitee，如果失败则回退到GitHub
+// fetchLatestStableReleaseAsync asynchronously fetches the latest stable
+// release from the cc-connect-next GitHub repository.
 func fetchLatestStableReleaseAsync() {
 	go func() {
-		release, err := fetchLatestStableFromGitee()
-		if err != nil || release == nil || release.TagName == "" {
-			// Gitee失败，尝试GitHub
-			release, err = fetchLatestStableRelease()
-			if err != nil || release == nil {
-				return
-			}
+		release, err := fetchLatestStableRelease()
+		if err != nil || release == nil {
+			return
 		}
 		// 缓存结果
 		cachedLatestVersion.mu.Lock()
@@ -59,33 +54,6 @@ func fetchLatestStableReleaseAsync() {
 		cachedLatestVersion.timestamp = time.Now()
 		cachedLatestVersion.mu.Unlock()
 	}()
-}
-
-// fetchLatestStableFromGitee 从Gitee获取最新稳定版本
-func fetchLatestStableFromGitee() (*githubRelease, error) {
-	client := &http.Client{Timeout: 3 * time.Second}
-	req, _ := http.NewRequest("GET", giteeAPI, nil)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("gitee API returned HTTP %d", resp.StatusCode)
-	}
-
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, err
-	}
-	// Gitee的latest通常就是稳定版，但检查Prerelease以防万一
-	if release.Prerelease {
-		return nil, nil
-	}
-	return &release, nil
 }
 
 // checkUpdateAsync 启动异步版本检查（不阻塞）
@@ -116,7 +84,7 @@ func getUpdateHintIfAvailable() string {
 	}
 
 	if isNewer(cachedVer, version) {
-		return fmt.Sprintf("\n📦 Update available: %s → %s  (run: cc-connect update)\n", version, cachedVer)
+		return fmt.Sprintf("\n📦 Update available: %s → %s  (run: cc-connect-next update)\n", version, cachedVer)
 	}
 	return ""
 }
@@ -129,7 +97,7 @@ func runUpdate() {
 		}
 	}
 
-	fmt.Printf("cc-connect %s\n", version)
+	fmt.Printf("cc-connect-next %s\n", version)
 	if pre {
 		fmt.Println("Checking for updates (including pre-releases)...")
 	} else {
@@ -202,7 +170,7 @@ func runUpdate() {
 	syncNpmPackageVersion(execPath, strings.TrimPrefix(latest, "v"))
 
 	fmt.Printf("Updated to %s\n", latest)
-	fmt.Println("Restart cc-connect to use the new version.")
+	fmt.Println("Restart cc-connect-next to use the new version.")
 }
 
 // fetchRelease returns the latest release. If pre=true, includes pre-releases.
@@ -287,7 +255,7 @@ func fetchLatestStableRelease() (*githubRelease, error) {
 func binaryAssetName(tag string) string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
-	name := fmt.Sprintf("cc-connect-%s-%s-%s", tag, goos, goarch)
+	name := fmt.Sprintf("cc-connect-next-%s-%s-%s", tag, goos, goarch)
 	if goos == "windows" {
 		name += ".exe"
 	}
@@ -297,14 +265,14 @@ func binaryAssetName(tag string) string {
 func archiveAssetName(tag string) string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
-	base := fmt.Sprintf("cc-connect-%s-%s-%s", tag, goos, goarch)
+	base := fmt.Sprintf("cc-connect-next-%s-%s-%s", tag, goos, goarch)
 	if goos == "windows" {
 		return base + ".zip"
 	}
 	return base + ".tar.gz"
 }
 
-// extractBinaryFromArchive extracts the cc-connect binary from a .tar.gz or .zip archive.
+// extractBinaryFromArchive extracts the cc-connect-next binary from a .tar.gz or .zip archive.
 func extractBinaryFromArchive(archivePath, archiveName string) (string, error) {
 	if strings.HasSuffix(archiveName, ".zip") {
 		return extractFromZip(archivePath)
@@ -337,8 +305,8 @@ func extractFromTarGz(archivePath string) (string, error) {
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		if strings.HasPrefix(hdr.Name, "cc-connect") {
-			tmp, err := os.CreateTemp("", "cc-connect-update-*")
+		if strings.HasPrefix(hdr.Name, "cc-connect-next") {
+			tmp, err := os.CreateTemp("", "cc-connect-next-update-*")
 			if err != nil {
 				return "", err
 			}
@@ -362,14 +330,14 @@ func extractFromZip(archivePath string) (string, error) {
 	defer r.Close()
 
 	for _, f := range r.File {
-		if !strings.HasPrefix(f.Name, "cc-connect") {
+		if !strings.HasPrefix(f.Name, "cc-connect-next") {
 			continue
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return "", err
 		}
-		tmp, err := os.CreateTemp("", "cc-connect-update-*")
+		tmp, err := os.CreateTemp("", "cc-connect-next-update-*")
 		if err != nil {
 			rc.Close()
 			return "", err
@@ -408,7 +376,7 @@ func downloadToTemp(url string) (string, error) {
 		return "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	tmp, err := os.CreateTemp("", "cc-connect-update-*")
+	tmp, err := os.CreateTemp("", "cc-connect-next-update-*")
 	if err != nil {
 		return "", err
 	}
@@ -487,9 +455,9 @@ func checkUpdate() {
 		return
 	}
 	if isNewer(release.TagName, version) {
-		hint := "cc-connect update"
+		hint := "cc-connect-next update"
 		if release.Prerelease {
-			hint = "cc-connect update --pre"
+			hint = "cc-connect-next update --pre"
 		}
 		fmt.Fprintf(os.Stderr, "Update available: %s → %s (run: %s)\n", version, release.TagName, hint)
 	}
@@ -593,7 +561,7 @@ func comparePreRelease(a, b string) int {
 }
 
 // syncNpmPackageVersion detects if the binary lives inside an npm package
-// (node_modules/cc-connect/bin/) and updates the package.json version to
+// (node_modules/cc-connect-next/bin/) and updates the package.json version to
 // match the newly installed binary. Without this, the npm wrapper's run.js
 // would see a version mismatch and re-download the old version on next run.
 func syncNpmPackageVersion(execPath, newVer string) {
@@ -615,7 +583,7 @@ func syncNpmPackageVersion(execPath, newVer string) {
 	}
 
 	name, _ := pkg["name"].(string)
-	if name != "cc-connect" {
+	if name != "cc-connect-next" {
 		return
 	}
 
@@ -637,7 +605,7 @@ func syncNpmPackageVersion(execPath, newVer string) {
 	if err := os.WriteFile(pkgJSON, out, 0o644); err != nil {
 		slog.Warn("update: failed to sync npm package.json version", "error", err)
 		fmt.Println("⚠️  Note: npm package version not synced. If the next run re-downloads an old version,")
-		fmt.Println("   please run: npm update -g cc-connect")
+		fmt.Println("   please run: npm update -g cc-connect-next")
 	} else {
 		slog.Debug("update: synced npm package.json version", "old", oldVer, "new", newVer)
 	}

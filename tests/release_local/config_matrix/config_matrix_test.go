@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/config"
+	"github.com/timmyagentic/cc-connect-next/config"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -20,7 +20,7 @@ func writeConfig(t *testing.T, body string) string {
 
 func baseProjectTOML(extra string) string {
 	return `
-data_dir = "` + filepath.ToSlash(os.TempDir()) + `/cc-connect-release-test"
+data_dir = "` + filepath.ToSlash(os.TempDir()) + `/cc-connect-next-release-test"
 ` + extra + `
 
 [[projects]]
@@ -28,7 +28,7 @@ name = "release"
 
 [projects.agent]
 type = "claudecode"
-work_dir = "/tmp/cc-connect-release-work"
+work_dir = "/tmp/cc-connect-next-release-work"
 
 [[projects.platforms]]
 type = "feishu"
@@ -61,7 +61,7 @@ tool_max_len = 222
 
 [projects.agent]
 type = "claudecode"
-work_dir = "/tmp/cc-connect-release-work"
+work_dir = "/tmp/cc-connect-next-release-work"
 
 [[projects.platforms]]
 type = "feishu"
@@ -115,8 +115,8 @@ func TestReleaseConfig_DefaultsKeepAttachmentsAndFullDisplayEnabled(t *testing.T
 	if mode != config.DisplayModeFull || !thinking || !tools {
 		t.Fatalf("display = mode:%s thinking:%v tools:%v, want full/true/true", mode, thinking, tools)
 	}
-	if got := config.EffectiveCardMode(cfg, &cfg.Projects[0]); got != "legacy" {
-		t.Fatalf("card mode = %q, want default legacy", got)
+	if got := config.EffectiveCardMode(cfg, &cfg.Projects[0]); got != "rich" {
+		t.Fatalf("card mode = %q, want privacy-first rich default", got)
 	}
 }
 
@@ -143,7 +143,7 @@ tool_messages = false
 
 [projects.agent]
 type = "claudecode"
-work_dir = "/tmp/cc-connect-release-work"
+work_dir = "/tmp/cc-connect-next-release-work"
 
 [[projects.platforms]]
 type = "feishu"
@@ -214,7 +214,7 @@ mode = "verbose"
 
 [projects.agent]
 type = "claudecode"
-work_dir = "/tmp/cc-connect-release-work"
+work_dir = "/tmp/cc-connect-next-release-work"
 
 [[projects.platforms]]
 type = "feishu"
@@ -232,7 +232,7 @@ reset_on_idle_mins = -1
 
 [projects.agent]
 type = "claudecode"
-work_dir = "/tmp/cc-connect-release-work"
+work_dir = "/tmp/cc-connect-next-release-work"
 
 [[projects.platforms]]
 type = "feishu"

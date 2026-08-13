@@ -74,7 +74,7 @@ func TestBuildUnit_DropsEmptyValue(t *testing.T) {
 
 // TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
 // path: os.WriteFile would truncate-in-place and KEEP the old 0644
-// permissions of a unit file left over from earlier cc-connect
+// permissions of a unit file left over from earlier cc-connect-next
 // versions, leaving captured token values world-readable.
 func TestSystemdInstall_TightensExistingUnitFrom0644(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // antigravitySession manages multi-turn conversations with the Antigravity CLI (agy).
@@ -89,7 +89,7 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	}
 
 	// Save images and files into the workspace
-	attachDir := filepath.Join(as.workDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(as.workDir, ".cc-connect-next", "attachments")
 	if (len(images) > 0 || len(files) > 0) && os.MkdirAll(attachDir, 0o755) != nil {
 		attachDir = os.TempDir()
 	}

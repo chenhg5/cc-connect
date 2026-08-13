@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/daemon"
+	"github.com/timmyagentic/cc-connect-next/daemon"
 )
 
 func runDaemon(args []string) {
@@ -89,7 +89,7 @@ func daemonInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
 	}
 
-	fmt.Println("cc-connect daemon installed and started.")
+	fmt.Println("cc-connect-next daemon installed and started.")
 	fmt.Println()
 	fmt.Printf("  Platform:  %s\n", mgr.Platform())
 	fmt.Printf("  Binary:    %s\n", cfg.BinaryPath)
@@ -98,11 +98,11 @@ func daemonInstall(args []string) {
 	fmt.Printf("  LogMax:    %d MB\n", cfg.LogMaxSize/1024/1024)
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  cc-connect daemon status    - Check status")
-	fmt.Println("  cc-connect daemon logs -f   - Follow logs")
-	fmt.Println("  cc-connect daemon restart   - Restart")
-	fmt.Println("  cc-connect daemon stop      - Stop")
-	fmt.Println("  cc-connect daemon uninstall - Remove")
+	fmt.Println("  cc-connect-next daemon status    - Check status")
+	fmt.Println("  cc-connect-next daemon logs -f   - Follow logs")
+	fmt.Println("  cc-connect-next daemon restart   - Restart")
+	fmt.Println("  cc-connect-next daemon stop      - Stop")
+	fmt.Println("  cc-connect-next daemon uninstall - Remove")
 
 	// Check linger for user-mode systemd
 	if strings.Contains(mgr.Platform(), "user") {
@@ -110,7 +110,7 @@ func daemonInstall(args []string) {
 		if !enabled {
 			fmt.Println()
 			fmt.Println("⚠️  Warning: Linger is not enabled for this user.")
-			fmt.Println("   cc-connect will stop when your last login session ends (e.g., SSH disconnect).")
+			fmt.Println("   cc-connect-next will stop when your last login session ends (e.g., SSH disconnect).")
 			fmt.Println("   To keep it running persistently, run:")
 			fmt.Printf("     sudo loginctl enable-linger %s\n", user)
 		}
@@ -229,7 +229,7 @@ func daemonUninstall() {
 	}
 
 	daemon.RemoveMeta()
-	fmt.Println("cc-connect daemon uninstalled.")
+	fmt.Println("cc-connect-next daemon uninstalled.")
 }
 
 // ── start / stop / restart ──────────────────────────────────
@@ -241,7 +241,7 @@ func daemonStart() {
 		fmt.Fprintf(os.Stderr, "Start failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon started.")
+	fmt.Println("cc-connect-next daemon started.")
 }
 
 func daemonStop() {
@@ -251,7 +251,7 @@ func daemonStop() {
 		fmt.Fprintf(os.Stderr, "Stop failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon stopped.")
+	fmt.Println("cc-connect-next daemon stopped.")
 }
 
 func daemonRestart(args []string) {
@@ -276,14 +276,14 @@ func daemonRestart(args []string) {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon restarted.")
+	fmt.Println("cc-connect-next daemon restarted.")
 }
 
 func requireInstalled(mgr daemon.Manager) {
 	st, _ := mgr.Status()
 	if st == nil || !st.Installed {
 		fmt.Fprintln(os.Stderr, "Service is not installed. Run first:")
-		fmt.Fprintln(os.Stderr, "  cc-connect daemon install --work-dir /path/to/config-dir")
+		fmt.Fprintln(os.Stderr, "  cc-connect-next daemon install --work-dir /path/to/config-dir")
 		os.Exit(1)
 	}
 }
@@ -298,14 +298,14 @@ func daemonStatus() {
 		os.Exit(1)
 	}
 
-	fmt.Println("cc-connect daemon status")
+	fmt.Println("cc-connect-next daemon status")
 	fmt.Println()
 
 	if !st.Installed {
 		fmt.Println("  Status:    Not installed")
 		fmt.Printf("  Platform:  %s\n", st.Platform)
 		fmt.Println()
-		fmt.Println("  Run: cc-connect daemon install")
+		fmt.Println("  Run: cc-connect-next daemon install")
 		return
 	}
 
@@ -433,7 +433,7 @@ func mustManager() daemon.Manager {
 }
 
 func printDaemonUsage() {
-	fmt.Println(`Usage: cc-connect daemon <command> [flags]
+	fmt.Println(`Usage: cc-connect-next daemon <command> [flags]
 
 Commands:
   install     Install and start as system service
@@ -446,7 +446,7 @@ Commands:
 
 Install flags:
   --config PATH         Path to config.toml (uses its parent as work dir)
-  --log-file PATH       Log file path (default: ~/.cc-connect/logs/cc-connect.log)
+  --log-file PATH       Log file path (default: ~/.cc-connect-next/logs/cc-connect-next.log)
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation

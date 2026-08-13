@@ -286,7 +286,7 @@ func (p *Platform) crossSigningSeedsPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get home dir: %w", err)
 	}
-	return filepath.Join(homeDir, ".cc-connect", fmt.Sprintf("matrix-cross-signing-%s.json", client.DeviceID)), nil
+	return filepath.Join(homeDir, ".cc-connect-next", fmt.Sprintf("matrix-cross-signing-%s.json", client.DeviceID)), nil
 }
 
 // setupCrossSigning bootstraps cross-signing for the bot's own device.

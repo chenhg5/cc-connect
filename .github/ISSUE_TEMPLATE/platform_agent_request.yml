@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Want cc-connect to support a new messaging platform or AI coding agent? Let us know!
+        Want cc-connect-next to support a new messaging platform or AI coding agent? Let us know!
 
   - type: dropdown
     id: type

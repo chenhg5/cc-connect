@@ -15,7 +15,7 @@ import (
 
 // prepareCmdForKill puts the spawned child into a new process group on
 // Windows so that taskkill /T can later terminate the entire descendant
-// tree. Without this, cc-connect can only signal the direct child,
+// tree. Without this, cc-connect-next can only signal the direct child,
 // leaving grandchildren (such as MCP server bridges) as orphans.
 //
 // Mirrors the pattern used by agent/codex/proc_windows.go.

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestAgentUsageProbeEnv_AddsHostManagedFlagForCustomProvider(t *testing.T) {
@@ -317,7 +317,7 @@ func TestProviderEnv_BedrockNoThinking(t *testing.T) {
 }
 
 // TestClaudecode_SessionResume_PreservesActiveProvider is a regression test
-// for cc-connect internal task t-20260614-qp7xnl: after a cc-connect process
+// for upstream cc-connect internal task t-20260614-qp7xnl: after a cc-connect-next process
 // restart, calling SetActiveProvider with the name persisted on the session
 // must restore providerEnv (ANTHROPIC_BASE_URL / ANTHROPIC_MODEL) so that the
 // next --resume spawn does not silently send the user's switched-to model
@@ -351,7 +351,7 @@ func TestClaudecode_SessionResume_PreservesActiveProvider(t *testing.T) {
 		t.Fatalf("baseline ANTHROPIC_BASE_URL = %q, want minimax", got)
 	}
 
-	// Step 2: simulate a cc-connect process restart. agent_session_id is
+	// Step 2: simulate a cc-connect-next process restart. agent_session_id is
 	// already on disk (carried by the engine via session.AgentSessionID), but
 	// the in-memory activeIdx is back to -1.
 	a2 := &Agent{providers: providers, activeIdx: -1}

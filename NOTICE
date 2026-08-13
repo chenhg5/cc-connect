@@ -1,0 +1,12 @@
+cc-connect-next
+===============
+
+This project is derived from CC Connect by chenhg5 and its contributors:
+https://github.com/chenhg5/cc-connect
+
+The initial successor baseline is CC Connect v1.4.1. Original project history
+and attribution are retained in this Git repository. New cc-connect-next work
+includes independent distribution/runtime identity and a privacy-first native
+Feishu Card 2.0 lifecycle.
+
+See LICENSE for the applicable MIT terms.

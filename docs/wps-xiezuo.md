@@ -1,13 +1,13 @@
 # WPS Xiezuo Platform Setup Guide
 
-This guide explains how to connect **cc-connect** to WPS Xiezuo (WPS 365 collaboration) so users can talk to an AI coding agent from WPS chats.
+This guide explains how to connect **cc-connect-next** to WPS Xiezuo (WPS 365 collaboration) so users can talk to an AI coding agent from WPS chats.
 
 ## Prerequisites
 
 - A WPS Open Platform application with app chat events enabled
 - `app_id` and `app_secret` for the application
-- A machine running cc-connect; no public IP is required
-- An agent such as Claude Code, Codex, or Gemini CLI configured in cc-connect
+- A machine running cc-connect-next; no public IP is required
+- An agent such as Claude Code, Codex, or Gemini CLI configured in cc-connect-next
 
 ## Connection Model
 
@@ -18,7 +18,7 @@ The platform uses WPS event WebSocket delivery and WPS REST APIs:
 - Event payloads: encrypted with AES-256-CBC and verified with HMAC-SHA256 signatures
 - Outgoing replies: REST API with a cached `client_credentials` access token
 
-cc-connect sends ACK frames on the WebSocket writer loop, so no public callback URL is needed.
+cc-connect-next sends ACK frames on the WebSocket writer loop, so no public callback URL is needed.
 
 ## Configure WPS
 
@@ -35,7 +35,7 @@ In the WPS Open Platform console:
 
 The exact console names may vary by WPS tenant and app type. If the connection fails with authorization errors, verify that the app is published/enabled for the target organization and has the required app chat permissions.
 
-## Configure cc-connect
+## Configure cc-connect-next
 
 Add `wps-xiezuo` to a project in `config.toml`:
 
@@ -71,10 +71,10 @@ clean_reply = false     # optional; strip thinking/tool progress lines
 
 ## Start and Verify
 
-Start cc-connect:
+Start cc-connect-next:
 
 ```bash
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 Expected logs include:
@@ -85,7 +85,7 @@ level=INFO msg="wps-xiezuo: connected"
 level=INFO msg="platform started" project=my-project platform=wps-xiezuo
 ```
 
-Send a message to the WPS app chat. cc-connect should receive the encrypted event, ACK it, forward the text to the configured agent, and send the reply back through the WPS message API.
+Send a message to the WPS app chat. cc-connect-next should receive the encrypted event, ACK it, forward the text to the configured agent, and send the reply back through the WPS message API.
 
 ## Security Notes
 
@@ -104,10 +104,10 @@ Send a message to the WPS app chat. cc-connect should receive the encrypted even
 **Messages arrive but replies fail**
 
 - Confirm the app has message send permissions.
-- Check whether the tenant requires the `/oauth2/token` or `/openapi/oauth2/token` token endpoint; cc-connect tries both.
+- Check whether the tenant requires the `/oauth2/token` or `/openapi/oauth2/token` token endpoint; cc-connect-next tries both.
 - Verify the target chat allows app messages.
 
 **Bot responds to unexpected users**
 
 - Set `allow_from` to a comma-separated list of WPS user IDs.
-- Users can send `/whoami` to discover the ID used by cc-connect.
+- Users can send `/whoami` to discover the ID used by cc-connect-next.

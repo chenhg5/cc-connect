@@ -5,13 +5,13 @@
 
 ## 概述
 
-Bridge 协议允许使用**任何编程语言**编写的外部平台适配器在运行时通过 WebSocket 动态接入 cc-connect，无需编写 Go 代码或重新编译二进制文件。
+Bridge 协议允许使用**任何编程语言**编写的外部平台适配器在运行时通过 WebSocket 动态接入 cc-connect-next，无需编写 Go 代码或重新编译二进制文件。
 
 ### 架构
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                    cc-connect                        │
+│                    cc-connect-next                        │
 │                                                      │
 │   ┌────────────┐ ┌────────────┐ ┌────────────────┐  │
 │   │  Telegram   │ │    飞书    │ │ BridgePlatform │  │
@@ -33,7 +33,7 @@ Bridge 协议允许使用**任何编程语言**编写的外部平台适配器在
    └─────────────────┘  └─────────────────┘
 ```
 
-`BridgePlatform` 是 cc-connect 内置的一个平台实现，它：
+`BridgePlatform` 是 cc-connect-next 内置的一个平台实现，它：
 
 1. 暴露 WebSocket 端点供外部适配器连接。
 2. 将 WebSocket 消息转换为 `core.Platform` 接口调用。
@@ -74,7 +74,7 @@ token = "your-secret"     # 认证密钥，必填
 ### 连接生命周期
 
 ```
-适配器                             cc-connect
+适配器                             cc-connect-next
   │                                  │
   │──── WebSocket 连接 ─────────────→│  (携带 token)
   │                                  │
@@ -95,7 +95,7 @@ token = "your-secret"     # 认证密钥，必填
 
 所有消息均为 JSON 对象，必须包含 `type` 字段。协议使用 WebSocket 文本帧传输（每帧一个 JSON 对象）。
 
-### 适配器 → cc-connect
+### 适配器 → cc-connect-next
 
 #### `register`
 
@@ -151,7 +151,7 @@ token = "your-secret"     # 认证密钥，必填
 | `user_id` | string | 是 | 用户在平台上的唯一标识。 |
 | `user_name` | string | 否 | 显示名称。 |
 | `content` | string | 是 | 文本内容。 |
-| `reply_ctx` | string | 是 | 不透明的上下文字符串，适配器需要它来路由回复。cc-connect 会在每个回复中原样回传。 |
+| `reply_ctx` | string | 是 | 不透明的上下文字符串，适配器需要它来路由回复。cc-connect-next 会在每个回复中原样回传。 |
 | `images` | Image[] | 否 | 附带的图片（见[图片对象](#图片对象)）。 |
 | `files` | File[] | 否 | 附带的文件（见[文件对象](#文件对象)）。 |
 | `audio` | Audio | 否 | 语音消息（见[音频对象](#音频对象)）。 |
@@ -192,7 +192,7 @@ token = "your-secret"     # 认证密钥，必填
 
 #### `ping`
 
-心跳保活。cc-connect 回应 `pong`。
+心跳保活。cc-connect-next 回应 `pong`。
 
 ```json
 {
@@ -203,7 +203,7 @@ token = "your-secret"     # 认证密钥，必填
 
 ---
 
-### cc-connect → 适配器
+### cc-connect-next → 适配器
 
 #### `register_ack`
 
@@ -307,7 +307,7 @@ token = "your-secret"     # 认证密钥，必填
 
 #### `card`
 
-发送结构化卡片给用户。仅在适配器声明了 `"card"` 能力时发送；否则 cc-connect 会降级为 `reply`，内容使用 `card.RenderText()` 生成的纯文本。
+发送结构化卡片给用户。仅在适配器声明了 `"card"` 能力时发送；否则 cc-connect-next 会降级为 `reply`，内容使用 `card.RenderText()` 生成的纯文本。
 
 ```json
 {
@@ -478,7 +478,7 @@ token = "your-secret"     # 认证密钥，必填
 | `delete_message` | 删除消息 | `delete_message` |
 | `reconstruct_reply` | 可从 session_key 重建回复上下文 | 启用定时任务/心跳消息 |
 
-如果未声明某个能力，cc-connect 会自动降级：
+如果未声明某个能力，cc-connect-next 会自动降级：
 - 没有 `card` → 卡片通过 `RenderText()` 渲染为纯文本。
 - 没有 `buttons` → 按钮被省略或渲染为文本提示。
 - 没有 `preview` → 禁用流式预览；只发送最终回复。
@@ -799,17 +799,17 @@ WebSocket 连接断开时，适配器应：
 
 1. 使用指数退避等待（起始 1 秒，最大 60 秒）。
 2. 重新连接并发送新的 `register` 消息。
-3. 恢复正常运行 — cc-connect 独立于连接维护会话状态。
+3. 恢复正常运行 — cc-connect-next 独立于连接维护会话状态。
 
 ### 消息顺序
 
-单个 WebSocket 连接内的消息是有序的。cc-connect 按 session key 顺序处理适配器消息。
+单个 WebSocket 连接内的消息是有序的。cc-connect-next 按 session key 顺序处理适配器消息。
 
 ### 超时
 
 - **Ping 间隔**：适配器应至少每 30 秒发送一次 `ping`。
-- **连接超时**：cc-connect 在 90 秒没有收到 ping 后关闭空闲连接。
-- **回复超时**：如果 agent 耗时过长，cc-connect 可能发送错误回复。适配器不需要特殊处理。
+- **连接超时**：cc-connect-next 在 90 秒没有收到 ping 后关闭空闲连接。
+- **回复超时**：如果 agent 耗时过长，cc-connect-next 可能发送错误回复。适配器不需要特殊处理。
 
 ---
 
@@ -834,7 +834,7 @@ token = "一个强随机密钥"
 
 开发适配器时，请遵循以下原则：
 
-1. **保持无状态** — 适配器应该是一个轻量的协议转换层。所有会话状态存储在 cc-connect 中。
+1. **保持无状态** — 适配器应该是一个轻量的协议转换层。所有会话状态存储在 cc-connect-next 中。
 2. **处理断线重连** — 网络故障是正常的，实现指数退避重试。
 3. **如实声明能力** — 只声明你的平台实际支持的能力。
 4. **忠实使用 `reply_ctx`** — 始终原样回传原始消息中的 `reply_ctx`。
@@ -892,7 +892,7 @@ asyncio.run(main())
 
 ## 版本管理
 
-协议版本通过 `register` 消息的 `metadata.protocol_version` 声明。当前版本为 `1`。cc-connect 会拒绝不兼容版本的连接，并在 `register_ack` 中返回错误。
+协议版本通过 `register` 消息的 `metadata.protocol_version` 声明。当前版本为 `1`。cc-connect-next 会拒绝不兼容版本的连接，并在 `register_ack` 中返回错误。
 
 ```json
 {

@@ -16,8 +16,8 @@ import (
 // "discard the previous log on every rotation", which loses the entire
 // post-mortem trail at the moment something goes wrong.
 //
-// A typical rotation policy with N=3 and maxSize=10MB keeps cc-connect.log
-// plus cc-connect.log.1 / .2 / .3 on disk, so the maximum retained footprint
+// A typical rotation policy with N=3 and maxSize=10MB keeps cc-connect-next.log
+// plus cc-connect-next.log.1 / .2 / .3 on disk, so the maximum retained footprint
 // is ≈ 4 × maxSize.
 func ParseLogBackups(s string) (int, error) {
 	orig := s

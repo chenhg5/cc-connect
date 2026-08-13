@@ -2,4 +2,4 @@
 
 package main
 
-import _ "github.com/chenhg5/cc-connect/platform/weibo"
+import _ "github.com/timmyagentic/cc-connect-next/platform/weibo"

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 
 	"github.com/slack-go/slack"
 )
@@ -28,7 +28,7 @@ const cardUpdateMinInterval = 3 * time.Second
 const slackUpdateMaxText = 3500
 
 // slackStreamingCard aggregates one agent turn (thinking + tool steps + answer)
-// into a single Slack message that updates in place — the cc-connect equivalent
+// into a single Slack message that updates in place — the cc-connect-next equivalent
 // of DingTalk's AI Card. The message is posted LAZILY on the first non-empty
 // content, so the native "is thinking…" status (set in StartTyping) stays
 // visible until the bot actually has something to show. Implements

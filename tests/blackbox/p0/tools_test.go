@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
+	"github.com/timmyagentic/cc-connect-next/tests/blackbox/helper"
 )
 
 // ── P0-14: 工具调用 ───────────────────────────────────────────────────────────
 
-// TestP0_14_ToolInvocation_ClaudeCode verifies that cc-connect routes a task
+// TestP0_14_ToolInvocation_ClaudeCode verifies that cc-connect-next routes a task
 // requiring tool use to the agent and the agent successfully executes it.
 // A real agent calling real tools is the only way to verify this end-to-end.
 func TestP0_14_ToolInvocation_ClaudeCode(t *testing.T) {
@@ -55,7 +55,7 @@ func testToolInvocation(t *testing.T, agentType string) {
 
 // ── P0-15: 长消息流式输出 ─────────────────────────────────────────────────────
 
-// TestP0_15_LongResponse_ClaudeCode verifies that cc-connect correctly handles
+// TestP0_15_LongResponse_ClaudeCode verifies that cc-connect-next correctly handles
 // a long agent response without truncation or corruption. The agent must
 // produce a substantive response (≥ 200 chars total).
 func TestP0_15_LongResponse_ClaudeCode(t *testing.T) {

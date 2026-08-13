@@ -11,7 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // sessionFileData mirrors the unexported sessionSnapshot in core/session.go
@@ -101,7 +101,7 @@ func runSessions(args []string) {
 		}
 		if id == "" {
 			fmt.Fprintln(os.Stderr, "Error: session ID is required")
-			fmt.Fprintln(os.Stderr, "Usage: cc-connect sessions show <session-id> [-n N]")
+			fmt.Fprintln(os.Stderr, "Usage: cc-connect-next sessions show <session-id> [-n N]")
 			os.Exit(1)
 		}
 		runSessionsShow(dataDir, id, limit)
@@ -143,9 +143,9 @@ func resolveDataDir(flagValue string) string {
 		return flagValue
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect")
+		return filepath.Join(home, ".cc-connect-next")
 	}
-	return ".cc-connect"
+	return ".cc-connect-next"
 }
 
 func loadAllSessions(dataDir string) ([]sessionRecord, error) {
@@ -292,7 +292,7 @@ func runSessionsShow(dataDir, id string, limit int) {
 
 	if record == nil {
 		fmt.Fprintf(os.Stderr, "Error: session %q not found\n", id)
-		fmt.Fprintln(os.Stderr, "Use 'cc-connect sessions list' to see available sessions.")
+		fmt.Fprintln(os.Stderr, "Use 'cc-connect-next sessions list' to see available sessions.")
 		os.Exit(1)
 	}
 
@@ -419,7 +419,7 @@ func truncate(s string, maxLen int) string {
 }
 
 func printSessionsUsage() {
-	fmt.Println(`Usage: cc-connect sessions [command] [options]
+	fmt.Println(`Usage: cc-connect-next sessions [command] [options]
 
 Browse and manage session history.
 
@@ -430,7 +430,7 @@ Commands:
   prune [project] [--merge]  Remove duplicate sessions per chat
 
 Options:
-  --data-dir <path>  Data directory (default: ~/.cc-connect)
+  --data-dir <path>  Data directory (default: ~/.cc-connect-next)
   -h, --help         Show this help
 
 Session ID formats for 'show':
@@ -445,12 +445,12 @@ Prune options:
              --merge is also set.
 
 Examples:
-  cc-connect sessions                           Interactive TUI browser
-  cc-connect sessions list                      List all sessions
-  cc-connect sessions show "mybot:s1"           Show all messages in session
-  cc-connect sessions show "#1" -n 20           Show last 20 messages of first session
-  cc-connect sessions prune                     Remove empty duplicate sessions
-  cc-connect sessions prune --empty             Same as above, explicit form
-  cc-connect sessions prune --merge             Merge duplicates, keeping most recent
-  cc-connect sessions prune mybot --merge       Prune specific project`)
+  cc-connect-next sessions                           Interactive TUI browser
+  cc-connect-next sessions list                      List all sessions
+  cc-connect-next sessions show "mybot:s1"           Show all messages in session
+  cc-connect-next sessions show "#1" -n 20           Show last 20 messages of first session
+  cc-connect-next sessions prune                     Remove empty duplicate sessions
+  cc-connect-next sessions prune --empty             Same as above, explicit form
+  cc-connect-next sessions prune --merge             Merge duplicates, keeping most recent
+  cc-connect-next sessions prune mybot --merge       Prune specific project`)
 }

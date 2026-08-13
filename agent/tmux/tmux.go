@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func init() {
@@ -32,7 +32,7 @@ type Agent struct {
 	pollMs          int
 	stripInputBlock bool     // strip the ───/❯/─── input area block from output
 	stripPatterns   []string // per-line regex patterns to strip from output
-	// windowPerSession, when true, gives each cc-connect session its own tmux
+	// windowPerSession, when true, gives each cc-connect-next session its own tmux
 	// window (and thus its own init_command/agent instance) instead of sharing
 	// the single session:pane target. Required for true per-session isolation
 	// (e.g. session_scope = "thread" on the platform).
@@ -159,7 +159,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.RUnlock()
 
 	// Decide which tmux window this session drives:
-	//   - window_per_session: a dedicated window per cc-connect session (true
+	//   - window_per_session: a dedicated window per cc-connect-next session (true
 	//     isolation; each gets its own init_command/agent instance).
 	//   - else, when workDir is a real path: a window named after the directory
 	//     so each workspace gets its own instance.
@@ -232,7 +232,7 @@ func (a *Agent) resolveTarget(sessionName, pane, workDir string) (target, window
 
 // windowForSession returns the tmux window name to use for a StartSession call
 // and the effective agent session ID. When window_per_session is enabled, each
-// cc-connect session gets its own window: an existing (resumed) sessionID maps
+// cc-connect-next session gets its own window: an existing (resumed) sessionID maps
 // back to its window, while an empty sessionID allocates a fresh window whose
 // name doubles as the agent session ID (persisted by the engine for resumes).
 // When disabled, behaviour is unchanged (per-workDir window or legacy pane).

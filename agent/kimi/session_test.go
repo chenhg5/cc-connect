@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -164,7 +164,7 @@ func TestTruncate(t *testing.T) {
 
 // TestBuildArgs_NoPrintSupportOmitsPrintFlag is the regression test for #1456.
 // When the locally installed Kimi CLI does not advertise --print in its help
-// output, cc-connect must omit that flag — otherwise the newer Kimi Code CLI
+// output, cc-connect-next must omit that flag — otherwise the newer Kimi Code CLI
 // exits with `error: unknown option '--print' (Did you mean --prompt?)`.
 func TestBuildArgs_NoPrintSupportOmitsPrintFlag(t *testing.T) {
 	ctx := context.Background()

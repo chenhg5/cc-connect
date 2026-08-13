@@ -1,9 +1,9 @@
-APP        := cc-connect
-MODULE     := github.com/chenhg5/cc-connect
+APP        := cc-connect-next
+MODULE     := github.com/timmyagentic/cc-connect-next
 CMD        := ./cmd/cc-connect
 DIST       := dist
 
-VERSION := v1.4.1
+VERSION := v0.1.0-beta.1
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 

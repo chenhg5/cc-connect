@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/config"
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/config"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // runRunAsUserStartupChecks runs preflight gates + isolation audit for

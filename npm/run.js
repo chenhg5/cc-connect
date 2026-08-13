@@ -8,7 +8,7 @@ const fs = require("fs");
 
 const PACKAGE = require("./package.json");
 const EXPECTED_VER = PACKAGE.version; // e.g. "1.1.0-beta.4"
-const NAME = "cc-connect";
+const NAME = "cc-connect-next";
 const binDir = path.join(__dirname, "bin");
 const ext = process.platform === "win32" ? ".exe" : "";
 const binaryPath = path.join(binDir, NAME + ext);
@@ -48,7 +48,7 @@ function needsReinstall() {
   try {
     const out = execFileSync(binaryPath, ["--version"], { encoding: "utf8", timeout: 5000 });
     if (out.includes(EXPECTED_VER)) return false;
-    // Extract version from output (e.g. "cc-connect 1.2.2-beta.1" or "1.2.2-beta.1")
+    // Extract version from output (e.g. "cc-connect-next 1.2.2-beta.1" or "1.2.2-beta.1")
     const match = out.match(/(\d+\.\d+\.\d+[^\s]*)/);
     if (match && isNewerOrEqual(match[1], EXPECTED_VER)) return false;
     return true;
@@ -58,14 +58,14 @@ function needsReinstall() {
 }
 
 if (needsReinstall()) {
-  console.log(`[cc-connect] Binary missing or outdated, installing v${EXPECTED_VER}...`);
+  console.log(`[cc-connect-next] Binary missing or outdated, installing v${EXPECTED_VER}...`);
   try {
     execSync("node " + JSON.stringify(path.join(__dirname, "install.js")), {
       stdio: "inherit",
       cwd: __dirname,
     });
   } catch {
-    console.error("[cc-connect] Auto-install failed. Run manually: npm uninstall -g cc-connect && npm install -g cc-connect@beta");
+    console.error("[cc-connect-next] Auto-install failed. Run manually: npm uninstall -g cc-connect-next && npm install -g cc-connect-next@beta");
     process.exit(1);
   }
 }

@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest a new feature or improvement for cc-connect
+description: Suggest a new feature or improvement for cc-connect-next
 title: "[Feature] "
 labels: ["enhancement"]
 
@@ -13,7 +13,7 @@ body:
     id: area
     attributes:
       label: Feature Area
-      description: Which part of cc-connect does this relate to?
+      description: Which part of cc-connect-next does this relate to?
       options:
         - Core / Engine
         - Agent (Claude Code, Codex, Cursor, Gemini, etc.)

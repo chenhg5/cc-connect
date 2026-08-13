@@ -1,11 +1,11 @@
 # Telegram Setup Guide
 
-This guide walks you through connecting **cc-connect** to Telegram, so you can chat with your local Claude Code via a Telegram bot.
+This guide walks you through connecting **cc-connect-next** to Telegram, so you can chat with your local Claude Code via a Telegram bot.
 
 ## Prerequisites
 
 - A Telegram account
-- A machine that can run cc-connect (no public IP needed)
+- A machine that can run cc-connect-next (no public IP needed)
 - Claude Code installed and configured
 
 > 💡 **Advantage**: Uses Long Polling mode — no public IP, no domain, no reverse proxy needed.
@@ -26,7 +26,7 @@ Send the command `/newbot`. BotFather will ask you to provide a name and usernam
 
 ### 1.3 Set the Bot Name
 
-Enter a **display name** for your bot (e.g. `cc-connect`).
+Enter a **display name** for your bot (e.g. `cc-connect-next`).
 
 ### 1.4 Set the Bot Username
 
@@ -53,7 +53,7 @@ Keep your token secure...
 
 ---
 
-## Step 2: Configure cc-connect
+## Step 2: Configure cc-connect-next
 
 Add the token to your `config.toml`:
 
@@ -177,14 +177,14 @@ Enter a description — users will see this when they first open the bot.
 
 ---
 
-## Step 5: Start cc-connect
+## Step 5: Start cc-connect-next
 
 ### 5.1 Launch
 
 ```bash
-cc-connect
+cc-connect-next
 # Or specify a config file
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 ### 5.2 Verify Connection
@@ -194,7 +194,7 @@ You should see logs like:
 ```
 level=INFO msg="telegram: connected" bot=cc_connect_bot
 level=INFO msg="platform started" project=my-project platform=telegram
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 ```
 
 ---
@@ -216,7 +216,7 @@ level=INFO msg="cc-connect is running" projects=1
 
 ### 6.3 Topic Sessions
 
-Telegram topics include a `message_thread_id`. cc-connect uses that thread ID
+Telegram topics include a `message_thread_id`. cc-connect-next uses that thread ID
 as part of the Telegram session key, so each topic has its own independent
 conversation context. This applies to forum topics in groups and private chat
 topics when Telegram includes `message_thread_id`.
@@ -228,9 +228,9 @@ topics when Telegram includes `message_thread_id`.
 ```
 User: Help me analyze the current project structure
 
-cc-connect: 🤔 Thinking...
-cc-connect: 🔧 Tool: Bash(ls -la)
-cc-connect: Here's the project structure...
+cc-connect-next: 🤔 Thinking...
+cc-connect-next: 🔧 Tool: Bash(ls -la)
+cc-connect-next: Here's the project structure...
 ```
 
 ---
@@ -250,7 +250,7 @@ cc-connect: Here's the project structure...
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                         │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► Your Project Code    │
+│   cc-connect-next ◄──► Claude Code CLI ◄──► Your Project Code    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -275,9 +275,9 @@ cc-connect: Here's the project structure...
 ### Q: Bot doesn't respond to messages?
 
 Check the following:
-1. Is cc-connect running?
+1. Is cc-connect-next running?
 2. Is the bot token correct?
-3. Have you sent a message after starting cc-connect? (The bot only receives messages after startup)
+3. Have you sent a message after starting cc-connect-next? (The bot only receives messages after startup)
 
 ### Q: How to regenerate the token?
 

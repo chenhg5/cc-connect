@@ -10,7 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func init() {
@@ -54,7 +54,7 @@ type Agent struct {
 
 // sessionCallbacks lets a running acpSession report what it learned
 // during the handshake back to its parent Agent. The session is owned
-// by cc-connect's engine (not the agent), so without this the agent
+// by cc-connect-next's engine (not the agent), so without this the agent
 // would never see availableModes / capability advertisements.
 type sessionCallbacks interface {
 	reportModes(block acpModesBlock)
@@ -267,7 +267,7 @@ func (a *Agent) CLIDisplayName() string {
 
 // -- ModeSwitcher --
 //
-// cc-connect's engine treats ModeSwitcher as the point of truth for
+// cc-connect-next's engine treats ModeSwitcher as the point of truth for
 // both displaying `/mode` options and applying a mode selection. For
 // the generic ACP adapter we keep the Key == ACP modeId so downstream
 // `session/set_mode` calls don't need any translation.
@@ -288,7 +288,7 @@ func (a *Agent) SetMode(mode string) {
 	slog.Info("acp: mode changed for future sessions", "mode", normalised)
 }
 
-// GetMode returns the mode cc-connect will treat as "current" when
+// GetMode returns the mode cc-connect-next will treat as "current" when
 // rendering the `/mode` picker or applying SetLiveMode.
 //
 // Precedence: the most recent explicit SetMode wins (that's the user's

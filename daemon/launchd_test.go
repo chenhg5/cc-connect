@@ -13,7 +13,7 @@ import (
 
 func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
 	cfg := Config{
-		BinaryPath: "/opt/cc-connect/cc-connect",
+		BinaryPath: "/opt/cc-connect-next/cc-connect-next",
 		WorkDir:    "/tmp/wd",
 		LogFile:    "/tmp/log",
 		LogMaxSize: 10485760,
@@ -28,7 +28,7 @@ func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
 		t.Fatal("plist must not use boolean KeepAlive true")
 	}
 	// launchd.plist(5): SuccessfulExit=true means restart ONLY after a successful
-	// (exit 0) exit; false means restart ONLY after an unsuccessful exit. cc-connect
+	// (exit 0) exit; false means restart ONLY after an unsuccessful exit. cc-connect-next
 	// returns 0 on graceful SIGTERM shutdown but a non-zero status on crash, so the
 	// daemon's "restart on failure but not on graceful stop" intent maps to
 	// SuccessfulExit=false. The previous wiring used <true/>, which was the inverse:
@@ -69,6 +69,13 @@ func TestPreferredLaunchdDomainFallsBackToUserWhenGUIDomainUnavailable(t *testin
 func TestLaunchdStatusUsesUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(launchdPlistPath()), 0o700); err != nil {
+		t.Fatalf("mkdir launchd fixture: %v", err)
+	}
+	if err := os.WriteFile(launchdPlistPath(), []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write launchd fixture: %v", err)
+	}
 
 	guiDomain := launchdGUIDomain()
 	userDomain := launchdUserDomain()
@@ -283,8 +290,8 @@ func containsCall(calls []string, want string) bool {
 // `launchctl bootstrap` rejected.
 func TestBuildPlist_EscapesXMLSpecialCharsInPaths(t *testing.T) {
 	cfg := Config{
-		BinaryPath: "/opt/cc-connect/bin & <tools>/cc-connect",
-		WorkDir:    "/Users/jane/Projects/dev & test/cc-connect",
+		BinaryPath: "/opt/cc-connect-next/bin & <tools>/cc-connect-next",
+		WorkDir:    "/Users/jane/Projects/dev & test/cc-connect-next",
 		LogFile:    "/Users/jane/Library/Logs/cc \"connect\".log",
 		LogMaxSize: 10485760,
 		EnvPATH:    "/usr/bin:/path/with'apostrophe/bin",
@@ -469,7 +476,7 @@ func TestInstallLaunchd_WritesPlistAt0600(t *testing.T) {
 }
 
 // TestInstallLaunchd_TightensExistingPlistFrom0644 covers the upgrade
-// path: a user from an earlier cc-connect version may already have a
+// path: a user from an earlier cc-connect-next version may already have a
 // 0644 plist on disk; os.WriteFile would truncate-in-place and *keep*
 // the old permissions, leaving captured token values world-readable.
 // Install must explicitly tighten the existing file to 0600.

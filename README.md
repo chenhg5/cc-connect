@@ -1,619 +1,157 @@
-<p align="center">
-  <img src="./docs/images/banner.svg" alt="CC-Connect Banner" width="800"/>
-</p>
+# cc-connect-next
 
-<p align="center">
-  <a href="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml">
-    <img src="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
-  </a>
-  <a href="https://github.com/chenhg5/cc-connect/releases">
-    <img src="https://img.shields.io/github/v/release/chenhg5/cc-connect?include_prereleases" alt="Release"/>
-  </a>
-  <a href="https://www.npmjs.com/package/cc-connect">
-    <img src="https://img.shields.io/npm/dm/cc-connect?logo=npm" alt="npm downloads"/>
-  </a>
-  <a href="https://github.com/chenhg5/cc-connect/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"/>
-  </a>
-  <a href="https://goreportcard.com/report/github.com/chenhg5/cc-connect">
-    <img src="https://goreportcard.com/badge/github.com/chenhg5/cc-connect" alt="Go Report Card"/>
-  </a>
-</p>
+Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), with a native Feishu Card 2.0 response lifecycle.
 
-<p align="center">
-  <a href="https://discord.gg/kHpwgaM4kq">
-    <img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"/>
-  </a>
-  <a href="https://t.me/+odGNDhCjbjdmMmZl">
-    <img src="https://img.shields.io/badge/Telegram-Group-26A5E4?logo=telegram&logoColor=white" alt="Telegram"/>
-  </a>
-</p>
+[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md)
 
-<p align="center">
-  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
-</p>
+> Status: `0.1.0-beta.1` is under active development. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/23266" target="_blank">
-    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
-  </a>
-</p>
+## What changes for Feishu
 
+One agent turn stays in one quoted native card:
 
-## ❤️ Sponsor
+1. Reply immediately with a non-empty `⏳ 正在思考…` card.
+2. Show anonymous progress only: `推理 N 次 · 工具 N 次`.
+3. Switch the same card to `⏳ 正在调用工具…` as tool calls occur.
+4. Replace progress with `✍️ 正在回答` when answer text begins.
+5. Stream the `main_text` element through CardKit when `card_id` is available; fall back to full-card updates safely.
+6. Finalize the same card as `✅ Done`, or `⚠️ 未完成` on error.
 
-> Want to appear here? Contact: chg80333@gmail.com | WeChat: mongorz
+Privacy is enforced at two layers: the engine stores only anonymous event kinds for rich-card progress, and the Feishu renderer ignores all reasoning/tool names, inputs, results, model, token, context, footer, and work-directory fields. The card payload has no expandable panel.
 
-<details open>
-<summary>Sponsors</summary>
+## Install
 
-[![MiniMax](assets/banners/minimax-en.png)](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link)
+### npm release build
 
-MiniMax-M3 pushes the frontier of coding and agentic AI, with a 1M-token context window powered by MiniMax Sparse Attention and natively multimodal capabilities from step zero. It leads across SWE-Bench Pro (59.0), Terminal Bench 2.1 (66.0), VIBE V2 (60.1), SVG-Bench (63.7), KernelBench Hard (28.8), BrowseComp (83.5), GDPval rubrics (74.7), Banker ToolBench (76.1), MCP Atlas (74.2), and OSWorld-verified (70.0). Build, learn, and ship with the MiniMax Token Plan.
-
-[Click here](https://platform.minimax.io/subscribe/token-plan?code=lqYrKBvjke&source=link) to get an exclusive 12% off the MiniMax Token Plan + voucher for cc-connect users!
-
----
-
-<table>
-<tr>
-<td width="150"><a href="https://aigocode.com/invite/CYY3C85C"><img src="assets/sponsors/aigocode.png" alt="AIGoCode" width="120"></a></td>
-<td>Thanks to AIGoCode for sponsoring this project! AIGoCode is an all-in-one platform that integrates Claude Code, Codex, and the latest Gemini models, providing you with stable, efficient, and highly cost-effective AI coding services. The platform offers flexible subscription plans, zero risk of account suspension, direct access with no VPN required, and lightning-fast responses. AIGoCode has prepared a special benefit for cc-connect users: if you register via <a href="https://aigocode.com/invite/CYY3C85C">this link</a>, you'll receive an extra 10% bonus credit on your first top-up!</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
-<td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://apikey.fun/register?aff=cc_connect"><img src="assets/sponsors/apikeyfun.png" alt="APIKEY.FUN" width="120"></a></td>
-<td>Thanks to APIKEY.FUN for sponsoring this project! APIKEY.FUN is a professional enterprise-grade AI relay service, dedicated to providing stable, efficient, and cost-effective AI model API access for enterprises and individual developers. The platform supports Claude, OpenAI, Gemini and other mainstream models, with prices as low as 7% of official rates. Register via <a href="https://apikey.fun/register?aff=cc_connect">this link</a> to enjoy an exclusive permanent 5% discount on all top-ups!</td>
-</tr>
-
-<tr>
-<tr>
-<td width="150"><a href="https://www.shengsuanyun.com/?from=CH_67XCLZGS"><img src="assets/sponsors/shengsuanyun.svg" alt="Shengsuanyun" width="120"></a></td>
-<td>Thanks to Shengsuanyun for sponsoring this project! Shengsuanyun is a super factory dedicated to serving AI Native Teams, an industrial-grade AI task parallel execution platform, and a model marketplace that aggregates and supplies computing power from domestic and international LLM and image/video multimedia models such as Claude, Chatgpt, and Gemini. It guarantees no reverse engineering or data manipulation, boasts a 99.7% SLA availability across the entire site, and its <a href="https://watch.shengsuanyun.com/status/shengsuanyun">monitoring interface</a> is consistently green. Furthermore, it offers an enterprise-grade customized gateway for refined cost and access control, featuring intelligent routing, security protection, and BYOK enterprise-provided key hosting. The platform is billed on a pay-as-you-go basis and with a tokens plan (coming soon), and invoices are available. New users who register using <a href="https://www.shengsuanyun.com/?from=CH_67XCLZGS">this link</a> will receive 10 yuan in model power and a 10% bonus on their first deposit.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://runapi.co/register?aff=4BXa"><img src="assets/sponsors/runapi.jpg" alt="RunAPI" width="120"></a></td>
-<td>Thanks to RunAPI for sponsoring this project! RunAPI is an efficient and stable API platform—an alternative to OpenRouter. A single API Key gives you access to 150+ leading models, including OpenAI, Claude, Gemini, DeepSeek, Grok, and more, at prices as low as 10% of the original (up to 90% off), with exceptional stability. It's seamlessly compatible with tools like Claude Code, OpenClaw, and others. RunAPI offers an exclusive perk for cc-connect users: register and contact an administrator to claim ¥7 in free credit.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://camel.kr777.top/register?aff=V2z8"><img src="assets/sponsors/camel_logo.png" alt="CaMeL" width="120"></a></td>
-<td>Thanks to CaMeL for sponsoring this project! In-depth cooperation with major research institutes and supercomputing centers, self-developed high-stability high-efficiency cache scheduling solution. Exclusive for cc-connect users: New registration authentication immediately receive $10 credit upon registration. Register via <a href="https://camel.kr777.top/register?aff=V2z8">this link</a>.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV"><img src="assets/sponsors/anyrouteio.png" alt="AnyRoute.io" width="120"></a></td>
-<td>Thanks to AnyRoute.io for sponsoring this project! AnyRoute.io is a reliable, stable, and efficient API relay platform integrating the latest Claude Code and Codex models. Transparent pricing with rates as low as 93% off official prices (just 0.7x), supports invoicing and enterprise-grade high-concurrency usage. Register via <a href="https://cc.anyroute.io/register?aff=CR455DSQSKEV">this link</a> to get started.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://aicanapi.com/register?aff=rIEy"><img src="assets/sponsors/aican.jpg" alt="aicanapi.com" width="120"></a></td>
-<td>Thanks to aicanapi.com for sponsoring this project! Aican API provides high-performance, low-latency, high-concurrency API services for enterprises and developers. Claude Code models at up to 84% off, other models at 80% off official price. Doubao Seedance 2 real-person generation service with queue-free access for faster responses. Choose Aican API for simpler, more efficient, and more cost-effective enterprise-grade AI services. Register via <a href="https://aicanapi.com/register?aff=rIEy">this link</a> to get started.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS"><img src="assets/sponsors/patewayai.png" alt="Pateway" width="120"></a></td>
-<td>Thanks to Pateway for sponsoring this project! PatewayAI is a premium API relay service for serious AI developers, offering 100% official direct access to Claude and Codex models — no reverse engineering, no quality degradation. Transparent billing with token-level verification. Enterprise-grade concurrency, formal contracts and invoicing available. Register via <a href="https://pateway.ai/?ch=2qn568&aff=DRA4VUFS">this link</a> to get $3 free trial credit, up to 40% off on top-ups, and referral rewards up to $150!</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://cy.10dianai.com/register?aff=3FQn"><img src="assets/sponsors/10dianai.png" alt="10点AI" width="120"></a></td>
-<td>Thanks to 10点AI for sponsoring this project! 10dian-AI Enterprise Platform is an AI API gateway for developers and enterprises, aggregating GPT, Claude, Gemini, DeepSeek and more. Optimized for production environments with stable high-concurrency operation, avoiding interface jitter and timeout issues. Affordable pricing, stable uptime, official guarantee. Register via <a href="https://cy.10dianai.com/register?aff=3FQn">this link</a> to get ¥5 free credit!</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://cloud.siliconflow.cn/i/650Yh2Z7"><img src="assets/sponsors/siliconflow.png" alt="SiliconFlow" width="120"></a></td>
-<td>Thanks to SiliconFlow for supporting this project! SiliconFlow is a high-performance AI infrastructure and model API platform, providing fast and reliable access to language, speech, image, and video models in one place. With pay-as-you-go billing, broad multimodal model support, high-speed inference, and enterprise-grade stability, SiliconFlow helps developers and teams build and scale AI applications more efficiently. Register via <a href="https://cloud.siliconflow.cn/i/650Yh2Z7">this link</a> and complete real-name verification to receive ¥20 in bonus credit!</td>
-</tr>
-
-
-<tr>
-<td width="150"><a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect"><img src="assets/sponsors/youyunzhisuan.png" alt="优云智算" width="120"></a></td>
-<td>Thanks to 优云智算 for sponsoring this project! 优云智算 (UCloud AI Cloud Platform) provides stable and comprehensive domestic and international model APIs with just one key. Featuring high-value Coding Plan packages (monthly or per-use), plus stable official relay for overseas models. Supports Claude Code, Codex, and API calls. Enterprise features include high concurrency, 7x24 technical support, and self-service invoicing. Register via <a href="https://passport.compshare.cn/register?referral_code=H65IOClRGu5CM7nn5ykfad&ytag=GPU_YY_YX_git_cc-connect">this link</a> to receive ¥5 free platform credit!</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://dragoncode.codes/register?ref=23ZELCPX"><img src="assets/sponsors/dragoncode.png" alt="DragonCode" width="120"></a></td>
-<td>Thanks to DragonCode for supporting this project. DragonCode has prepared a special benefit for cc-connect users: register via <a href="https://dragoncode.codes/register?ref=23ZELCPX">this link</a> to get started.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://coder.visioncoder.cn"><img src="assets/sponsors/visioncoder.png" alt="VisionCoder" width="120"></a></td>
-<td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity. VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
-</tr>
-
-
-<tr>
-<td width="150"><a href="https://code0.ai/register?aff=5cGO"><img src="assets/sponsors/code0.svg" alt="Code0" width="120"></a></td>
-<td>Thanks to Code0 for sponsoring this project! Code0 is an AI model aggregation API relay service for Chinese developers, compatible with OpenAI / Anthropic / Gemini protocols. One key for all mainstream models, stable support for Claude Code, Codex, Gemini CLI, cc-connect and more. Fixed exchange rate: ¥1.5 CNY = $1 USD API credit, transparent pricing, domestic direct connection, ready to use. Register via <a href="https://code0.ai/register?aff=5cGO">this link</a>.</td>
-</tr>
-
-<tr>
-<td width="150"><a href="https://console.claudeapi.com/register?aff=GDbA"><img src="assets/sponsors/claudeapi.svg" alt="claudeapi.com" width="120"></a></td>
-<td>Thanks to claudeapi.com for sponsoring this project! claudeapi is a high-quality direct Claude connection service for mid-to-high-end users. It is fully integrated with Anthropic's official first-party Keys and AWS Bedrock official channels — no reverse engineering, no intelligence degradation, no stitching. It fully preserves the official capabilities, long context, and tool-calling performance of Opus / Sonnet / Haiku. Designed specifically for Claude Code power users, Agent developers, and enterprise teams, it focuses on out-of-the-box usability and enterprise-grade stability. Invoicing and team onboarding are supported. Register via <a href="https://console.claudeapi.com/register?aff=GDbA">this link</a>.</td>
-</tr>
-</table>
-
-</details>
-
----
-
-<br>
-
-<p align="center">
-  <b>Control your local AI agents from any chat app. Anywhere, anytime.</b>
-</p>
-
-<p align="center">
-  cc-connect bridges AI agents running on your machine to the messaging platforms you already use.<br/>
-  Code review, research, automation, data analysis — anything an AI agent can do,<br/>
-  now accessible from your phone, tablet, or any device with a chat app.
-</p>
-
-<p align="center">
-  <img src="docs/images/connector.png" alt="CC-Connect Architecture" width="90%"/>
-</p>
-
-
-## 🆕 What's New in v1.4.0
-
-Stable release of the v1.4.0 series — **two new platforms join the family** (Cisco Webex, Matrix with E2EE), broader configurability across agents and platforms, Korean i18n, and a long list of fixes including three critical post-beta cherry-picks for a Send-goroutine race, a Feishu recall-probe quota burn, and a `run_as_user` EACCES regression.
-
-- 🚨 **Critical fixes shipped late** — Send-goroutine nil-pointer race that crashed the whole cc-connect process (#1436, @gotang); Feishu `MessageRecallDetector` burning ~1.3M OpenAPI calls/month per stuck session (#1321, @qvictl); `run_as_user` EACCES regression introduced by v1.3.4 (#1433, @chenhg5; reported by @vuyiv #1429).
-- **New platforms** — **Cisco Webex** first-class adapter (#1402, @bryantbarzola); **Matrix with E2EE** end-to-end-encrypted room support (#834). cc-connect now ships 15 chat platforms.
-- **Agent option parsing refactor** — unified `cmd` field across all agent adapters; `cli_path` is deprecated (still works with a warning) (#1297, @happyTonakai).
-- **Slack streaming + aggregated turn card** — live streaming preview while the agent is thinking, collapses into a single turn card on completion (#1333).
-- **Feishu rich card upgrades** — `after_click` card replacement for `cmd:` action handlers (#1299); batch images dispatched as one multi-image message (default coalesce window now 500 ms) so the first image of N is no longer dropped (#1408 carrying #1395).
-- **Codex per-config prompts + `model_catalog_json`** — `system_prompt` / `append_system_prompt` now honoured for the codex agent (#1345); Codex's own `model_catalog_json` is preferred as highest-priority model source (#1074, @happyTonakai).
-- **Zhipu GLM provider presets** — `z.ai` and `bigmodel` (CN) endpoint entries added (#1412, @clingnet).
-- **Korean (ko) i18n** — Web admin UI now ships Korean alongside zh / en / ja (#1343); `nav.cron` also localised for ko/ja/es.
-- **Claude Code plugins via `plugin_dir`** — load Claude Code plugins by pointing at a directory (#1325).
-- **Operational knobs** — `cc-connect send --cwd` workdir support (#1380, @MMMarcinho); `max_attachment_size_mb` for `cc-connect send` outbound size cap (#1392, @rablwupei); `CC_LOG_MAX_BACKUPS` env var for daemon log rotation (#1260); configurable `/history` truncation (#1291, @AaronZ345).
-- **acp graceful `/stop`** — new `AgentSessionCanceller` interface lets ACP agents stop cleanly (#1275).
-- **Reliability fixes** — workspace model persistence (#1372); core queued messages drain strictly FIFO (#1286); workspace binding + run_as_user fixes (#1315, #1316, #1433); claudecode mid-turn compaction keeps the turn alive (#1272); claudecode tool output reaches progress card via `EventToolResult` (#1407, @coolrockin); DingTalk stream loop panic recovery (#1390, reported by @gd0094); `/restart` notification queued and dispatched on platform ready (#1388 closing #1383); cron permission lookup with composite keys (#1067).
-- **Skill discovery hardened** — only depth-1 `SKILL.md` is registered; nested SKILL.md files are treated as assets, fixing 101 phantom slash-commands from `frontend-design` skill (#1317 carrying #1304).
-- **Windows cmdline hotfix on main** — v1.3.4's `--append-system-prompt-file` fix is now on main via #1378. Windows + claudecode users are unblocked here without needing the v1.3.4 hotfix branch.
-
-⚠️ **Upgrade notes**: `cli_path` is deprecated in favour of `cmd` (existing configs keep working). Feishu `imageBatchWindow` default changed from 150 ms → 500 ms. Feishu `MessageRecallDetector` fallback probe interval changed from 2 s → 60 s. Override in config if you preferred the old values.
-
-Full themed summary with credits: `changelogs/v1.4.0.md`. Per-beta detail: `changelogs/v1.4.0-beta.1.md`, `v1.4.0-beta.2.md`, `v1.4.0-beta.3.md`. The v1.3.4 Windows hotfix is documented in `changelogs/v1.3.4.md`.
-
-
-## 🧩 Platform feature snapshot
-
-High-level view of what each **built-in platform** can do in cc-connect.
-
-**Legend**
-
-| Symbol | Meaning |
-|--------|---------|
-| ✅ | Works in **stable** cc-connect with typical configuration |
-| ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
-| ❌ | Not supported or not applicable in practice |
-
-† **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
-
-| Capability | Feishu | WPS Xiezuo | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot | Matrix |
-|------------|:------:|:----------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|:------:|
-| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ | ⚠️ |
-| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Images & files | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Voice / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ | ❌ |
-| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-
-> **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
-> **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
-> Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
-
-
-## ✨ Why cc-connect?
-
-### 🤖 Universal Agent Support
-**10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin, Copilot — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
-
-### 📱 Platform Flexibility
-**13 Chat Platforms** — Feishu, WPS Xiezuo, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), Matrix, plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
-
-### 🔄 Multi-Agent Orchestration
-**Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
-
-### 🎮 Complete Chat Control
-**Full Control from Chat** — Switch models (`/model`), tune reasoning (`/reasoning`), change permission modes (`/mode`), manage sessions, all via slash commands.
-
-**Directory Switching in Chat** — Change where the next session starts with `/dir <path>` (and `/cd <path>` as a compatibility alias), plus quick history jump via `/dir <number>` / `/dir -`.
-
-### 🧠 Persistent Memory
-**Agent Memory** — Read and write agent instruction files (`/memory`) without touching the terminal.
-
-### ⏰ Intelligent Scheduling
-**Scheduled Tasks** — Set up cron jobs in natural language. *"Every day at 6am, summarize GitHub trending"* just works.
-
-### 🎤 Multimodal Support
-**Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
-
-### 📦 Multi-Project Architecture
-**Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
-
-### 🌍 Multilingual Interface
-**5 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, and Spanish. Built-in i18n ensures everyone feels at home.
-
-
-<p align="center">
-  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-telegram.JPG" alt="Telegram" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
-</p>
-<p align="center">
-  <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
-</p>
-
-
-## 🚀 Quick Start
-
-### 🤖 Install & Configure via AI Agent (Recommended)
-
-> **The easiest way** — Send this to Claude Code or any AI coding agent, and it will handle the entire installation and configuration for you:
+After the first beta is published:
 
 ```bash
-Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to install and configure cc-connect.
+npm install -g cc-connect-next@beta
+cc-connect-next --version
 ```
 
+The npm package and GitHub release use the same version and download the matching native binary.
 
-### 📦 Manual Install
-
-**Via npm:**
-
-```bash
-npm install -g cc-connect
-```
-
-**Via Homebrew (macOS / Linux):**
+### Build the current source
 
 ```bash
-brew install cc-connect
-```
-
-**Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
-
-```bash
-# Linux amd64 - Stable
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
-chmod +x cc-connect
-sudo mv cc-connect /usr/local/bin/
-
-```
-
-**Build from source (requires Go 1.22+):**
-
-```bash
-git clone https://github.com/chenhg5/cc-connect.git
-cd cc-connect
+git clone https://github.com/timmyagentic/cc-connect-next.git
+cd cc-connect-next
 make build
+./cc-connect-next --version
 ```
 
+Run `cc-connect-next` once to create the secure starter config at `~/.cc-connect-next/config.toml`, then add the Feishu app credentials.
 
-### ⚙️ Configure
+## Migrate from official CC Connect
 
-> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
-
-If you prefer manual configuration:
+The migration is explicit and does not stop, uninstall, or modify official CC Connect.
 
 ```bash
-mkdir -p ~/.cc-connect
-cp config.example.toml ~/.cc-connect/config.toml
-vim ~/.cc-connect/config.toml
+cc-connect-next migrate --dry-run
+cc-connect-next migrate
+cc-connect-next --config ~/.cc-connect-next/config.toml
 ```
 
-Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
-`admin_from` must be placed under `[[projects]]` (not under `[projects.platforms.options]`). You can use `/whoami` or `/status` to get your current `User ID`.
-When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
+It copies `config.toml` and persistent state such as sessions, projects, cron/timer data, bindings, and local provider configuration. It rewrites `data_dir` to `~/.cc-connect-next` and excludes runtime-only paths including logs, sockets, locks, restart notifications, and daemon metadata. Existing targets are refused unless `--force` is supplied deliberately.
 
-
-### ▶️ Run
+Custom locations are supported:
 
 ```bash
-./cc-connect
+cc-connect-next migrate \
+  --source /path/to/official-data \
+  --target /path/to/next-data \
+  --dry-run
 ```
 
+## Recommended Feishu configuration
 
-### 🔄 Upgrade
-
-```bash
-# npm
-npm install -g cc-connect
-
-# Homebrew
-brew upgrade cc-connect
-
-# Binary self-update
-cc-connect update           # Stable
-cc-connect update --pre     # Include pre-releases
-```
-
-
-## 📊 Support Matrix
-
-| Component | Type | Status |
-|-----------|------|--------|
-| Agent | Claude Code | ✅ Supported |
-| Agent | Codex (OpenAI) | ✅ Supported |
-| Agent | Cursor Agent | ✅ Supported |
-| Agent | Gemini CLI (Google) | ✅ Supported |
-| Agent | Qoder CLI | ✅ Supported |
-| Agent | OpenCode (Crush) | ✅ Supported |
-| Agent | iFlow CLI | ✅ Supported |
-| Agent | Kimi CLI (Moonshot) | ✅ Supported |
-| Agent | Pi (Cursor Background Agent) | ✅ Supported |
-| Agent | Copilot (GitHub) | ✅ Supported |
-| Agent | ACP (Agent Client Protocol) | ✅ Any [ACP-compatible agent](https://agentclientprotocol.com/get-started/agents) |
-| Agent | Devin (Cognition) | ✅ Supported (via ACP) |
-| Agent | Goose (Block) | 🔜 Planned |
-| Agent | Aider | 🔜 Planned |
-| Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
-| Platform | DingTalk | ✅ Stream — no public IP needed |
-| Platform | WPS Xiezuo | ✅ WebSocket — no public IP needed |
-| Platform | Telegram | ✅ Long Polling — no public IP needed |
-| Platform | Slack | ✅ Socket Mode — no public IP needed |
-| Platform | Discord | ✅ Gateway — no public IP needed |
-| Platform | Weibo | ✅ WebSocket — no public IP needed |
-| Platform | LINE | ✅ Webhook — public URL required |
-| Platform | WeChat Work | ✅ WebSocket / Webhook |
-| Platform | Weixin (personal, ilink) | ✅— HTTP long polling — no public IP needed |
-| Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
-| Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
-| Platform | Matrix | ✅ Long Polling (/sync) — no public IP needed |
-
-
-## 📖 Platform Setup Guides
-
-| Platform | Guide | Connection | Public IP? |
-|----------|-------|------------|------------|
-| Feishu (Lark) | [docs/feishu.md](docs/feishu.md) | WebSocket | No |
-| DingTalk | [docs/dingtalk.md](docs/dingtalk.md) | Stream | No |
-| WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
-| Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
-| Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
-| Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
-| Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
-| WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
-| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
-| QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
-| Matrix | [docs/matrix.md](docs/matrix.md) | /sync (Long Polling) | No |
-
-
-## 🎯 Key Features
-
-### 💬 Session Management
-
-```
-/new [name]       Start a new session
-/list             List all sessions
-/switch <id>      Switch session
-/current          Show current session
-/dir [path|reset] Show, switch, or reset work directory
-```
-
-Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
+New configs already use these defaults:
 
 ```toml
+[display]
+mode = "compact"
+card_mode = "rich"
+thinking_messages = false
+tool_messages = false
+show_context_indicator = false
+reply_footer = false
+
 [[projects]]
-reset_on_idle_mins = 30   # default when unset; set to 0 to disable
+name = "my-project"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/absolute/path/to/project"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "${FEISHU_APP_ID}"
+app_secret = "${FEISHU_APP_SECRET}"
+reply_to_trigger = true
+done_emoji = "Done"
 ```
 
-The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
+Set `card_mode = "legacy"` to opt out and use the inherited CC Connect message rendering.
 
-### 🛡️ OS-User Isolation (`run_as_user`)
+## Coexistence and switching
 
-On Linux/macOS, a project can spawn its agent under a different Unix
-user for OS-level file-system isolation from the supervisor user that
-runs cc-connect. Currently supported by Claude Code.
+Official CC Connect and cc-connect-next can be installed side by side:
 
-```toml
-[[projects]]
-name = "claude-sandboxed"
-run_as_user = "partseeker-coder"
-run_as_env = ["PGSSLROOTCERT"]
-```
+| Boundary | Official | cc-connect-next |
+|---|---|---|
+| Command | `cc-connect` | `cc-connect-next` |
+| Data | `~/.cc-connect` | `~/.cc-connect-next` |
+| macOS service | `com.cc-connect.service` | `com.cc-connect-next.service` |
+| Linux service | `cc-connect.service` | `cc-connect-next.service` |
+| API socket | `~/.cc-connect/run/api.sock` | `~/.cc-connect-next/run/api.sock` |
 
-The target user needs passwordless sudo from the supervisor, no sudo
-of its own, read+write on `work_dir`, and its own `~/.claude/settings.json`
-with whatever credentials the agent uses. If you authenticate via
-`claude.ai` OAuth, symlink the target user's `~/.claude/.credentials.json`
-to the supervisor's copy so token refresh stays in sync — see the
-[environment propagation checklist](./docs/usage.md#environment-propagation-what-moves-into-the-target-users-home)
-for details. See
-[`docs/usage.md`](./docs/usage.md#running-agents-as-a-different-unix-user-run_as_user)
-for the full setup.
+Do not run both against the same Feishu app credentials at the same time: two WebSocket consumers can race or duplicate handling. Use a separate test app for parallel runtime testing, or stop the official daemon only when you deliberately switch production traffic. Installation and migration themselves are safe to perform while the official daemon remains installed.
 
-Before starting cc-connect, audit the setup with:
+Rollback is simply:
 
 ```bash
-cc-connect doctor user-isolation
+cc-connect-next daemon stop
+cc-connect daemon start
 ```
 
-This runs three go/no-go preflight gates and an isolation probe that
-reports what the target user can and cannot read. cc-connect refuses to
-start if any gate fails or if the probe detects a cross-user leak.
+The official data directory remains untouched.
 
----
+## Agent-readable install task
 
-### 🔐 Permission Modes
-
-```
-/mode             Show available modes
-/mode yolo        # Auto-approve all tools
-/mode default     # Ask for each tool
-```
-
-
-### 🔄 Provider Management
-
-```
-/provider list              List providers
-/provider switch <name>     Switch API provider at runtime
-```
-
-
-### 🤖 Model Selection
-
-```
-/model                      List available models (format: alias - model)
-/model switch <alias>       Switch to model by alias
-```
-
-
-### 📂 Work Directory
-
-```
-/dir                         Show current work directory and history
-/dir <path>                  Switch to a path (relative or absolute)
-/dir <number>                Switch from history
-/dir -                       Switch to previous directory
-/cd <path>                   Compatibility alias for /dir <path>
-```
-
-
-### ⏰ Scheduled Tasks
-
-```bash
-/cron add 0 6 * * * Summarize GitHub trending
-```
-
-### 📎 Agent Attachment Send-Back
-
-When an agent generates a local screenshot, chart, PDF, bundle, or other file, it can send that attachment back to the current chat.
-
-First release supports:
-- Feishu
-- Telegram
-
-If your agent does not natively inject the system prompt, run this once in chat after upgrading:
+Paste this into a coding agent:
 
 ```text
-/bind setup
+Install cc-connect-next from https://github.com/timmyagentic/cc-connect-next.
+First verify the OS/architecture and whether cc-connect is currently running.
+Do not stop, uninstall, overwrite, or edit official CC Connect.
+Use the beta package if it is published; otherwise build the current source. Then run
+`cc-connect-next migrate --dry-run`, report the plan,
+then run the real migration only after confirming the target is ~/.cc-connect-next.
+Validate `cc-connect-next --version`, config permissions, independent daemon name,
+and independent API socket. Do not start both runtimes with the same Feishu app.
 ```
 
-or:
-
-```text
-/cron setup
-```
-
-This refreshes the cc-connect instructions in the project memory file so the agent knows how to send attachments back.
-
-You can control this feature globally in `config.toml`:
-
-```toml
-attachment_send = "on"  # default: "on"; set to "off" to block image/file send-back
-```
-
-This switch is independent from the agent's `/mode`. It only controls `cc-connect send --image/--file`. Voice send-back uses the TTS config instead.
-
-Examples:
+## Development
 
 ```bash
-cc-connect send --image /absolute/path/to/chart.png
-cc-connect send --file /absolute/path/to/report.pdf
-cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
-cc-connect send --tts "Hello from cc-connect"
+make web
+go test ./...
+make build-noweb
 ```
 
-Notes:
-- Absolute paths are the safest option.
-- `--image` and `--file` can both be repeated.
-- `--tts` sends synthesized speech when the user asks for a voice reply.
-- `attachment_send = "off"` disables only attachment send-back; ordinary text replies still work.
-- Attachments are capped at 50 MiB by default; configure with `max_attachment_size_mb` (or `CC_MAX_ATTACHMENT_SIZE_MB` env, same MiB unit).
-- This command is for generated attachments, not ordinary text replies.
+Focused card tests:
 
-📖 **Full documentation:** [docs/usage.md](docs/usage.md)
+```bash
+go test ./platform/feishu -run TestBuildRichCard -count=1
+go test ./core -run TestProcessInteractiveEvents_RichCard -count=1
+go test -tags no_web ./cmd/cc-connect -run TestMigrateLegacyData -count=1
+```
 
+## Attribution and license
 
-## 📚 Documentation
-
-- [Usage Guide](docs/usage.md) — Complete feature documentation
-- [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
-- [config.example.toml](config.example.toml) — Configuration template
-- [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests
-
-
-## 👥 Community
-
-- [Discord](https://discord.gg/kHpwgaM4kq)
-- [Telegram](https://t.me/+odGNDhCjbjdmMmZl)
-
-
-## ☕ Support the Project
-
-If cc-connect has been helpful to you, consider buying us a coffee! Your support helps us:
-
-- 🛠️ Maintain and improve the project
-- 📚 Write better documentation and tutorials
-- 🐛 Fix bugs and add new features faster
-- ☕ Keep the developers caffeinated
-
-### How to Donate
-
-**Buy Me a Coffee**: [https://buymeacoffee.com/cg33](https://buymeacoffee.com/cg33)
-
-**WeChat Pay / Alipay**:
-
-| WeChat Pay | Alipay |
-|:----------:|:------:|
-| <img src="docs/images/wechatpay.jpg" alt="WeChat Pay" width="150"> | <img src="docs/images/alipay.jpg" alt="Alipay" width="150"> |
-
-### Thank You, Donors! 🎉
-
-We're grateful to everyone who has supported this project. Leave your GitHub username in the donation message if you'd like to be recognized here!
-
-<!-- Donors will be listed below -->
-| Avatar | GitHub Username | Date |
-|--------|-----------------|------|
-| <img src="https://avatars.githubusercontent.com/u/1762560?v=4" width="40" height="40" style="border-radius: 50%;"> | [@thx0701](https://github.com/thx0701) | 2026-04-29 |
-
-
-## 🤝 Commercial Cooperation
-
-We accept the following commercial collaborations:
-
-- **Enterprise Customization**: Custom deployment for internal AI tooling (Feishu, DingTalk, WeChat Work, Slack, etc.)
-- **Technical Consulting**: AI agent integration and architecture design
-- **Outsourcing Projects**: AI-related system development
-
-**Contact**: **Email**: chg80333@gmail.com | **WeChat**: mongorz | [Telegram](https://t.me/+odGNDhCjbjdmMmZl) | [Discord](https://discord.gg/kHpwgaM4kq)
-
-
-## 🙏 Contributors
-
-<a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
-</a>
-
-
-## ⭐ Star History
-
-<a href="https://www.star-history.com/#chenhg5/cc-connect&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
- </picture>
-</a>
-
-
-## 📄 License
-
-MIT License
-
-
-<p align="center">
-  <sub>Built with ❤️ by the cc-connect community</sub>
-</p>
+cc-connect-next starts from CC Connect v1.4.1 and preserves its Git history. See [NOTICE](NOTICE) for attribution and [LICENSE](LICENSE) for MIT terms.

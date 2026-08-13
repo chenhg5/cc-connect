@@ -92,7 +92,7 @@ func runRelaySend(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -127,16 +127,16 @@ func runRelaySend(args []string) {
 }
 
 func printRelayUsage() {
-	fmt.Println(`Usage: cc-connect relay <command> [options]
+	fmt.Println(`Usage: cc-connect-next relay <command> [options]
 
 Commands:
   send      Send a message to another bot via relay
 
-Run 'cc-connect relay <command> --help' for details.`)
+Run 'cc-connect-next relay <command> --help' for details.`)
 }
 
 func printRelaySendUsage() {
-	fmt.Println(`Usage: cc-connect relay send [options] [<target_project> <message>]
+	fmt.Println(`Usage: cc-connect-next relay send [options] [<target_project> <message>]
 
 Send a message to another bot and wait for the response.
 
@@ -145,10 +145,10 @@ Options:
   -t, --to <project>         Target bot project name
   -s, --session-key <key>    Session key (auto-detected from CC_SESSION_KEY env)
   -m, --message <text>       Message to send
-      --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --data-dir <path>      Data directory (default: ~/.cc-connect-next)
   -h, --help                 Show this help
 
 Examples:
-  cc-connect relay send --to claude-bot "What's the weather today?"
-  cc-connect relay send claude-bot What is the weather today`)
+  cc-connect-next relay send --to claude-bot "What's the weather today?"
+  cc-connect-next relay send claude-bot What is the weather today`)
 }

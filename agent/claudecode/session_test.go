@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestHandleResultParsesUsage(t *testing.T) {
@@ -460,22 +460,22 @@ func TestBuildAppendSystemPrompt(t *testing.T) {
 }
 
 // TestEnsureSharedSystemPromptFile_WritesOnceAndReuses covers the 99%
-// case for the #1376 workaround. The cc-connect default
+// case for the #1376 workaround. The cc-connect-next default
 // AgentSystemPrompt is written once to <ccDataDir>/agent-prompts/
-// cc-connect-system.md and reused across spawns — no per-spawn write,
+// cc-connect-next-system.md and reused across spawns — no per-spawn write,
 // no cleanup. claude only reads the file, so reuse is safe under
 // concurrent spawns.
 func TestEnsureSharedSystemPromptFile_WritesOnceAndReuses(t *testing.T) {
 	dir := t.TempDir()
-	content := "## cc-connect prompt\n" + makeFiller(10*1024)
+	content := "## cc-connect-next prompt\n" + makeFiller(10*1024)
 
 	// First call must create the file.
 	path1, err := ensureSharedSystemPromptFile(dir, content)
 	if err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
-	if !strings.HasSuffix(filepath.ToSlash(path1), "agent-prompts/cc-connect-system.md") {
-		t.Errorf("path %q does not end in agent-prompts/cc-connect-system.md", path1)
+	if !strings.HasSuffix(filepath.ToSlash(path1), "agent-prompts/cc-connect-next-system.md") {
+		t.Errorf("path %q does not end in agent-prompts/cc-connect-next-system.md", path1)
 	}
 	got, err := os.ReadFile(path1)
 	if err != nil {
@@ -511,7 +511,7 @@ func TestEnsureSharedSystemPromptFile_WritesOnceAndReuses(t *testing.T) {
 }
 
 // TestEnsureSharedSystemPromptFile_RewritesOnContentChange covers
-// cc-connect upgrades: when AgentSystemPrompt content changes between
+// cc-connect-next upgrades: when AgentSystemPrompt content changes between
 // releases, the shared file must be refreshed automatically.
 func TestEnsureSharedSystemPromptFile_RewritesOnContentChange(t *testing.T) {
 	dir := t.TempDir()
@@ -541,7 +541,7 @@ func TestEnsureSharedSystemPromptFile_EmptyDirUsesTempDir(t *testing.T) {
 		t.Fatalf("ensure with empty dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(path) })
-	if !strings.Contains(filepath.ToSlash(path), "/agent-prompts/cc-connect-system.md") {
+	if !strings.Contains(filepath.ToSlash(path), "/agent-prompts/cc-connect-next-system.md") {
 		t.Errorf("unexpected fallback path: %q", path)
 	}
 }
@@ -576,7 +576,7 @@ func TestWriteTempAppendPromptFile_UniquePerCall(t *testing.T) {
 
 // TestWriteTempAppendPromptFile_ReadableByOtherUser guards the
 // run_as_user regression from issue #1429. os.CreateTemp defaults to
-// 0600 owned by the cc-connect process user; when the agent is
+// 0600 owned by the cc-connect-next process user; when the agent is
 // spawned as a different OS user (via run_as_user), a 0600 root-owned
 // file is unreadable and the agent exits with EACCES before reading
 // any prompt at all. The fix is to chmod 0o644 immediately after

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/config"
+	"github.com/timmyagentic/cc-connect-next/config"
 	qrterminal "github.com/mdp/qrterminal/v3"
 	"rsc.io/qr"
 )
@@ -168,7 +168,7 @@ func runFeishuSetup(args []string, requestedMode string) {
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: onboarding failed: %v\n", err)
-			fmt.Fprintln(os.Stderr, "Tip: you can bind an existing bot with `cc-connect feishu bind --app app_id:app_secret`")
+			fmt.Fprintln(os.Stderr, "Tip: you can bind an existing bot with `cc-connect-next feishu bind --app app_id:app_secret`")
 			os.Exit(1)
 		}
 		resolvedAppID = result.AppID
@@ -322,7 +322,7 @@ func printBotMenuGuidance(platformType string) {
 	fmt.Println()
 	fmt.Println("   推荐菜单配置：")
 	fmt.Println("   ┌─────────────────────────────────────────────┐")
-	fmt.Println("   │ 主菜单: cc-connect                          │")
+	fmt.Println("   │ 主菜单: cc-connect-next                          │")
 	fmt.Println("   │   ├── /help     帮助                        │")
 	fmt.Println("   │   ├── /status   状态                        │")
 	fmt.Println("   │   ├── /new      新会话                      │")
@@ -345,7 +345,7 @@ func printBotMenuGuidance(platformType string) {
 }
 
 func printFeishuUsage() {
-	fmt.Println(`Usage: cc-connect feishu <command> [options]
+	fmt.Println(`Usage: cc-connect-next feishu <command> [options]
 
 Commands:
   setup   Unified entry: no credentials => NEW flow; with --app/--app-id => BIND flow
@@ -367,14 +367,14 @@ Options:
 
 Examples:
   # Recommended: one command for both flows
-  cc-connect feishu setup --project my-project
-  cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
+  cc-connect-next feishu setup --project my-project
+  cc-connect-next feishu setup --project my-project --app cli_xxx:sec_xxx
 
   # Equivalent to "setup --app ..."
-  cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
+  cc-connect-next feishu bind --project my-project --app cli_xxx:sec_xxx
 
   # Use only when you must force QR onboarding
-  cc-connect feishu new --project my-project --platform-type lark`)
+  cc-connect-next feishu new --project my-project --platform-type lark`)
 }
 
 func resolveFeishuSetupInputs(mode, app, appID, appSecret string) (effectiveMode, resolvedAppID, resolvedAppSecret string, err error) {
@@ -411,7 +411,7 @@ func resolveFeishuSetupInputs(mode, app, appID, appSecret string) (effectiveMode
 		return "", "", "", fmt.Errorf("bind mode requires credentials: use --app id:secret or --app-id/--app-secret")
 	}
 	if mode == feishuSetupModeNew && (appID != "" || appSecret != "") {
-		return "", "", "", fmt.Errorf("new mode does not accept credentials; use `cc-connect feishu bind`")
+		return "", "", "", fmt.Errorf("new mode does not accept credentials; use `cc-connect-next feishu bind`")
 	}
 
 	return effectiveMode, appID, appSecret, nil

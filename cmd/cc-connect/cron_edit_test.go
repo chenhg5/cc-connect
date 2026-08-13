@@ -12,7 +12,7 @@ import (
 // and the user gets back "unknown or invalid field: <field>".
 //
 // Pre-fix bug: `silent` was missing from the bool case, so
-// `cc-connect cron edit <id> silent true` shipped {"value": "true"} and the
+// `cc-connect-next cron edit <id> silent true` shipped {"value": "true"} and the
 // server rejected it. printCronEditUsage already documents `silent` as a
 // bool, so the CLI parsing has to match.
 func TestParseCronEditValue(t *testing.T) {

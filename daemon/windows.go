@@ -15,7 +15,7 @@ import (
 
 const (
 	windowsTaskName   = ServiceName
-	windowsScriptName = "cc-connect-daemon.ps1"
+	windowsScriptName = "cc-connect-next-daemon.ps1"
 )
 
 var runPowerShell = func(script string) (string, error) {
@@ -51,7 +51,7 @@ func (m *schtasksManager) Install(cfg Config) error {
 	// 0644 has weak semantics on Windows; the file ACL is what matters.
 	// We still write 0600 so the file's POSIX bits do not advertise read
 	// access, and rely on the user's own profile ACLs for primary defense
-	// (the script lives under %USERPROFILE%\.cc-connect by default).
+	// (the script lives under %USERPROFILE%\.cc-connect-next by default).
 	// WriteFile only applies perm on create, so Chmod the existing file
 	// after writing to harden reinstalls of pre-existing 0644 scripts.
 	if err := os.WriteFile(scriptPath, []byte(buildWindowsTaskScript(cfg)), 0600); err != nil {

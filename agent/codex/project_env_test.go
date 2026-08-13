@@ -7,7 +7,7 @@ import (
 // TestNew_ParsesProjectEnvFromOpts verifies that env vars declared under
 // [projects.agent.options.env] in config.toml are loaded into the agent's
 // configEnv field. Without this, user-scoped env (e.g. HTTPS_PROXY in the
-// shell that launched cc-connect) silently overrides the values intended
+// shell that launched cc-connect-next) silently overrides the values intended
 // for the codex subprocess.
 //
 // Regression for: codex agent ignoring opts["env"] in factory.

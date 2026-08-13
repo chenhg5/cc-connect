@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestSlugify(t *testing.T) {
@@ -15,7 +15,7 @@ func TestSlugify(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"cc-connect", "cc-connect"},
+		{"cc-connect-next", "cc-connect-next"},
 		{"Daily", "daily"},
 		{"My Project", "my-project"},
 		{"hello_world", "hello-world"},

@@ -5,13 +5,13 @@
 
 ## Overview
 
-The Bridge Protocol allows **external platform adapters** written in any programming language to connect to cc-connect at runtime via WebSocket. This eliminates the requirement to write Go code and recompile the binary for every new platform integration.
+The Bridge Protocol allows **external platform adapters** written in any programming language to connect to cc-connect-next at runtime via WebSocket. This eliminates the requirement to write Go code and recompile the binary for every new platform integration.
 
 ### Architecture
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                    cc-connect                        │
+│                    cc-connect-next                        │
 │                                                      │
 │   ┌────────────┐ ┌────────────┐ ┌────────────────┐  │
 │   │  Telegram   │ │   Feishu   │ │ BridgePlatform │  │
@@ -33,7 +33,7 @@ The Bridge Protocol allows **external platform adapters** written in any program
    └─────────────────┘  └─────────────────┘
 ```
 
-The `BridgePlatform` is a built-in platform inside cc-connect that:
+The `BridgePlatform` is a built-in platform inside cc-connect-next that:
 
 1. Exposes a WebSocket endpoint for external adapters to connect.
 2. Translates WebSocket messages into `core.Platform` interface calls.
@@ -74,7 +74,7 @@ Unauthenticated connections are rejected with HTTP 401.
 ### Connection Lifecycle
 
 ```
-Adapter                          cc-connect
+Adapter                          cc-connect-next
   │                                  │
   │──── WebSocket Connect ──────────→│  (with token)
   │                                  │
@@ -95,7 +95,7 @@ Adapter                          cc-connect
 
 All messages are JSON objects with a required `type` field. The protocol uses newline-delimited JSON over WebSocket text frames (one JSON object per frame).
 
-### Adapter → cc-connect
+### Adapter → cc-connect-next
 
 #### `register`
 
@@ -151,7 +151,7 @@ Delivers an incoming user message to the engine.
 | `user_id` | string | yes | User identifier on the platform. |
 | `user_name` | string | no | Display name. |
 | `content` | string | yes | Text content. |
-| `reply_ctx` | string | yes | Opaque context string the adapter needs to route replies back. cc-connect echoes this in every reply. |
+| `reply_ctx` | string | yes | Opaque context string the adapter needs to route replies back. cc-connect-next echoes this in every reply. |
 | `images` | Image[] | no | Attached images (see [Image Object](#image-object)). |
 | `files` | File[] | no | Attached files (see [File Object](#file-object)). |
 | `audio` | Audio | no | Voice message (see [Audio Object](#audio-object)). |
@@ -192,7 +192,7 @@ Acknowledges a preview start and returns a handle for subsequent updates.
 
 #### `ping`
 
-Keepalive. cc-connect responds with `pong`.
+Keepalive. cc-connect-next responds with `pong`.
 
 ```json
 {
@@ -203,7 +203,7 @@ Keepalive. cc-connect responds with `pong`.
 
 ---
 
-### cc-connect → Adapter
+### cc-connect-next → Adapter
 
 #### `register_ack`
 
@@ -307,7 +307,7 @@ Requests the adapter to delete a message (e.g., cleaning up preview messages).
 
 #### `card`
 
-Send a structured card to the user. Only sent if the adapter declared `"card"` capability; otherwise cc-connect falls back to `reply` with `card.RenderText()`.
+Send a structured card to the user. Only sent if the adapter declared `"card"` capability; otherwise cc-connect-next falls back to `reply` with `card.RenderText()`.
 
 ```json
 {
@@ -478,7 +478,7 @@ Notify the adapter of a server-side error.
 | `delete_message` | Delete messages | `delete_message` |
 | `reconstruct_reply` | Can reconstruct reply context from session_key | Enables cron/heartbeat messages |
 
-If a capability is not declared, cc-connect will automatically degrade:
+If a capability is not declared, cc-connect-next will automatically degrade:
 - No `card` → cards are rendered as plain text via `RenderText()`.
 - No `buttons` → buttons are omitted or rendered as text hints.
 - No `preview` → streaming is disabled; only the final reply is sent.
@@ -799,17 +799,17 @@ If the WebSocket connection drops, the adapter should:
 
 1. Wait with exponential backoff (starting at 1s, max 60s).
 2. Reconnect and send a new `register` message.
-3. Resume normal operation — cc-connect maintains session state independently of the connection.
+3. Resume normal operation — cc-connect-next maintains session state independently of the connection.
 
 ### Message Ordering
 
-Messages within a single WebSocket connection are ordered. cc-connect processes adapter messages sequentially per session key.
+Messages within a single WebSocket connection are ordered. cc-connect-next processes adapter messages sequentially per session key.
 
 ### Timeouts
 
 - **Ping interval**: Adapters should send `ping` at least every 30 seconds.
-- **Connection timeout**: cc-connect closes idle connections after 90 seconds without a ping.
-- **Reply timeout**: If an agent takes too long, cc-connect may send an error reply. The adapter does not need to handle this specially.
+- **Connection timeout**: cc-connect-next closes idle connections after 90 seconds without a ping.
+- **Reply timeout**: If an agent takes too long, cc-connect-next may send an error reply. The adapter does not need to handle this specially.
 
 ---
 
@@ -834,7 +834,7 @@ No per-adapter project configuration is needed — adapters are associated with 
 
 When building an adapter, follow these guidelines:
 
-1. **Keep it stateless** — the adapter should be a thin translation layer. All session state lives in cc-connect.
+1. **Keep it stateless** — the adapter should be a thin translation layer. All session state lives in cc-connect-next.
 2. **Handle reconnection** — network failures are normal. Implement exponential backoff.
 3. **Declare capabilities honestly** — only declare capabilities your platform actually supports.
 4. **Use `reply_ctx` faithfully** — always echo back the `reply_ctx` from the original message.
@@ -892,7 +892,7 @@ asyncio.run(main())
 
 ## Versioning
 
-The protocol version is declared in the `register` message via `metadata.protocol_version`. The current version is `1`. cc-connect will reject connections with incompatible versions and respond with a `register_ack` containing an error.
+The protocol version is declared in the `register` message via `metadata.protocol_version`. The current version is `1`. cc-connect-next will reject connections with incompatible versions and respond with a `register_ack` containing an error.
 
 ```json
 {
