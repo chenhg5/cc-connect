@@ -253,7 +253,7 @@ func TestAllowList(t *testing.T) {
 		user   string
 		expect bool
 	}{
-		{"", "anyone", true},
+		{"", "anyone", false},
 		{"*", "anyone", true},
 		{"user1", "user1", true},
 		{"user1", "USER1", true},
