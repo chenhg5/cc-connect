@@ -4910,7 +4910,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			err = streamCard.Finalize(e.ctx, "")
 		}
 		if err != nil {
-			slog.Debug("streaming card: failed to discard silent turn", "error", err)
+			slog.Debug("streaming card: failed to discard active card", "error", err)
 		}
 		streamCard = nil
 	}
@@ -5000,6 +5000,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				return
 			}
 			sp.discard()
+			discardStreamingCard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()

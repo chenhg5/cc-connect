@@ -14742,6 +14742,48 @@ func TestProcessInteractiveEvents_SilentReplyDiscardsStreamingCard(t *testing.T)
 	}
 }
 
+func TestEngineStopDiscardsActiveStreamingCard(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "dingtalk:user-stop-stream-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stop-stream-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-stop-stream-card"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stop-stream-card", time.Now(), nil, nil, state.replyCtx)
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for !p.cardCreated.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("streaming card was not created before shutdown")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interactive turn did not exit after shutdown")
+	}
+
+	card := p.getCard()
+	if card == nil || !card.discarded.Load() {
+		t.Fatal("engine shutdown left its eager streaming card active")
+	}
+	if card.finalized.Load() {
+		t.Fatal("engine shutdown bypassed the platform discard capability")
+	}
+}
+
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	agentSession := newResultAgentSession("agent reply")
