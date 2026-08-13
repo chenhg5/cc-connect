@@ -1995,6 +1995,22 @@ type stubRichCardSplitPlatform struct {
 	*stubRichCardSilentPlatform
 }
 
+type stubRichCardStartFailurePlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *stubRichCardStartFailurePlatform) SendPreviewStart(context.Context, any, string) (any, error) {
+	return nil, errors.New("simulated rich-card start failure")
+}
+
+type stubRichCardUpdateFailurePlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *stubRichCardUpdateFailurePlatform) UpdateMessage(context.Context, any, string) error {
+	return errors.New("simulated rich-card update failure")
+}
+
 func (p *stubRichCardSplitPlatform) SplitMarkdownByTables(markdown string, _ int) []string {
 	return []string{markdown, "unexpected overflow card"}
 }
@@ -2247,6 +2263,97 @@ func TestProcessInteractiveEvents_RichCardRendersWorkspaceReferences(t *testing.
 	}
 	if strings.Contains(final, raw) {
 		t.Fatalf("rich card retained the raw absolute path: %q", final)
+	}
+}
+
+func TestProcessInteractiveEvents_FailedRichCardRendersWorkspaceReferences(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+	sessionKey := "feishu:user-rich-failed-reference"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-failed-reference")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-failed-reference",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "/root/code/demo-repo/src/services/user_profile_service.ts:42"
+	agentSession.events <- Event{Type: EventText, Content: raw}
+	agentSession.events <- Event{Type: EventError, Error: errors.New("simulated private failure")}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-failed-reference", time.Now(), nil, nil, state.replyCtx)
+
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("expected a failed rich-card update")
+	}
+	final := updates[len(updates)-1]
+	want := "📄 `demo-repo/src/services/user_profile_service.ts:42`"
+	if !strings.Contains(final, "status=error") || !strings.Contains(final, want) {
+		t.Fatalf("failed rich card did not retain the rendered safe partial: %q", final)
+	}
+	if strings.Contains(final, raw) {
+		t.Fatalf("failed rich card reintroduced the raw absolute path: %q", final)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform func(*stubRichCardSilentPlatform) Platform
+	}{
+		{
+			name: "start failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardStartFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+		},
+		{
+			name: "update failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := tt.platform(base)
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			sessionKey := "feishu:user-rich-fallback-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-fallback-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-fallback"}
+			e.interactiveStates[sessionKey] = state
+
+			answer := "Readable fallback answer."
+			agentSession.events <- Event{Type: EventResult, Content: answer, Done: true}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-fallback", time.Now(), nil, nil, state.replyCtx)
+
+			sent := base.getSent()
+			if len(sent) != 1 || sent[0] != answer {
+				t.Fatalf("fallback sent = %q, want only the assistant answer", sent)
+			}
+			if strings.Contains(sent[0], "rich:status=") {
+				t.Fatalf("fallback exposed rich-card JSON as message text: %q", sent[0])
+			}
+		})
 	}
 }
 

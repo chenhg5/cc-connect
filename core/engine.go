@@ -4644,7 +4644,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// answer is safe to retain because it was already user-visible.
 		body := ""
 		if len(safeBody) > 0 {
-			body = safeBody[0]
+			body = workspaceRenderer(safeBody[0])
 			if resolver, ok := p.(RichCardMarkdownResolver); ok && body != "" {
 				body = resolver.ResolveRichCardMarkdown(e.ctx, body, true)
 			}
@@ -5577,6 +5577,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Keep the entire answer on the one quoted lifecycle card. Feishu's
 				// renderer converts tables beyond its per-card component budget to
 				// fenced text, avoiding extra unquoted overflow cards.
+				sendAnswerFallback := func() bool {
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							slog.Error("failed to send rich card fallback answer", "error", err)
+							return false
+						}
+					}
+					return true
+				}
 				finalBody := resolveRichCardMarkdown(fullResponse, true)
 				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
@@ -5594,15 +5603,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
-							if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
-								slog.Error("failed to send rich card reply", "error", err)
+							if !sendAnswerFallback() {
 								return
 							}
 						}
 					}
 				} else {
-					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
-						slog.Error("failed to send rich card reply", "error", err)
+					if !sendAnswerFallback() {
 						return
 					}
 				}

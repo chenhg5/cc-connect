@@ -356,12 +356,37 @@ func canonicalDestinationPath(path string) (string, error) {
 		return "", err
 	}
 	parent := filepath.Dir(abs)
-	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil {
-		return filepath.Join(resolvedParent, filepath.Base(abs)), nil
-	} else if !errors.Is(err, os.ErrNotExist) {
+	resolvedParent, err := resolvePathThroughExistingAncestor(parent)
+	if err != nil {
 		return "", err
 	}
-	return abs, nil
+	// Deliberately leave the final component unresolved. Existing target
+	// symlinks are rejected later with Lstat, while every existing symlink in
+	// the parent chain has already been canonicalized for overlap checks.
+	return filepath.Join(resolvedParent, filepath.Base(abs)), nil
+}
+
+func resolvePathThroughExistingAncestor(path string) (string, error) {
+	current := filepath.Clean(path)
+	missing := make([]string, 0)
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func collectMigrationTree(root, scope string, skipRuntime bool, destination *migrationDestination, report *migrationReport) error {

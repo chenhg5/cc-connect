@@ -191,6 +191,32 @@ func TestMigrateLegacyDataRefusesSymlinkTarget(t *testing.T) {
 	}
 }
 
+func TestPrepareLegacyMigrationRefusesMissingTargetBelowSymlinkIntoSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	link := filepath.Join(root, "source-link")
+	target := filepath.Join(link, "missing-parent", ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	if err := os.Symlink(source, link); err != nil {
+		t.Fatalf("symlink source ancestor: %v", err)
+	}
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   root,
+	})
+	if err == nil || !strings.Contains(err.Error(), "separate directories") {
+		t.Fatalf("prepareLegacyMigration() error = %v, want source/target overlap refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(source, "missing-parent")); !os.IsNotExist(statErr) {
+		t.Fatalf("preflight created a target parent inside the source, err=%v", statErr)
+	}
+}
+
 func TestMigrateLegacyDataIncludesCustomDataDirAndProjectLocalData(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
