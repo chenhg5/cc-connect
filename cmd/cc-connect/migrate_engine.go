@@ -75,6 +75,7 @@ type legacyMigrationConfig struct {
 }
 
 type legacyMigrationProject struct {
+	Name    string `toml:"name"`
 	Mode    string `toml:"mode"`
 	BaseDir string `toml:"base_dir"`
 	Agent   struct {
@@ -301,7 +302,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		return nil, fmt.Errorf("inventory source config directory: %w", err)
 	}
 	if dataDir != source && dataDirExists {
-		if err := collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report); err != nil {
+		if err := collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report); err != nil {
 			return nil, fmt.Errorf("inventory source data_dir: %w", err)
 		}
 	}
@@ -525,6 +526,12 @@ func pathStrictlyWithin(parent, child string) bool {
 }
 
 func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, excludedRoots []string, destination *migrationDestination, report *migrationReport) error {
+	return collectMigrationTreeExcludingWithPolicy(root, scope, skipRuntime, excludedRoots, nil, destination, report)
+}
+
+type migrationPathPolicy func(rel string, entry fs.DirEntry) error
+
+func collectMigrationTreeExcludingWithPolicy(root, scope string, skipRuntime bool, excludedRoots []string, policy migrationPathPolicy, destination *migrationDestination, report *migrationReport) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -575,6 +582,11 @@ func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, exclude
 			return nil
 		}
 		if entry.IsDir() {
+			if policy != nil {
+				if err := policy(rel, entry); err != nil {
+					return err
+				}
+			}
 			if destination.PreserveAccess {
 				info, err := entry.Info()
 				if err != nil {
@@ -591,6 +603,11 @@ func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, exclude
 		if !info.Mode().IsRegular() {
 			report.SkippedRuntime++
 			return nil
+		}
+		if policy != nil {
+			if err := policy(rel, entry); err != nil {
+				return err
+			}
 		}
 		if destination.PreserveAccess {
 			destination.Access[filepath.Clean(rel)] = migrationAccessMetadataForInfo(info)
@@ -611,6 +628,133 @@ func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, exclude
 		}, true)
 		return nil
 	})
+}
+
+var legacyPersistentRootFiles = map[string]struct{}{
+	"dir_history.json":        {},
+	"heartbeat_state.json":    {},
+	"relay_bindings.json":     {},
+	"workspace_bindings.json": {},
+}
+
+func collectLegacyDataDir(root string, cfg legacyMigrationConfig, destination *migrationDestination, report *migrationReport) error {
+	policy := func(rel string, entry fs.DirEntry) error {
+		if isKnownLegacyDataDirPath(rel, entry.IsDir(), cfg) {
+			return nil
+		}
+		return fmt.Errorf("source data_dir must be dedicated: unexpected non-CC Connect entry %s under %s; refusing to inventory unrelated files", rel, root)
+	}
+	return collectMigrationTreeExcludingWithPolicy(root, "data-dir", true, nil, policy, destination, report)
+}
+
+func isKnownLegacyDataDirPath(rel string, isDir bool, cfg legacyMigrationConfig) bool {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
+	if len(parts) == 0 || parts[0] == "." || parts[0] == "" {
+		return false
+	}
+
+	switch parts[0] {
+	case "sessions":
+		if len(parts) == 1 {
+			return isDir
+		}
+		if isDir {
+			return true
+		}
+		return strings.HasSuffix(parts[len(parts)-1], ".json")
+	case "projects":
+		if len(parts) == 1 {
+			return isDir
+		}
+		if len(parts) != 2 || isDir {
+			return false
+		}
+		return strings.HasSuffix(parts[1], ".state.json") || strings.HasSuffix(parts[1], ".opencode-models.json")
+	case "crons", "timers":
+		if len(parts) == 1 {
+			return isDir
+		}
+		return len(parts) == 2 && !isDir && parts[1] == "jobs.json"
+	case "config":
+		if len(parts) == 1 {
+			return isDir
+		}
+		return len(parts) == 2 && !isDir && parts[1] == "minimax.json"
+	case "agent-prompts":
+		if len(parts) == 1 {
+			return isDir
+		}
+		if len(parts) != 2 || isDir {
+			return false
+		}
+		return parts[1] == "cc-connect-system.md" ||
+			strings.HasPrefix(parts[1], "cc-connect-system-") && strings.HasSuffix(parts[1], ".md")
+	case "weixin":
+		if len(parts) <= 3 {
+			return isDir
+		}
+		if len(parts) != 4 || isDir {
+			return false
+		}
+		return parts[3] == "context_tokens.json" || parts[3] == "get_updates.buf"
+	}
+
+	if len(parts) != 1 || isDir {
+		return false
+	}
+	name := parts[0]
+	if _, ok := legacyPersistentRootFiles[name]; ok {
+		return true
+	}
+	if isLegacyMatrixStateFile(name) || name == "sessions.json" || strings.HasSuffix(name, ".sessions.json") {
+		return true
+	}
+	for _, project := range cfg.Projects {
+		if isLegacyProjectSessionFile(name, project.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLegacyMatrixStateFile(name string) bool {
+	if strings.HasPrefix(name, "matrix-cross-signing-") && strings.HasSuffix(name, ".json") {
+		return true
+	}
+	if !strings.HasPrefix(name, "matrix-crypto-") {
+		return false
+	}
+	return strings.HasSuffix(name, ".db") || strings.HasSuffix(name, ".db-shm") || strings.HasSuffix(name, ".db-wal") || strings.HasSuffix(name, ".db-journal")
+}
+
+func isLegacyProjectSessionFile(name, projectName string) bool {
+	projectName = strings.TrimSpace(projectName)
+	if projectName == "" || filepath.Base(projectName) != projectName {
+		return false
+	}
+	if name == projectName+".json" || name == projectName+".sessions.json" {
+		return true
+	}
+	prefix := projectName + "_"
+	for _, suffix := range []string{".json", ".sessions.json"} {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		hash := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		if len(hash) == 8 && isLowerHex(hash) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLowerHex(value string) bool {
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func addPlannedMigrationFile(destination *migrationDestination, file plannedMigrationFile, archiveCollision bool) {

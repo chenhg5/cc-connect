@@ -690,6 +690,65 @@ func TestPrepareLegacyMigrationRejectsAncestorDataDir(t *testing.T) {
 	}
 }
 
+func TestPrepareLegacyMigrationRejectsBroadCustomDataDirOutsideSourceTree(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "etc", "cc-connect")
+	dataDir := filepath.Join(root, "home", "service")
+	target := filepath.Join(root, "var", "lib", "cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(dataDir)+`"`+"\n")
+	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"sessions":{}}`)
+	writeMigrationFixture(t, filepath.Join(dataDir, ".ssh", "id_private"), "must-not-be-inventoried")
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   filepath.Join(root, "root-home"),
+		DryRun: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "source data_dir must be dedicated") || !strings.Contains(err.Error(), ".ssh") {
+		t.Fatalf("prepare broad custom data_dir error = %v, want unexpected-entry refusal", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("unsafe custom data_dir created target before refusal: %v", statErr)
+	}
+}
+
+func TestKnownLegacyDataDirPathAllowsOnlyOwnedPersistentPaths(t *testing.T) {
+	cfg := legacyMigrationConfig{Projects: []legacyMigrationProject{{Name: "demo"}}}
+	tests := []struct {
+		rel   string
+		isDir bool
+		want  bool
+	}{
+		{rel: "sessions", isDir: true, want: true},
+		{rel: "sessions/demo.json", want: true},
+		{rel: "projects/demo.state.json", want: true},
+		{rel: "projects/demo-0123456789abcdef.opencode-models.json", want: true},
+		{rel: "crons/jobs.json", want: true},
+		{rel: "timers/jobs.json", want: true},
+		{rel: "config/minimax.json", want: true},
+		{rel: "agent-prompts/cc-connect-system.md", want: true},
+		{rel: "weixin/demo/account/context_tokens.json", want: true},
+		{rel: "workspace_bindings.json", want: true},
+		{rel: "matrix-crypto-DEVICE.db-wal", want: true},
+		{rel: "matrix-cross-signing-DEVICE.json", want: true},
+		{rel: "demo.json", want: true},
+		{rel: "demo_0123abcd.sessions.json", want: true},
+		{rel: ".ssh", isDir: true, want: false},
+		{rel: "projects/repository", isDir: true, want: false},
+		{rel: "sessions/private.pem", want: false},
+		{rel: "config/browser-profile.json", want: false},
+		{rel: "credentials.json", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(strings.ReplaceAll(tt.rel, "/", "_"), func(t *testing.T) {
+			if got := isKnownLegacyDataDirPath(filepath.FromSlash(tt.rel), tt.isDir, cfg); got != tt.want {
+				t.Fatalf("isKnownLegacyDataDirPath(%q, isDir=%v) = %v, want %v", tt.rel, tt.isDir, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMigrateLegacyDataResolvesRelativePathsFromOfficialRuntimeWorkDir(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
