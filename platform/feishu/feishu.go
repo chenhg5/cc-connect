@@ -4380,8 +4380,7 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 	if resp.Code != 0 {
 		err := classifyFeishuCardAPIError("stream rich card text", resp.Code, resp.Msg)
 		if errors.Is(err, errFeishuCardRateLimited) {
-			slog.Debug(p.tag()+": stream rich card text rate limited; skipping frame", "code", resp.Code)
-			return nil
+			slog.Debug(p.tag()+": stream rich card text rate limited; requesting full-card fallback", "code", resp.Code)
 		}
 		return fmt.Errorf("%s: %w", p.tag(), err)
 	}

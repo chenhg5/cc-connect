@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,42 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/timmyagentic/cc-connect-next/core"
 )
+
+func TestStreamRichCardTextReturnsRateLimitForFallback(t *testing.T) {
+	const cardID = "card_rate_limited"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code": 0, "msg": "success", "expire": 7200, "tenant_access_token": "tenant-token",
+			})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/elements/"):
+			writeJSON(t, w, map[string]any{"code": 230020, "msg": "rate limited"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := lark.NewClient("cli_rate_limit", "secret",
+		lark.WithOpenBaseUrl(srv.URL),
+		lark.WithHttpClient(srv.Client()),
+	)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        "cli_rate_limit",
+		appSecret:    "secret",
+		client:       client,
+		replayClient: client,
+	}
+	handle := &feishuPreviewHandle{cardID: cardID}
+	err := p.StreamRichCardText(context.Background(), handle, "unrendered frame")
+	if err == nil || !errors.Is(err, errFeishuCardRateLimited) {
+		t.Fatalf("StreamRichCardText() error = %v, want distinguishable rate-limit failure", err)
+	}
+}
 
 type capturedRichCardRequest struct {
 	Method string

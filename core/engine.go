@@ -4689,6 +4689,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 	silentCancelCh := state.silentTurnCancellationSignal(msgID)
+	stopCh := state.stopSignal()
 	turnRichCardCopy, hasTurnRichCardCopy := state.turnRichCardCopy(msgID)
 	if !hasTurnRichCardCopy {
 		turnRichCardCopy = e.i18n.RichCardCopy()
@@ -4777,12 +4778,33 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	prepareRichCardMarkdown := func(p Platform, rctx any, markdown string, final bool) string {
 		// Preserve the same workspace references and platform-native outbound
 		// semantics as ordinary Send/Reply before resolving card-only assets.
+		renderCtx := e.ctx
+		if final {
+			// A final remote-image resolution can otherwise outlive Stop's card
+			// finalization window. Cancel rendering as soon as this turn is stopped,
+			// while keeping e.ctx alive for the terminal card update itself.
+			var cancelRender context.CancelFunc
+			renderCtx, cancelRender = context.WithCancel(e.ctx)
+			select {
+			case <-stopCh:
+				cancelRender()
+			default:
+				go func(ctx context.Context, cancel context.CancelFunc) {
+					select {
+					case <-stopCh:
+						cancel()
+					case <-ctx.Done():
+					}
+				}(renderCtx, cancelRender)
+			}
+			defer cancelRender()
+		}
 		markdown = workspaceRenderer(markdown)
 		if transformer, ok := p.(RichCardMarkdownTransformer); ok && markdown != "" {
-			markdown = transformer.TransformRichCardMarkdown(e.ctx, rctx, markdown)
+			markdown = transformer.TransformRichCardMarkdown(renderCtx, rctx, markdown)
 		}
 		if resolver, ok := p.(RichCardMarkdownResolver); ok && markdown != "" {
-			markdown = resolver.ResolveRichCardMarkdown(e.ctx, markdown, final)
+			markdown = resolver.ResolveRichCardMarkdown(renderCtx, markdown, final)
 		}
 		return markdown
 	}
@@ -4964,7 +4986,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 	events := state.agentSession.Events()
-	stopCh := state.stopSignal()
 	for {
 		var event Event
 		var ok bool

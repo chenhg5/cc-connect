@@ -2038,6 +2038,24 @@ type shutdownAwareRichCardPlatform struct {
 	updatedAfterStop  []bool
 }
 
+type shutdownBlockingRichCardResolverPlatform struct {
+	*shutdownAwareRichCardPlatform
+	finalStarted  chan struct{}
+	finalCanceled chan struct{}
+	startOnce     sync.Once
+	cancelOnce    sync.Once
+}
+
+func (p *shutdownBlockingRichCardResolverPlatform) ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string {
+	if !final {
+		return markdown
+	}
+	p.startOnce.Do(func() { close(p.finalStarted) })
+	<-ctx.Done()
+	p.cancelOnce.Do(func() { close(p.finalCanceled) })
+	return markdown
+}
+
 type cancelTurnControllableSession struct {
 	*controllableAgentSession
 	cancelOnce   sync.Once
@@ -2333,6 +2351,77 @@ func TestEngine_StopInterruptsPermissionWaitBeforeFinalizingRichCard(t *testing.
 	}
 	if updatedAfterStop[len(updatedAfterStop)-1] {
 		t.Fatal("terminal card update ran after platform Stop")
+	}
+}
+
+func TestEngine_StopInterruptsFinalImageResolutionBeforeDoneUpdate(t *testing.T) {
+	base := &shutdownAwareRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	p := &shutdownBlockingRichCardResolverPlatform{
+		shutdownAwareRichCardPlatform: base,
+		finalStarted:                  make(chan struct{}),
+		finalCanceled:                 make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	sessionKey := "feishu:user-shutdown-final-image"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-shutdown-final-image")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-shutdown-final-image",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	turnDone := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-shutdown-final-image", time.Now(), nil, nil, state.replyCtx)
+		close(turnDone)
+	}()
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "answer with ![chart](https://example.com/chart.png)",
+		Done:    true,
+	}
+
+	select {
+	case <-p.finalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not enter final rich-card image resolution")
+	}
+
+	stopStarted := time.Now()
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(stopStarted); elapsed >= time.Second {
+		t.Fatalf("Stop waited for the image resolver instead of interrupting it: %v", elapsed)
+	}
+	select {
+	case <-p.finalCanceled:
+	default:
+		t.Fatal("shutdown did not cancel final image resolution")
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("image-resolving turn did not finish during shutdown")
+	}
+
+	_, _, updates, _ := base.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("final card did not reach Done after image resolution was interrupted: %v", updates)
+	}
+	contextErrs, updatedAfterStop := base.lifecycleSnapshot()
+	if len(contextErrs) == 0 || contextErrs[len(contextErrs)-1] != nil {
+		t.Fatalf("Done update used a canceled engine context: %v", contextErrs)
+	}
+	if updatedAfterStop[len(updatedAfterStop)-1] {
+		t.Fatal("Done update ran after platform Stop")
 	}
 }
 

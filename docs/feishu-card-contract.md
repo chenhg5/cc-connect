@@ -28,13 +28,15 @@ Immediate feedback is intentionally higher priority than retroactive invisibilit
 
 When Feishu returns a CardKit `card_id`, answer deltas update the `main_text` element with a monotonic sequence number. Full-card state transitions share the same sequence, so a delayed frame cannot overwrite a newer one. Rich cards share the public `[stream_preview]` contract with legacy previews: `enabled` and `disabled_platforms` gate all non-terminal reasoning-count, tool-count, and answer-body updates, while `interval_ms`, `min_delta_chars`, and `max_chars` control answer-body frames. Disabling preview still keeps the immediate accepted-state card and the terminal Done/error update, but suppresses every intermediate frame. The final answer is never truncated by `max_chars`.
 
-If CardKit creation or element streaming is unavailable, cc-connect-next safely falls back to updating the inline card in the same quoted message. Tables beyond Feishu's per-card component budget are rendered as fenced text in that same card rather than creating overflow answer messages.
+If CardKit creation or element streaming is unavailable, cc-connect-next safely falls back to updating the inline card in the same quoted message. A CardKit rate-limit response is treated as an unrendered frame, not a successful stream update; the full-card fallback must succeed before that answer body is recorded as visible. Tables beyond Feishu's per-card component budget are rendered as fenced text in that same card rather than creating overflow answer messages.
 
 If the terminal full-card update itself fails, cc-connect-next removes the stale lifecycle card before sending the readable answer as a normal reply. If a turn fails earlier, only the last body confirmed by a successful Feishu create/update call may be retained on the failure card or in assistant history. Text held back by disabled previews, throttling, or a failed update is never treated as visible. If the failure-state update also fails, the fallback reply contains only that confirmed safe partial plus localized static failure copy; raw provider/process errors are never substituted into chat-visible text.
 
 When `resolve_mentions = true`, every streaming, completed, and safe-partial failure body resolves `@DisplayName` against the triggering chat before it enters Card 2.0. This preserves the native Feishu mention and notification behavior even though the lifecycle card is updated directly rather than sent through the ordinary `Send`/`Reply` path.
 
 Remote markdown images are uploaded once and reused by URL. A failed fetch or Feishu upload enters a one-minute backoff instead of a permanent denylist; after that window the next card that references the URL retries it. This avoids per-frame retry storms while allowing transient timeouts, rate limits, and network failures to recover without restarting the process.
+
+During shutdown, cc-connect-next first interrupts any final remote-image resolution for active turns, then uses the still-live platform connection to deliver each terminal Done/error card within the bounded shutdown window. Platform teardown happens only after those lifecycle updates finish or the deadline expires.
 
 ## Privacy boundary
 
