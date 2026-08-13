@@ -4862,7 +4862,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		sendWorkspace(p, rctx, content)
 	}
 	visibleRichPartial := func() string {
-		body := strings.TrimSpace(partialText)
+		// Only retain text confirmed by a successful Feishu create/update call.
+		// partialText may contain disabled, throttled, or failed frames that were
+		// never visible and must not leak into a failure card or assistant history.
+		body := strings.TrimSpace(lastRichCardPreview)
 		if body == "" || couldBeSilentPrefix(body) || isSilentReply(body) {
 			return ""
 		}
@@ -5178,6 +5181,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							slog.Debug("rich card: failed to create initial thinking card", "platform", p.Name(), "error", err)
 						} else {
 							cardMessageID = handle
+							lastRichCardPreview = ""
 						}
 					}
 				} else if cardMessageID != nil && richCardPreviewEnabled {
@@ -5188,6 +5192,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					card := buildResolvedRichCard(CardStatusThinking, "thinking", toolSteps, "", true, "")
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
+					} else {
+						lastRichCardPreview = ""
 					}
 				}
 				break
@@ -5263,6 +5269,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							slog.Debug("rich card: failed to create initial tool card", "platform", p.Name(), "error", err)
 						} else {
 							cardMessageID = handle
+							lastRichCardPreview = ""
 						}
 					}
 				} else if cardMessageID != nil && richCardPreviewEnabled {
@@ -5273,6 +5280,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					card := buildResolvedRichCard(CardStatusWorking, "tool", toolSteps, "", true, "")
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
+					} else {
+						lastRichCardPreview = ""
 					}
 				}
 				break
@@ -5443,6 +5452,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 										slog.Debug("rich card: failed to create initial text card", "platform", p.Name(), "error", err)
 									} else {
 										cardMessageID = handle
+										lastRichCardPreview = ""
 									}
 								}
 							}
@@ -5494,9 +5504,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								if updater, ok := p.(MessageUpdater); ok {
 									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 										richAnswerStarted = true
+										lastRichCardPreview = transitionBody
 										if !hasStreamer {
 											lastRichCardUpdate = time.Now()
-											lastRichCardPreview = previewBody
 										}
 									} else {
 										slog.Debug("rich card: failed to switch to answer phase", "platform", p.Name(), "error", err)

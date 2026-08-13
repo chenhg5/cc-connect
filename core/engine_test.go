@@ -2598,6 +2598,76 @@ func TestProcessInteractiveEvents_RichCardErrorRetainsVisiblePartialAnswer(t *te
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardErrorOmitsUnrenderedPartialAnswer(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         StreamPreviewCfg
+		chunks      []string
+		wantVisible string
+		wantHidden  string
+	}{
+		{
+			name:       "preview-disabled",
+			cfg:        StreamPreviewCfg{Enabled: false},
+			chunks:     []string{"unrendered incomplete answer"},
+			wantHidden: "unrendered incomplete answer",
+		},
+		{
+			name:        "throttled-latest-chunk",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 60_000, MinDeltaChars: 1},
+			chunks:      []string{"rendered prefix", " plus unrendered suffix"},
+			wantVisible: "rendered prefix",
+			wantHidden:  "plus unrendered suffix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(tt.cfg)
+			sessionKey := "feishu:user-rich-unrendered-error-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-unrendered-error-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-unrendered-error-" + tt.name}
+			e.interactiveStates[sessionKey] = state
+
+			for _, chunk := range tt.chunks {
+				agentSession.events <- Event{Type: EventText, Content: chunk}
+			}
+			agentSession.events <- Event{Type: EventError, Error: errors.New("private failure")}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-unrendered-error-"+tt.name, time.Now(), nil, nil, state.replyCtx)
+
+			_, streams, updates, _ := p.snapshot()
+			if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+				t.Fatalf("missing terminal error card: %v", updates)
+			}
+			final := updates[len(updates)-1]
+			if tt.wantVisible != "" && (!strings.Contains(strings.Join(streams, "\n"), tt.wantVisible) || !strings.Contains(final, tt.wantVisible)) {
+				t.Fatalf("last rendered prefix was not retained: streams=%v final=%q", streams, final)
+			}
+			if strings.Contains(final, tt.wantHidden) {
+				t.Fatalf("failure card exposed an unrendered chunk: %q", final)
+			}
+			history := session.GetHistory(0)
+			var assistants []string
+			for _, entry := range history {
+				if entry.Role == "assistant" {
+					assistants = append(assistants, entry.Content)
+				}
+			}
+			if tt.wantVisible == "" {
+				if len(assistants) != 0 {
+					t.Fatalf("unrendered partial was persisted to history: %v", assistants)
+				}
+			} else if len(assistants) != 1 || assistants[0] != tt.wantVisible {
+				t.Fatalf("history = %v, want only last rendered prefix %q", assistants, tt.wantVisible)
+			}
+		})
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardChannelClosePersistsAndShowsPartialAnswer(t *testing.T) {
 	p := &stubRichCardSilentPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
