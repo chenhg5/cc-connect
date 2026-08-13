@@ -914,6 +914,46 @@ func TestMigrateLegacyDataForceCreatesRecoverableBackup(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyDataPreservesExistingEmptyTargetBackup(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("create empty target: %v", err)
+	}
+
+	report, err := migrateLegacyData(source, target, false, false)
+	if err != nil {
+		t.Fatalf("migrateLegacyData() error = %v", err)
+	}
+	if report.BackupDir == "" || len(report.Backups) != 1 || report.Backups[0].Backup != report.BackupDir {
+		t.Fatalf("empty existing target backup report = %+v, backup_dir=%q", report.Backups, report.BackupDir)
+	}
+	info, err := os.Stat(report.BackupDir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("empty pre-migration target backup was not retained: info=%v err=%v", info, err)
+	}
+	entries, err := os.ReadDir(report.BackupDir)
+	if err != nil {
+		t.Fatalf("read empty target backup: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("empty target backup unexpectedly contains entries: %v", entries)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(target, migrationManifestFilename))
+	if err != nil {
+		t.Fatalf("read migration manifest: %v", err)
+	}
+	var manifest migrationManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse migration manifest: %v", err)
+	}
+	if len(manifest.Backups) != 1 || manifest.Backups[0].Backup != report.BackupDir {
+		t.Fatalf("manifest did not record empty target backup: %+v", manifest.Backups)
+	}
+}
+
 func TestMigrateLegacyDataRejectsTargetChangesBeforePromotion(t *testing.T) {
 	tests := []struct {
 		name          string

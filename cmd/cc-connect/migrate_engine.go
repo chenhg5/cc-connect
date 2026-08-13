@@ -224,7 +224,6 @@ func migrateLegacyDataWithHooks(opts migrationOptions, hooks migrationHooks) (mi
 			hooks.AfterPromotion(destination.Target)
 		}
 	}
-	finalizeMigrationBackups(destinations)
 	cleanupMigrationStages(destinations)
 	return plan.Report, nil
 }
@@ -425,14 +424,14 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		if destination.Existed {
 			destination.Backup = availableMigrationBackupPath(destination.Target, createdAt, index)
 		}
-		if destination.ExistingNonEmpty {
+		if destination.Existed {
 			report.Backups = append(report.Backups, migrationBackupRecord{
 				Target: destination.Target,
 				Backup: destination.Backup,
 			})
 		}
 	}
-	if mainDestination.ExistingNonEmpty {
+	if mainDestination.Existed {
 		report.BackupDir = mainDestination.Backup
 	}
 	report.ProjectDirectories = len(projectDestinations)
@@ -1503,15 +1502,6 @@ func promoteMigrationDestination(destination *migrationDestination, hooks migrat
 	return nil
 }
 
-func finalizeMigrationBackups(destinations []*migrationDestination) {
-	for _, destination := range destinations {
-		if destination.Existed && !destination.ExistingNonEmpty && destination.Backup != "" {
-			_ = os.Remove(destination.Backup)
-			destination.Backup = ""
-		}
-	}
-}
-
 func rollbackPromotedDestinations(destinations []*migrationDestination) ([]string, error) {
 	recoveryPaths := make([]string, 0, len(destinations))
 	rollbackErrors := make([]error, 0)
@@ -1588,7 +1578,7 @@ func buildMigrationManifest(plan *preparedMigration) migrationManifest {
 				Files:  len(destination.Files),
 			})
 		}
-		if destination.ExistingNonEmpty && destination.Backup != "" {
+		if destination.Existed && destination.Backup != "" {
 			manifest.Backups = append(manifest.Backups, migrationBackupRecord{
 				Target: destination.Target,
 				Backup: destination.Backup,
