@@ -592,6 +592,35 @@ base_dir = "`+filepath.ToSlash(baseDir)+`"
 	}
 }
 
+func TestMigrateLegacyDataExpandsHomeInMultiWorkspaceBase(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	workspace := filepath.Join(root, "workspaces", "team-project")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "multi"
+mode = "multi-workspace"
+base_dir = "~/workspaces"
+`)
+	writeMigrationFixture(t, filepath.Join(workspace, ".cc-connect", "attachments", "context.txt"), "workspace-data")
+
+	report, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		IncludeProjectData: true,
+	})
+	if err != nil {
+		t.Fatalf("migrateLegacyDataWithOptions() error = %v", err)
+	}
+	if got, want := report.ProjectDirectories, 1; got != want {
+		t.Fatalf("project directories = %d, want %d", got, want)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, ".cc-connect-next", "attachments", "context.txt")); err != nil || string(got) != "workspace-data" {
+		t.Fatalf("home-relative multi-workspace project data was not migrated: content=%q err=%v", got, err)
+	}
+}
+
 func TestMigrateLegacyDataArchivesConflictingConfigRootState(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

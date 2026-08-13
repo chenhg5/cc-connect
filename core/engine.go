@@ -83,6 +83,7 @@ const (
 	messageRecallPollInterval  = 2 * time.Second
 	messageRecallProbeCooldown = time.Minute
 	recalledStopLockWait       = 2 * time.Second
+	interactiveShutdownWait    = 3 * time.Second
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -441,6 +442,8 @@ type Engine struct {
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
+	activeTurns         sync.WaitGroup
+	activeTurnStates    map[*interactiveState]int
 	replyFooterMu       sync.Mutex
 	replyFooterUsage    replyFooterUsageCache
 
@@ -2249,9 +2252,34 @@ func (e *Engine) Start() error {
 func (e *Engine) Stop() error {
 	e.platformLifecycleMu.Lock()
 	e.stopping = true
+	activeStates := make([]*interactiveState, 0, len(e.activeTurnStates))
+	for state := range e.activeTurnStates {
+		activeStates = append(activeStates, state)
+	}
 	e.platformLifecycleMu.Unlock()
 
-	// Cancel first so late lifecycle callbacks observe shutdown immediately.
+	// Wake foreground turns while the engine context and platform clients are
+	// still usable. Rich-card turns need this window to replace their in-flight
+	// card with a terminal error state before platform shutdown.
+	for _, state := range activeStates {
+		state.markStopped()
+	}
+	activeTurnsDone := make(chan struct{})
+	go func() {
+		e.activeTurns.Wait()
+		close(activeTurnsDone)
+	}()
+	select {
+	case <-activeTurnsDone:
+	case <-time.After(interactiveShutdownWait):
+		slog.Warn("timed out waiting for active turns to finalize during shutdown",
+			"timeout", interactiveShutdownWait,
+			"active_turns", len(activeStates),
+		)
+	}
+
+	// Cancel after the bounded card-finalization window so late lifecycle
+	// callbacks observe shutdown and any stuck Agent/platform work can unwind.
 	e.cancel()
 
 	if e.observeCancel != nil {
@@ -2297,6 +2325,34 @@ func (e *Engine) Stop() error {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
 	return nil
+}
+
+// beginInteractiveTurn registers a foreground event loop under the same lock
+// that closes admission during Stop. This makes WaitGroup.Wait safe: once
+// stopping is true no later Add can race with the shutdown wait.
+func (e *Engine) beginInteractiveTurn(state *interactiveState) bool {
+	e.platformLifecycleMu.Lock()
+	defer e.platformLifecycleMu.Unlock()
+	if e.stopping || e.ctx.Err() != nil {
+		return false
+	}
+	if e.activeTurnStates == nil {
+		e.activeTurnStates = make(map[*interactiveState]int)
+	}
+	e.activeTurnStates[state]++
+	e.activeTurns.Add(1)
+	return true
+}
+
+func (e *Engine) finishInteractiveTurn(state *interactiveState) {
+	e.platformLifecycleMu.Lock()
+	if count := e.activeTurnStates[state]; count <= 1 {
+		delete(e.activeTurnStates, state)
+	} else {
+		e.activeTurnStates[state] = count - 1
+	}
+	e.platformLifecycleMu.Unlock()
+	e.activeTurns.Done()
 }
 
 // OnPlatformReady marks an async platform as ready and initializes platform-level
@@ -4520,6 +4576,12 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+	if !e.beginInteractiveTurn(state) {
+		state.markStopped()
+		return
+	}
+	defer e.finishInteractiveTurn(state)
+
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -5761,6 +5823,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					"dropped", droppedStale,
 				)
 			}
+			if state.stopped {
+				state.pendingMessages = nil
+				state.mu.Unlock()
+				return
+			}
 			if len(state.pendingMessages) > 0 {
 				queued := state.pendingMessages[0]
 				state.pendingMessages = state.pendingMessages[1:]
@@ -6109,6 +6176,12 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string) bool {
 	for {
 		state.mu.Lock()
+		if state.stopped {
+			state.pendingMessages = nil
+			session.Unlock()
+			state.mu.Unlock()
+			return true
+		}
 		if len(state.pendingMessages) == 0 {
 			session.Unlock()
 			state.mu.Unlock()

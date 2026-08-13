@@ -2011,6 +2011,35 @@ func (p *stubRichCardUpdateFailurePlatform) UpdateMessage(context.Context, any, 
 	return errors.New("simulated rich-card update failure")
 }
 
+type shutdownAwareRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+	lifecycleMu       sync.Mutex
+	stopped           bool
+	updateContextErrs []error
+	updatedAfterStop  []bool
+}
+
+func (p *shutdownAwareRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	p.lifecycleMu.Lock()
+	p.updateContextErrs = append(p.updateContextErrs, ctx.Err())
+	p.updatedAfterStop = append(p.updatedAfterStop, p.stopped)
+	p.lifecycleMu.Unlock()
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *shutdownAwareRichCardPlatform) Stop() error {
+	p.lifecycleMu.Lock()
+	p.stopped = true
+	p.lifecycleMu.Unlock()
+	return nil
+}
+
+func (p *shutdownAwareRichCardPlatform) lifecycleSnapshot() ([]error, []bool) {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	return append([]error(nil), p.updateContextErrs...), append([]bool(nil), p.updatedAfterStop...)
+}
+
 func (p *stubRichCardSplitPlatform) SplitMarkdownByTables(markdown string, _ int) []string {
 	return []string{markdown, "unexpected overflow card"}
 }
@@ -2074,6 +2103,64 @@ func TestProcessInteractiveEvents_RichCardErrorStaysOnCardAndHidesDetails(t *tes
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no card deletion, got %d", deletes)
+	}
+}
+
+func TestEngine_StopFinalizesActiveRichCardBeforeCancelingPlatform(t *testing.T) {
+	p := &shutdownAwareRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	sessionKey := "feishu:user-shutdown-rich"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-shutdown-rich")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-shutdown-rich",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	turnDone := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-shutdown-rich", time.Now(), nil, nil, state.replyCtx)
+		close(turnDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		starts, _, _, _ := p.snapshot()
+		if len(starts) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("immediate rich card was not created before shutdown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("active rich-card turn did not exit during shutdown")
+	}
+
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("active rich card did not reach a terminal error state: %v", updates)
+	}
+	contextErrs, updatedAfterStop := p.lifecycleSnapshot()
+	if len(contextErrs) == 0 || contextErrs[len(contextErrs)-1] != nil {
+		t.Fatalf("terminal card update used a canceled context: %v", contextErrs)
+	}
+	if updatedAfterStop[len(updatedAfterStop)-1] {
+		t.Fatal("terminal card update ran after platform Stop")
 	}
 }
 

@@ -614,7 +614,7 @@ func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourc
 			addRoot(raw)
 		}
 		if strings.TrimSpace(project.BaseDir) != "" {
-			baseDir, err := resolveLegacyConfigPath(project.BaseDir, runtimeWorkDir, home)
+			baseDir, err := resolveLegacyWorkspaceBaseDir(project.BaseDir, runtimeWorkDir, home)
 			if err != nil {
 				recordSkip(project.BaseDir, "workspace base path resolution failed")
 				continue
@@ -830,6 +830,16 @@ func resolveLegacyConfigPath(raw, baseDir, _ string) (string, error) {
 		expanded = filepath.Join(baseDir, expanded)
 	}
 	return filepath.Abs(filepath.Clean(expanded))
+}
+
+func resolveLegacyWorkspaceBaseDir(raw, runtimeWorkDir, home string) (string, error) {
+	// Match the official multi-workspace startup path: base_dir alone treats a
+	// leading "~/" as the user's home. Generic config paths deliberately keep
+	// tilde literal, so this must remain a base_dir-specific compatibility rule.
+	if strings.HasPrefix(raw, "~/") {
+		raw = filepath.Join(home, raw[2:])
+	}
+	return resolveLegacyConfigPath(raw, runtimeWorkDir, home)
 }
 
 func prepareMigrationStage(destination *migrationDestination) error {
