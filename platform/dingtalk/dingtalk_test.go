@@ -328,6 +328,44 @@ func TestFormatReplyContent_EmptyContent_UsesFallback(t *testing.T) {
 	}
 }
 
+func TestFormatReplyContent_WithQuotedFile(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedMediaContent{
+		DownloadCode: "download-code",
+		FileName:     "AGENTS.user.md",
+	})
+	richText := &richTextContent{
+		Content:    "这个文件你能看得见吗",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "file",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"文件: AGENTS.user.md\"\n\n这个文件你能看得见吗"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_WithQuotedPicture(t *testing.T) {
+	p := &Platform{}
+	richText := &richTextContent{
+		Content:    "这个呢",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "picture",
+			Content: json.RawMessage(`{"downloadCode":"download-code"}`),
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"图片\"\n\n这个呢"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
 func TestFormatReplyContent_TextQuotePreservesWhitespace(t *testing.T) {
 	p := &Platform{}
 	repliedContent, _ := json.Marshal(repliedTextContent{Text: "  original message  "})
@@ -365,7 +403,7 @@ func TestFormatReplyContent_NonTextMsgType(t *testing.T) {
 		Content:    "user reply",
 		IsReplyMsg: true,
 		RepliedMsg: &repliedMessage{
-			MsgType: "image",
+			MsgType: "video",
 			Content: json.RawMessage(`{}`),
 		},
 	}
@@ -683,31 +721,32 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// extractRichText tests (from main: richText message type support)
+// parseRichText tests
 // ──────────────────────────────────────────────────────────────
 
-func TestExtractRichText(t *testing.T) {
+func TestParseRichText(t *testing.T) {
 	tests := []struct {
-		name    string
-		content interface{}
-		want    string
+		name              string
+		content           interface{}
+		wantText          string
+		wantDownloadCodes []string
 	}{
 		{
-			name:    "nil content",
-			content: nil,
-			want:    "",
+			name:     "nil content",
+			content:  nil,
+			wantText: "",
 		},
 		{
-			name:    "non-map content",
-			content: "not a map",
-			want:    "",
+			name:     "non-map content",
+			content:  "not a map",
+			wantText: "",
 		},
 		{
 			name: "empty richText array",
 			content: map[string]interface{}{
 				"richText": []interface{}{},
 			},
-			want: "",
+			wantText: "",
 		},
 		{
 			name: "single text element",
@@ -716,7 +755,7 @@ func TestExtractRichText(t *testing.T) {
 					map[string]interface{}{"text": "Hello World"},
 				},
 			},
-			want: "Hello World",
+			wantText: "Hello World",
 		},
 		{
 			name: "multiple text elements",
@@ -726,7 +765,7 @@ func TestExtractRichText(t *testing.T) {
 					map[string]interface{}{"text": "World"},
 				},
 			},
-			want: "Hello World",
+			wantText: "Hello World",
 		},
 		{
 			name: "text with attrs (bold etc) — attrs ignored, text extracted",
@@ -736,35 +775,217 @@ func TestExtractRichText(t *testing.T) {
 					map[string]interface{}{"text": "bold", "attrs": map[string]interface{}{"bold": true}},
 				},
 			},
-			want: "normal bold",
+			wantText: "normal bold",
 		},
 		{
-			name: "mixed text and picture elements — pictures skipped",
+			name: "mixed text and picture elements",
 			content: map[string]interface{}{
 				"richText": []interface{}{
 					map[string]interface{}{"text": "See image: "},
-					map[string]interface{}{"pictureDownloadCode": "abc123"},
+					map[string]interface{}{"pictureDownloadCode": "preview-abc123", "downloadCode": "abc123"},
+					map[string]interface{}{"pictureDownloadCode": "  "},
+					map[string]interface{}{"pictureDownloadCode": "def456"},
 					map[string]interface{}{"text": "done"},
 				},
 			},
-			want: "See image: done",
+			wantText:          "See image: done",
+			wantDownloadCodes: []string{"abc123", "def456"},
 		},
 		{
 			name: "missing richText key",
 			content: map[string]interface{}{
 				"other": "data",
 			},
-			want: "",
+			wantText: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractRichText(tt.content)
-			if got != tt.want {
-				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
+			gotText, gotDownloadCodes := parseRichText(tt.content)
+			if gotText != tt.wantText {
+				t.Errorf("parseRichText() text = %q, want %q", gotText, tt.wantText)
+			}
+			if got, want := strings.Join(gotDownloadCodes, ","), strings.Join(tt.wantDownloadCodes, ","); got != want {
+				t.Errorf("parseRichText() download codes = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestOnRawMessage_RichTextWithPicture_DownloadsImage(t *testing.T) {
+	const imageBody = "rich-text-image"
+
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte(imageBody))
+	}))
+	defer imageSrv.Close()
+
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient: &http.Client{Transport: &dingtalkFileDownloadRT{
+			accessToken: "tok-rich-text-image",
+			downloadURL: imageSrv.URL,
+		}},
+	}
+
+	captured := make(chan *core.Message, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		captured <- msg
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rich-text-image",
+		"conversationType": "2",
+		"conversationId": "conv-group",
+		"conversationTitle": "test group",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "Please inspect "},
+				{"pictureDownloadCode": "preview-picture-code-1", "downloadCode": "picture-code-1", "type": "picture"},
+				{"text": "this image"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "Please inspect this image" {
+			t.Fatalf("Content = %q, want %q", msg.Content, "Please inspect this image")
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != imageBody {
+			t.Fatalf("image bytes = %q, want %q", got, imageBody)
+		}
+		if msg.Images[0].MimeType != "image/png" {
+			t.Fatalf("image MIME = %q, want image/png", msg.Images[0].MimeType)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked for richText image message")
+	}
+}
+
+type richTextImageResponse struct {
+	body     string
+	mimeType string
+}
+
+type richTextImageDownloadRT struct {
+	images      map[string]richTextImageResponse
+	failedCodes map[string]bool
+}
+
+func (r *richTextImageDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/v1.0/robot/messageFiles/download" {
+		var payload struct {
+			DownloadCode string `json:"downloadCode"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		if r.failedCodes[payload.DownloadCode] {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"download unavailable"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		body := fmt.Sprintf(`{"downloadUrl":"https://richtext-images.invalid/%s"}`, payload.DownloadCode)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+
+	if req.URL.Host == "richtext-images.invalid" {
+		code := strings.TrimPrefix(req.URL.Path, "/")
+		image, ok := r.images[code]
+		if !ok {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		header := make(http.Header)
+		header.Set("Content-Type", image.mimeType)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(image.body)),
+			Header:     header,
+			Request:    req,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("unexpected request: %s", req.URL)
+}
+
+func TestOnRawMessage_RichTextPictures_PreservesUsableContent(t *testing.T) {
+	rt := &richTextImageDownloadRT{
+		images: map[string]richTextImageResponse{
+			"picture-a": {body: "image-a", mimeType: "image/jpeg"},
+			"picture-b": {body: "image-b", mimeType: "image/png"},
+		},
+		failedCodes: map[string]bool{"broken-picture": true},
+	}
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		accessToken:  "tok-rich-text-images",
+		tokenExpiry:  time.Now().Add(time.Hour),
+	}
+
+	captured := make(chan *core.Message, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) { captured <- msg }
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rich-text-multiple-images",
+		"conversationType": "2",
+		"conversationId": "conv-group",
+		"senderStaffId": "user-1",
+		"content": {
+			"richText": [
+				{"pictureDownloadCode": "preview-a", "downloadCode": "picture-a", "type": "picture"},
+				{"pictureDownloadCode": "preview-broken", "downloadCode": "broken-picture", "type": "picture"},
+				{"pictureDownloadCode": "preview-b", "downloadCode": "picture-b", "type": "picture"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty for picture-only richText", msg.Content)
+		}
+		if len(msg.Images) != 2 {
+			t.Fatalf("Images len = %d, want 2 usable images", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != "image-a" {
+			t.Fatalf("first image = %q, want image-a", got)
+		}
+		if got := string(msg.Images[1].Data); got != "image-b" {
+			t.Fatalf("second image = %q, want image-b", got)
+		}
+		if msg.ChannelKey != "conv-group" {
+			t.Fatalf("ChannelKey = %q, want conv-group", msg.ChannelKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not invoked for picture-only richText message")
 	}
 }
 
@@ -1073,6 +1294,144 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler never invoked with file message")
+	}
+}
+
+func TestReplyToFileMessage_BuildsTextAndFileAttachment(t *testing.T) {
+	const fileBody = "quoted dingtalk file"
+	const fileName = "AGENTS.user.md"
+
+	fileSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown")
+		_, _ = w.Write([]byte(fileBody))
+	}))
+	defer fileSrv.Close()
+
+	rt := &dingtalkFileDownloadRT{
+		accessToken: "tok-replied-file",
+		downloadURL: fileSrv.URL,
+	}
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "text",
+		"msgId": "msg-replied-file-1",
+		"conversationType": "2",
+		"conversationId": "conv-1",
+		"conversationTitle": "test group",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"text": {
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "file",
+				"content": {
+					"spaceId": "space-1",
+					"fileName": "` + fileName + `",
+					"downloadCode": "dc-replied-file",
+					"fileId": "file-1"
+				}
+			},
+			"content": "这个文件你能看得见吗"
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		expectedContent := "引用: \"文件: " + fileName + "\"\n\n这个文件你能看得见吗"
+		if msg.Content != expectedContent {
+			t.Errorf("Content = %q, want %q", msg.Content, expectedContent)
+		}
+		if len(msg.Files) != 1 {
+			t.Fatalf("Files len = %d, want 1", len(msg.Files))
+		}
+		file := msg.Files[0]
+		if file.FileName != fileName {
+			t.Errorf("FileName = %q, want %q", file.FileName, fileName)
+		}
+		if string(file.Data) != fileBody {
+			t.Errorf("file bytes = %q, want %q", file.Data, fileBody)
+		}
+		if file.MimeType != "text/markdown" {
+			t.Errorf("MimeType = %q, want %q", file.MimeType, "text/markdown")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked for reply-to-file message")
+	}
+}
+
+func TestReplyToPictureMessage_BuildsTextAndImageAttachment(t *testing.T) {
+	imageBody := []byte("fake png bytes")
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(imageBody)
+	}))
+	defer imageSrv.Close()
+
+	rt := &dingtalkFileDownloadRT{
+		accessToken: "tok-replied-picture",
+		downloadURL: imageSrv.URL,
+	}
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "text",
+		"msgId": "msg-replied-picture-1",
+		"conversationType": "2",
+		"conversationId": "conv-1",
+		"conversationTitle": "test group",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"text": {
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "picture",
+				"content": {"downloadCode": "dc-replied-picture"}
+			},
+			"content": "这个呢"
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "引用: \"图片\"\n\n这个呢" {
+			t.Errorf("Content = %q", msg.Content)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if len(msg.Files) != 0 {
+			t.Fatalf("Files len = %d, want 0", len(msg.Files))
+		}
+		image := msg.Images[0]
+		if string(image.Data) != string(imageBody) {
+			t.Errorf("image bytes = %q, want %q", image.Data, imageBody)
+		}
+		if image.MimeType != "image/png" {
+			t.Errorf("MimeType = %q, want image/png", image.MimeType)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked for reply-to-picture message")
 	}
 }
 
