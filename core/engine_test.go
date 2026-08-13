@@ -2945,6 +2945,102 @@ func runRichCardSilentScenario(t *testing.T, name string, chunks []string, final
 	return p.snapshot()
 }
 
+func runRichCardPreviewConfigScenario(t *testing.T, name string, cfg StreamPreviewCfg, events []Event) (starts, streams, updates []string, deletes int) {
+	t.Helper()
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich"})
+	e.SetStreamPreviewCfg(cfg)
+	sessionKey := "feishu:user-rich-preview-config-" + name
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-preview-config-" + name)
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-preview-config-" + name}
+	e.interactiveStates[sessionKey] = state
+
+	for _, event := range events {
+		agentSession.events <- event
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-preview-config-"+name, time.Now(), nil, nil, state.replyCtx)
+	return p.snapshot()
+}
+
+func TestProcessInteractiveEvents_RichCardHonorsStreamPreviewDisablement(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  StreamPreviewCfg
+	}{
+		{name: "globally-disabled", cfg: StreamPreviewCfg{Enabled: false}},
+		{name: "platform-disabled", cfg: StreamPreviewCfg{Enabled: true, DisabledPlatforms: []string{"FEISHU"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			starts, streams, updates, deletes := runRichCardPreviewConfigScenario(t, tt.name, tt.cfg, []Event{
+				{Type: EventThinking, Content: "private reasoning"},
+				{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"},
+				{Type: EventText, Content: "visible answer"},
+				{Type: EventResult, Content: "visible answer", Done: true},
+			})
+
+			if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+				t.Fatalf("initial lifecycle card = %v, want one thinking card", starts)
+			}
+			if len(streams) != 0 {
+				t.Fatalf("disabled stream preview emitted CardKit frames: %v", streams)
+			}
+			if len(updates) != 1 || !strings.Contains(updates[0], "status=done") || !strings.Contains(updates[0], "visible answer") {
+				t.Fatalf("updates = %v, want only the terminal Done card", updates)
+			}
+			if deletes != 0 {
+				t.Fatalf("completed card was unexpectedly deleted %d time(s)", deletes)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardHonorsStreamPreviewThresholds(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         StreamPreviewCfg
+		chunks      []string
+		final       string
+		wantPreview string
+	}{
+		{
+			name:        "interval-and-max-chars",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 60_000, MinDeltaChars: 1, MaxChars: 5},
+			chunks:      []string{"123456", "789"},
+			final:       "123456789",
+			wantPreview: "12345…",
+		},
+		{
+			name:        "minimum-delta",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 10},
+			chunks:      []string{"abc", "def"},
+			final:       "abcdef",
+			wantPreview: "abc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make([]Event, 0, len(tt.chunks)+1)
+			for _, chunk := range tt.chunks {
+				events = append(events, Event{Type: EventText, Content: chunk})
+			}
+			events = append(events, Event{Type: EventResult, Content: tt.final, Done: true})
+			_, streams, updates, _ := runRichCardPreviewConfigScenario(t, tt.name, tt.cfg, events)
+
+			if len(streams) != 2 || streams[0] != tt.wantPreview || streams[1] != tt.final {
+				t.Fatalf("stream frames = %v, want throttled preview %q then terminal %q", streams, tt.wantPreview, tt.final)
+			}
+			if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], tt.final) {
+				t.Fatalf("final lifecycle card is incomplete: %v", updates)
+			}
+		})
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardShortAnswerUsesFirstChunkTypewriter(t *testing.T) {
 	_, streams, updates, deletes := runRichCardSilentScenario(t, "short-typewriter", []string{"Short answer."}, "Short answer.")
 	if deletes != 0 {

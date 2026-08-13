@@ -4665,7 +4665,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	firstEventLogged := false
 	var toolSteps []ToolStep
 	var lastRichCardUpdate time.Time
-	var lastRichCardLen int
+	var lastRichCardPreview string
 	var cardMessageID any
 	var partialText string
 	var richAnswerStarted bool
@@ -5112,6 +5112,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if e.display.CardMode != "rich" {
 			hasRichCard = false
 		}
+		richCardPreviewEnabled := hasRichCard && streamPreviewEnabledForPlatform(e.streamPreview, p.Name())
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
 			// Every update receives the full raw body, so transformations remain
 			// deterministic for both streaming and final frames.
@@ -5131,7 +5132,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// never copied into card state, even when legacy thinking_messages is
 				// enabled for other platforms.
 				toolSteps = append(toolSteps, ToolStep{Kind: ToolStepKindThinking})
-				if cardMessageID == nil {
+				if cardMessageID == nil && richCardPreviewEnabled {
 					card := buildResolvedRichCard(CardStatusThinking, "thinking", toolSteps, "", true, "")
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
@@ -5141,7 +5142,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							cardMessageID = handle
 						}
 					}
-				} else if updater, ok := p.(MessageUpdater); ok {
+				} else if cardMessageID != nil && richCardPreviewEnabled {
+					updater, ok := p.(MessageUpdater)
+					if !ok {
+						break
+					}
 					card := buildResolvedRichCard(CardStatusThinking, "thinking", toolSteps, "", true, "")
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
@@ -5212,7 +5217,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Count the call without retaining its name or arguments. This makes
 				// the privacy boundary true at the engine layer, not just cosmetic.
 				toolSteps = append(toolSteps, ToolStep{Kind: ToolStepKindTool})
-				if cardMessageID == nil {
+				if cardMessageID == nil && richCardPreviewEnabled {
 					card := buildResolvedRichCard(CardStatusWorking, "tool", toolSteps, "", true, "")
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
@@ -5222,7 +5227,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							cardMessageID = handle
 						}
 					}
-				} else if updater, ok := p.(MessageUpdater); ok {
+				} else if cardMessageID != nil && richCardPreviewEnabled {
+					updater, ok := p.(MessageUpdater)
+					if !ok {
+						break
+					}
 					card := buildResolvedRichCard(CardStatusWorking, "tool", toolSteps, "", true, "")
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
@@ -5388,7 +5397,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !handledByStreamCard {
 					if len(textParts) == 0 {
 						if hasRichCard {
-							if cardMessageID == nil && !silentHold {
+							if cardMessageID == nil && !silentHold && richCardPreviewEnabled {
 								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, "", true, "")
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
@@ -5406,14 +5415,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					textParts = append(textParts, event.Content)
 					partialText += event.Content
 					if hasRichCard {
-						if !silentHold {
+						if !silentHold && richCardPreviewEnabled {
+							previewBody := truncateStreamPreviewText(partialText, e.streamPreview.MaxChars)
 							// Lazy creation: if we held during the first text events and
 							// only released this chunk, the initial-create branch above
 							// won't fire (textParts is non-empty by now). Build the card
 							// here using the accumulated partialText so the card emerges
 							// with the post-prefix content already in body.
 							if cardMessageID == nil {
-								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, partialText, true, "")
+								card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, previewBody, true, "")
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -5421,6 +5431,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									} else {
 										cardMessageID = handle
 										richAnswerStarted = true
+										lastRichCardUpdate = time.Now()
+										lastRichCardPreview = previewBody
 									}
 								}
 							}
@@ -5436,7 +5448,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								// This preserves a visible typewriter effect even when a short
 								// answer arrives in one Agent event. Inline-card fallbacks keep
 								// the partial body in this first full-card update.
-								transitionBody := partialText
+								transitionBody := previewBody
 								if hasStreamer {
 									transitionBody = ""
 								}
@@ -5446,42 +5458,41 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 										richAnswerStarted = true
 										if !hasStreamer {
 											lastRichCardUpdate = time.Now()
-											lastRichCardLen = len(partialText)
+											lastRichCardPreview = previewBody
 										}
 									} else {
 										slog.Debug("rich card: failed to switch to answer phase", "platform", p.Name(), "error", err)
 									}
 								}
 							}
-							// Throttle: cardkit-v1 streaming text path uses tighter limits (200ms / 20 chars)
-							// for smoother typewriter UX; full-card Patch fallback keeps the original 1500ms / 30 chars.
-							throttleDur := 1500 * time.Millisecond
-							throttleChars := 30
-							if hasStreamer && cardMessageID != nil {
-								throttleDur = 200 * time.Millisecond
-								throttleChars = 20
-							}
-							if cardMessageID != nil && (time.Since(lastRichCardUpdate) > throttleDur || len(partialText)-lastRichCardLen > throttleChars) {
+							// Rich cards share the public stream_preview contract with the
+							// legacy preview path. The first body frame is immediate; later
+							// frames must satisfy both configured minimums and remain capped.
+							interval := time.Duration(e.streamPreview.IntervalMs) * time.Millisecond
+							elapsedReady := lastRichCardUpdate.IsZero() || interval <= 0 || time.Since(lastRichCardUpdate) >= interval
+							delta := utf8.RuneCountInString(previewBody) - utf8.RuneCountInString(lastRichCardPreview)
+							deltaReady := lastRichCardUpdate.IsZero() || delta >= e.streamPreview.MinDeltaChars
+							if cardMessageID != nil && previewBody != lastRichCardPreview && elapsedReady && deltaReady {
 								// Prefer per-element streaming text update (cardkit-v1) when available;
 								// it engages Lark's native typewriter rendering. Falls back to
 								// full-card Patch on ErrNotSupported (handle without cardID) or any error.
 								streamed := false
 								if hasStreamer {
-									streamBody := resolveRichCardMarkdown(partialText, false)
+									streamBody := resolveRichCardMarkdown(previewBody, false)
 									if err := streamer.StreamRichCardText(e.ctx, cardMessageID, streamBody); err == nil {
 										lastRichCardUpdate = time.Now()
-										lastRichCardLen = len(partialText)
+										lastRichCardPreview = previewBody
 										streamed = true
 									} else if !errors.Is(err, ErrNotSupported) {
 										slog.Debug("rich card: streaming text update failed, falling back to full Patch", "platform", p.Name(), "error", err)
 									}
 								}
 								if !streamed {
-									card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, partialText, true, "")
+									card := buildResolvedRichCard(CardStatusWorking, "answer", toolSteps, previewBody, true, "")
 									if updater, ok := p.(MessageUpdater); ok {
 										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 											lastRichCardUpdate = time.Now()
-											lastRichCardLen = len(partialText)
+											lastRichCardPreview = previewBody
 										} else {
 											slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
 										}
@@ -5855,12 +5866,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
 					// Forced final flush via cardkit-v1 streaming text update before
-					// flipping status to Done via full-card Patch. The throttle in the
-					// EventText path may have skipped the last <200ms / <20 chars; this
-					// catch-up keeps the typewriter rendering smooth all the way to the
-					// end. ErrNotSupported (no cardID) and any error are silent — the
-					// subsequent UpdateMessage will rewrite the body anyway.
-					if streamer, ok := p.(RichCardTextStreamer); ok {
+					// flipping status to Done via full-card Patch. Configured throttling
+					// may have skipped the last small/recent chunk; this catches it up
+					// when previews are enabled. ErrNotSupported (no cardID) and any
+					// error are silent — the subsequent UpdateMessage rewrites the body.
+					if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(e.streamPreview, p.Name()) {
 						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
 							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
 						}
@@ -6061,7 +6071,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				partialText = ""
 				richAnswerStarted = false
 				lastRichCardUpdate = time.Time{}
-				lastRichCardLen = 0
+				lastRichCardPreview = ""
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}

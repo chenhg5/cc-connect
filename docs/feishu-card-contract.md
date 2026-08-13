@@ -24,7 +24,7 @@ Immediate feedback is intentionally higher priority than retroactive invisibilit
 
 ## Streaming and fallback
 
-When Feishu returns a CardKit `card_id`, answer deltas update the `main_text` element with a monotonic sequence number. Full-card state transitions share the same sequence, so a delayed frame cannot overwrite a newer one. Updates are coalesced on a short interval to keep the typing effect smooth without violating Feishu rate limits.
+When Feishu returns a CardKit `card_id`, answer deltas update the `main_text` element with a monotonic sequence number. Full-card state transitions share the same sequence, so a delayed frame cannot overwrite a newer one. Rich cards share the public `[stream_preview]` contract with legacy previews: `enabled` and `disabled_platforms` gate all non-terminal reasoning-count, tool-count, and answer-body updates, while `interval_ms`, `min_delta_chars`, and `max_chars` control answer-body frames. Disabling preview still keeps the immediate accepted-state card and the terminal Done/error update, but suppresses every intermediate frame. The final answer is never truncated by `max_chars`.
 
 If CardKit creation or element streaming is unavailable, cc-connect-next safely falls back to updating the inline card in the same quoted message. Tables beyond Feishu's per-card component budget are rendered as fenced text in that same card rather than creating overflow answer messages.
 

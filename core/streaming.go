@@ -191,20 +191,36 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 	}
 }
 
+func streamPreviewEnabledForPlatform(cfg StreamPreviewCfg, platformName string) bool {
+	if !cfg.Enabled {
+		return false
+	}
+	for _, disabled := range cfg.DisabledPlatforms {
+		if strings.EqualFold(disabled, platformName) {
+			return false
+		}
+	}
+	return true
+}
+
+func truncateStreamPreviewText(text string, maxChars int) string {
+	if maxChars <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text
+	}
+	return string(runes[:maxChars]) + "…"
+}
+
 // canPreview returns true if the platform supports message updating and is not disabled.
 func (sp *streamPreview) canPreview() bool {
 	sp.mu.Lock()
 	degraded := sp.degraded
 	sp.mu.Unlock()
-	if degraded || !sp.cfg.Enabled {
+	if degraded || !streamPreviewEnabledForPlatform(sp.cfg, sp.platform.Name()) {
 		return false
-	}
-	// Check if platform is in disabled list
-	platformName := sp.platform.Name()
-	for _, disabled := range sp.cfg.DisabledPlatforms {
-		if strings.EqualFold(disabled, platformName) {
-			return false
-		}
 	}
 	_, ok := sp.platform.(MessageUpdater)
 	return ok
@@ -221,11 +237,7 @@ func (sp *streamPreview) appendText(text string) {
 
 	sp.fullText += text
 
-	displayText := sp.fullText
-	maxChars := sp.cfg.MaxChars
-	if maxChars > 0 && len([]rune(displayText)) > maxChars {
-		displayText = string([]rune(displayText)[:maxChars]) + "…"
-	}
+	displayText := truncateStreamPreviewText(sp.fullText, sp.cfg.MaxChars)
 
 	delta := len([]rune(displayText)) - len([]rune(sp.lastSentText))
 	elapsed := time.Since(sp.lastSentAt)
@@ -257,11 +269,7 @@ func (sp *streamPreview) scheduleFlushLocked(delay time.Duration) {
 		if sp.degraded {
 			return
 		}
-		displayText := sp.fullText
-		maxChars := sp.cfg.MaxChars
-		if maxChars > 0 && len([]rune(displayText)) > maxChars {
-			displayText = string([]rune(displayText)[:maxChars]) + "…"
-		}
+		displayText := truncateStreamPreviewText(sp.fullText, sp.cfg.MaxChars)
 		sp.flushLocked(displayText)
 	})
 }
@@ -338,11 +346,7 @@ func (sp *streamPreview) freeze() {
 
 	if sp.previewMsgID != nil && !sp.degraded {
 		if updater, ok := sp.platform.(MessageUpdater); ok {
-			text := sp.fullText
-			maxChars := sp.cfg.MaxChars
-			if maxChars > 0 && len([]rune(text)) > maxChars {
-				text = string([]rune(text)[:maxChars]) + "…"
-			}
+			text := truncateStreamPreviewText(sp.fullText, sp.cfg.MaxChars)
 			if text != "" {
 				if sp.transform != nil {
 					text = sp.transform(text)

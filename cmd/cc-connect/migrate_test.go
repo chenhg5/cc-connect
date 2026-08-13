@@ -106,6 +106,41 @@ api_key = "keep-this-secret"
 	}
 }
 
+func TestMigrateLegacyDataRewritesQuotedTopLevelDataDir(t *testing.T) {
+	for _, key := range []string{`"data_dir"`, `'data_dir'`} {
+		t.Run(key, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), key+` = "`+filepath.ToSlash(source)+`" # preserve comment`+"\n")
+			writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{"session":"kept"}`)
+
+			if _, err := migrateLegacyData(source, target, false, false); err != nil {
+				t.Fatalf("migrateLegacyData() error = %v", err)
+			}
+			configBytes, err := os.ReadFile(filepath.Join(target, "config.toml"))
+			if err != nil {
+				t.Fatalf("read migrated config: %v", err)
+			}
+			canonicalTarget, err := canonicalExistingDirectory(target)
+			if err != nil {
+				t.Fatalf("canonical target: %v", err)
+			}
+			configText := string(configBytes)
+			want := key + ` = "` + filepath.ToSlash(canonicalTarget) + `" # preserve comment`
+			if !strings.Contains(configText, want) {
+				t.Fatalf("quoted data_dir was not rewritten in place: got %q, want %q", configText, want)
+			}
+			if got := strings.Count(configText, key); got != 1 {
+				t.Fatalf("migrated config contains %d quoted data_dir keys, want 1: %q", got, configText)
+			}
+			if got, err := os.ReadFile(filepath.Join(target, "sessions", "demo.json")); err != nil || string(got) != `{"session":"kept"}` {
+				t.Fatalf("quoted data_dir migration lost persistent state: content=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
 func TestMigrateLegacyDataRefusesExistingTargetWithoutForce(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

@@ -177,7 +177,7 @@ func pathsOverlap(a, b string) bool {
 	return contains(a, b) || contains(b, a)
 }
 
-var topLevelDataDirLine = regexp.MustCompile(`^(\s*data_dir\s*=\s*)(?:"(?:\\.|[^"])*"|'[^']*')(\s*(?:#.*)?)$`)
+var topLevelDataDirLine = regexp.MustCompile(`^(\s*(?:data_dir|"data_dir"|'data_dir')\s*=\s*)(?:"(?:\\.|[^"])*"|'[^']*')(\s*(?:#.*)?)$`)
 
 func rewriteMigratedDataDir(configBytes []byte, target string) []byte {
 	lines := strings.Split(string(configBytes), "\n")
