@@ -110,6 +110,7 @@ type replyContext struct {
 	messageID  string
 	chatID     string
 	sessionKey string
+	rootID     string // topic root message ID (from msg.RootId); used by workspace_thread_isolation
 }
 
 type Platform struct {
@@ -130,6 +131,7 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	workspaceThreadIsolation   bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -310,6 +312,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	workspaceThreadIsolation, _ := opts["workspace_thread_isolation"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -401,6 +404,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		workspaceThreadIsolation:   workspaceThreadIsolation,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1100,6 +1104,11 @@ func (p *Platform) dispatchCoreMessage(msg *core.Message) {
 // populateWorkspaceChannelKeys keeps workspace binding scope aligned with the
 // session scope. In Feishu topic mode the session key contains the root message
 // ID, while the legacy chat-level binding remains the default for new topics.
+//
+// When workspace_thread_isolation is enabled (even without thread_isolation),
+// messages inside a topic get a topic-scoped ChannelKey so each topic can bind
+// an independent workspace. The session key and reply behaviour remain
+// unchanged — only the workspace routing key is affected.
 func (p *Platform) populateWorkspaceChannelKeys(msg *core.Message) {
 	if msg == nil || msg.ChannelKey != "" {
 		return
@@ -1109,15 +1118,23 @@ func (p *Platform) populateWorkspaceChannelKeys(msg *core.Message) {
 		return
 	}
 	msg.ChannelKey = rctx.chatID
-	if !p.threadIsolation {
+
+	if !p.threadIsolation && !p.workspaceThreadIsolation {
 		return
 	}
-	parts := strings.SplitN(rctx.sessionKey, ":", 3)
-	if len(parts) != 3 || parts[0] != p.platformName || parts[1] != rctx.chatID {
-		return
+
+	// Determine the topic root ID.  Prefer the rootID captured from the
+	// inbound event (works for both thread_isolation and
+	// workspace_thread_isolation); fall back to parsing the session key
+	// (covers card-action paths where rootID may not be set directly).
+	rootID := rctx.rootID
+	if rootID == "" && p.threadIsolation {
+		parts := strings.SplitN(rctx.sessionKey, ":", 3)
+		if len(parts) == 3 && parts[0] == p.platformName && parts[1] == rctx.chatID {
+			rootID, _ = parseThreadRootID(parts[2])
+		}
 	}
-	rootID, ok := parseThreadRootID(parts[2])
-	if !ok {
+	if rootID == "" {
 		return
 	}
 	msg.ChannelKey = rctx.chatID + ":topic:" + rootID
@@ -1403,7 +1420,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, rootID: stringValue(msg.RootId)}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
