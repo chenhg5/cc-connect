@@ -16,6 +16,7 @@ Every accepted interactive turn gets its own Card 2.0 message. The card is creat
 | Failed before an answer | Localized generic failure | No runtime error details |
 | Failed after partial answer | Localized failure | The already-visible safe partial answer |
 | Bare `NO_REPLY` | The optimistic card is recalled; no answer or Done state remains | No answer body; Feishu may show its own recall notice |
+| Triggering message recalled | The lifecycle card is deleted silently | No partial answer is persisted to assistant history |
 
 The initial card is non-empty and is sent before waiting for reasoning, tools, or answer text. A queued turn uses its own stored reply context, so it never quotes an earlier question by accident.
 
@@ -42,7 +43,7 @@ This is omission, not a collapsed disclosure: private details do not exist in th
 
 ## Locale and completion
 
-Lifecycle copy is defined for English, Simplified Chinese, Traditional Chinese, Japanese, and Spanish. The active conversation locale selects the copy. A configured `done_emoji` is added to the triggering message only after a visible successful answer; it is suppressed for `NO_REPLY` and failures.
+Lifecycle copy is defined for English, Simplified Chinese, Traditional Chinese, Japanese, and Spanish. Each accepted turn snapshots the locale selected by its own triggering message, so concurrent sessions cannot make a card switch language mid-turn; a queued turn receives its own fresh snapshot. A configured `done_emoji` is added to the triggering message only after a visible successful answer; it is suppressed for `NO_REPLY`, recalled triggers, and failures.
 
 ## Executable verification
 
@@ -51,7 +52,8 @@ Run the focused contract tests:
 ```bash
 go test ./platform/feishu -run 'TestBuildRichCard|TestRichCardLifecycle' -count=1
 go test ./core -run 'TestProcessInteractiveEvents_RichCard|TestProcessInteractiveEvents_QueuedRichCards' -count=1
+go test ./core -run 'TestProcessInteractiveEvents_CapturesRichCardLocalePerTurn|TestHandleMessageRecallDeletesRichCardWithoutPersistingPartialOutput|TestEngine_Stop.*RichCard' -count=1
 go test ./core -run TestCUJ -count=1
 ```
 
-These tests cover payload privacy, all supported locales, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.
+These tests cover payload privacy, all supported locales, per-turn locale isolation, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, partial-answer failure handling, shutdown finalization, recalled-trigger cleanup, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.

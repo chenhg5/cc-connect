@@ -2025,6 +2025,14 @@ type cancelTurnControllableSession struct {
 	cancelCalled chan struct{}
 }
 
+type localizedCopyRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *localizedCopyRichCardPlatform) BuildLocalizedRichCard(status CardStatus, _ string, _ []ToolStep, markdown string, _ bool, _ string, copy RichCardCopy) string {
+	return fmt.Sprintf("status=%s thinking=%q answering=%q done=%q error=%q body=%q", status, copy.Thinking, copy.Answering, copy.Done, copy.Error, markdown)
+}
+
 func (s *cancelTurnControllableSession) CancelTurn() error {
 	s.cancelOnce.Do(func() { close(s.cancelCalled) })
 	return nil
@@ -2344,6 +2352,90 @@ func TestSilentTurnCancellationSignalKeepsEmptyMessageIDActive(t *testing.T) {
 	case <-ch:
 		t.Fatal("an empty message ID was treated as an already-recalled turn")
 	default:
+	}
+}
+
+func TestProcessInteractiveEvents_CapturesRichCardLocalePerTurn(t *testing.T) {
+	p := &localizedCopyRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangAuto)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	e.i18n.DetectAndSet("你好")
+	zhCopy := NewI18n(LangChinese).RichCardCopy()
+	enCopy := NewI18n(LangEnglish).RichCardCopy()
+	sessionKey := "feishu:user-locale-snapshot"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-locale-snapshot")
+	e.i18n.DetectAndSet("hello")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-zh",
+		pendingMessages: []queuedMessage{{
+			messageID:     "m-en",
+			platform:      p,
+			replyCtx:      "ctx-en",
+			content:       "hello",
+			msgPlatform:   "feishu",
+			msgSessionKey: sessionKey,
+		}},
+	}
+	state.setTurnRichCardCopy("m-zh", e.i18n.RichCardCopyForText("你好"))
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-zh", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitForStarts := func(want int) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			starts, _, _, _ := p.snapshot()
+			if len(starts) >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("preview starts = %d, want at least %d", len(starts), want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitForStarts(1)
+
+	// The engine-wide detected locale is already English, simulating another
+	// session winning that shared mutable state before this loop begins.
+	agentSession.events <- Event{Type: EventResult, Content: "第一条", Done: true}
+	waitForStarts(2)
+	agentSession.events <- Event{Type: EventResult, Content: "second", Done: true}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("queued locale turns did not complete")
+	}
+
+	starts, _, updates, _ := p.snapshot()
+	if !strings.Contains(starts[0], `thinking="`+zhCopy.Thinking+`"`) {
+		t.Fatalf("first card did not start in Chinese: %q", starts[0])
+	}
+	if !strings.Contains(starts[1], `thinking="`+enCopy.Thinking+`"`) {
+		t.Fatalf("queued card did not refresh to English: %q", starts[1])
+	}
+	var chineseFinal, englishFinal string
+	for _, update := range updates {
+		if strings.Contains(update, `body="第一条"`) {
+			chineseFinal = update
+		}
+		if strings.Contains(update, `body="second"`) {
+			englishFinal = update
+		}
+	}
+	if chineseFinal == "" || !strings.Contains(chineseFinal, `done="`+zhCopy.Done+`"`) || strings.Contains(chineseFinal, `done="`+enCopy.Done+`"`) {
+		t.Fatalf("Chinese turn changed locale before completion: %q", chineseFinal)
+	}
+	if englishFinal == "" || !strings.Contains(englishFinal, `done="`+enCopy.Done+`"`) {
+		t.Fatalf("queued English turn did not use its own locale: %q", englishFinal)
 	}
 }
 

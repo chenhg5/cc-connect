@@ -514,6 +514,9 @@ type interactiveState struct {
 	turnCancelMessageID      string
 	turnCancelClosed         bool
 	discardTurnMessageID     string
+	richCardCopy             RichCardCopy
+	richCardCopyMessageID    string
+	richCardCopySet          bool
 	pending                  *pendingPermission
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
@@ -739,6 +742,23 @@ func (s *interactiveState) shouldDiscardTurn(messageID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return messageID != "" && s.discardTurnMessageID == messageID
+}
+
+func (s *interactiveState) setTurnRichCardCopy(messageID string, copy RichCardCopy) {
+	s.mu.Lock()
+	s.richCardCopy = copy
+	s.richCardCopyMessageID = messageID
+	s.richCardCopySet = true
+	s.mu.Unlock()
+}
+
+func (s *interactiveState) turnRichCardCopy(messageID string) (RichCardCopy, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.richCardCopySet || s.richCardCopyMessageID != messageID {
+		return RichCardCopy{}, false
+	}
+	return s.richCardCopy, true
 }
 
 // resolve safely closes the Resolved channel exactly once.
@@ -3699,6 +3719,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	turnStart := time.Now()
 
+	turnRichCardCopy := e.i18n.RichCardCopyForText(msg.Content)
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
 	// Persist user message immediately so crashes between user input and
@@ -3732,6 +3753,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
+	state.setTurnRichCardCopy(msg.MessageID, turnRichCardCopy)
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
@@ -4630,6 +4652,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 	silentCancelCh := state.silentTurnCancellationSignal(msgID)
+	turnRichCardCopy, hasTurnRichCardCopy := state.turnRichCardCopy(msgID)
+	if !hasTurnRichCardCopy {
+		turnRichCardCopy = e.i18n.RichCardCopy()
+	}
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
@@ -4706,7 +4732,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	buildRichCard := func(p Platform, supporter RichCardSupporter, status CardStatus, phase string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 		if localized, ok := p.(LocalizedRichCardSupporter); ok {
-			return localized.BuildLocalizedRichCard(status, phase, steps, markdown, streaming, statusFooter, e.i18n.RichCardCopy())
+			return localized.BuildLocalizedRichCard(status, phase, steps, markdown, streaming, statusFooter, turnRichCardCopy)
 		}
 		return supporter.BuildRichCard(status, phase, steps, markdown, streaming, statusFooter)
 	}
@@ -5982,6 +6008,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Detect language now (deferred from queue time to avoid
 				// flipping locale while the previous turn is still running).
 				e.i18n.DetectAndSet(queued.content)
+				turnRichCardCopy = e.i18n.RichCardCopyForText(queued.content)
+				state.setTurnRichCardCopy(queued.messageID, turnRichCardCopy)
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
@@ -6314,7 +6342,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
 
+		queuedRichCardCopy := e.i18n.RichCardCopyForText(queued.content)
 		e.i18n.DetectAndSet(queued.content)
+		state.setTurnRichCardCopy(queued.messageID, queuedRichCardCopy)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		state.mu.Lock()

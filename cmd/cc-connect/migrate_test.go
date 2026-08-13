@@ -592,6 +592,115 @@ base_dir = "`+filepath.ToSlash(baseDir)+`"
 	}
 }
 
+func TestMigrateLegacyDataPreservesProjectDataAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX project access modes are not available on Windows")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	project := filepath.Join(root, "project")
+	projectSource := filepath.Join(project, ".cc-connect")
+	projectSubdir := filepath.Join(projectSource, "attachments")
+	projectEmptyDir := filepath.Join(projectSource, "images")
+	projectFile := filepath.Join(projectSubdir, "context.txt")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "isolated"
+run_as_user = "agent-user"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(project)+`"
+`)
+	writeMigrationFixture(t, projectFile, "project-data")
+	if err := os.MkdirAll(projectEmptyDir, 0o710); err != nil {
+		t.Fatalf("mkdir empty project directory: %v", err)
+	}
+	if err := os.Chmod(projectSource, 0o750); err != nil {
+		t.Fatalf("chmod project source: %v", err)
+	}
+	if err := os.Chmod(projectSubdir, 0o750); err != nil {
+		t.Fatalf("chmod project subdirectory: %v", err)
+	}
+	if err := os.Chmod(projectEmptyDir, 0o710); err != nil {
+		t.Fatalf("chmod empty project directory: %v", err)
+	}
+	if err := os.Chmod(projectFile, 0o640); err != nil {
+		t.Fatalf("chmod project file: %v", err)
+	}
+
+	if _, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		IncludeProjectData: true,
+	}); err != nil {
+		t.Fatalf("migrateLegacyDataWithOptions() error = %v", err)
+	}
+
+	projectTarget := filepath.Join(project, ".cc-connect-next")
+	for _, check := range []struct {
+		source string
+		target string
+		mode   os.FileMode
+	}{
+		{source: projectSource, target: projectTarget, mode: 0o750},
+		{source: projectSubdir, target: filepath.Join(projectTarget, "attachments"), mode: 0o750},
+		{source: projectEmptyDir, target: filepath.Join(projectTarget, "images"), mode: 0o710},
+		{source: projectFile, target: filepath.Join(projectTarget, "attachments", "context.txt"), mode: 0o640},
+	} {
+		sourceInfo, err := os.Stat(check.source)
+		if err != nil {
+			t.Fatalf("stat source access fixture: %v", err)
+		}
+		targetInfo, err := os.Stat(check.target)
+		if err != nil {
+			t.Fatalf("stat migrated project data: %v", err)
+		}
+		if got := targetInfo.Mode().Perm(); got != check.mode {
+			t.Fatalf("migrated mode for %s = %#o, want %#o", check.target, got, check.mode)
+		}
+		sourceUID, sourceGID, sourceHasOwner := migrationOwnership(sourceInfo)
+		targetUID, targetGID, targetHasOwner := migrationOwnership(targetInfo)
+		if sourceHasOwner != targetHasOwner || (sourceHasOwner && (sourceUID != targetUID || sourceGID != targetGID)) {
+			t.Fatalf("migrated ownership for %s = %d:%d, want %d:%d", check.target, targetUID, targetGID, sourceUID, sourceGID)
+		}
+	}
+}
+
+func TestVerifyMigrationPlanUnchangedDetectsAddedPersistentFile(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "existing.json"), "existing")
+	opts := migrationOptions{Source: source, Target: target, Home: root, IncludeProjectData: true}
+
+	original, err := prepareLegacyMigration(opts)
+	if err != nil {
+		t.Fatalf("prepare original migration: %v", err)
+	}
+	destinations := append(append([]*migrationDestination{}, original.Projects...), original.Main)
+	for _, destination := range destinations {
+		if err := prepareMigrationStage(destination); err != nil {
+			t.Fatalf("prepare migration stage: %v", err)
+		}
+	}
+	t.Cleanup(func() { cleanupMigrationStages(destinations) })
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "created-while-running.json"), "new")
+
+	fresh, err := prepareLegacyMigration(opts)
+	if err != nil {
+		t.Fatalf("prepare fresh migration inventory: %v", err)
+	}
+	if err := verifyMigrationPlanUnchanged(original, fresh); err == nil || !strings.Contains(err.Error(), "changed during migration") {
+		t.Fatalf("verifyMigrationPlanUnchanged() error = %v, want added-file refusal", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("source drift activated a target, err=%v", err)
+	}
+}
+
 func TestMigrateLegacyDataExpandsHomeInMultiWorkspaceBase(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

@@ -4263,6 +4263,10 @@ func (i *I18n) T(key MsgKey) string {
 	i.mu.RLock()
 	lang := i.currentLang()
 	i.mu.RUnlock()
+	return translateMessage(key, lang)
+}
+
+func translateMessage(key MsgKey, lang Language) string {
 	if msg, ok := messages[key]; ok {
 		if translated, ok := msg[lang]; ok {
 			return translated
@@ -4284,20 +4288,41 @@ func (i *I18n) T(key MsgKey) string {
 // conversation language. Native card platforms receive this copy from the
 // engine instead of embedding user-facing strings in their renderer.
 func (i *I18n) RichCardCopy() RichCardCopy {
+	i.mu.RLock()
+	lang := i.currentLang()
+	i.mu.RUnlock()
+	return richCardCopyForLanguage(lang)
+}
+
+// RichCardCopyForText resolves a turn's card language from its own trigger
+// instead of the engine-wide auto-detected value. This keeps concurrent
+// sessions independent while still honoring an explicitly configured language.
+func (i *I18n) RichCardCopyForText(text string) RichCardCopy {
+	i.mu.RLock()
+	lang := i.lang
+	i.mu.RUnlock()
+	if lang == LangAuto {
+		lang = DetectLanguage(text)
+	}
+	return richCardCopyForLanguage(lang)
+}
+
+func richCardCopyForLanguage(lang Language) RichCardCopy {
+	t := func(key MsgKey) string { return translateMessage(key, lang) }
 	return RichCardCopy{
-		Thinking:        i.T(MsgRichCardThinking),
-		CallingTools:    i.T(MsgRichCardCallingTools),
-		Answering:       i.T(MsgRichCardAnswering),
-		Done:            i.T(MsgRichCardDone),
-		Error:           i.T(MsgRichCardError),
-		CompletedBody:   i.T(MsgRichCardCompletedBody),
-		ErrorBody:       i.T(MsgRichCardErrorBody),
-		PrivacyNotice:   i.T(MsgRichCardPrivacyNotice),
-		ProgressFormat:  i.T(MsgRichCardProgressFormat),
-		ThinkingSummary: i.T(MsgRichCardThinkingSummary),
-		ToolSummary:     i.T(MsgRichCardToolSummary),
-		AnswerSummary:   i.T(MsgRichCardAnswerSummary),
-		ErrorSummary:    i.T(MsgRichCardErrorSummary),
+		Thinking:        t(MsgRichCardThinking),
+		CallingTools:    t(MsgRichCardCallingTools),
+		Answering:       t(MsgRichCardAnswering),
+		Done:            t(MsgRichCardDone),
+		Error:           t(MsgRichCardError),
+		CompletedBody:   t(MsgRichCardCompletedBody),
+		ErrorBody:       t(MsgRichCardErrorBody),
+		PrivacyNotice:   t(MsgRichCardPrivacyNotice),
+		ProgressFormat:  t(MsgRichCardProgressFormat),
+		ThinkingSummary: t(MsgRichCardThinkingSummary),
+		ToolSummary:     t(MsgRichCardToolSummary),
+		AnswerSummary:   t(MsgRichCardAnswerSummary),
+		ErrorSummary:    t(MsgRichCardErrorSummary),
 	}
 }
 

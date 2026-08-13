@@ -94,10 +94,20 @@ type plannedMigrationFile struct {
 	Content      []byte
 }
 
+type migrationAccessMetadata struct {
+	Mode     fs.FileMode
+	IsDir    bool
+	UID      int
+	GID      int
+	HasOwner bool
+}
+
 type migrationDestination struct {
 	Scope            string
 	Target           string
 	Files            map[string]plannedMigrationFile
+	PreserveAccess   bool
+	Access           map[string]migrationAccessMetadata
 	Stage            string
 	Backup           string
 	Existed          bool
@@ -145,6 +155,20 @@ func migrateLegacyDataWithOptions(opts migrationOptions) (migrationReport, error
 	if err := writeStagedContent(plan.Main.Stage, migrationManifestFilename, manifestBytes, sha256Bytes(manifestBytes)); err != nil {
 		cleanupMigrationStages(destinations)
 		return plan.Report, fmt.Errorf("write migration manifest: %w", err)
+	}
+
+	// The official process intentionally remains online during migration. Build
+	// a fresh, read-only plan immediately before activation so additions,
+	// deletions, newly discovered projects, and access-mode changes cannot be
+	// silently omitted just because they were absent from the first inventory.
+	freshPlan, err := prepareLegacyMigration(opts)
+	if err != nil {
+		cleanupMigrationStages(destinations)
+		return plan.Report, fmt.Errorf("re-scan migration source: %w", err)
+	}
+	if err := verifyMigrationPlanUnchanged(plan, freshPlan); err != nil {
+		cleanupMigrationStages(destinations)
+		return plan.Report, err
 	}
 
 	promoted := make([]*migrationDestination, 0, len(destinations))
@@ -294,9 +318,11 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 				return nil, fmt.Errorf("unsafe overlapping project-local migration path: %s -> %s", projectSource, projectTarget)
 			}
 			destination := &migrationDestination{
-				Scope:  "project-data",
-				Target: projectTarget,
-				Files:  make(map[string]plannedMigrationFile),
+				Scope:          "project-data",
+				Target:         projectTarget,
+				Files:          make(map[string]plannedMigrationFile),
+				PreserveAccess: true,
+				Access:         make(map[string]migrationAccessMetadata),
 			}
 			var projectReport migrationReport
 			if err := collectMigrationTree(projectSource, "project-data", false, destination, &projectReport); err != nil {
@@ -467,6 +493,13 @@ func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, exclude
 			return err
 		}
 		if rel == "." {
+			if destination.PreserveAccess {
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				destination.Access[rel] = migrationAccessMetadataForInfo(info)
+			}
 			return nil
 		}
 		parts := strings.Split(filepath.ToSlash(rel), "/")
@@ -493,6 +526,13 @@ func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, exclude
 			return nil
 		}
 		if entry.IsDir() {
+			if destination.PreserveAccess {
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				destination.Access[filepath.Clean(rel)] = migrationAccessMetadataForInfo(info)
+			}
 			return nil
 		}
 		info, err := entry.Info()
@@ -502,6 +542,9 @@ func collectMigrationTreeExcluding(root, scope string, skipRuntime bool, exclude
 		if !info.Mode().IsRegular() {
 			report.SkippedRuntime++
 			return nil
+		}
+		if destination.PreserveAccess {
+			destination.Access[filepath.Clean(rel)] = migrationAccessMetadataForInfo(info)
 		}
 		hash, size, err := sha256File(path)
 		if err != nil {
@@ -856,9 +899,29 @@ func prepareMigrationStage(destination *migrationDestination) error {
 		return err
 	}
 	destination.Stage = stage
+	access := make(map[string]migrationAccessMetadata)
+	if destination.PreserveAccess && destination.Existed {
+		existingAccess, err := collectMigrationAccess(destination.Target)
+		if err != nil {
+			return err
+		}
+		for rel, metadata := range existingAccess {
+			access[rel] = metadata
+		}
+	}
+	if destination.PreserveAccess {
+		for rel, metadata := range destination.Access {
+			access[rel] = metadata
+		}
+	}
 
 	if destination.Existed {
 		if err := copyExistingMigrationTarget(destination.Target, stage); err != nil {
+			return err
+		}
+	}
+	if destination.PreserveAccess {
+		if err := ensurePreservedMigrationDirectories(stage, access); err != nil {
 			return err
 		}
 	}
@@ -870,6 +933,11 @@ func prepareMigrationStage(destination *migrationDestination) error {
 	sort.Strings(rels)
 	for _, rel := range rels {
 		if err := writePlannedMigrationFile(stage, destination.Files[rel]); err != nil {
+			return err
+		}
+	}
+	if destination.PreserveAccess {
+		if err := applyMigrationAccessTree(stage, access); err != nil {
 			return err
 		}
 	}
@@ -895,6 +963,171 @@ func verifyMigrationSourcesUnchanged(destinations []*migrationDestination) error
 				return fmt.Errorf("source changed during migration: %s; no target was activated", file.Source)
 			}
 			verified[key] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func verifyMigrationPlanUnchanged(original, fresh *preparedMigration) error {
+	if original.SourceRoot != fresh.SourceRoot || original.SourceDataDir != fresh.SourceDataDir || original.SourceWorkDir != fresh.SourceWorkDir {
+		return fmt.Errorf("source topology changed during migration; no target was activated")
+	}
+	if original.Report.SkippedSymlinks != fresh.Report.SkippedSymlinks || !sameSkippedProjects(original.Report.SkippedProjects, fresh.Report.SkippedProjects) {
+		return fmt.Errorf("source discovery changed during migration; no target was activated")
+	}
+	originalDestinations := migrationDestinationsByTarget(original)
+	freshDestinations := migrationDestinationsByTarget(fresh)
+	if len(originalDestinations) != len(freshDestinations) {
+		return fmt.Errorf("persistent source entries changed during migration; no target was activated")
+	}
+	for target, before := range originalDestinations {
+		after, ok := freshDestinations[target]
+		if !ok || before.Scope != after.Scope || before.PreserveAccess != after.PreserveAccess {
+			return fmt.Errorf("persistent source destination changed during migration: %s; no target was activated", target)
+		}
+		if len(before.Files) != len(after.Files) {
+			return fmt.Errorf("persistent source entries changed during migration for %s; no target was activated", target)
+		}
+		for rel, beforeFile := range before.Files {
+			afterFile, ok := after.Files[rel]
+			if !ok || beforeFile.Source != afterFile.Source || beforeFile.SourceSize != afterFile.SourceSize || beforeFile.SourceSHA256 != afterFile.SourceSHA256 || beforeFile.Size != afterFile.Size || beforeFile.SHA256 != afterFile.SHA256 {
+				return fmt.Errorf("persistent source changed during migration: %s; no target was activated", beforeFile.Source)
+			}
+		}
+		if len(before.Access) != len(after.Access) {
+			return fmt.Errorf("project data access metadata changed during migration for %s; no target was activated", target)
+		}
+		for rel, beforeAccess := range before.Access {
+			if afterAccess, ok := after.Access[rel]; !ok || beforeAccess != afterAccess {
+				return fmt.Errorf("project data access metadata changed during migration: %s; no target was activated", filepath.Join(target, rel))
+			}
+		}
+	}
+	return nil
+}
+
+func migrationDestinationsByTarget(plan *preparedMigration) map[string]*migrationDestination {
+	result := make(map[string]*migrationDestination, len(plan.Projects)+1)
+	for _, destination := range append(append([]*migrationDestination{}, plan.Projects...), plan.Main) {
+		result[destination.Target] = destination
+	}
+	return result
+}
+
+func sameSkippedProjects(a, b []migrationSkippedProjectRecord) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func collectMigrationAccess(root string) (map[string]migrationAccessMetadata, error) {
+	result := make(map[string]migrationAccessMetadata)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !entry.IsDir() && !entry.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		result[filepath.Clean(rel)] = migrationAccessMetadataForInfo(info)
+		return nil
+	})
+	return result, err
+}
+
+func migrationAccessMetadataForInfo(info fs.FileInfo) migrationAccessMetadata {
+	uid, gid, hasOwner := migrationOwnership(info)
+	return migrationAccessMetadata{
+		Mode:     info.Mode().Perm(),
+		IsDir:    info.IsDir(),
+		UID:      uid,
+		GID:      gid,
+		HasOwner: hasOwner,
+	}
+}
+
+func ensurePreservedMigrationDirectories(root string, access map[string]migrationAccessMetadata) error {
+	rels := make([]string, 0, len(access))
+	for rel, metadata := range access {
+		if metadata.IsDir && rel != "." {
+			rels = append(rels, rel)
+		}
+	}
+	sort.Slice(rels, func(i, j int) bool {
+		depthI := strings.Count(filepath.ToSlash(rels[i]), "/")
+		depthJ := strings.Count(filepath.ToSlash(rels[j]), "/")
+		if depthI == depthJ {
+			return rels[i] < rels[j]
+		}
+		return depthI < depthJ
+	})
+	for _, rel := range rels {
+		if err := ensureStagedDirectory(root, rel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMigrationAccessTree(root string, access map[string]migrationAccessMetadata) error {
+	rels := make([]string, 0, len(access))
+	for rel := range access {
+		rels = append(rels, rel)
+	}
+	sort.Slice(rels, func(i, j int) bool {
+		if rels[i] == "." {
+			return false
+		}
+		if rels[j] == "." {
+			return true
+		}
+		depthI := strings.Count(filepath.ToSlash(rels[i]), "/")
+		depthJ := strings.Count(filepath.ToSlash(rels[j]), "/")
+		if depthI == depthJ {
+			return rels[i] < rels[j]
+		}
+		return depthI > depthJ
+	})
+	for _, rel := range rels {
+		path := root
+		if rel != "." {
+			if err := validateMigrationRel(rel); err != nil {
+				return err
+			}
+			path = filepath.Join(root, rel)
+		}
+		metadata := access[rel]
+		if metadata.HasOwner {
+			info, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			uid, gid, ok := migrationOwnership(info)
+			if !ok || uid != metadata.UID || gid != metadata.GID {
+				if err := os.Chown(path, metadata.UID, metadata.GID); err != nil {
+					return fmt.Errorf("preserve ownership for %s: %w", path, err)
+				}
+			}
+		}
+		if err := os.Chmod(path, metadata.Mode.Perm()); err != nil {
+			return fmt.Errorf("preserve access mode for %s: %w", path, err)
 		}
 	}
 	return nil
