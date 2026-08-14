@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/tests/blackbox/helper"
-	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
+	"github.com/timmyagentic/cc-connect-next/tests/blackbox/helper"
+	bbplatform "github.com/timmyagentic/cc-connect-next/tests/blackbox/platform"
 )
 
 const p2CmdTimeout = 30 * time.Second
@@ -142,7 +142,7 @@ func TestP2_46_Search_ClaudeCode(t *testing.T) {
 // ── P2-61: 非授权用户被拒绝 ──────────────────────────────────────────────────
 
 // TestP2_61_UnauthorizedUserIgnored verifies that when a message arrives from
-// a user ID not in allow_from, cc-connect does NOT send a reply.
+// a user ID not in allow_from, cc-connect-next does NOT send a reply.
 //
 // The engine's allow_from filter is configured per-project. This test uses a
 // separate MockPlatform that injects a message from a user NOT in any

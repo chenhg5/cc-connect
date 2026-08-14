@@ -65,7 +65,7 @@ func (m *systemdManager) Install(cfg Config) error {
 	// readable by root only; for user-level units under
 	// ~/.config/systemd/user it remains owner-only. WriteFile only applies
 	// perm on create, so Chmod afterwards is required to harden reinstalls
-	// of pre-existing 0644 units from earlier cc-connect versions.
+	// of pre-existing 0644 units from earlier cc-connect-next versions.
 	if err := os.WriteFile(unitPath, []byte(unit), 0600); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}
@@ -172,14 +172,14 @@ func (m *systemdManager) unitPath() string {
 func (m *systemdManager) buildUnit(cfg Config) string {
 	var sb strings.Builder
 	sb.WriteString("[Unit]\n")
-	sb.WriteString("Description=cc-connect - AI Agent Chat Bridge\n")
+	sb.WriteString("Description=cc-connect-next - AI Agent Chat Bridge\n")
 	sb.WriteString("After=network-online.target\n")
 	sb.WriteString("Wants=network-online.target\n\n")
 
 	sb.WriteString("[Service]\n")
 	sb.WriteString("Type=simple\n")
-	fmt.Fprintf(&sb, "ExecStart=%s\n", cfg.BinaryPath)
-	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
+	fmt.Fprintf(&sb, "ExecStart=%s --config %s\n", quoteSystemdExecArg(cfg.BinaryPath), quoteSystemdExecArg(configPathFor(cfg)))
+	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", quoteSystemdExecArg(cfg.WorkDir))
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
@@ -214,6 +214,35 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		sb.WriteString("WantedBy=default.target\n")
 	}
 	return sb.String()
+}
+
+// quoteSystemdExecArg preserves one literal argv value in ExecStart. Percent
+// signs must be doubled because systemd expands specifiers even in quoted
+// arguments; the remaining escapes follow systemd's quoted-string grammar.
+func quoteSystemdExecArg(value string) string {
+	var b strings.Builder
+	b.Grow(len(value) + 2)
+	b.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '%':
+			b.WriteString("%%")
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // escapeSystemdEnvValue prepares a value for inclusion inside the double
@@ -277,16 +306,16 @@ func checkSystemdRunning(system bool) error {
 				"  Add the following to /etc/wsl.conf and restart WSL (wsl --shutdown):\n" +
 				"    [boot]\n" +
 				"    systemd=true\n" +
-				"  Or use: nohup cc-connect > cc-connect.log 2>&1 &")
+				"  Or use: nohup cc-connect-next > cc-connect-next.log 2>&1 &")
 		}
 		if state == "offline" || strings.Contains(state, "not been booted") {
 			return fmt.Errorf("systemd is not active (state: %s).\n"+
 				"  If running in a container, systemd is typically not available.\n"+
 				"  Use nohup, tmux, or screen instead:\n"+
-				"    nohup cc-connect > cc-connect.log 2>&1 &", state)
+				"    nohup cc-connect-next > cc-connect-next.log 2>&1 &", state)
 		}
 		return fmt.Errorf("systemd check failed (state: %s).\n"+
-			"  Use nohup as alternative: nohup cc-connect > cc-connect.log 2>&1 &", state)
+			"  Use nohup as alternative: nohup cc-connect-next > cc-connect-next.log 2>&1 &", state)
 	}
 
 	// User-level failures
@@ -295,16 +324,16 @@ func checkSystemdRunning(system bool) error {
 			"  Add the following to /etc/wsl.conf and restart WSL (wsl --shutdown):\n" +
 			"    [boot]\n" +
 			"    systemd=true\n" +
-			"  Or use: nohup cc-connect > cc-connect.log 2>&1 &")
+			"  Or use: nohup cc-connect-next > cc-connect-next.log 2>&1 &")
 	}
 
 	user := os.Getenv("USER")
 	return fmt.Errorf("systemd user session not available.\n"+
 		"  This often happens when connecting via SSH without a systemd login session.\n"+
 		"  Try one of:\n"+
-		"    1. Run as root: sudo cc-connect daemon install (uses system-level systemd)\n"+
+		"    1. Run as root: sudo cc-connect-next daemon install (uses system-level systemd)\n"+
 		"    2. loginctl enable-linger %s && export XDG_RUNTIME_DIR=/run/user/$(id -u)\n"+
-		"    3. Use nohup/tmux instead: nohup cc-connect > cc-connect.log 2>&1 &", user)
+		"    3. Use nohup/tmux instead: nohup cc-connect-next > cc-connect-next.log 2>&1 &", user)
 }
 
 func isWSL2() bool {

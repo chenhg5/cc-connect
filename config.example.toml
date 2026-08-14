@@ -1,5 +1,5 @@
-# cc-connect configuration
-# cc-connect 配置文件
+# cc-connect-next configuration
+# cc-connect-next 配置文件
 #
 # Copy this file to config.toml and fill in your credentials.
 # 复制此文件为 config.toml，填入你的凭证信息。
@@ -9,9 +9,9 @@
 # 例如：token = "${TELEGRAM_BOT_TOKEN}"
 #
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
-# A single cc-connect process can manage multiple projects simultaneously.
+# A single cc-connect-next process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
-# 单个 cc-connect 进程可以同时管理多个项目。
+# 单个 cc-connect-next 进程可以同时管理多个项目。
 
 # =============================================================================
 # Global Settings / 全局设置
@@ -34,26 +34,26 @@
 # 初始化命令，会添加到每条 shell 命令前面。用于加载 profile，使自定义函数和别名可用。
 # shell_profile = "source ~/.zshrc"
 
-# Session data storage directory (default: ~/.cc-connect)
+# Session data storage directory (default: ~/.cc-connect-next)
 # Stores conversation history and session state as JSON files.
-# 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
+# 会话数据存储目录（默认 ~/.cc-connect-next），以 JSON 文件保存对话历史和会话状态。
 # data_dir = "/path/to/custom/dir"
 
-# Attachment send-back switch for `cc-connect send --image/--file`.
+# Attachment send-back switch for `cc-connect-next send --image/--file`.
 # Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
-# `cc-connect send --message` without attachments is unaffected.
-# 附件回传开关，用于控制 `cc-connect send --image/--file`。
+# `cc-connect-next send --message` without attachments is unaffected.
+# 附件回传开关，用于控制 `cc-connect-next send --image/--file`。
 # 它与 agent 的 /mode 独立；设为 "off" 会禁用通过 IM 回传图片/文件。
-# 不带附件的 `cc-connect send --message` 不受影响。
+# 不带附件的 `cc-connect-next send --message` 不受影响。
 # attachment_send = "on"
 
-# Maximum size of a single attachment (in MiB) for `cc-connect send
+# Maximum size of a single attachment (in MiB) for `cc-connect-next send
 # --file/--image/--audio/--video` and the /send API. Default: 50 (i.e. 50 MiB).
 # Set 0 to keep the default. Raise it to send larger files; the /send request
 # body limit scales with this value to fit base64-encoded attachments.
 # Can also be overridden by the CC_MAX_ATTACHMENT_SIZE_MB env var (same MiB
 # unit; takes precedence over this option when set).
-# `cc-connect send` 单个附件的最大大小（单位 MiB）。默认 50（即 50 MiB），设 0 保持默认。
+# `cc-connect-next send` 单个附件的最大大小（单位 MiB）。默认 50（即 50 MiB），设 0 保持默认。
 # 调大可发送更大文件；/send 请求体上限会随之按 base64 膨胀自动放大。
 # 也可用环境变量 CC_MAX_ATTACHMENT_SIZE_MB 覆盖（同样单位 MiB；设置后优先级高于本配置项）。
 # max_attachment_size_mb = 50
@@ -71,7 +71,7 @@ level = "info" # debug, info, warn, error
 #
 # Remote presets URL (fetches recommended providers list from GitHub/Gitee)
 # 远程预设列表 URL（从 GitHub/Gitee 拉取推荐服务商）
-# provider_presets_url = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+# provider_presets_url = "https://raw.githubusercontent.com/timmyagentic/cc-connect-next/main/provider-presets.json"
 
 # [[providers]]
 # name = "anthropic"
@@ -108,22 +108,23 @@ level = "info" # debug, info, warn, error
 # Set to 0 to disable truncation (show full content).
 # 设为 0 表示不截断（显示完整内容）。
 
-# [display]
-# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+[display]
+mode = "compact"            # Hide raw intermediate messages outside the rich card
+card_mode = "rich"          # Privacy-first Feishu Card 2.0 lifecycle (default)
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
 #                           #          隐藏思考和工具消息，每段文本独立发送
 #                           # quiet: hide thinking/tool, all text in one card, done emoji at end
 #                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
-# thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
+thinking_messages = false   # Rich cards expose counts only, never reasoning text
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 # history_max_len = 1000    # Max chars per /history entry (default: 1000; 0 = no truncation) / 每条历史记录最大字符数（默认 1000；0 表示不截断）
-# tool_messages = true      # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
-# show_context_indicator = true  # Show "[ctx: ~N%]" suffix on assistant replies (default: true)
+tool_messages = false       # Rich cards expose counts only, never tool details
+show_context_indicator = false  # Keep model/token/context metadata out of chat
 #                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
-# reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
+reply_footer = false             # Keep model/token/workdir footer out of chat
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
@@ -156,7 +157,7 @@ level = "info" # debug, info, warn, error
 
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
-# rotates to a fresh cc-connect session when the user comes back after being idle.
+# rotates to a fresh cc-connect-next session when the user comes back after being idle.
 # This avoids "context drift", where stale chat history (failed commands,
 # debugging noise, abandoned tangents) gets re-ingested via --continue every
 # time the workspace pool evicts the session, and starts to dominate the model's
@@ -178,7 +179,7 @@ level = "info" # debug, info, warn, error
 #
 # Spawn a project's agent command under a different Unix user via
 # `sudo -n -iu <user>`. This provides OS-level file-system isolation from
-# the supervisor user that runs cc-connect itself, so a misbehaving agent
+# the supervisor user that runs cc-connect-next itself, so a misbehaving agent
 # cannot read files outside the target user's permission scope.
 #
 # Currently supported by: claudecode.
@@ -191,15 +192,15 @@ level = "info" # debug, info, warn, error
 #        # install claude CLI, set up ~/.claude/settings.json, PGSSL certs,
 #        # ~/.pgpass, plugin state, anything the agent needs.
 #   2. Grant the supervisor user passwordless sudo to the target:
-#        # /etc/sudoers.d/cc-connect
+#        # /etc/sudoers.d/cc-connect-next
 #        partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
 #   3. Ensure the target user does NOT have passwordless sudo to anywhere
 #      else. `sudo -n -iu partseeker-coder -- sudo -n true` must fail.
 #   4. Ensure the target user can read AND write the project's work_dir.
-#   5. Run `cc-connect doctor user-isolation` to audit the setup before
-#      starting cc-connect.
+#   5. Run `cc-connect-next doctor user-isolation` to audit the setup before
+#      starting cc-connect-next.
 #
-# cc-connect refuses to start if any preflight gate fails (missing sudo,
+# cc-connect-next refuses to start if any preflight gate fails (missing sudo,
 # target can escalate, work_dir inaccessible) or if the isolation probe
 # detects that the target user can read another user's secrets.
 #
@@ -277,11 +278,11 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
-# Bot-to-bot relay settings. timeout_secs controls how long cc-connect waits for
-# the target bot to finish responding during `cc-connect relay send`.
+# Bot-to-bot relay settings. timeout_secs controls how long cc-connect-next waits for
+# the target bot to finish responding during `cc-connect-next relay send`.
 # visibility controls the extra group-chat echo only; the caller still receives
 # the target response from the relay command when visibility is "none".
-# Bot 间 relay 设置。timeout_secs 控制 `cc-connect relay send` 等待目标 bot
+# Bot 间 relay 设置。timeout_secs 控制 `cc-connect-next relay send` 等待目标 bot
 # 完成回复的最长时间。visibility 只控制群内额外可见消息；设为 "none" 时调用方
 # 仍会从 relay 命令拿到目标回复。
 
@@ -413,12 +414,12 @@ level = "info" # debug, info, warn, error
 # [[hooks]]
 # event = "error"
 # type = "http"
-# url = "https://my-server.com/cc-connect/on-error"
+# url = "https://my-server.com/cc-connect-next/on-error"
 #
 # [[hooks]]
 # event = "*"
 # type = "http"
-# url = "https://my-server.com/cc-connect/events"
+# url = "https://my-server.com/cc-connect-next/events"
 
 # =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
@@ -494,15 +495,15 @@ level = "info" # debug, info, warn, error
 # # 备选：MiniMax TTS（T2A v2 流式 API）
 # # Docs: https://platform.minimaxi.com/document/T2A%20V2
 # [tts.minimax]
-# api_key  = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# api_key  = "your-minimax-api-key" # optional: if empty, cc-connect-next reads ~/.cc-connect-next/config/minimax.json
 # base_url = ""              # optional: default "https://api.minimaxi.com" / 留空使用默认地址
 # model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
 # config_file = ""           # optional MiniMax JSON config path; default data_dir/config/minimax.json
 #
 # # Per-project/agent voice overrides. Keys match [[projects]].name.
 # # 每个项目/Agent 可单独覆盖音色；key 与 [[projects]].name 一致。
-# # Agent tool command: cc-connect send --tts <text>
-# # Agent 工具命令：cc-connect send --tts <文本>
+# # Agent tool command: cc-connect-next send --tts <text>
+# # Agent 工具命令：cc-connect-next send --tts <文本>
 # [tts.agents.assistant]
 # voice_id = "Chinese (Mandarin)_Crisp_Girl"
 # speed = 0.98
@@ -523,10 +524,10 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Daemon Mode / 守护进程模式
 # =============================================================================
-# Run cc-connect as a background service (systemd user / launchd LaunchAgent).
-# 将 cc-connect 作为后台服务运行（systemd 用户服务 / launchd LaunchAgent）。
+# Run cc-connect-next as a background service (systemd user / launchd LaunchAgent).
+# 将 cc-connect-next 作为后台服务运行（systemd 用户服务 / launchd LaunchAgent）。
 #
-# CLI: cc-connect daemon install|uninstall|start|stop|restart|status|logs
+# CLI: cc-connect-next daemon install|uninstall|start|stop|restart|status|logs
 # Install: --log-file PATH, --log-max-size N (MB), --work-dir DIR, --force
 # Logs: -f/--follow, -n N, --log-file PATH
 # 配置均通过 CLI 参数，无需在此文件中设置。
@@ -612,9 +613,9 @@ level = "info" # debug, info, warn, error
 #   /commands del finduser
 #   /commands         — list all custom commands
 #
-# In addition, cc-connect auto-discovers .md files from the agent's commands
+# In addition, cc-connect-next auto-discovers .md files from the agent's commands
 # directory (e.g. .claude/commands/*.md, .gemini/commands/*.md).
-# 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
+# 此外，cc-connect-next 还会自动发现 Agent 的 commands 目录下的 .md 文件。
 
 # =============================================================================
 # Banned Words / 违禁词
@@ -703,10 +704,10 @@ name = "my-backend"
 #                                                     # 禁用该项目的指定命令
 #
 # filter_external_sessions: when true, /list /switch /delete only show sessions
-# created by cc-connect, hiding sessions from direct CLI usage in the same work_dir.
+# created by cc-connect-next, hiding sessions from direct CLI usage in the same work_dir.
 # Default false = show all sessions from the agent.
 # filter_external_sessions = false
-# filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
+# filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect-next 创建的会话，
 # 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
 #
 # shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
@@ -855,8 +856,8 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # router_url = "http://127.0.0.1:3456"  # Claude Code Router URL (default: http://127.0.0.1:3456)
 # router_api_key = "your-router-api-key" # Optional: API key if router requires authentication / 可选：如果 router 需要认证
 #
-# When router_url is set, cc-connect will automatically:
-# 设置 router_url 后，cc-connect 会自动：
+# When router_url is set, cc-connect-next will automatically:
+# 设置 router_url 后，cc-connect-next 会自动：
 #   - Set ANTHROPIC_BASE_URL to router_url
 #   - Set NO_PROXY=127.0.0.1 to prevent proxy interference
 #   - Disable telemetry and cost warnings for cleaner integration
@@ -873,7 +874,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # provider_refs = ["minimaxi", "dashscope"]
 
 # API Providers — switch between them via /provider command in chat
-# or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
+# or via CLI: cc-connect-next provider add --project my-backend --name relay --api-key sk-xxx
 # API Provider 管理 — 可通过聊天命令 /provider 或 CLI 命令切换
 #
 # [[projects.agent.providers]]
@@ -903,7 +904,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # Some providers (e.g. SiliconFlow) don't support Claude's adaptive thinking.
 # # Set thinking = "disabled" to auto-rewrite via a local proxy.
 # # 部分第三方 Provider（如硅基流动）不支持 Claude 的 adaptive thinking，
-# # 设置 thinking = "disabled" 后 cc-connect 会通过本地代理自动改写请求。
+# # 设置 thinking = "disabled" 后 cc-connect-next 会通过本地代理自动改写请求。
 # [[projects.agent.providers]]
 # name = "siliconflow"
 # api_key = "sk-xxx"
@@ -947,10 +948,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # thinking = "disabled"
 
 # Reference normalization and rendering / 本地引用标准化与展示优化
-# Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
+# Disabled by default. When enabled, cc-connect-next can normalize Codex / Claude Code
 # local file references (paths, line refs, markdown file links) and re-render them
 # into a more readable platform-friendly form before sending to supported IMs.
-# 默认关闭。启用后，cc-connect 可对 Codex / Claude Code 的本地文件引用
+# 默认关闭。启用后，cc-connect-next 可对 Codex / Claude Code 的本地文件引用
 # （路径、行号引用、Markdown 文件链接）做标准化，并在发送到支持的平台前
 # 重新渲染为更易读的展示形式。
 #
@@ -975,8 +976,8 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #    添加 im.message.receive_v1 事件，选择 WebSocket 长连接模式
 # 4. Fill in app_id and app_secret below / 填入下方 app_id 和 app_secret
 # Quick setup via CLI:
-#   cc-connect feishu setup --project <project_name>
-# （可通过 CLI 快速配置：cc-connect feishu setup --project <project_name>）
+#   cc-connect-next feishu setup --project <project_name>
+# （可通过 CLI 快速配置：cc-connect-next feishu setup --project <project_name>）
 # Note: No WebSocket URL needed — the SDK auto-negotiates the connection.
 # 注意：无需配置 WebSocket URL，SDK 会自动通过凭证建立连接。
 
@@ -1013,12 +1014,12 @@ app_secret = "your-feishu-app-secret"
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 # image_batch_window_ms = 500  # Coalesce window for consecutive images from the same session (default: 500ms).
 #                              # When the Feishu mobile client sends multiple images, each arrives as a separate
-#                              # event; cc-connect buffers them and dispatches a single multi-image message once
+#                              # event; cc-connect-next buffers them and dispatches a single multi-image message once
 #                              # no new image arrives within this window. Raise it (e.g. 800–1200ms) if your
 #                              # network or device routinely sends images more than 500ms apart and they still
 #                              # split into multiple agent turns; lower it for snappier single-image responses.
 #                              # 来自同一会话的连续图片消息的合批窗口（默认 500ms）。飞书手机端连续发图时每张
-#                              # 都是独立事件，cc-connect 会在窗口内将它们合并成一条多图消息再分发；如果你的
+#                              # 都是独立事件，cc-connect-next 会在窗口内将它们合并成一条多图消息再分发；如果你的
 #                              # 网络或设备发送间隔超过 500ms 且仍被拆成多轮，可调高（如 800–1200ms）；如果
 #                              # 只是单图发送，希望响应更快，也可以适当调低。
 
@@ -1235,8 +1236,8 @@ app_secret = "your-feishu-app-secret"
 #                              # e.g. "123456789012345678,987654321098765432"; takes precedence over group_reply_all
 #                              # 逗号分隔的服务器 ID，仅在这些服务器无需 @ 也响应（优先于 group_reply_all）
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
-# thread_isolation = false  # If true, cc-connect creates/uses Discord threads as session boundaries when the channel supports threads
-#                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
+# thread_isolation = false  # If true, cc-connect-next creates/uses Discord threads as session boundaries when the channel supports threads
+#                           # 设为 true 时，cc-connect-next 会在支持 thread 的 Discord 频道内按 thread 隔离会话
 # progress_style = "legacy"  # Progress rendering: legacy | compact | card / 进度展示方式：legacy | compact | card
 #                            # card = one editable Discord embed progress card / card = 单条可编辑的 Discord 嵌入式进度卡
 # reply_hud = false  # If true, append final-reply HUD line (model/context/tokens) in Discord only
@@ -1295,8 +1296,8 @@ app_secret = "your-feishu-app-secret"
 #    URL: http(s)://<your-domain>:<port>/wecom/callback
 #    Token: any random string / 任意随机字符串
 #    EncodingAESKey: click "Random Generate" (43 chars) / 点击"随机生成"（43位）
-#    (Start cc-connect FIRST, then save to pass verification)
-#    （先启动 cc-connect，再保存以通过验证）
+#    (Start cc-connect-next FIRST, then save to pass verification)
+#    （先启动 cc-connect-next，再保存以通过验证）
 # 5. App > Trusted IP > add your server's outbound IP
 #    应用 > 企业可信 IP > 添加服务器出口 IP
 # 6. (Optional) My Enterprise > WeChat Plugin > scan QR to link personal WeChat
@@ -1352,8 +1353,8 @@ app_secret = "your-feishu-app-secret"
 # Same HTTP API as OpenClaw @tencent-weixin/openclaw-weixin: long-poll getUpdates + sendMessage.
 # 与 OpenClaw 插件 openclaw-weixin 使用同一套网关：长轮询收消息 + sendMessage 下发。
 #
-# 1. Easiest: run `cc-connect weixin setup --project <name>` — terminal shows a QR; scan with WeChat to obtain token.
-#    Or: `cc-connect weixin bind --project <name> --token <bearer>` if you already have a token (e.g. from OpenClaw).
+# 1. Easiest: run `cc-connect-next weixin setup --project <name>` — terminal shows a QR; scan with WeChat to obtain token.
+#    Or: `cc-connect-next weixin bind --project <name> --token <bearer>` if you already have a token (e.g. from OpenClaw).
 # 2. Manual: set token below. Optional: base_url (default https://ilinkai.weixin.qq.com).
 # 3. allow_from: comma-separated Weixin user IDs (e.g. user@im.wechat) or "*".
 # State files (get_updates cursor + context_token cache) live under:
@@ -1499,10 +1500,10 @@ app_secret = "your-feishu-app-secret"
 # reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
 #
 # Optional: project system prompt / 可选：项目系统提示
-# Codex has no native system-prompt flag, so cc-connect injects this as a
+# Codex has no native system-prompt flag, so cc-connect-next injects this as a
 # preamble prepended to your first message of each new session (resumed
 # sessions are not re-injected).
-# Codex 没有原生的系统提示参数，cc-connect 会将其作为前导内容注入到每个新
+# Codex 没有原生的系统提示参数，cc-connect-next 会将其作为前导内容注入到每个新
 # 会话的第一条消息之前（恢复的会话不会重复注入）。
 # system_prompt = "You are a helpful AI assistant that specializes in Python development."
 #
@@ -1648,7 +1649,7 @@ app_secret = "your-feishu-app-secret"
 # startup_wait_ms = 2000       # milliseconds to wait after init_command before accepting messages (default: 2000 when init_command is set)
 # prompt_pattern = '[\$#>%]\s*$'  # regex to detect shell prompt = command done (default shown)
 # poll_interval_ms = 200       # output poll interval in milliseconds (default: 200)
-# window_per_session = false   # When true, each cc-connect session gets its OWN tmux window
+# window_per_session = false   # When true, each cc-connect-next session gets its OWN tmux window
 #                              # (own init_command/agent instance) instead of sharing one pane.
 #                              # Enable this for true isolation when the platform splits sessions
 #                              # (e.g. Slack session_scope = "thread"); otherwise all sessions
@@ -1709,18 +1710,18 @@ app_secret = "your-feishu-app-secret"
 # Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
 # =============================================================================
 # Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
-# subcommand. cc-connect ships a first-class `type = "devin"` agent that pins
+# subcommand. cc-connect-next ships a first-class `type = "devin"` agent that pins
 # the command / args / display name so you don't have to.
-# Devin 通过 `devin acp` 子命令使用 ACP 协议与 cc-connect 通信。cc-connect 内置
+# Devin 通过 `devin acp` 子命令使用 ACP 协议与 cc-connect-next 通信。cc-connect-next 内置
 # `type = "devin"` 的一级支持：无需手动指定 command/args，默认值就能跑通。
 #
 # Prerequisites / 前置条件:
 #   1. Install Devin CLI per the official docs at https://cli.devin.ai/
 #      安装 Devin CLI，见官方文档 https://cli.devin.ai/
 #   2. Run `devin auth login` once — credentials are stored locally and the
-#      ACP subprocess reads them automatically. cc-connect never sees the token.
+#      ACP subprocess reads them automatically. cc-connect-next never sees the token.
 #      运行一次 `devin auth login` 完成登录；ACP 子进程会自动读取本地凭证，
-#      cc-connect 全程不接触 token。
+#      cc-connect-next 全程不接触 token。
 #   3. Windsurf Enterprise users can alternatively inject WINDSURF_API_KEY
 #      via the agent env option (see below).
 #      Windsurf 企业版用户也可以通过下面的 env 注入 WINDSURF_API_KEY。
@@ -1783,7 +1784,7 @@ app_secret = "your-feishu-app-secret"
 
 # --- Example: OpenClaw (Gateway-backed ACP bridge) ---
 # Docs: https://docs.openclaw.ai/cli/acp
-# Install the OpenClaw CLI, run a Gateway, then point cc-connect at `openclaw acp`.
+# Install the OpenClaw CLI, run a Gateway, then point cc-connect-next at `openclaw acp`.
 #
 # IMPORTANT: Remote OpenClaw requires pairing authorization before use!
 #
@@ -1791,7 +1792,7 @@ app_secret = "your-feishu-app-secret"
 #   1. Start OpenClaw gateway: openclaw acp --url wss://your-gateway:18789
 #   2. In another terminal, run: openclaw pair
 #   3. Approve the pairing request in the OpenClaw UI
-#   4. Now cc-connect can communicate with the authorized gateway
+#   4. Now cc-connect-next can communicate with the authorized gateway
 #
 # Without pairing, OpenClaw will return empty responses ("pairing required" error).
 # Reference: https://zhuanlan.zhihu.com/p/2005687480976970296
@@ -1955,7 +1956,7 @@ app_secret = "your-feishu-app-secret"
 # GitHub Copilot CLI uses --headless --stdio for JSON-RPC communication.
 # GitHub Copilot CLI 使用 --headless --stdio 进行 JSON-RPC 通信。
 # The generic ACP configuration above is also supported; this first-class agent
-# adds cc-connect model/mode switching plus session list/delete integration.
+# adds cc-connect-next model/mode switching plus session list/delete integration.
 
 # [[projects]]
 # name = "my-copilot-project"

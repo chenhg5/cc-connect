@@ -1,6 +1,6 @@
 # Usage Guide
 
-Complete guide to using cc-connect features.
+Complete guide to using cc-connect-next features.
 
 ## Table of Contents
 
@@ -50,7 +50,7 @@ Each user gets an independent session with full conversation context. Manage ses
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
-cc-connect rotates to a fresh session automatically after long inactivity:
+cc-connect-next rotates to a fresh session automatically after long inactivity:
 
 ```toml
 [[projects]]
@@ -185,10 +185,10 @@ env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ### CLI Commands
 
 ```bash
-cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
-cc-connect provider list --project my-backend
-cc-connect provider remove --project my-backend --name relay
-cc-connect provider import --project my-backend  # from cc-switch
+cc-connect-next provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect-next provider list --project my-backend
+cc-connect-next provider remove --project my-backend --name relay
+cc-connect-next provider import --project my-backend  # from cc-switch
 ```
 
 ### Chat Commands
@@ -272,7 +272,7 @@ Switch where the next agent session starts, directly from chat.
 - Do not put `admin_from` under `[projects.platforms.options]`, or it will be ignored.
 - Use `/whoami` or `/status` to get your current `User ID`, then place that ID into `admin_from`.
 - If you are the only user of this bot, `admin_from = "*"` also works, but it grants every allowed user privileged command access.
-- Restart `cc-connect` after updating `config.toml`.
+- Restart `cc-connect-next` after updating `config.toml`.
 - Directory changes apply to the next session in the current project.
 - Relative paths are resolved from the current agent work directory.
 - Directory history is project-scoped and can be switched by index.
@@ -304,13 +304,13 @@ Examples:
 
 ### What this is
 
-By default, every agent session cc-connect spawns runs as the same Unix
-user that runs `cc-connect` itself. If an agent misbehaves — reads a
+By default, every agent session cc-connect-next spawns runs as the same Unix
+user that runs `cc-connect-next` itself. If an agent misbehaves — reads a
 secret, overwrites a sibling repo, trashes `~/.ssh/` — it has the
 supervisor user's full file-system reach.
 
 `run_as_user` sets a per-project target Unix user. When it is set,
-cc-connect spawns that project's agent command via
+cc-connect-next spawns that project's agent command via
 
 ```
 sudo -n -iu <target-user> -- claude ...
@@ -367,7 +367,7 @@ supervisor — that grants the supervisor root, which is irrelevant here
 and dangerous.
 
 ```
-# /etc/sudoers.d/cc-connect (install with `sudo visudo -f ...`)
+# /etc/sudoers.d/cc-connect-next (install with `sudo visudo -f ...`)
 partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
 ```
 
@@ -385,7 +385,7 @@ sudo -n -iu partseeker-coder -- sudo -n true
 # must FAIL with "a password is required" or similar
 ```
 
-If that command succeeds, cc-connect will refuse to start. Remove any
+If that command succeeds, cc-connect-next will refuse to start. Remove any
 `NOPASSWD` sudo grants for the target user first.
 
 #### 4. Make the project's `work_dir` accessible to the target user
@@ -399,14 +399,14 @@ sudo setfacl -R -m u:partseeker-coder:rwX /home/leigh/workspace/sandboxed-repo
 sudo setfacl -R -dm u:partseeker-coder:rwX /home/leigh/workspace/sandboxed-repo
 ```
 
-cc-connect refuses to start if the target user cannot read+write the
+cc-connect-next refuses to start if the target user cannot read+write the
 `work_dir` root, and warns (non-fatal) for descendant paths that look
 inaccessible.
 
-#### 5. Audit the setup before starting cc-connect
+#### 5. Audit the setup before starting cc-connect-next
 
 ```bash
-cc-connect doctor user-isolation
+cc-connect-next doctor user-isolation
 ```
 
 This runs the full preflight (the three go/no-go gates from
@@ -414,14 +414,14 @@ This runs the full preflight (the three go/no-go gates from
 **isolation probe**: it spawns a fixed shell script as the target user
 and reports what the target can read, what it's denied, and any
 cross-user leaks. Output goes to stdout plus a JSON report in
-`~/.cc-connect/audits/<timestamp>-<project>.json`.
+`~/.cc-connect-next/audits/<timestamp>-<project>.json`.
 
 Exit code 0 = clean. Exit code 1 = at least one fatal problem.
 
 You can inspect the probe script itself with:
 
 ```bash
-cc-connect doctor user-isolation --print-script
+cc-connect-next doctor user-isolation --print-script
 ```
 
 ### Configuration
@@ -473,7 +473,7 @@ Migration checklist:
       automatically by whichever Claude CLI session is running. The
       target user's token will **not** be refreshed unless the target
       user has an active session — which it often doesn't between
-      cc-connect spawns. The recommended fix is to symlink the target
+      cc-connect-next spawns. The recommended fix is to symlink the target
       user's credentials to the supervisor's file so both share one
       token that stays fresh:
 
@@ -506,9 +506,9 @@ Migration checklist:
       its own install or a system-wide install that both users can run.
 - [ ] **Shell profile** — `~/.profile` / `~/.bashrc` on the target user
       needs to set `PATH` and any tool init the agent depends on. Test
-      with `sudo -iu partseeker-coder` before wiring cc-connect.
+      with `sudo -iu partseeker-coder` before wiring cc-connect-next.
 
-After migration, run `cc-connect doctor user-isolation` again. The
+After migration, run `cc-connect-next doctor user-isolation` again. The
 `target home` section reports which expected paths are present and
 which are missing — missing isn't necessarily wrong, but it's your
 checklist.
@@ -522,7 +522,7 @@ behavior (spawn as supervisor) returns on the next restart.
 
 - **"passwordless sudo to user X is not configured"** — step 2 of setup
   is missing or the sudoers rule is scoped to the wrong supervisor. Fix
-  the rule, run `visudo -c` to validate syntax, then restart cc-connect.
+  the rule, run `visudo -c` to validate syntax, then restart cc-connect-next.
 - **"target user X can run passwordless sudo"** — step 3 failed. The
   error includes the output of `sudo -l` from the target context; find
   the offending rule and remove it.
@@ -534,7 +534,7 @@ behavior (spawn as supervisor) returns on the next restart.
   and re-audit.
 - **"descendant scan timed out"** — non-fatal. The `work_dir` is large
   enough that the permission walk exceeded its timeout. Run
-  `cc-connect doctor user-isolation` manually if you want the full
+  `cc-connect-next doctor user-isolation` manually if you want the full
   walk, or narrow the project's `work_dir`.
 
 ---
@@ -545,12 +545,12 @@ Use CLI to create or bind Feishu/Lark bot credentials and write them back to `co
 
 ```bash
 # Recommended: unified entry
-cc-connect feishu setup --project my-project
-cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
+cc-connect-next feishu setup --project my-project
+cc-connect-next feishu setup --project my-project --app cli_xxx:sec_xxx
 
 # Force modes (usually unnecessary)
-cc-connect feishu new --project my-project
-cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
+cc-connect-next feishu new --project my-project
+cc-connect-next feishu bind --project my-project --app cli_xxx:sec_xxx
 ```
 
 Differences:
@@ -575,16 +575,16 @@ Weixin personal chat uses the **ilink bot HTTP API** (long polling + `sendMessag
 **Full walkthrough (Chinese): [docs/weixin.md](./weixin.md).**
 
 ```bash
-cc-connect weixin setup --project my-project
-cc-connect weixin bind --project my-project --token '<token>'
-cc-connect weixin new --project my-project
+cc-connect-next weixin setup --project my-project
+cc-connect-next weixin bind --project my-project --token '<token>'
+cc-connect-next weixin new --project my-project
 ```
 
 Notes:
 - `setup` without `--token` runs QR login; with `--token` behaves like bind.
 - Auto-creates the project and/or a `weixin` platform block when missing.
 - After login, send a message from WeChat once so `context_token` is cached.
-- See `cc-connect weixin help` for flags (`--api-url`, `--cdn-url`, `--route-tag`, etc.).
+- See `cc-connect-next weixin help` for flags (`--api-url`, `--cdn-url`, `--route-tag`, etc.).
 
 ---
 
@@ -618,7 +618,7 @@ Notes:
 
 3. Start: `ccr start`
 
-4. Configure cc-connect:
+4. Configure cc-connect-next:
 ```toml
 [projects.agent.options]
 router_url = "http://127.0.0.1:3456"
@@ -629,16 +629,16 @@ router_api_key = "your-secret-key"  # optional
 
 ## Claude Code PermissionRequest Hooks
 
-If you have [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) configured in your Claude Code `settings.json`, cc-connect will respect them — matching hooks can auto-approve or deny tool requests before they reach the messaging platform.
+If you have [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) configured in your Claude Code `settings.json`, cc-connect-next will respect them — matching hooks can auto-approve or deny tool requests before they reach the messaging platform.
 
 ### Why hooks run twice
 
-cc-connect launches Claude Code with `--permission-prompt-tool stdio`, which means Claude Code's own hook execution output is discarded (stdout is consumed by the protocol). To make your hooks actually take effect, cc-connect reads the hook definitions from `settings.json` and **re-runs them independently**.
+cc-connect-next launches Claude Code with `--permission-prompt-tool stdio`, which means Claude Code's own hook execution output is discarded (stdout is consumed by the protocol). To make your hooks actually take effect, cc-connect-next reads the hook definitions from `settings.json` and **re-runs them independently**.
 
 This means your hook command is executed **twice** per permission request:
 
 1. Once by Claude Code (result discarded)
-2. Once by cc-connect (result used)
+2. Once by cc-connect-next (result used)
 
 ### Avoiding double cost for LLM-based hooks
 
@@ -647,18 +647,18 @@ If your hook is rule-based (e.g. "deny `rm -rf`"), running twice is harmless. Bu
 ```bash
 #!/bin/bash
 if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then
-  exit 0  # cc-connect will re-run us without this flag
+  exit 0  # cc-connect-next will re-run us without this flag
 fi
 # ... your actual hook logic ...
 ```
 
-cc-connect sets `CC_CONNECT_PERMISSION_HOOK_SKIP=1` in the Claude Code subprocess environment. When your hook sees this variable, it's running inside Claude Code (result will be discarded) — skip the expensive work. cc-connect strips this variable when it runs the hook itself, so the second execution proceeds normally.
+cc-connect-next sets `CC_CONNECT_PERMISSION_HOOK_SKIP=1` in the Claude Code subprocess environment. When your hook sees this variable, it's running inside Claude Code (result will be discarded) — skip the expensive work. cc-connect-next strips this variable when it runs the hook itself, so the second execution proceeds normally.
 
 ---
 
 ## Voice Messages (Speech-to-Text)
 
-Send voice messages — cc-connect transcribes them automatically.
+Send voice messages — cc-connect-next transcribes them automatically.
 
 **Supported:** Feishu, WeChat Work, Telegram, LINE, Discord, Slack
 
@@ -738,7 +738,7 @@ Switch: `/tts always` or `/tts voice_only`
 
 ## Image, File, and Voice Send-Back
 
-When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
+When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect-next send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
 
 **Currently supported platforms:**
 - Feishu
@@ -758,10 +758,10 @@ or:
 /cron setup
 ```
 
-These two commands write the same cc-connect instructions. Either one is enough. After that, the agent knows:
+These two commands write the same cc-connect-next instructions. Either one is enough. After that, the agent knows:
 - normal text replies should be returned normally
-- generated attachments should be sent back with `cc-connect send --image/--file`
-- requested voice messages should be sent with `cc-connect send --tts`
+- generated attachments should be sent back with `cc-connect-next send --image/--file`
+- requested voice messages should be sent with `cc-connect-next send --tts`
 
 If you have run setup before, run it again after upgrading so the instructions are refreshed to the latest version.
 
@@ -773,15 +773,15 @@ Add this to `config.toml` if you want to disable agent-driven attachment send-ba
 attachment_send = "off"
 ```
 
-The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
+The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect-next send --image/--file`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
 
 ### CLI examples
 
 ```bash
-cc-connect send --image /absolute/path/to/chart.png
-cc-connect send --file /absolute/path/to/report.pdf
-cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
-cc-connect send --tts "Hello from cc-connect"
+cc-connect-next send --image /absolute/path/to/chart.png
+cc-connect-next send --file /absolute/path/to/report.pdf
+cc-connect-next send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+cc-connect-next send --tts "Hello from cc-connect-next"
 ```
 
 Notes:
@@ -792,7 +792,7 @@ Notes:
 - `--image` and `--file` can both be repeated.
 - Absolute paths are recommended so the command does not depend on the agent's current working directory.
 - With `attachment_send = "off"`, image/file send-back is blocked but ordinary text replies still work.
-- Each attachment is capped at **50 MiB** by default. Configure it with `max_attachment_size_mb` (MiB) in config.toml, or override that value with the `CC_MAX_ATTACHMENT_SIZE_MB` env var (same MiB unit; takes precedence when set), e.g. `CC_MAX_ATTACHMENT_SIZE_MB=100 cc-connect send --file big.bin`.
+- Each attachment is capped at **50 MiB** by default. Configure it with `max_attachment_size_mb` (MiB) in config.toml, or override that value with the `CC_MAX_ATTACHMENT_SIZE_MB` env var (same MiB unit; takes precedence when set), e.g. `CC_MAX_ATTACHMENT_SIZE_MB=100 cc-connect-next send --file big.bin`.
 
 ### Typical use cases
 
@@ -805,8 +805,8 @@ Notes:
 
 - This command is for generated attachment and voice delivery, not ordinary text replies.
 - The files must exist on the local machine where the agent runs.
-- There must be an active session; otherwise the command fails because cc-connect has no chat context to deliver to.
-- The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect may still be rejected by the platform).
+- There must be an active session; otherwise the command fails because cc-connect-next has no chat context to deliver to.
+- The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect-next may still be rejected by the platform).
 
 ---
 
@@ -832,11 +832,11 @@ Example:
 ### CLI Commands
 
 ```bash
-cc-connect cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
-cc-connect cron list
-cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
-cc-connect cron exec <job-id>
-cc-connect cron del <job-id>
+cc-connect-next cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
+cc-connect-next cron list
+cc-connect-next cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
+cc-connect-next cron exec <job-id>
+cc-connect-next cron del <job-id>
 ```
 
 Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
@@ -851,7 +851,7 @@ Claude Code auto-creates the cron job. For other agents that rely on memory file
 
 ## Shell Configuration
 
-By default, cc-connect uses `sh` on Unix and `powershell.exe` on Windows for all shell execution (`/shell` commands, cron exec jobs, hooks, and webhook exec). You can override this to use a different shell.
+By default, cc-connect-next uses `sh` on Unix and `powershell.exe` on Windows for all shell execution (`/shell` commands, cron exec jobs, hooks, and webhook exec). You can override this to use a different shell.
 
 ### Supported Shells
 
@@ -912,7 +912,7 @@ shell_profile = "source ~/.config/fish/config.fish"
 
 ### Affected Execution Paths
 
-The shell configuration applies to all command execution in cc-connect:
+The shell configuration applies to all command execution in cc-connect-next:
 
 - **`/shell` command** — interactive shell commands from chat
 - **Cron exec jobs** — `[[cron]]` entries with `exec` field
@@ -937,7 +937,7 @@ Cross-platform bot communication in group chats.
 ### Bot-to-Bot Communication
 
 ```bash
-cc-connect relay send --to gemini "What do you think about this architecture?"
+cc-connect-next relay send --to gemini "What do you think about this architecture?"
 ```
 
 ---
@@ -947,13 +947,13 @@ cc-connect relay send --to gemini "What do you think about this architecture?"
 Run as background service.
 
 ```bash
-cc-connect daemon install --config ~/.cc-connect/config.toml
-cc-connect daemon start
-cc-connect daemon stop
-cc-connect daemon restart
-cc-connect daemon status
-cc-connect daemon logs [-f]
-cc-connect daemon uninstall
+cc-connect-next daemon install --config ~/.cc-connect-next/config.toml --work-dir /absolute/runtime/cwd
+cc-connect-next daemon start
+cc-connect-next daemon stop
+cc-connect-next daemon restart
+cc-connect-next daemon status
+cc-connect-next daemon logs [-f]
+cc-connect-next daemon uninstall
 ```
 
 ---
@@ -1027,7 +1027,7 @@ token = "your-secret-token"     # Login token; /web setup generates one automati
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
 ```
 
-Then restart cc-connect.
+Then restart cc-connect-next.
 
 ### Build Options
 
@@ -1052,7 +1052,7 @@ Key endpoints:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/status` | System status (version, uptime, platforms) |
-| `POST` | `/api/v1/restart` | Restart cc-connect |
+| `POST` | `/api/v1/restart` | Restart cc-connect-next |
 | `POST` | `/api/v1/reload` | Reload configuration |
 | `GET` | `/api/v1/projects` | List projects |
 | `GET` | `/api/v1/sessions?project=<name>` | List sessions for a project |
@@ -1068,7 +1068,7 @@ Full API reference: [management-api.md](./management-api.md)
 
 > **Status: Beta.** This feature is available since v1.2.2-beta.5. The protocol may change in future releases.
 
-The Bridge exposes a WebSocket + REST server so external adapters (custom UIs, bots, scripts) can interact with cc-connect sessions — send messages, receive events, manage sessions.
+The Bridge exposes a WebSocket + REST server so external adapters (custom UIs, bots, scripts) can interact with cc-connect-next sessions — send messages, receive events, manage sessions.
 
 ### Enable via Chat
 
@@ -1087,7 +1087,7 @@ path = "/bridge/ws"             # WebSocket endpoint path
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
 ```
 
-Then restart cc-connect.
+Then restart cc-connect-next.
 
 ### Authentication
 
@@ -1163,9 +1163,9 @@ Quick answers to questions that came up repeatedly in issues and that the
 maintainers have resolved. Each entry links back to the originating issue
 or PR so you can dig further if needed.
 
-### Does cc-connect support OpenClaw? (issue #501)
+### Does cc-connect-next support OpenClaw? (issue #501)
 
-Yes. OpenClaw is supported via the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). cc-connect ships an `acp` agent type that talks to any ACP-compatible CLI, including OpenClaw's `openclaw acp` subcommand.
+Yes. OpenClaw is supported via the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). cc-connect-next ships an `acp` agent type that talks to any ACP-compatible CLI, including OpenClaw's `openclaw acp` subcommand.
 
 Minimal config snippet (full version is in `config.example.toml` under
 `# --- Example: OpenClaw (Gateway-backed ACP bridge) ---`):
@@ -1184,14 +1184,14 @@ args = ["acp"]
 display_name = "OpenClaw ACP"
 ```
 
-**Pairing is required for remote gateways.** If you point cc-connect at a
+**Pairing is required for remote gateways.** If you point cc-connect-next at a
 remote OpenClaw Gateway (`args = ["acp", "--url", "wss://..."]`) you must
 pair first or every reply comes back empty:
 
 1. Start the gateway: `openclaw acp --url wss://your-gateway:18789`
 2. In another terminal: `openclaw pair`
 3. Approve the pairing request in the OpenClaw UI
-4. Now cc-connect can talk to the authorized gateway
+4. Now cc-connect-next can talk to the authorized gateway
 
 Empty responses from OpenClaw are almost always a missing pairing step
 (issue #432). Re-run `openclaw pair` and re-approve before debugging
@@ -1215,9 +1215,9 @@ chat_id = "your_group_chat_id@chatroom"   # group chats end with @chatroom
 
 **How to find the group chat ID:**
 
-1. Start cc-connect and let the bot be in the target group.
+1. Start cc-connect-next and let the bot be in the target group.
 2. Send any message in the group from a known allowed account.
-3. Check the cc-connect logs — the incoming `chat_id` (ending in
+3. Check the cc-connect-next logs — the incoming `chat_id` (ending in
    `@chatroom`) is logged at the moment the message is received. Copy
    that value into `chat_id`.
 
@@ -1234,7 +1234,7 @@ Common pitfalls:
   call; the bot becomes a group member the same way any other WeChat
   contact does.
 - **Bot never receives group messages** — make sure the group is bound
-  to your cc-connect instance. If `allow_from` is set, the first user
+  to your cc-connect-next instance. If `allow_from` is set, the first user
   to message in the group is recorded; if the binding is to a
   different user, the bot stays silent.
 - **Bot replies in private but ignores the group (or vice versa)** —

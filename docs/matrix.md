@@ -1,11 +1,11 @@
 # Matrix Setup Guide
 
-This guide walks you through connecting **cc-connect** to [Matrix](https://matrix.org/), the open standard for decentralized communication. Once set up, you can chat with your local AI agent from any Matrix client (Element, FluffyChat, Nheko, etc.).
+This guide walks you through connecting **cc-connect-next** to [Matrix](https://matrix.org/), the open standard for decentralized communication. Once set up, you can chat with your local AI agent from any Matrix client (Element, FluffyChat, Nheko, etc.).
 
 ## Prerequisites
 
 - A Matrix account on any homeserver (public like `matrix.org`, or self-hosted)
-- A machine that can run cc-connect (no public IP needed)
+- A machine that can run cc-connect-next (no public IP needed)
 - Claude Code (or another supported agent) installed and configured
 
 > **Advantage**: Uses `/sync` long polling — no public IP, no domain, no reverse proxy needed. Works behind NAT and firewalls.
@@ -27,7 +27,7 @@ You can also use any existing Matrix account — a dedicated bot account is reco
 
 ## Step 2: Get Your Access Token
 
-You need an access token so cc-connect can authenticate as your Matrix user.
+You need an access token so cc-connect-next can authenticate as your Matrix user.
 
 ### Via curl (Recommended)
 
@@ -58,13 +58,13 @@ The response contains `"access_token": "syt_..."`. Copy it for the config.
 
 ## Step 3: Find Your User ID (Optional)
 
-Your user ID looks like `@username:matrix.org`. cc-connect can auto-detect it from the access token, but you can also specify it explicitly in config.
+Your user ID looks like `@username:matrix.org`. cc-connect-next can auto-detect it from the access token, but you can also specify it explicitly in config.
 
 In Element: click your avatar — your user ID is shown at the top.
 
 ---
 
-## Step 4: Configure cc-connect
+## Step 4: Configure cc-connect-next
 
 Add the Matrix platform to your `config.toml`:
 
@@ -101,12 +101,12 @@ access_token = "syt_xxx_xxx"
 
 ---
 
-## Step 5: Start cc-connect
+## Step 5: Start cc-connect-next
 
 ```bash
-cc-connect
+cc-connect-next
 # Or specify a config file
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 You should see logs like:
@@ -115,7 +115,7 @@ You should see logs like:
 level=INFO msg="matrix: E2EE enabled" device_id=CC-CONNECT
 level=INFO msg="matrix: connected" user=@bot:matrix.org
 level=INFO msg="platform started" project=my-project platform=matrix
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 ```
 
 If you see `E2EE not available`, encryption initialization failed. Encrypted rooms won't work. See the FAQ below.
@@ -128,7 +128,7 @@ If you see `E2EE not available`, encryption initialization failed. Encrypted roo
 
 1. Open your Matrix client (Element, FluffyChat, etc.)
 2. Start a new DM with the bot's user ID (e.g. `@bot:matrix.org`)
-3. Send a message — cc-connect will respond
+3. Send a message — cc-connect-next will respond
 
 ### 6. Group Chat
 
@@ -156,7 +156,7 @@ If you see `E2EE not available`, encryption initialization failed. Encrypted roo
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                         │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► Your Project Code    │
+│   cc-connect-next ◄──► Claude Code CLI ◄──► Your Project Code    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -184,7 +184,7 @@ If you see `E2EE not available`, encryption initialization failed. Encrypted roo
 
 ### Q: Bot doesn't respond to messages?
 
-1. Is cc-connect running and showing `matrix: connected` in logs?
+1. Is cc-connect-next running and showing `matrix: connected` in logs?
 2. Is the access token valid? Try regenerating it.
 3. In group rooms, is the bot mentioned or is `group_reply_all = true` set?
 4. If logs show `E2EE not available` or `decrypt failed`, see E2EE questions below.
@@ -199,34 +199,34 @@ allow_from = "@alice:matrix.org,@bob:matrix.org"
 
 ### Q: Bot doesn't join rooms?
 
-Make sure `auto_join = true` (this is the default). If the bot was already invited before cc-connect started, re-invite it.
+Make sure `auto_join = true` (this is the default). If the bot was already invited before cc-connect-next started, re-invite it.
 
 ### Q: E2EE (End-to-End Encryption)
 
-cc-connect supports encrypted rooms (E2EE) when built with the `goolm` build tag. If you see `matrix: E2EE enabled` at startup, encryption is working. If you see `matrix: E2EE not available (build with -tags goolm to enable)`, rebuild with E2EE support:
+cc-connect-next supports encrypted rooms (E2EE) when built with the `goolm` build tag. If you see `matrix: E2EE enabled` at startup, encryption is working. If you see `matrix: E2EE not available (build with -tags goolm to enable)`, rebuild with E2EE support:
 
-> **Data storage**: E2EE crypto data is stored under `~/.cc-connect/` (created with `0700` permissions):
+> **Data storage**: E2EE crypto data is stored under `~/.cc-connect-next/` (created with `0700` permissions):
 > - `matrix-crypto-<device_id>.db` — encryption key database (one per device)
 > - `matrix-cross-signing-<device_id>.json` — cross-signing seed (one per device)
 >
-> To reset E2EE (e.g. after changing device or reinstalling), delete these files and restart cc-connect:
+> To reset E2EE (e.g. after changing device or reinstalling), delete these files and restart cc-connect-next:
 > ```bash
-> rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json
+> rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json
 > ```
 
 ```bash
 go build -tags goolm ./cmd/cc-connect
 ```
 
-> **Note**: To remove the red question mark ("encrypted by a device not verified by its owner") on bot messages, cross-signing must be set up. cc-connect does this automatically on first run, but some servers require `cross_signing_password` in config for the initial setup. See the red question mark FAQ below.
+> **Note**: To remove the red question mark ("encrypted by a device not verified by its owner") on bot messages, cross-signing must be set up. cc-connect-next does this automatically on first run, but some servers require `cross_signing_password` in config for the initial setup. See the red question mark FAQ below.
 
 #### Logs show "E2EE not available"?
 
 Possible causes and fixes:
 
 1. **`device ID not available from whoami`** — The server didn't return a device ID. Create a dedicated device via curl with `device_id`.
-2. **`not marked as shared, but there are keys on the server`** — Old crypto data conflicts with the current device. cc-connect tries to auto-recover. If it persists, delete old crypto databases and cross-signing seeds: `rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
-3. **`mismatching device ID in client and crypto store`** — The token's device ID doesn't match the crypto database. Delete the database and seeds: `rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
+2. **`not marked as shared, but there are keys on the server`** — Old crypto data conflicts with the current device. cc-connect-next tries to auto-recover. If it persists, delete old crypto databases and cross-signing seeds: `rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json`
+3. **`mismatching device ID in client and crypto store`** — The token's device ID doesn't match the crypto database. Delete the database and seeds: `rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json`
 
 #### Logs show "decrypt failed: no session found"?
 
@@ -234,7 +234,7 @@ The sender's client didn't send the encryption key to the bot's device. This usu
 
 1. **Reusing Element's access token** — Element's device ID conflicts with the bot's encryption keys. Create a dedicated device via curl (see Step 2).
 2. **Just changed the access token** — The sender's client may not have discovered the bot's new device yet. Wait 1-2 minutes and send a new message.
-3. **Corrupted crypto database** — Delete and restart: `rm ~/.cc-connect/matrix-crypto-*.db* ~/.cc-connect/matrix-cross-signing-*.json`
+3. **Corrupted crypto database** — Delete and restart: `rm ~/.cc-connect-next/matrix-crypto-*.db* ~/.cc-connect-next/matrix-cross-signing-*.json`
 
 #### How to get a dedicated access token (recommended)?
 
@@ -256,7 +256,7 @@ The `access_token` in the response can be used in config. The `device_id` will b
 
 #### Red question mark on bot messages ("encrypted by a device not verified by its owner")?
 
-This means the bot's device hasn't been cross-signed. cc-connect automatically sets up cross-signing on first run, but some Matrix servers require password authentication (UIA) to publish the cross-signing keys.
+This means the bot's device hasn't been cross-signed. cc-connect-next automatically sets up cross-signing on first run, but some Matrix servers require password authentication (UIA) to publish the cross-signing keys.
 
 If logs show `no supported UIA flow for cross-signing`, provide the bot account's password. You can set it in config:
 
@@ -274,7 +274,7 @@ The environment variable takes precedence over the config file value. This is a 
 
 #### How to verify the bot's device?
 
-cc-connect auto-accepts SAS key verification requests (when `auto_verify = true`, which is the default). To verify from Element:
+cc-connect-next auto-accepts SAS key verification requests (when `auto_verify = true`, which is the default). To verify from Element:
 
 1. Open a DM with the bot
 2. Click the bot's avatar → **Verify** (or go to **Settings** → **Security** → find the bot's device)
@@ -285,7 +285,7 @@ After verification, encrypted messages from the bot will no longer show warnings
 
 ### Q: How to use a self-hosted Matrix server?
 
-Set `homeserver` to your server's URL (e.g. `https://synapse.example.com`). Make sure the URL is reachable from the machine running cc-connect.
+Set `homeserver` to your server's URL (e.g. `https://synapse.example.com`). Make sure the URL is reachable from the machine running cc-connect-next.
 
 ### Q: How to use a proxy?
 

@@ -90,6 +90,32 @@ type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
 }
 
+// RichCardCopy contains fully localized lifecycle text. Keeping this copy in
+// core ensures platform renderers never hardcode one language or need to infer
+// locale from a phase token.
+type RichCardCopy struct {
+	Thinking        string
+	CallingTools    string
+	Answering       string
+	Done            string
+	Error           string
+	CompletedBody   string
+	ErrorBody       string
+	PrivacyNotice   string
+	ProgressFormat  string
+	ThinkingSummary string
+	ToolSummary     string
+	AnswerSummary   string
+	ErrorSummary    string
+}
+
+// LocalizedRichCardSupporter is an optional extension for native rich-card
+// platforms. Engines prefer it over BuildRichCard and pass copy from the
+// active per-conversation locale.
+type LocalizedRichCardSupporter interface {
+	BuildLocalizedRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string, copy RichCardCopy) string
+}
+
 // RichCardMarkdownResolver is an optional interface for platforms that need to
 // pre-process rich-card markdown before it is rendered or streamed.
 //
@@ -98,6 +124,15 @@ type RichCardSupporter interface {
 // while final frames may wait briefly so the completed card can embed images.
 type RichCardMarkdownResolver interface {
 	ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string
+}
+
+// RichCardMarkdownTransformer is an optional reply-context-aware transform
+// applied before a rich-card body is rendered. Platforms use it to preserve
+// native outbound semantics that ordinary Send/Reply paths would otherwise
+// provide, such as resolving a display name into a real mention in the
+// triggering chat.
+type RichCardMarkdownTransformer interface {
+	TransformRichCardMarkdown(ctx context.Context, replyCtx any, markdown string) string
 }
 
 // MarkdownTableSplitter is an optional interface for platforms that need
@@ -156,20 +191,36 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 	}
 }
 
+func streamPreviewEnabledForPlatform(cfg StreamPreviewCfg, platformName string) bool {
+	if !cfg.Enabled {
+		return false
+	}
+	for _, disabled := range cfg.DisabledPlatforms {
+		if strings.EqualFold(disabled, platformName) {
+			return false
+		}
+	}
+	return true
+}
+
+func truncateStreamPreviewText(text string, maxChars int) string {
+	if maxChars <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text
+	}
+	return string(runes[:maxChars]) + "…"
+}
+
 // canPreview returns true if the platform supports message updating and is not disabled.
 func (sp *streamPreview) canPreview() bool {
 	sp.mu.Lock()
 	degraded := sp.degraded
 	sp.mu.Unlock()
-	if degraded || !sp.cfg.Enabled {
+	if degraded || !streamPreviewEnabledForPlatform(sp.cfg, sp.platform.Name()) {
 		return false
-	}
-	// Check if platform is in disabled list
-	platformName := sp.platform.Name()
-	for _, disabled := range sp.cfg.DisabledPlatforms {
-		if strings.EqualFold(disabled, platformName) {
-			return false
-		}
 	}
 	_, ok := sp.platform.(MessageUpdater)
 	return ok
@@ -186,11 +237,7 @@ func (sp *streamPreview) appendText(text string) {
 
 	sp.fullText += text
 
-	displayText := sp.fullText
-	maxChars := sp.cfg.MaxChars
-	if maxChars > 0 && len([]rune(displayText)) > maxChars {
-		displayText = string([]rune(displayText)[:maxChars]) + "…"
-	}
+	displayText := truncateStreamPreviewText(sp.fullText, sp.cfg.MaxChars)
 
 	delta := len([]rune(displayText)) - len([]rune(sp.lastSentText))
 	elapsed := time.Since(sp.lastSentAt)
@@ -222,11 +269,7 @@ func (sp *streamPreview) scheduleFlushLocked(delay time.Duration) {
 		if sp.degraded {
 			return
 		}
-		displayText := sp.fullText
-		maxChars := sp.cfg.MaxChars
-		if maxChars > 0 && len([]rune(displayText)) > maxChars {
-			displayText = string([]rune(displayText)[:maxChars]) + "…"
-		}
+		displayText := truncateStreamPreviewText(sp.fullText, sp.cfg.MaxChars)
 		sp.flushLocked(displayText)
 	})
 }
@@ -303,11 +346,7 @@ func (sp *streamPreview) freeze() {
 
 	if sp.previewMsgID != nil && !sp.degraded {
 		if updater, ok := sp.platform.(MessageUpdater); ok {
-			text := sp.fullText
-			maxChars := sp.cfg.MaxChars
-			if maxChars > 0 && len([]rune(text)) > maxChars {
-				text = string([]rune(text)[:maxChars]) + "…"
-			}
+			text := truncateStreamPreviewText(sp.fullText, sp.cfg.MaxChars)
 			if text != "" {
 				if sp.transform != nil {
 					text = sp.transform(text)

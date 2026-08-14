@@ -580,7 +580,7 @@ func TestMultiWorkspaceAgent_PropagatesRunAsUser(t *testing.T) {
 // TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs verifies that
 // workspace agents do not get spurious run_as_user or run_as_env entries
 // when the parent agent does not report them. This is the "isolation not
-// configured" path — the vast majority of cc-connect deployments, which
+// configured" path — the vast majority of cc-connect-next deployments, which
 // must remain unchanged.
 func TestMultiWorkspaceAgent_NoPropagationWhenParentHasNoRunAs(t *testing.T) {
 	baseDir := t.TempDir()

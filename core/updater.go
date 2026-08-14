@@ -20,10 +20,8 @@ import (
 )
 
 const (
-	githubReleasesAPI = "https://api.github.com/repos/chenhg5/cc-connect/releases"
-	giteeReleasesAPI  = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases"
-	githubDownload    = "https://github.com/chenhg5/cc-connect/releases/download"
-	giteeDownload     = "https://gitee.com/cg33/cc-connect/releases/download"
+	githubReleasesAPI = "https://api.github.com/repos/timmyagentic/cc-connect-next/releases"
+	githubDownload    = "https://github.com/timmyagentic/cc-connect-next/releases/download"
 )
 
 type ReleaseInfo struct {
@@ -34,10 +32,11 @@ type ReleaseInfo struct {
 	CreatedAt  string `json:"created_at"`
 }
 
-// CheckForUpdate queries GitHub/Gitee for newer releases.
-// If preferGitee is true, tries Gitee first (faster in China); otherwise GitHub first.
-func CheckForUpdate(currentVersion string, preferGitee bool) (*ReleaseInfo, error) {
-	releases, err := fetchReleases(preferGitee)
+// CheckForUpdate queries the cc-connect-next GitHub repository for newer
+// releases. The legacy preferGitee argument is retained for API compatibility
+// but intentionally ignored because this project has no mirrored release feed.
+func CheckForUpdate(currentVersion string, _ bool) (*ReleaseInfo, error) {
+	releases, err := fetchReleases()
 	if err != nil {
 		return nil, err
 	}
@@ -70,30 +69,8 @@ func CheckForUpdate(currentVersion string, preferGitee bool) (*ReleaseInfo, erro
 	return best, nil
 }
 
-func fetchReleases(preferGitee bool) ([]ReleaseInfo, error) {
-	type source struct {
-		name string
-		url  string
-	}
-	sources := []source{
-		{"github", githubReleasesAPI + "?per_page=20"},
-		{"gitee", giteeReleasesAPI + "?per_page=20&direction=desc&sort=created"},
-	}
-	if preferGitee {
-		sources[0], sources[1] = sources[1], sources[0]
-	}
-
-	releases, err := fetchReleasesFrom(sources[0].url)
-	if err == nil && len(releases) > 0 {
-		return releases, nil
-	}
-	slog.Debug("updater: primary source failed, trying fallback", "primary", sources[0].name, "error", err)
-
-	releases, err = fetchReleasesFrom(sources[1].url)
-	if err != nil {
-		return nil, fmt.Errorf("check updates failed (both sources): %w", err)
-	}
-	return releases, nil
+func fetchReleases() ([]ReleaseInfo, error) {
+	return fetchReleasesFrom(githubReleasesAPI + "?per_page=20")
 }
 
 func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
@@ -102,7 +79,7 @@ func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "cc-connect-updater")
+	req.Header.Set("User-Agent", "cc-connect-next-updater")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
@@ -122,9 +99,9 @@ func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
 	return releases, nil
 }
 
-// SelfUpdate downloads and installs the given release version.
-// If preferGitee is true, tries Gitee download first.
-func SelfUpdate(tag string, preferGitee bool) error {
+// SelfUpdate downloads and installs the given release version. The legacy
+// preferGitee argument is retained for API compatibility and ignored.
+func SelfUpdate(tag string, _ bool) error {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
@@ -132,31 +109,16 @@ func SelfUpdate(tag string, preferGitee bool) error {
 	if goos == "windows" {
 		ext = ".zip"
 	}
-	filename := fmt.Sprintf("cc-connect-%s-%s-%s%s", tag, goos, goarch, ext)
+	filename := fmt.Sprintf("cc-connect-next-%s-%s-%s%s", tag, goos, goarch, ext)
 
-	giteeURL := fmt.Sprintf("%s/%s/%s", giteeDownload, tag, filename)
 	githubURL := fmt.Sprintf("%s/%s/%s", githubDownload, tag, filename)
-	urls := []string{githubURL, giteeURL}
-	if preferGitee {
-		urls = []string{giteeURL, githubURL}
-	}
-
-	var data []byte
-	var lastErr error
-	for _, u := range urls {
-		slog.Info("updater: downloading", "url", u)
-		data, lastErr = downloadFile(u)
-		if lastErr == nil {
-			break
-		}
-		slog.Debug("updater: download failed, trying next", "error", lastErr)
-	}
-	if lastErr != nil && data == nil {
-		return fmt.Errorf("download failed from all sources: %w", lastErr)
+	slog.Info("updater: downloading", "url", githubURL)
+	data, err := downloadFile(githubURL)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
 	}
 
 	var binary []byte
-	var err error
 	if goos == "windows" {
 		binary, err = extractBinaryFromZip(data)
 	} else {
@@ -183,7 +145,7 @@ func downloadFile(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "cc-connect-updater")
+	req.Header.Set("User-Agent", "cc-connect-next-updater")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -216,11 +178,11 @@ func extractBinaryFromTarGz(data []byte) ([]byte, error) {
 			return nil, err
 		}
 		name := filepath.Base(hdr.Name)
-		if strings.HasPrefix(name, "cc-connect") && hdr.Typeflag == tar.TypeReg {
+		if strings.HasPrefix(name, "cc-connect-next") && hdr.Typeflag == tar.TypeReg {
 			return io.ReadAll(tr)
 		}
 	}
-	return nil, fmt.Errorf("cc-connect binary not found in archive")
+	return nil, fmt.Errorf("cc-connect-next binary not found in archive")
 }
 
 func extractBinaryFromZip(data []byte) ([]byte, error) {
@@ -230,7 +192,7 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 	}
 	for _, f := range r.File {
 		name := filepath.Base(f.Name)
-		if strings.HasPrefix(name, "cc-connect") && !f.FileInfo().IsDir() {
+		if strings.HasPrefix(name, "cc-connect-next") && !f.FileInfo().IsDir() {
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err
@@ -239,7 +201,7 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 			return io.ReadAll(rc)
 		}
 	}
-	return nil, fmt.Errorf("cc-connect binary not found in zip archive")
+	return nil, fmt.Errorf("cc-connect-next binary not found in zip archive")
 }
 
 func replaceBinary(newBinary []byte) error {
@@ -253,7 +215,7 @@ func replaceBinary(newBinary []byte) error {
 	}
 
 	dir := filepath.Dir(execPath)
-	tmpFile, err := os.CreateTemp(dir, "cc-connect-update-*")
+	tmpFile, err := os.CreateTemp(dir, "cc-connect-next-update-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}

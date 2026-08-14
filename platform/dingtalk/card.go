@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // aiCard implements core.StreamingCard for DingTalk AI Card streaming.
@@ -36,8 +36,11 @@ type aiCard struct {
 	done           chan struct{} // closed when finalized or failed
 }
 
-// Ensure aiCard implements core.StreamingCard
-var _ core.StreamingCard = (*aiCard)(nil)
+// Ensure aiCard implements the streaming-card lifecycle contracts.
+var (
+	_ core.StreamingCard          = (*aiCard)(nil)
+	_ core.StreamingCardDiscarder = (*aiCard)(nil)
+)
 
 // generateOutTrackID generates a unique outTrackId for AI Card.
 func generateOutTrackID() string {
@@ -371,7 +374,7 @@ func (c *aiCard) doStream(ctx context.Context, content string, isFinalize bool) 
 			c.platform.activateCardDegrade(fmt.Sprintf("card.stream:%d", resp.StatusCode))
 			c.mu.Lock()
 			c.state = "failed"
-			close(c.done)
+			c.closeDoneLocked()
 			c.mu.Unlock()
 		}
 		return fmt.Errorf("stream AI card: status=%d, body=%s", resp.StatusCode, string(respBody))
@@ -383,6 +386,10 @@ func (c *aiCard) doStream(ctx context.Context, content string, isFinalize bool) 
 
 // Finalize sends the final content and marks the card as complete.
 func (c *aiCard) Finalize(ctx context.Context, content string) error {
+	return c.finalize(ctx, content, false)
+}
+
+func (c *aiCard) finalize(ctx context.Context, content string, retryFailed bool) error {
 	c.mu.Lock()
 
 	// Stop any pending timer
@@ -391,8 +398,10 @@ func (c *aiCard) Finalize(ctx context.Context, content string) error {
 		c.timer = nil
 	}
 
-	// If already finished or failed, skip
-	if c.state == "finished" || c.state == "failed" {
+	// A normal final answer must not revive a card that already failed. Discard
+	// deliberately retries a terminal empty frame because it is the only cleanup
+	// operation DingTalk exposes for an eagerly delivered processing card.
+	if c.state == "finished" || (c.state == "failed" && !retryFailed) {
 		c.mu.Unlock()
 		return nil
 	}
@@ -401,13 +410,18 @@ func (c *aiCard) Finalize(ctx context.Context, content string) error {
 	for c.inFlight {
 		c.mu.Unlock()
 		select {
-		case <-c.done:
-			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 		c.mu.Lock()
 	}
+	if c.state == "finished" || (c.state == "failed" && !retryFailed) {
+		c.mu.Unlock()
+		return nil
+	}
 
+	c.pendingContent = ""
 	c.inFlight = true
 	c.mu.Unlock()
 
@@ -422,14 +436,32 @@ func (c *aiCard) Finalize(ctx context.Context, content string) error {
 		c.lastSentContent = content
 		c.lastSentAt = time.Now()
 	}
+	c.closeDoneLocked()
+	c.mu.Unlock()
+
+	return err
+}
+
+// Discard terminates an eagerly delivered AI card without exposing agent
+// output. DingTalk's streaming endpoint has no separate recall operation for
+// this card path, so an empty final frame is used to ensure the card cannot
+// remain permanently in its processing state.
+func (c *aiCard) Discard(ctx context.Context) error {
+	return c.finalize(ctx, "", true)
+}
+
+// closeDoneLocked closes done exactly once. doStream may mark a retryable
+// request failed before Discard makes its terminal retry, so both paths can
+// legitimately reach this transition. c.mu must be held by the caller.
+func (c *aiCard) closeDoneLocked() {
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
 	select {
 	case <-c.done:
 	default:
 		close(c.done)
 	}
-	c.mu.Unlock()
-
-	return err
 }
 
 // Failed returns true if the card has entered a failed state.

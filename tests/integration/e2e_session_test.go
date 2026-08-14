@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/config"
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/config"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // testConfigPath returns the path to config.test.toml co-located with this

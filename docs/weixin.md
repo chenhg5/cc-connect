@@ -1,6 +1,6 @@
 # 微信个人号（Weixin / ilink）接入指南
 
-本文档说明如何通过 **cc-connect** 接入**微信个人号**侧的对话能力。底层使用腾讯 **ilink 机器人 HTTP 网关**（与 OpenClaw 插件 `openclaw-weixin` 同类接口：`getUpdates` 长轮询 + `sendMessage` 下发）。
+本文档说明如何通过 **cc-connect-next** 接入**微信个人号**侧的对话能力。底层使用腾讯 **ilink 机器人 HTTP 网关**（与 OpenClaw 插件 `openclaw-weixin` 同类接口：`getUpdates` 长轮询 + `sendMessage` 下发）。
 
 > **说明**：这是「个人微信 + ilink」通道，与 **[企业微信 WeChat Work](wecom.md)**（`type = "wecom"`）不是同一套协议，请勿混淆。
 
@@ -8,7 +8,7 @@
 
 ## 前置要求
 
-- 可运行 cc-connect 的环境（无需公网 IP；ilink 由云端提供）
+- 可运行 cc-connect-next 的环境（无需公网 IP；ilink 由云端提供）
 - 已安装并可正常使用的 Agent（如 Claude Code、Codex 等）
 - 使用 **微信（手机端）** 扫码完成 ilink 登录（或由运营商提供 Bearer Token）
 
@@ -16,10 +16,10 @@
 
 ## 推荐流程：一条命令扫码
 
-装好 `cc-connect` 后，在项目目录执行（将 `my-project` 换成你的 `config.toml` 里的项目名，或留空在仅有一个项目时自动选择）：
+装好 `cc-connect-next` 后，在项目目录执行（将 `my-project` 换成你的 `config.toml` 里的项目名，或留空在仅有一个项目时自动选择）：
 
 ```bash
-cc-connect weixin setup --project my-project
+cc-connect-next weixin setup --project my-project
 ```
 
 终端会打印：
@@ -40,9 +40,9 @@ cc-connect weixin setup --project my-project
 已有 Token 时：
 
 ```bash
-cc-connect weixin bind --project my-project --token '<你的_Bearer_Token>'
+cc-connect-next weixin bind --project my-project --token '<你的_Bearer_Token>'
 # 或
-cc-connect weixin setup --project my-project --token '<你的_Bearer_Token>'
+cc-connect-next weixin setup --project my-project --token '<你的_Bearer_Token>'
 ```
 
 若校验失败，可检查 `--api-url` 是否与运营商一致（默认 `https://ilinkai.weixin.qq.com`），或使用 `--skip-verify` 仅写入配置（不推荐生产环境）。
@@ -99,8 +99,8 @@ token = "ilink_bot_bearer_token"       # 必填；扫码或 bind 写入
 
 ### `context_token`（首次对话）
 
-网关下发消息时可能带 `context_token`；cc-connect 会缓存并在回复时使用。  
-**首次连接**：请先启动 cc-connect，再用允许的微信账号 **给机器人发一条消息**，完成关联后再使用 `/new` 等指令。
+网关下发消息时可能带 `context_token`；cc-connect-next 会缓存并在回复时使用。
+**首次连接**：请先启动 cc-connect-next，再用允许的微信账号 **给机器人发一条消息**，完成关联后再使用 `/new` 等指令。
 
 ---
 
@@ -108,7 +108,7 @@ token = "ilink_bot_bearer_token"       # 必填；扫码或 bind 写入
 
 - **文字、引用、语音转写文本**：与网关一致。  
 - **图片 / 文件 / 视频 / 语音文件**：支持从微信 CDN 下载并按 AES-128-ECB 解密后交给 Agent（需正确配置 `cdn_base_url` 等）。  
-- **出站图片与文件**：平台实现了 `ImageSender` / `FileSender`，可通过 `cc-connect send --image` / `--file` 等能力下发（需引擎侧已支持附件发送）。  
+- **出站图片与文件**：平台实现了 `ImageSender` / `FileSender`，可通过 `cc-connect-next send --image` / `--file` 等能力下发（需引擎侧已支持附件发送）。
 - **语音 SILK**：无转写文字时可走 STT（需配置语音转写且通常依赖 ffmpeg）。
 
 ---
@@ -153,9 +153,9 @@ chat_id = "your_group_chat_id@chatroom"   # 群聊 ID 以 @chatroom 结尾
 
 **怎么拿到这个群聊 ID：**
 
-1. 启动 cc-connect，并让机器人加入目标群。
+1. 启动 cc-connect-next，并让机器人加入目标群。
 2. 让群里任意已知允许的用户在群里发一条消息。
-3. 看 cc-connect 日志：消息到达时会打印带 `@chatroom` 后缀的
+3. 看 cc-connect-next 日志：消息到达时会打印带 `@chatroom` 后缀的
    `chat_id`，把它原样填到 `chat_id` 即可。
 
 把 `chat_id` 留空就响应机器人所在的所有聊天。填具体值只响应那一个

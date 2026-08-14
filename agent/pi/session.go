@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // piSession manages a multi-turn pi coding agent conversation.
@@ -64,7 +64,7 @@ func newPiSession(ctx context.Context, cmd string, extraArgs []string, workDir, 
 		mode:      mode,
 		thinking:  thinking,
 		extraEnv:  extraEnv,
-		attachDir: filepath.Join(workDir, ".cc-connect", "attachments",
+		attachDir: filepath.Join(workDir, ".cc-connect-next", "attachments",
 			fmt.Sprintf("pi_%d", time.Now().UnixNano())),
 		events:   make(chan core.Event, 64),
 		ctx:      sessionCtx,

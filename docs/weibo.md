@@ -1,11 +1,11 @@
 # 微博私信接入指南
 
-本文档介绍如何将 **cc-connect** 接入微博私信，让你可以通过微博私信远程调用 AI 编程 Agent。
+本文档介绍如何将 **cc-connect-next** 接入微博私信，让你可以通过微博私信远程调用 AI 编程 Agent。
 
 ## 前置要求
 
 - 微博账号
-- 一台可运行 cc-connect 的设备（无需公网 IP）
+- 一台可运行 cc-connect-next 的设备（无需公网 IP）
 - AI 编程 Agent（Claude Code、Codex 等）已安装并配置完成
 
 > 💡 **优势**：使用 WebSocket 长连接，无需公网 IP、无需域名、无需反向代理
@@ -22,15 +22,15 @@
 
 按照平台指引创建一个新的应用，获取 Open IM 的 `app_id` 和 `app_secret`。
 
-> ⚠️ **重要**：请妥善保存这两个凭证，后续配置 cc-connect 时需要用到。
+> ⚠️ **重要**：请妥善保存这两个凭证，后续配置 cc-connect-next 时需要用到。
 
 ---
 
-## 第二步：配置 cc-connect
+## 第二步：配置 cc-connect-next
 
 ### 2.1 编辑配置文件
 
-将凭证配置到 cc-connect 的 `config.toml` 中：
+将凭证配置到 cc-connect-next 的 `config.toml` 中：
 
 ```toml
 [[projects]]
@@ -55,7 +55,7 @@ app_secret = "your-weibo-app-secret"
 也可以使用交互式 CLI 来配置：
 
 ```bash
-cc-connect new
+cc-connect-next new
 # 选择 weibo 平台，按提示输入 app_id 和 app_secret
 ```
 
@@ -72,25 +72,25 @@ app_secret = "your-weibo-app-secret"
 
 ---
 
-## 第三步：启动 cc-connect
+## 第三步：启动 cc-connect-next
 
 ### 3.1 启动服务
 
 ```bash
-cc-connect
+cc-connect-next
 # 或指定配置文件
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 ### 3.2 验证连接
 
-启动后，cc-connect 会自动与微博建立 WebSocket 长连接。你会在日志中看到：
+启动后，cc-connect-next 会自动与微博建立 WebSocket 长连接。你会在日志中看到：
 
 ```
 level=INFO msg="weibo: authenticated" uid=1234567890
 level=INFO msg="weibo: websocket connected"
 level=INFO msg="platform started" project=my-project platform=weibo
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 ```
 
 ---
@@ -104,14 +104,14 @@ level=INFO msg="cc-connect is running" projects=1
 ```
 用户: 帮我分析一下当前项目的结构
 
-cc-connect: 🤔 思考中...
-cc-connect: 🔧 执行: Bash(ls -la)
-cc-connect: ✅ 这是一个 Go 项目，包含以下模块...
+cc-connect-next: 🤔 思考中...
+cc-connect-next: 🔧 执行: Bash(ls -la)
+cc-connect-next: ✅ 这是一个 Go 项目，包含以下模块...
 ```
 
 ### 4.2 使用命令
 
-所有 cc-connect 命令均可在微博私信中使用：
+所有 cc-connect-next 命令均可在微博私信中使用：
 
 | 命令 | 功能 |
 |------|------|
@@ -141,7 +141,7 @@ cc-connect: ✅ 这是一个 Go 项目，包含以下模块...
 ┌─────────────────────────────────────────────────────────────┐
 │                      你的本地环境                            │
 │                                                              │
-│   cc-connect ◄──► AI Agent CLI ◄──► 你的项目代码            │
+│   cc-connect-next ◄──► AI Agent CLI ◄──► 你的项目代码            │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -160,7 +160,7 @@ cc-connect: ✅ 这是一个 Go 项目，包含以下模块...
 
 ### 消息长度限制
 
-微博私信文本限制约 2000 字符。cc-connect 会自动将超长消息分块发送，接收端会按顺序收到完整内容。
+微博私信文本限制约 2000 字符。cc-connect-next 会自动将超长消息分块发送，接收端会按顺序收到完整内容。
 
 ### Token 管理
 
@@ -181,13 +181,13 @@ cc-connect: ✅ 这是一个 Go 项目，包含以下模块...
 ### Q: 连接后收不到消息？
 
 检查以下项目：
-1. cc-connect 服务是否正常运行
+1. cc-connect-next 服务是否正常运行
 2. WebSocket 连接是否建立成功（查看日志）
 3. `app_id` 和 `app_secret` 是否正确
 
 ### Q: 长连接断开怎么办？
 
-cc-connect 内置了自动重连机制（指数退避，最大 10 秒间隔），断开后会自动尝试重新连接。
+cc-connect-next 内置了自动重连机制（指数退避，最大 10 秒间隔），断开后会自动尝试重新连接。
 
 ### Q: 提示 Token 无效？
 
@@ -196,7 +196,7 @@ cc-connect 内置了自动重连机制（指数退避，最大 10 秒间隔）�
 
 ### Q: 消息发送后显示不完整？
 
-微博私信有约 2000 字符的限制，cc-connect 会自动分块发送。如果仍有问题，检查网络连接。
+微博私信有约 2000 字符的限制，cc-connect-next 会自动分块发送。如果仍有问题，检查网络连接。
 
 ---
 

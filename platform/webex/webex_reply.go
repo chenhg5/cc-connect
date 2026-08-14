@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // webexMaxBytes is Webex's per-message body cap.

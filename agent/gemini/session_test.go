@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // sanitizeFileName mirrors the logic in geminiSession.Send for file name sanitization.
 func sanitizeFileName(fileName string, index int) string {
 	fname := filepath.Base(fileName)
 	if fname == "" || fname == "." || fname == ".." {
-		fname = fmt.Sprintf("cc-connect-file-%d", index)
+		fname = fmt.Sprintf("cc-connect-next-file-%d", index)
 	}
 	return fname
 }
@@ -33,9 +33,9 @@ func TestSanitizeFileName(t *testing.T) {
 		{"path traversal", "../../etc/passwd", 0, true, "passwd"},
 		{"deep traversal", "../../../tmp/evil.sh", 1, true, "evil.sh"},
 		{"absolute path", "/etc/shadow", 0, true, "shadow"},
-		{"empty name", "", 2, true, "cc-connect-file-2"},
-		{"dot only", ".", 3, true, "cc-connect-file-3"},
-		{"double dot", "..", 4, true, "cc-connect-file-4"},
+		{"empty name", "", 2, true, "cc-connect-next-file-2"},
+		{"dot only", ".", 3, true, "cc-connect-next-file-3"},
+		{"double dot", "..", 4, true, "cc-connect-next-file-4"},
 		{"subdir file", "subdir/file.txt", 0, true, "file.txt"},
 		{"slash path", "dir/subdir/evil.dll", 0, true, "evil.dll"},
 	}
@@ -405,7 +405,7 @@ func TestSlugify(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"cc-connect", "cc-connect"},
+		{"cc-connect-next", "cc-connect-next"},
 		{"Daily", "daily"},
 		{"My Project", "my-project"},
 		{"hello_world", "hello-world"},

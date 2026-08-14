@@ -10,7 +10,7 @@ package core
 // project's work_dir looking for permission problems the target user would
 // hit at runtime.
 //
-// Use PreflightRunAsUser at cc-connect startup, in parallel across all
+// Use PreflightRunAsUser at cc-connect-next startup, in parallel across all
 // projects, and refuse to start the daemon if any project returns any
 // fatal error. Warnings are surfaced via slog but do not abort startup.
 //
@@ -94,7 +94,7 @@ func PreflightRunAsUser(ctx context.Context, cfg PreflightConfig) PreflightResul
 
 	if _, err := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "/usr/bin/true"); err != nil {
 		result.Fatal = append(result.Fatal, fmt.Errorf(
-			"project %q: passwordless sudo to user %q is not configured. Add a sudoers rule such as:\n  %s ALL=(%s) NOPASSWD: ALL\nthen restart cc-connect. Underlying error: %w",
+			"project %q: passwordless sudo to user %q is not configured. Add a sudoers rule such as:\n  %s ALL=(%s) NOPASSWD: ALL\nthen restart cc-connect-next. Underlying error: %w",
 			cfg.Project, cfg.RunAsUser, currentUsernameOr("<supervisor>"), cfg.RunAsUser, err))
 		return result // subsequent checks are pointless
 	}
@@ -106,7 +106,7 @@ func PreflightRunAsUser(ctx context.Context, cfg PreflightConfig) PreflightResul
 			result.SudoListOutput = strings.TrimSpace(string(out))
 		}
 		msg := fmt.Sprintf(
-			"project %q: target user %q can run passwordless sudo. The run_as_user sandbox provides no isolation if the spawned agent can escalate non-interactively. Remove NOPASSWD sudo access for this user before starting cc-connect.",
+			"project %q: target user %q can run passwordless sudo. The run_as_user sandbox provides no isolation if the spawned agent can escalate non-interactively. Remove NOPASSWD sudo access for this user before starting cc-connect-next.",
 			cfg.Project, cfg.RunAsUser)
 		if result.SudoListOutput != "" {
 			msg += "\n\n`sudo -n -l` as " + cfg.RunAsUser + ":\n" + indent(result.SudoListOutput, "  ")
@@ -126,7 +126,7 @@ func PreflightRunAsUser(ctx context.Context, cfg PreflightConfig) PreflightResul
 		}
 		if _, err := cfg.Runner.Run(ctx, "-n", "-iu", cfg.RunAsUser, "--", "test", "-r", absWorkDir, "-a", "-w", absWorkDir); err != nil {
 			result.Fatal = append(result.Fatal, fmt.Errorf(
-				"project %q: target user %q cannot read AND write work_dir %q. Agents will fail with EACCES at runtime. Fix ownership/permissions on this directory (chown/chmod or an ACL granting the target user rwx) before starting cc-connect.",
+				"project %q: target user %q cannot read AND write work_dir %q. Agents will fail with EACCES at runtime. Fix ownership/permissions on this directory (chown/chmod or an ACL granting the target user rwx) before starting cc-connect-next.",
 				cfg.Project, cfg.RunAsUser, absWorkDir))
 		} else {
 			warn := scanDescendants(ctx, cfg.Runner, cfg.RunAsUser, absWorkDir, cfg.ScanConfig)
@@ -176,7 +176,7 @@ func scanDescendants(ctx context.Context, runner SudoRunner, target, workDir str
 
 	out, err := runner.Run(scanCtx, args...)
 	if scanCtx.Err() == context.DeadlineExceeded {
-		return fmt.Sprintf("work_dir descendant scan timed out after %s (large repo?); skipping detailed access audit. Run `cc-connect doctor user-isolation` manually if you need it.", scan.Timeout)
+		return fmt.Sprintf("work_dir descendant scan timed out after %s (large repo?); skipping detailed access audit. Run `cc-connect-next doctor user-isolation` manually if you need it.", scan.Timeout)
 	}
 	// find exits non-zero if it couldn't stat some path — that's
 	// actually data for us, parse whatever it printed.

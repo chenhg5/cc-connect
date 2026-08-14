@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/chenhg5/cc-connect/daemon"
+	"github.com/timmyagentic/cc-connect-next/daemon"
 )
 
 func TestResolveLogMaxBackups_FlagWinsOverEnv(t *testing.T) {

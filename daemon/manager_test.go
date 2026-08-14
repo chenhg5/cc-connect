@@ -186,6 +186,30 @@ app_secret = "${CAPTURE_CONFIG_FEISHU_SECRET}"
 	}
 }
 
+func TestResolveCapturesExplicitConfigOutsideRuntimeWorkDir(t *testing.T) {
+	workDir := t.TempDir()
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "migrated.toml")
+	if err := os.WriteFile(configPath, []byte(`token = "${CAPTURE_EXPLICIT_CONFIG}"`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("CAPTURE_EXPLICIT_CONFIG", "migrated-secret")
+
+	cfg := Config{BinaryPath: "/bin/true", WorkDir: workDir, ConfigPath: configPath}
+	if err := Resolve(&cfg); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.WorkDir != workDir {
+		t.Fatalf("Resolve changed runtime work dir to %q, want %q", cfg.WorkDir, workDir)
+	}
+	if cfg.ConfigPath != configPath {
+		t.Fatalf("Resolve config path = %q, want %q", cfg.ConfigPath, configPath)
+	}
+	if cfg.EnvExtra["CAPTURE_EXPLICIT_CONFIG"] != "migrated-secret" {
+		t.Fatalf("explicit migrated config placeholder was not captured: %+v", cfg.EnvExtra)
+	}
+}
+
 func TestResolveNoCaptureSecretsSkipsConfigEnvPlaceholders(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "config.toml"), []byte(`

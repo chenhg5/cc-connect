@@ -84,7 +84,7 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect-next
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
@@ -129,7 +129,7 @@ type Config struct {
 	// available. Example: "source ~/.zshrc"
 	ShellProfile string `toml:"shell_profile,omitempty"`
 	// MaxAttachmentSizeMB is the per-file size limit, in MiB, for attachments
-	// sent through `cc-connect send --file/--image/--audio/--video` and the
+	// sent through `cc-connect-next send --file/--image/--audio/--video` and the
 	// /send API. 0 (the default) means use core.DefaultMaxAttachmentSize
 	// (50 MiB). Raise it to send larger files; the request body limit on the
 	// API side scales with this value to account for base64 expansion.
@@ -193,7 +193,7 @@ const (
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
-	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	CardMode             *string `toml:"card_mode"`              // "rich" (default, Card 2.0 Feishu) or "legacy"
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
@@ -319,7 +319,7 @@ type TTSConfig struct {
 }
 
 // TTSAgentConfig overrides global [tts] synthesis parameters for one project.
-// Keys are project names, which map naturally to cc-connect's agent workspaces
+// Keys are project names, which map naturally to cc-connect-next's agent workspaces
 // (for example assistant, reviewer).
 type TTSAgentConfig struct {
 	Provider     string  `toml:"provider,omitempty"`
@@ -481,14 +481,14 @@ type ProjectConfig struct {
 	Platforms                    []PlatformConfig   `toml:"platforms"`
 	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
-	// ResetOnIdleMins automatically rotates to a new cc-connect session after
+	// ResetOnIdleMins automatically rotates to a new cc-connect-next session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
-	// runs cc-connect itself. Requires passwordless sudo to the target user
+	// runs cc-connect-next itself. Requires passwordless sudo to the target user
 	// and is POSIX-only. See docs/usage.md "Running agents as a different
 	// Unix user" for setup and migration.
 	RunAsUser string `toml:"run_as_user,omitempty"`
@@ -541,7 +541,7 @@ type ProjectConfig struct {
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
-	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
+	// cc-connect-next, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
 	// Shell overrides the global shell for this project. See Config.Shell.
@@ -625,9 +625,9 @@ func load(path string) (*Config, error) {
 	resolveEnvInConfig(cfg)
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
-			cfg.DataDir = filepath.Join(home, ".cc-connect")
+			cfg.DataDir = filepath.Join(home, ".cc-connect-next")
 		} else {
-			cfg.DataDir = ".cc-connect"
+			cfg.DataDir = ".cc-connect-next"
 		}
 	}
 	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
@@ -640,7 +640,7 @@ func load(path string) (*Config, error) {
 
 // LoadPermissive loads the config file and performs all validation except the
 // "at least one platform per project" check. Use this for commands (like
-// `cc-connect web`) that should work even before platforms are configured.
+// `cc-connect-next web`) that should work even before platforms are configured.
 func LoadPermissive(path string) (*Config, error) {
 	cfg, err := load(path)
 	if err != nil {
@@ -962,8 +962,8 @@ func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile
 	}
 }
 
-// EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
-// or "legacy" (default plain messages). Per-project overrides global.
+// EffectiveCardMode returns the card rendering mode for the project: "rich"
+// (default, privacy-first Feishu Card 2.0) or "legacy". Per-project overrides global.
 func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	var projDisp *DisplayConfig
 	if proj != nil {
@@ -979,11 +979,11 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 			return m
 		}
 	}
-	return "legacy"
+	return "rich"
 }
 
 // validatePermissive is like validate but skips the "at least one platform"
-// requirement so that commands like `cc-connect web` can operate on agent-only
+// requirement so that commands like `cc-connect-next web` can operate on agent-only
 // configs before platforms have been set up.
 func (c *Config) validatePermissive() error {
 	return c.validateInternal(true)

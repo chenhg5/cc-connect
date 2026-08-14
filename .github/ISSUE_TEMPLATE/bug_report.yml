@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug to help us improve cc-connect
+description: Report a bug to help us improve cc-connect-next
 title: "[Bug] "
 labels: ["bug"]
 
@@ -12,8 +12,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: cc-connect Version
-      description: Run `cc-connect --version` to get the version.
+      label: cc-connect-next Version
+      description: Run `cc-connect-next --version` to get the version.
       placeholder: "e.g. v0.3.0"
     validations:
       required: true
@@ -69,7 +69,7 @@ body:
     attributes:
       label: Installation Method
       options:
-        - npm (npm install -g cc-connect)
+        - npm (npm install -g cc-connect-next@beta)
         - Binary download (GitHub Releases)
         - Build from source
     validations:
@@ -91,7 +91,7 @@ body:
       description: Steps to reproduce the behavior.
       placeholder: |
         1. Configure config.toml with ...
-        2. Run `cc-connect`
+        2. Run `cc-connect-next`
         3. Send message '...' in the chat
         4. See error ...
     validations:

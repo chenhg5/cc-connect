@@ -1,13 +1,13 @@
 # QQ 平台接入指南 / QQ Platform Setup Guide
 
-cc-connect 通过 [OneBot v11](https://github.com/botuniverse/onebot-11) 协议连接 QQ，需要搭配一个 OneBot 实现（如 NapCat）使用。
+cc-connect-next 通过 [OneBot v11](https://github.com/botuniverse/onebot-11) 协议连接 QQ，需要搭配一个 OneBot 实现（如 NapCat）使用。
 
-cc-connect connects to QQ via the [OneBot v11](https://github.com/botuniverse/onebot-11) protocol. You need a OneBot implementation (e.g., NapCat) running alongside.
+cc-connect-next connects to QQ via the [OneBot v11](https://github.com/botuniverse/onebot-11) protocol. You need a OneBot implementation (e.g., NapCat) running alongside.
 
 ## 架构 / Architecture
 
 ```
-QQ Client ←→ NapCat (OneBot v11) ←WebSocket→ cc-connect ←→ Agent (Claude Code / etc.)
+QQ Client ←→ NapCat (OneBot v11) ←WebSocket→ cc-connect-next ←→ Agent (Claude Code / etc.)
 ```
 
 ## 前置条件 / Prerequisites
@@ -52,7 +52,7 @@ http://localhost:6099
 - 端口设为 `3001`（默认）/ Port: `3001` (default)
 - 如果需要鉴权，设置 Access Token / Set Access Token if needed
 
-### 3. 配置 cc-connect / Configure cc-connect
+### 3. 配置 cc-connect-next / Configure cc-connect-next
 
 在 `config.toml` 中添加 QQ 平台 / Add QQ platform to `config.toml`:
 
@@ -74,7 +74,7 @@ allow_from = "*"                 # 允许交互的 QQ 号，"*" 表示所有人
 ### 4. 启动 / Start
 
 ```bash
-cc-connect
+cc-connect-next
 ```
 
 看到如下日志表示连接成功 / You should see:

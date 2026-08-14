@@ -57,11 +57,11 @@ func TestUnauthorizedAccessMessage(t *testing.T) {
 // this test asserts every file lands inside attachDir, with no escapees.
 func TestSaveFilesToDisk_RejectsPathTraversal(t *testing.T) {
 	workDir := t.TempDir()
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(workDir, ".cc-connect-next", "attachments")
 
 	files := []FileAttachment{
 		// The original repro: walks two levels up out of attachments and
-		// out of .cc-connect/, landing directly in workDir.
+		// out of .cc-connect-next/, landing directly in workDir.
 		{FileName: "../../escape.txt", Data: []byte("payload")},
 		// Three levels up — would land in workDir's parent without the fix.
 		{FileName: "../../../way-up.txt", Data: []byte("payload")},

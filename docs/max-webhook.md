@@ -16,7 +16,7 @@ The bot runs on a server that has a public domain and TLS-terminating reverse pr
    user → MAX cloud ─── HTTPS POST ───▶  │  nginx :443 (TLS)                     │
                        https://your.tld   │     └ proxy_pass → 127.0.0.1:8090    │
                        /webhook           │                                       │
-                                          │  cc-connect (HTTP :8090, localhost)   │
+                                          │  cc-connect-next (HTTP :8090, localhost)   │
                                           └───────────────────────────────────────┘
 ```
 
@@ -91,7 +91,7 @@ The bot runs at home (no public IP) and a small VPS forwards traffic to it via S
 
 ```
                                           ┌─── VPS ───┐         ┌──── Home ────┐
-   user → MAX cloud ─── HTTPS ─────────▶ │  nginx    │ ──SSH──▶│  cc-connect  │
+   user → MAX cloud ─── HTTPS ─────────▶ │  nginx    │ ──SSH──▶│  cc-connect-next  │
                        /webhook           │ :443→:8090│  -R     │   :8090      │
                                           └───────────┘ tunnel  └──────────────┘
 ```
@@ -202,7 +202,7 @@ The bot decides which mode to use purely from config — no rebuild.
 
 1. Set `webhook_url`, `webhook_listen` (and optional `webhook_path`, `webhook_secret`) in `config.toml`.
 2. Make sure the public URL is reachable and TLS works.
-3. `systemctl restart cc-connect` (or however you run it).
+3. `systemctl restart cc-connect-next` (or however you run it).
 
 On startup the bot calls `POST /subscriptions` against MAX with the new URL. MAX immediately stops delivering long-poll updates and starts pushing.
 
@@ -225,7 +225,7 @@ After that, restart the bot in long-poll mode.
 ### `502 Bad Gateway` from nginx when MAX hits the webhook
 
 The bot is not listening on `webhook_listen`. Check, in order:
-1. `systemctl --user status cc-connect` — is it running?
+1. `systemctl --user status cc-connect-next` — is it running?
 2. `ss -tlnp | grep 8090` (or your port) — is something bound?
 3. Bot logs — look for `max: webhook listening addr=...` and `max: webhook subscribed url=...`. If you see `connected` but neither of those, you have a startup hang.
 

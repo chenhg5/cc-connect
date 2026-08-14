@@ -1,7 +1,7 @@
 {
-  "name": "cc-connect",
-  "version": "1.4.1",
-  "description": "Bridge local AI coding agents (Claude Code, Cursor, Gemini CLI) to messaging platforms (Feishu, DingTalk, Slack, Telegram, Discord, LINE, WeChat Work)",
+  "name": "cc-connect-next",
+  "version": "0.1.0-beta.1",
+  "description": "Privacy-first AI agent bridge with native Feishu Card 2.0 streaming",
   "keywords": [
     "claude-code",
     "ai-coding",
@@ -15,15 +15,15 @@
     "chatbot",
     "bridge"
   ],
-  "homepage": "https://github.com/chenhg5/cc-connect",
+  "homepage": "https://github.com/timmyagentic/cc-connect-next",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chenhg5/cc-connect.git"
+    "url": "https://github.com/timmyagentic/cc-connect-next.git"
   },
   "license": "MIT",
-  "author": "chenhg5",
+  "author": "cc-connect-next contributors",
   "bin": {
-    "cc-connect": "run.js"
+    "cc-connect-next": "run.js"
   },
   "scripts": {
     "postinstall": "node install.js"

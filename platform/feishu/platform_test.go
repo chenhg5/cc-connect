@@ -16,9 +16,9 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 
-	"github.com/chenhg5/cc-connect/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
@@ -29,6 +29,12 @@ func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
 	if _, ok := p.(core.CardSender); !ok {
 		t.Fatal("expected default Feishu platform to implement core.CardSender")
 	}
+	if _, ok := p.(core.RichCardSupporter); !ok {
+		t.Fatal("expected default Feishu platform to advertise rich-card support")
+	}
+	if _, ok := p.(core.RichCardMarkdownTransformer); !ok {
+		t.Fatal("expected default Feishu platform to advertise rich-card outbound transforms")
+	}
 }
 
 func TestNew_CanDisableInteractiveCards(t *testing.T) {
@@ -38,6 +44,15 @@ func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	}
 	if _, ok := p.(core.CardSender); ok {
 		t.Fatal("expected disabled Feishu platform to fall back to plain text")
+	}
+	if _, ok := p.(core.RichCardSupporter); ok {
+		t.Fatal("disabled Feishu cards must not advertise rich-card support")
+	}
+	if _, ok := p.(core.LocalizedRichCardSupporter); ok {
+		t.Fatal("disabled Feishu cards must not advertise localized rich-card support")
+	}
+	if _, ok := p.(core.RichCardMarkdownTransformer); ok {
+		t.Fatal("disabled Feishu cards must not advertise rich-card outbound transforms")
 	}
 }
 
@@ -1074,212 +1089,128 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesToolDescriptors(t *testing.T) {
 	}
 }
 
-func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
-	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
-		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"pwd"}`},
-		{Kind: core.ToolStepKindTool, Name: "functions.write_stdin", Summary: `{"chars":"q"}`},
-		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"git status --short"}`},
-		{Kind: core.ToolStepKindTool, Name: "functions.exec_command", Summary: `{"cmd":"ps aux | grep cc-connect"}`},
-		{Kind: core.ToolStepKindTool, Name: "apply_patch", Summary: "/tmp/file.go"},
-		{Kind: core.ToolStepKindTool, Name: "multi_tool_use.parallel", Summary: "3 tool calls"},
-		{Kind: core.ToolStepKindTool, Name: "tool_search_tool", Summary: "search available tools"},
-		{Kind: core.ToolStepKindTool, Name: "update_plan", Summary: "revise checklist"},
-		{Kind: core.ToolStepKindTool, Name: "request_user_input", Summary: "ask for confirmation"},
-	}, "answer", true, "")
+func TestBuildRichCard_InitialStateIsVisibleAndLocked(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusThinking, "thinking", nil, "", true, "")
 
-	panels := collectCardPanels(t, cardJSON)
-	if len(panels) != 1 {
-		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
-	}
-	for _, want := range []string{
-		"Inspect files",
-		"Command I/O",
-		"Git",
-		"Inspect process",
-		"Edit",
-		"Run tools",
-		"Search tools",
-		"Update plan",
-		"Ask user",
-		"file-link-text_outlined",
-		"keyboard_outlined",
-		"code_outlined",
-		"computer_outlined",
-		"edit_outlined",
-		"list-check_outlined",
-		"search_outlined",
-		"robot_outlined",
-	} {
-		if !panelContains(t, panels[0], want) {
-			t.Fatalf("tools panel should contain %q: %#v", want, panels[0])
-		}
-	}
-}
-
-func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
-	code := 0
-	success := true
-	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
-		{Kind: core.ToolStepKindThinking, Name: "Thinking", Summary: "Inspecting event routing"},
-		{
-			Kind:     core.ToolStepKindTool,
-			Name:     "Bash",
-			Summary:  "echo hi",
-			Result:   "hi",
-			Status:   "completed",
-			ExitCode: &code,
-			Success:  &success,
-			Done:     true,
-		},
-	}, "done", true, "")
-
-	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
+	for _, want := range []string{"⏳ 正在思考…", "推理与工具详情不会展示，也无法展开", richCardMainTextElementID} {
 		if !strings.Contains(cardJSON, want) {
-			t.Fatalf("rich card should contain %q, got %q", want, cardJSON)
+			t.Fatalf("initial rich card should contain %q, got %q", want, cardJSON)
 		}
 	}
-	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
-		t.Fatalf("rich card should not contain progress payload prefix, got %q", cardJSON)
+	if strings.Contains(cardJSON, "collapsible_panel") {
+		t.Fatalf("private progress must not be expandable, got %q", cardJSON)
+	}
+	contents := collectCardMarkdownContents(t, cardJSON)
+	if len(contents) != 1 || strings.TrimSpace(contents[0]) == "" {
+		t.Fatalf("initial rich card body must be non-empty, got %#v", contents)
 	}
 }
 
-func TestBuildRichCard_OversizePanelsKeepVisibleContent(t *testing.T) {
-	var steps []core.ToolStep
-	for i := 0; i < 40; i++ {
-		steps = append(steps, core.ToolStep{
-			Kind:    core.ToolStepKindThinking,
-			Name:    "Thinking",
-			Summary: "visible reasoning " + strconv.Itoa(i) + " " + strings.Repeat("r", 700),
-		})
-		steps = append(steps, core.ToolStep{
-			Kind:    core.ToolStepKindTool,
-			Name:    "Bash",
-			Summary: "visible command " + strconv.Itoa(i) + " " + strings.Repeat("c", 700),
-			Result:  "visible result " + strconv.Itoa(i) + " " + strings.Repeat("o", 700),
-			Done:    true,
-		})
-	}
+func TestBuildRichCard_ProgressExposesCountsButNeverDetails(t *testing.T) {
+	code := 7
+	success := false
+	cardJSON := buildRichCard(core.CardStatusWorking, "tool", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Name: "Thinking", Summary: "private chain of thought"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "cat ~/.ssh/id_ed25519", Result: "PRIVATE_KEY", Status: "failed", ExitCode: &code, Success: &success},
+		{Kind: core.ToolStepKindTool, Name: "web_fetch", Summary: "https://example.com/?token=secret"},
+	}, "", true, "gpt-5.6-sol · token · /Users/private/project")
 
-	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "")
-
-	panels := collectCardPanels(t, cardJSON)
-	if len(panels) == 0 {
-		t.Fatalf("oversize rich card should preserve compact reasoning/tool panels instead of blank fallback: %q", cardJSON)
+	for _, want := range []string{"⏳ 正在调用工具…", "推理 1 次 · 工具 2 次", "推理与工具详情不会展示，也无法展开"} {
+		if !strings.Contains(cardJSON, want) {
+			t.Fatalf("working rich card should contain %q, got %q", want, cardJSON)
+		}
 	}
-	rendered := strings.Join(collectCardMarkdownContents(t, cardJSON), "\n") + "\n" + cardJSON
-	if !strings.Contains(rendered, "visible reasoning") && !strings.Contains(rendered, "visible command") {
-		t.Fatalf("oversize rich card should keep visible step content, got %q", cardJSON)
+	for _, forbidden := range []string{"private chain of thought", "Bash", "id_ed25519", "PRIVATE_KEY", "token=secret", "failed", "gpt-5.6-sol", "/Users/private/project", "collapsible_panel"} {
+		if strings.Contains(cardJSON, forbidden) {
+			t.Fatalf("working rich card leaked %q: %q", forbidden, cardJSON)
+		}
 	}
 }
 
-func TestBuildRichCard_PanelsShowLatestTenSteps(t *testing.T) {
-	var steps []core.ToolStep
-	for i := 0; i < 15; i++ {
-		steps = append(steps, core.ToolStep{
-			Kind:    core.ToolStepKindThinking,
-			Name:    "Thinking",
-			Summary: "reasoning-index-" + strconv.Itoa(i),
-		})
-		steps = append(steps, core.ToolStep{
-			Kind:    core.ToolStepKindTool,
-			Name:    "Bash",
-			Summary: "tool-command-" + strconv.Itoa(i),
-			Result:  "tool-result-" + strconv.Itoa(i),
-			Done:    true,
-		})
-	}
+func TestBuildRichCard_StreamingShowsOnlyAnswer(t *testing.T) {
+	cardJSON := buildRichCard(core.CardStatusWorking, "answer", []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Summary: "private reasoning"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "secret command"},
+	}, "正在生成的答案", true, "model · token · ctx")
 
-	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "")
-
-	panels := collectCardPanels(t, cardJSON)
-	if len(panels) != 2 {
-		t.Fatalf("panel count = %d, want reasoning and tools panels: %#v", len(panels), panels)
+	for _, want := range []string{"✍️ 正在回答", "正在生成的答案", `"streaming_mode":true`, `"streaming_config"`} {
+		if !strings.Contains(cardJSON, want) {
+			t.Fatalf("streaming rich card should contain %q, got %q", want, cardJSON)
+		}
 	}
-	for _, tt := range []struct {
-		name          string
-		panel         map[string]any
-		oldestHidden  string
-		windowStart   string
-		latestVisible string
-		resultVisible string
-		hiddenSummary string
+	for _, forbidden := range []string{"private reasoning", "secret command", "推理 1 次", "model · token · ctx", "collapsible_panel"} {
+		if strings.Contains(cardJSON, forbidden) {
+			t.Fatalf("streaming rich card leaked %q: %q", forbidden, cardJSON)
+		}
+	}
+}
+
+func TestBuildRichCard_CompletedAndErrorStatesAreClean(t *testing.T) {
+	steps := []core.ToolStep{
+		{Kind: core.ToolStepKindThinking, Summary: "private reasoning"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "secret command"},
+	}
+	done := buildRichCard(core.CardStatusDone, "done", steps, "最终答案", false, "model · token · ctx")
+	failed := buildRichCard(core.CardStatusError, "error", steps, "", false, "model · token · ctx")
+
+	for _, want := range []string{"✅ 已完成", "最终答案"} {
+		if !strings.Contains(done, want) {
+			t.Fatalf("completed card should contain %q, got %q", want, done)
+		}
+	}
+	if !strings.Contains(failed, "⚠️ 未完成") || !strings.Contains(failed, "本次处理未能完成") {
+		t.Fatalf("failed card should contain a safe visible fallback, got %q", failed)
+	}
+	for _, cardJSON := range []string{done, failed} {
+		for _, forbidden := range []string{"private reasoning", "secret command", "推理 1 次", "model · token · ctx", "collapsible_panel"} {
+			if strings.Contains(cardJSON, forbidden) {
+				t.Fatalf("terminal rich card leaked %q: %q", forbidden, cardJSON)
+			}
+		}
+	}
+}
+
+func TestBuildRichCard_LocalizesLifecycleForEverySupportedLanguage(t *testing.T) {
+	tests := []struct {
+		name     string
+		lang     core.Language
+		thinking string
+		tool     string
+		progress string
+		privacy  string
+		done     string
+		error    string
 	}{
-		{
-			name:          "reasoning",
-			panel:         panels[0],
-			oldestHidden:  "reasoning-index-0",
-			windowStart:   "reasoning-index-5",
-			latestVisible: "reasoning-index-14",
-			hiddenSummary: "5 earlier steps hidden",
-		},
-		{
-			name:          "tools",
-			panel:         panels[1],
-			oldestHidden:  "tool-command-0",
-			windowStart:   "tool-command-5",
-			latestVisible: "tool-command-14",
-			resultVisible: "tool-result-14",
-			hiddenSummary: "5 earlier steps hidden",
-		},
-	} {
-		if panelContains(t, tt.panel, tt.oldestHidden) {
-			t.Fatalf("%s panel should hide oldest step %q: %#v", tt.name, tt.oldestHidden, tt.panel)
-		}
-		for _, want := range []string{tt.windowStart, tt.latestVisible, tt.resultVisible, tt.hiddenSummary} {
-			if want == "" {
-				continue
+		{"english", core.LangEnglish, "Thinking…", "Calling tools…", "Reasoning 1 · Tools 1", "details are private", "✅ Done", "⚠️ Not completed"},
+		{"simplified chinese", core.LangChinese, "正在思考…", "正在调用工具…", "推理 1 次 · 工具 1 次", "详情不会展示", "✅ 已完成", "⚠️ 未完成"},
+		{"traditional chinese", core.LangTraditionalChinese, "正在思考…", "正在呼叫工具…", "推理 1 次 · 工具 1 次", "詳情不會顯示", "✅ 已完成", "⚠️ 未完成"},
+		{"japanese", core.LangJapanese, "考えています…", "ツールを呼び出しています…", "推論 1 回 · ツール 1 回", "詳細は非公開", "✅ 完了", "⚠️ 未完了"},
+		{"spanish", core.LangSpanish, "Pensando…", "Usando herramientas…", "razonamientos 1 · herramientas 1", "detalles del razonamiento", "✅ Completado", "⚠️ No completado"},
+	}
+	steps := []core.ToolStep{{Kind: core.ToolStepKindThinking}, {Kind: core.ToolStepKindTool}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copy := core.NewI18n(tt.lang).RichCardCopy()
+			thinking := buildRichCardWithCopy(core.CardStatusThinking, "thinking", nil, "", true, copy)
+			tool := buildRichCardWithCopy(core.CardStatusWorking, "tool", steps, "", true, copy)
+			done := buildRichCardWithCopy(core.CardStatusDone, "done", steps, "result", false, copy)
+			failed := buildRichCardWithCopy(core.CardStatusError, "error", steps, "", false, copy)
+			for label, assertion := range map[string]struct {
+				card string
+				want string
+			}{
+				"thinking": {thinking, tt.thinking},
+				"tool":     {tool, tt.tool},
+				"progress": {tool, tt.progress},
+				"privacy":  {tool, tt.privacy},
+				"done":     {done, tt.done},
+				"error":    {failed, tt.error},
+			} {
+				if !strings.Contains(assertion.card, assertion.want) {
+					t.Fatalf("%s card missing %q: %s", label, assertion.want, assertion.card)
+				}
 			}
-			if !panelContains(t, tt.panel, want) {
-				t.Fatalf("%s panel should contain %q: %#v", tt.name, want, tt.panel)
-			}
-		}
-	}
-}
-
-func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
-	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
-		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
-		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
-	}, "answer", true, "")
-
-	panels := collectCardPanels(t, cardJSON)
-	if len(panels) != 2 {
-		t.Fatalf("panel count = %d, want 2 panels: %#v", len(panels), panels)
-	}
-	if got := cardPanelTitle(panels[0]); got != "Reasoning (1)" {
-		t.Fatalf("first panel title = %q, want Reasoning (1)", got)
-	}
-	if got := cardPanelTitle(panels[1]); got != "Tools (1)" {
-		t.Fatalf("second panel title = %q, want Tools (1)", got)
-	}
-	if panelContains(t, panels[0], "pwd") {
-		t.Fatalf("reasoning panel should not include tool content: %#v", panels[0])
-	}
-	if panelContains(t, panels[1], "Inspecting event routing") {
-		t.Fatalf("tools panel should not include reasoning content: %#v", panels[1])
-	}
-	if !panelContains(t, panels[0], "mindmap_outlined") {
-		t.Fatalf("reasoning panel should render a reasoning icon: %#v", panels[0])
-	}
-}
-
-func TestBuildRichCard_UsesToolDescriptorsForAliases(t *testing.T) {
-	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
-		{Kind: core.ToolStepKindTool, Name: "web_fetch", Summary: "https://example.com/docs?token=secret"},
-	}, "answer", true, "")
-
-	panels := collectCardPanels(t, cardJSON)
-	if len(panels) != 1 {
-		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
-	}
-	if !panelContains(t, panels[0], "language_outlined") {
-		t.Fatalf("tools panel should use web fetch icon: %#v", panels[0])
-	}
-	if !panelContains(t, panels[0], "Fetch web page") {
-		t.Fatalf("tools panel should use descriptor title: %#v", panels[0])
-	}
-	if panelContains(t, panels[0], "token=secret") {
-		t.Fatalf("tools panel should redact sensitive URL query params: %#v", panels[0])
+		})
 	}
 }
 
@@ -1414,17 +1345,22 @@ func TestResolveRichCardMarkdownStreamingStartsUploadWithoutWaiting(t *testing.T
 	}
 }
 
-func TestResolveRichCardMarkdownFailedImageIsNotRetried(t *testing.T) {
+func TestResolveRichCardMarkdownFailedImageRetriesAfterBackoff(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	var (
 		mu    sync.Mutex
 		calls int
+		now   = time.Unix(1_700_000_000, 0)
 	)
+	p.richCardImageNowFunc = func() time.Time { return now }
 	p.richCardImageUploadFunc = func(_ context.Context, _ string) (string, error) {
 		mu.Lock()
+		defer mu.Unlock()
 		calls++
-		mu.Unlock()
-		return "", errors.New("upload failed")
+		if calls == 1 {
+			return "", errors.New("upload failed")
+		}
+		return "img_v3_retried", nil
 	}
 
 	input := "before ![chart](https://example.com/chart.png) after"
@@ -1437,9 +1373,21 @@ func TestResolveRichCardMarkdownFailedImageIsNotRetried(t *testing.T) {
 		}
 	}
 	mu.Lock()
-	defer mu.Unlock()
 	if calls != 1 {
-		t.Fatalf("upload calls = %d, want failed URL cached after first attempt", calls)
+		mu.Unlock()
+		t.Fatalf("upload calls = %d, want one attempt during failure backoff", calls)
+	}
+	mu.Unlock()
+
+	now = now.Add(richCardImageRetryWait + time.Nanosecond)
+	retried := p.ResolveRichCardMarkdown(context.Background(), input, true)
+	if !strings.Contains(retried, "![chart](img_v3_retried)") {
+		t.Fatalf("expired failure should retry and render the image, got %q", retried)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("upload calls = %d, want one retry after backoff", calls)
 	}
 }
 
@@ -1519,7 +1467,7 @@ func TestFeishuCardAPIErrorClassification(t *testing.T) {
 
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
-	if strings.Contains(cardJSON, "cc-connect · 进度") {
+	if strings.Contains(cardJSON, "cc-connect-next · 进度") {
 		t.Fatalf("normal text should use default card template, got %q", cardJSON)
 	}
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
@@ -1795,6 +1743,23 @@ func TestResolveMentions_CardFormat(t *testing.T) {
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
 		t.Fatalf("card format should use <at id=...>, got %q", result)
+	}
+}
+
+func TestTransformRichCardMarkdownResolvesShortAnswerMention(t *testing.T) {
+	base := &Platform{platformName: "feishu", resolveMentions: true}
+	base.chatMemberCache.Store("oc_chat", &chatMemberEntry{
+		members:   map[string]string{"张三": "ou_zhangsan"},
+		fetchedAt: time.Now(),
+	})
+	p := &interactivePlatform{Platform: base}
+	input := "@张三 请查看"
+	result := p.TransformRichCardMarkdown(context.Background(), replyContext{chatID: "oc_chat"}, input)
+	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
+		t.Fatalf("short rich-card answer should use card mention syntax, got %q", result)
+	}
+	if strings.Contains(result, "@张三") {
+		t.Fatalf("short rich-card answer retained unresolved mention: %q", result)
 	}
 }
 

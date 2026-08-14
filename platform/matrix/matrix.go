@@ -8,11 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/event"
@@ -39,6 +40,7 @@ type Platform struct {
 	autoJoin              bool
 	autoVerify            bool
 	proxyURL              string
+	dataDir               string
 
 	mu                   sync.RWMutex
 	client               *mautrix.Client
@@ -92,6 +94,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		}
 	}
 	proxyURL, _ := opts["proxy"].(string)
+	dataDir, _ := opts["cc_data_dir"].(string)
 	crossSigningPassword, _ := opts["cross_signing_password"].(string)
 	if env := os.Getenv("MATRIX_CROSS_SIGNING_PASSWORD"); env != "" {
 		crossSigningPassword = env
@@ -116,11 +119,31 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChannel: shareSession,
 		autoJoin:              autoJoin,
 		proxyURL:              proxyURL,
+		dataDir:               dataDir,
 		autoVerify:            autoVerify,
 		crossSigningPassword:  crossSigningPassword,
 		httpClient:            httpClient,
 		dedup:                 core.MessageDedup{},
 	}, nil
+}
+
+func (p *Platform) persistenceDir() (string, error) {
+	if strings.TrimSpace(p.dataDir) != "" {
+		return p.dataDir, nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home dir: %w", err)
+	}
+	return filepath.Join(homeDir, ".cc-connect-next"), nil
+}
+
+func (p *Platform) persistencePath(name string) (string, error) {
+	dataDir, err := p.persistenceDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dataDir, name), nil
 }
 
 func (p *Platform) Name() string { return "matrix" }

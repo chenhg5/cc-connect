@@ -1,4 +1,4 @@
-module github.com/chenhg5/cc-connect
+module github.com/timmyagentic/cc-connect-next
 
 go 1.25.0
 

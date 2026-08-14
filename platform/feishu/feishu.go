@@ -21,8 +21,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -171,8 +172,9 @@ type Platform struct {
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
 	richCardImagePending    map[string]*richCardImageUpload
-	richCardImageFailed     map[string]struct{}
+	richCardImageFailed     map[string]time.Time // URL -> retry-at time
 	richCardImageUploadFunc func(context.Context, string) (string, error)
+	richCardImageNowFunc    func() time.Time
 
 	// imageBatch coalesces consecutive image messages from the same session
 	// arriving within imageBatchWindow. Without this, sending N images in rapid
@@ -1159,7 +1161,7 @@ func (p *Platform) flushImageBatchByRef(sessionKey string, ref *imageBatchEntry)
 
 // flushImageBatches synchronously dispatches any pending image batches.
 // Intended to be called from Stop() so buffered images aren't lost when
-// cc-connect shuts down.
+// cc-connect-next shuts down.
 func (p *Platform) flushImageBatches() {
 	p.imageBatchMu.Lock()
 	pending := p.imageBatch
@@ -1823,6 +1825,10 @@ func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string
 // (before JSON serialization). Reverse-matches against the chat member list,
 // longest name first. Uses the correct at syntax based on predicted message type.
 func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
+	return p.resolveMentionsWithFormat(ctx, chatID, content, predictMsgType(content) == larkim.MsgTypeInteractive)
+}
+
+func (p *Platform) resolveMentionsWithFormat(ctx context.Context, chatID, content string, useCardFormat bool) string {
 	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
 		return content
 	}
@@ -1837,7 +1843,6 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
 
-	useCardFormat := predictMsgType(content) == larkim.MsgTypeInteractive
 	result := content
 	for _, name := range names {
 		pattern := "@" + name
@@ -1860,6 +1865,19 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 		result = strings.ReplaceAll(result, pattern, atTag)
 	}
 	return result
+}
+
+// TransformRichCardMarkdown preserves resolve_mentions semantics when the
+// engine updates a Card 2.0 message directly instead of calling Send/Reply.
+// Rich-card markdown always uses Feishu's <at id=...></at> representation,
+// including for short answers that ordinary message prediction would classify
+// as plain text.
+func (p *interactivePlatform) TransformRichCardMarkdown(ctx context.Context, rctx any, markdown string) string {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return markdown
+	}
+	return p.resolveMentionsWithFormat(ctx, rc.chatID, markdown, true)
 }
 
 // chainMessage holds extracted data from one message in a reply chain.
@@ -4148,19 +4166,18 @@ func buildPreviewCardJSON(content string) string {
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
 //
-// Card 2.0 + cardkit-v1 path (when content is a rich card JSON and we're NOT
-// in thread/reply mode): runs a two-step flow that captures a card_id usable
-// for streaming text updates:
+// Card 2.0 + cardkit-v1 path (when content is a rich card JSON) runs a
+// two-step flow that captures a card_id usable for streaming text updates:
 //
 //  1. POST /open-apis/cardkit/v1/cards with {type:"card_json", data:<cardJSON>}
 //     → returns card_id (numeric string, 14-day TTL).
 //  2. Im.Message.Create with content {"type":"card","data":{"card_id":"..."}}
 //     → returns message_id; both ids are stored on feishuPreviewHandle.
 //
-// If step (1) fails OR we're in thread/reply mode (Reply API doesn't accept
-// card_id reference), we fall back to the inline-card-JSON path. The handle's
+// If step (1) fails, we fall back to the inline-card-JSON path. The handle's
 // cardID stays empty in that case and the engine routes EventText through the
-// full-card Patch path (= original #657 behavior, no typewriter).
+// full-card Patch path (= original #657 behavior, no typewriter). Both create
+// and reply messages accept the card_id reference schema.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
 	if !p.useInteractiveCard {
 		return nil, core.ErrNotSupported
@@ -4282,7 +4299,10 @@ func (p *Platform) createCardEntity(ctx context.Context, cardJSON string) (strin
 	}); err != nil {
 		return "", fmt.Errorf("%s: create card entity: %w", p.tag(), err)
 	}
-	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+	if apiResp == nil {
+		return "", fmt.Errorf("%s: create card entity: empty API response", p.tag())
+	}
+	if apiResp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%s: create card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
 	}
 	var resp struct {
@@ -4344,7 +4364,10 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 	}); err != nil {
 		return fmt.Errorf("%s: stream rich card text: %w", p.tag(), err)
 	}
-	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+	if apiResp == nil {
+		return fmt.Errorf("%s: stream rich card text: empty API response", p.tag())
+	}
+	if apiResp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: stream rich card text: HTTP status %d", p.tag(), apiResp.StatusCode)
 	}
 	var resp struct {
@@ -4357,8 +4380,7 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 	if resp.Code != 0 {
 		err := classifyFeishuCardAPIError("stream rich card text", resp.Code, resp.Msg)
 		if errors.Is(err, errFeishuCardRateLimited) {
-			slog.Debug(p.tag()+": stream rich card text rate limited; skipping frame", "code", resp.Code)
-			return nil
+			slog.Debug(p.tag()+": stream rich card text rate limited; requesting full-card fallback", "code", resp.Code)
 		}
 		return fmt.Errorf("%s: %w", p.tag(), err)
 	}
@@ -4466,14 +4488,13 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 // streamRichCardText so any sequence on any element/card is monotonic).
 func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cardID == "" {
-		h.mu.Unlock()
 		return fmt.Errorf("%s: updateCardEntity: cardID not set", p.tag())
 	}
 	h.sequence++
 	cardID := h.cardID
 	seq := h.sequence
-	h.mu.Unlock()
 
 	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s", cardID)
 	body := map[string]any{
@@ -4491,7 +4512,10 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 	}); err != nil {
 		return fmt.Errorf("%s: update card entity: %w", p.tag(), err)
 	}
-	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+	if apiResp == nil {
+		return fmt.Errorf("%s: update card entity: empty API response", p.tag())
+	}
+	if apiResp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: update card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
 	}
 	var resp struct {
@@ -5220,8 +5244,8 @@ func classifyCommandToolDetail(detail string) (title, icon string, ok bool) {
 	if strings.HasPrefix(command, "gh ") || command == "gh" {
 		return "GitHub", "cloud_outlined", true
 	}
-	if strings.HasPrefix(command, "cc-connect ") || command == "cc-connect" {
-		return "cc-connect", "robot_outlined", true
+	if strings.HasPrefix(command, "cc-connect-next ") || command == "cc-connect-next" {
+		return "cc-connect-next", "robot_outlined", true
 	}
 	if commandHasAnyPrefix(command, "go test", "npm test", "npm run test", "pnpm test", "yarn test", "pytest", "cargo test", "swift test", "xcodebuild test") {
 		return "Run tests", "list-check_outlined", true
@@ -5458,26 +5482,6 @@ func isSkillPathValue(value string) bool {
 	return strings.Contains(strings.ToLower(value), "/skills/")
 }
 
-var thinkingVerbs = []string{
-	"Churning", "Clauding", "Coalescing", "Cogitating", "Computing",
-	"Combobulating", "Concocting", "Conjuring", "Considering", "Contemplating",
-	"Cooking", "Crafting", "Creating", "Crunching", "Deciphering",
-	"Deliberating", "Divining", "Effecting", "Elucidating", "Enchanting",
-	"Envisioning", "Finagling", "Forging", "Generating", "Germinating",
-	"Hatching", "Ideating", "Imagining", "Incubating", "Inferring",
-	"Manifesting", "Marinating", "Meandering", "Mulling", "Musing",
-	"Noodling", "Percolating", "Perusing", "Pondering", "Processing",
-	"Puzzling", "Reticulating", "Ruminating", "Scheming", "Simmering",
-	"Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing",
-	"Thinking", "Tinkering", "Transmuting", "Unfurling", "Unravelling",
-	"Vibing", "Wandering", "Whirring", "Wizarding", "Working", "Wrangling",
-}
-
-func pickThinkingVerb() string {
-	idx := time.Now().Unix() % int64(len(thinkingVerbs))
-	return thinkingVerbs[idx] + "..."
-}
-
 var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
 
 type markdownTextMatch struct {
@@ -5495,6 +5499,7 @@ var feishuCardImagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)\)`)
 
 const (
 	richCardImageFinalWait = 4 * time.Second
+	richCardImageRetryWait = time.Minute
 	richCardImageMaxBytes  = 10 * 1024 * 1024
 	richCardImageMaxCount  = 4
 )
@@ -5592,8 +5597,7 @@ func (p *Platform) richCardImageKey(rawURL string) (string, bool) {
 func (p *Platform) richCardImageFailedURL(rawURL string) bool {
 	p.richCardImageMu.Lock()
 	defer p.richCardImageMu.Unlock()
-	_, failed := p.richCardImageFailed[rawURL]
-	return failed
+	return p.richCardImageFailureActiveLocked(rawURL)
 }
 
 func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string) *richCardImageUpload {
@@ -5605,7 +5609,7 @@ func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string)
 		p.richCardImagePending = map[string]*richCardImageUpload{}
 	}
 	if p.richCardImageFailed == nil {
-		p.richCardImageFailed = map[string]struct{}{}
+		p.richCardImageFailed = map[string]time.Time{}
 	}
 	if imageKey := p.richCardImageResolved[rawURL]; imageKey != "" {
 		upload := &richCardImageUpload{done: make(chan struct{})}
@@ -5613,7 +5617,7 @@ func (p *Platform) ensureRichCardImageUpload(ctx context.Context, rawURL string)
 		p.richCardImageMu.Unlock()
 		return upload
 	}
-	if _, failed := p.richCardImageFailed[rawURL]; failed {
+	if p.richCardImageFailureActiveLocked(rawURL) {
 		p.richCardImageMu.Unlock()
 		return nil
 	}
@@ -5637,9 +5641,9 @@ func (p *Platform) finishRichCardImageUpload(ctx context.Context, rawURL string,
 	delete(p.richCardImagePending, rawURL)
 	if err != nil {
 		if p.richCardImageFailed == nil {
-			p.richCardImageFailed = map[string]struct{}{}
+			p.richCardImageFailed = map[string]time.Time{}
 		}
-		p.richCardImageFailed[rawURL] = struct{}{}
+		p.richCardImageFailed[rawURL] = p.richCardImageNow().Add(richCardImageRetryWait)
 		slog.Debug(p.tag()+": rich card image upload failed", "host", richCardImageURLHost(rawURL), "error", err)
 	} else {
 		if p.richCardImageResolved == nil {
@@ -5649,6 +5653,24 @@ func (p *Platform) finishRichCardImageUpload(ctx context.Context, rawURL string,
 		slog.Debug(p.tag()+": rich card image uploaded", "host", richCardImageURLHost(rawURL), "image_key", imageKey)
 	}
 	close(upload.done)
+}
+
+func (p *Platform) richCardImageFailureActiveLocked(rawURL string) bool {
+	now := p.richCardImageNow()
+	for failedURL, retryAt := range p.richCardImageFailed {
+		if !now.Before(retryAt) {
+			delete(p.richCardImageFailed, failedURL)
+		}
+	}
+	retryAt, failed := p.richCardImageFailed[rawURL]
+	return failed && now.Before(retryAt)
+}
+
+func (p *Platform) richCardImageNow() time.Time {
+	if p.richCardImageNowFunc != nil {
+		return p.richCardImageNowFunc()
+	}
+	return time.Now()
 }
 
 func (p *Platform) uploadRichCardImageURL(ctx context.Context, rawURL string) (string, error) {
@@ -5710,7 +5732,7 @@ func fetchRichCardRemoteImage(ctx context.Context, rawURL string) ([]byte, strin
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("User-Agent", "cc-connect-feishu-rich-card-image-resolver/1.0")
+	req.Header.Set("User-Agent", "cc-connect-next-feishu-rich-card-image-resolver/1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -5982,47 +6004,6 @@ func sanitizeCardMarkdownForCard(text string) string {
 	return sanitizeCardMarkdownSegmentsForCard([]string{text})[0]
 }
 
-func richStepDisplayName(step core.ToolStep) string {
-	if step.Kind == core.ToolStepKindThinking {
-		return "Thinking"
-	}
-	return buildToolDisplay(step.Name, step.Summary).Title
-}
-
-func richStepBody(step core.ToolStep) string {
-	name := richStepDisplayName(step)
-	summary := buildToolDisplay(step.Name, step.Summary).Detail
-	if summary == "" {
-		summary = name
-	}
-	if step.Kind == core.ToolStepKindThinking {
-		return summary
-	}
-
-	lines := []string{summary}
-	var statusParts []string
-	status := strings.TrimSpace(step.Status)
-	if status != "" {
-		statusParts = append(statusParts, "status: "+status)
-	} else if step.Success != nil {
-		if *step.Success {
-			statusParts = append(statusParts, "status: ok")
-		} else {
-			statusParts = append(statusParts, "status: failed")
-		}
-	}
-	if step.ExitCode != nil {
-		statusParts = append(statusParts, fmt.Sprintf("exit: %d", *step.ExitCode))
-	}
-	if len(statusParts) > 0 {
-		lines = append(lines, strings.Join(statusParts, " | "))
-	}
-	if result := strings.TrimSpace(step.Result); result != "" {
-		lines = append(lines, result)
-	}
-	return strings.Join(lines, "\n")
-}
-
 // isCardJSON returns true if content looks like a complete Feishu card JSON
 // (has "schema" and "body"). Used to avoid double-wrapping rich card output.
 func isCardJSON(content string) bool {
@@ -6067,303 +6048,153 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	return string(b)
 }
 
-func splitRichStepsByLane(steps []core.ToolStep) (reasoning []core.ToolStep, tools []core.ToolStep) {
-	for _, step := range steps {
-		if step.Kind == core.ToolStepKindThinking {
-			reasoning = append(reasoning, step)
-			continue
-		}
-		tools = append(tools, step)
-	}
-	return reasoning, tools
+// buildRichCard renders the privacy-first Card 2.0 lifecycle used by
+// cc-connect-next. Reasoning text, tool names, inputs, results, model metadata,
+// token counts, context usage, and work directories are deliberately ignored:
+// only anonymous activity counts may appear before the answer starts.
+func buildRichCard(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool, _ string) string {
+	return buildRichCardWithCopy(status, phase, steps, markdown, streaming, core.NewI18n(core.LangChinese).RichCardCopy())
 }
 
-func richLaneTitle(label string, count int) string {
-	if count > 0 {
-		return fmt.Sprintf("%s (%d)", label, count)
-	}
-	return label
-}
-
-func richStepRowContent(step core.ToolStep) string {
-	body := richStepBody(step)
-	if step.Kind == core.ToolStepKindThinking {
-		return body
-	}
-	name := richStepDisplayName(step)
-	if body == name || strings.HasPrefix(body, name+"\n") {
-		return body
-	}
-	return name + "\n" + body
-}
-
-func richStepElement(step core.ToolStep) map[string]any {
-	text := map[string]any{
-		"tag":       "plain_text",
-		"content":   richStepRowContent(step),
-		"text_size": "notation",
-	}
-	elem := map[string]any{
-		"tag":  "div",
-		"text": text,
-	}
-	if step.Kind == core.ToolStepKindThinking {
-		text["text_color"] = "grey"
-		elem["icon"] = map[string]any{"tag": "standard_icon", "token": reasoningToolIcon}
-		return elem
-	}
-	elem["icon"] = map[string]any{"tag": "standard_icon", "token": buildToolDisplay(step.Name, step.Summary).IconToken}
-	return elem
-}
-
-func richPlaceholderElement(text string) map[string]any {
-	return map[string]any{
-		"tag": "div",
-		"text": map[string]any{
-			"tag":        "plain_text",
-			"content":    text,
-			"text_size":  "notation",
-			"text_color": "grey",
-		},
-	}
-}
-
-func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any {
-	if len(steps) == 0 {
-		return []map[string]any{richPlaceholderElement(emptyText)}
-	}
-	const maxPanelSteps = 10
-	visible := steps
-	hidden := 0
-	if len(steps) > maxPanelSteps {
-		hidden = len(steps) - maxPanelSteps
-		visible = steps[hidden:]
-	}
-	elements := make([]map[string]any, 0, len(visible)+1)
-	if hidden > 0 {
-		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... %d earlier steps hidden", hidden)))
-	}
-	for _, step := range visible {
-		elements = append(elements, richStepElement(step))
-	}
-	return elements
-}
-
-func buildRichPanel(title string, expanded bool, elements []map[string]any) map[string]any {
-	return map[string]any{
-		"tag":              "collapsible_panel",
-		"expanded":         expanded,
-		"background_color": "grey",
-		"header": map[string]any{
-			"title": map[string]any{"tag": "plain_text", "content": title},
-		},
-		"border":           map[string]any{"color": "grey"},
-		"vertical_spacing": "8px",
-		"padding":          "4px 8px",
-		"elements":         elements,
-	}
-}
-
-const maxRichCardJSONBytes = 28000
-
-// buildRichCard renders a Card 2.0 "single-card" turn with collapsible
-// reasoning/tool panels, streaming markdown body, status-colored header, and a
-// pre-composed multi-line statusFooter (engine-owned, includes elapsed).
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+func buildRichCardWithCopy(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool, copy core.RichCardCopy) string {
+	b, err := buildRichCardJSONBytes(status, phase, steps, markdown, streaming, copy)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
-		return buildCardJSONWithStatus(markdown, status)
-	}
-	if len(b) <= maxRichCardJSONBytes {
-		return string(b)
-	}
-
-	// Keep Card 2.0 visible when long tool/reasoning history would exceed the
-	// Feishu payload limit. Dropping to a body-only fallback is unsafe because
-	// Codex intermediate messages often live only in panels, leaving markdown
-	// empty and producing a blank white card on update.
-	for _, limit := range []struct {
-		perLane int
-		textLen int
-	}{
-		{perLane: 10, textLen: 180},
-		{perLane: 6, textLen: 120},
-		{perLane: 3, textLen: 80},
-	} {
-		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
-		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
-		if err == nil && len(compact) <= maxRichCardJSONBytes {
-			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
-				"original_size", len(b),
-				"compacted_size", len(compact),
-				"steps", len(steps),
-				"compacted_steps", len(compactSteps),
-			)
-			return string(compact)
+		fallback := strings.TrimSpace(markdown)
+		if fallback == "" {
+			fallback = copy.ErrorBody
 		}
+		return buildCardJSONWithStatus(fallback, status)
 	}
-
-	fallbackMarkdown := markdown
-	if strings.TrimSpace(fallbackMarkdown) == "" {
-		fallbackMarkdown = compactRichFallbackMarkdown(steps)
-	}
-	slog.Debug("feishu: rich card exceeds size limit, fallback to compact markdown card", "size", len(b))
-	return buildCardJSONWithStatus(fallbackMarkdown, status)
+	return string(b)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
-	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
-	panelMaps := make([]map[string]any, 0, 2)
-	if len(reasoningSteps) > 0 {
-		panelMaps = append(panelMaps, buildRichPanel(
-			richLaneTitle("Reasoning", len(reasoningSteps)),
-			streaming,
-			richPanelElements(reasoningSteps, "Thinking..."),
-		))
-	}
-	if len(toolSteps) > 0 {
-		panelMaps = append(panelMaps, buildRichPanel(
-			richLaneTitle("Tools", len(toolSteps)),
-			streaming,
-			richPanelElements(toolSteps, "No tool steps"),
-		))
-	}
-	if len(panelMaps) == 0 && streaming {
-		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
-	}
-
-	markdownMap := map[string]any{
-		"tag":        "markdown",
-		"element_id": richCardMainTextElementID, // required for cardkit-v1 streaming text update
-		"content":    sanitizeCardMarkdownForCard(markdown),
-	}
-
-	// Footer: engine pre-composes a multi-line statusFooter (lines separated by \n).
-	// Each line renders as its own dim "notation"-sized markdown block so they
-	// visually sit below the body without being mistaken for content. Skip
-	// rendering when statusFooter is empty (footer disabled / nothing to show).
-	var footerElements []map[string]any
-	if statusFooter != "" {
-		for _, line := range strings.Split(statusFooter, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			footerElements = append(footerElements, map[string]any{
-				"tag":        "markdown",
-				"content":    sanitizeCardMarkdownForCard(line),
-				"text_size":  "notation",
-
-			})
+func buildRichCardJSONBytes(status core.CardStatus, phase string, steps []core.ToolStep, markdown string, streaming bool, copy core.RichCardCopy) ([]byte, error) {
+	reasoningCount := 0
+	toolCount := 0
+	for _, step := range steps {
+		if step.Kind == core.ToolStepKindThinking {
+			reasoningCount++
+		} else {
+			toolCount++
 		}
 	}
 
-	var elements []map[string]any
-	if len(panelMaps) > 0 {
-		elements = append(elements, panelMaps...)
-		elements = append(elements, markdownMap)
-	} else {
-		elements = append(elements, markdownMap)
-	}
-	if len(footerElements) > 0 {
-		// Insert a horizontal separator between body and footer so the boundary is clear.
-		elements = append(elements, map[string]any{"tag": "hr"})
-		elements = append(elements, footerElements...)
-	}
-
-	// Header template color follows status.
+	phase = strings.ToLower(strings.TrimSpace(phase))
+	answering := (status == core.CardStatusWorking || status == core.CardStatusThinking) &&
+		(phase == "answer" || strings.TrimSpace(markdown) != "")
 	headerTemplate := "blue"
-	headerTitle := pickThinkingVerb()
+	headerTitle := "⏳ " + copy.Thinking
+	body := strings.TrimSpace(markdown)
+	summary := copy.ThinkingSummary
+	streamingMode := false
+
 	switch status {
 	case core.CardStatusDone:
 		headerTemplate = "green"
-		headerTitle = "Done"
+		headerTitle = "✅ " + copy.Done
+		summary = richCardSummary(body, copy.Done)
+		if body == "" {
+			body = copy.CompletedBody
+		}
 	case core.CardStatusError:
 		headerTemplate = "red"
-		headerTitle = "Error"
+		headerTitle = "⚠️ " + copy.Error
+		summary = copy.ErrorSummary
+		if body == "" {
+			body = copy.ErrorBody
+		}
 	case core.CardStatusThinking, core.CardStatusWorking:
-		headerTemplate = "blue"
-		headerTitle = pickThinkingVerb()
+		if answering {
+			headerTitle = "✍️ " + copy.Answering
+			summary = copy.AnswerSummary
+			streamingMode = streaming
+			if body == "" {
+				body = " "
+			}
+		} else {
+			phaseText := copy.Thinking
+			if phase == "tool" {
+				phaseText = copy.CallingTools
+				summary = copy.ToolSummary
+			}
+			headerTitle = "⏳ " + phaseText
+			lines := []string{phaseText}
+			if reasoningCount > 0 || toolCount > 0 {
+				progress := fmt.Sprintf(copy.ProgressFormat, reasoningCount, toolCount)
+				lines = append(lines, progress)
+				summary = stripRichCardMarkdown(progress)
+			}
+			lines = append(lines, "> 🔒 "+copy.PrivacyNotice)
+			body = strings.Join(lines, "\n\n")
+		}
+	}
+
+	config := map[string]any{
+		"streaming_mode":             streamingMode,
+		"update_multi":               true,
+		"enable_forward_interaction": true,
+		"summary":                    map[string]any{"content": summary},
+	}
+	if streamingMode {
+		step := richCardPrintStep(body)
+		config["streaming_config"] = map[string]any{
+			"print_frequency_ms": map[string]int{"default": 45, "android": 45, "ios": 45, "pc": 45},
+			"print_step":         map[string]int{"default": step, "android": step, "ios": step, "pc": step},
+			"print_strategy":     "fast",
+		}
 	}
 
 	card := map[string]any{
 		"schema": "2.0",
-		"config": map[string]any{
-			"streaming_mode":             streaming,
-			"update_multi":               true,
-			"enable_forward_interaction": true,
-		},
+		"config": config,
 		"header": map[string]any{
 			"template": headerTemplate,
 			"title":    map[string]any{"tag": "plain_text", "content": headerTitle},
 		},
-		"body": map[string]any{"elements": elements},
+		"body": map[string]any{
+			"direction": "vertical",
+			"padding":   "12px 12px 12px 12px",
+			"elements": []map[string]any{{
+				"tag":        "markdown",
+				"element_id": richCardMainTextElementID,
+				"content":    sanitizeCardMarkdownForCard(body),
+				"text_align": "left",
+				"text_size":  "normal",
+			}},
+		},
 	}
-
 	return json.Marshal(card)
 }
 
-func compactRichStepsForCardSize(steps []core.ToolStep, perLaneLimit, textLimit int) []core.ToolStep {
-	if len(steps) == 0 || perLaneLimit <= 0 {
-		return nil
-	}
-	kept := make([]core.ToolStep, 0, min(len(steps), perLaneLimit*2))
-	reasoning := 0
-	tools := 0
-	for i := len(steps) - 1; i >= 0; i-- {
-		step := steps[i]
-		if step.Kind == core.ToolStepKindThinking {
-			if reasoning >= perLaneLimit {
-				continue
-			}
-			reasoning++
-		} else {
-			if tools >= perLaneLimit {
-				continue
-			}
-			tools++
-		}
-		kept = append(kept, compactRichStepText(step, textLimit))
-	}
-	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
-		kept[i], kept[j] = kept[j], kept[i]
-	}
-	return kept
+func stripRichCardMarkdown(text string) string {
+	text = strings.ReplaceAll(text, "**", "")
+	text = strings.ReplaceAll(text, "：", ": ")
+	return strings.TrimSpace(text)
 }
 
-func compactRichStepText(step core.ToolStep, textLimit int) core.ToolStep {
-	step.Summary = compactRichText(step.Summary, textLimit)
-	step.Result = compactRichText(step.Result, textLimit)
-	return step
+func richCardPrintStep(markdown string) int {
+	length := utf8.RuneCountInString(markdown)
+	switch {
+	case length <= 100:
+		return 1
+	case length <= 400:
+		return 2
+	default:
+		return max(3, (length+159)/160)
+	}
 }
 
-func compactRichText(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
+func richCardSummary(markdown, fallback string) string {
+	text := strings.TrimSpace(markdown)
+	if text == "" {
+		return fallback
 	}
-	rs := []rune(strings.TrimSpace(s))
-	if len(rs) <= maxRunes {
-		return string(rs)
+	runes := []rune(text)
+	if len(runes) > 120 {
+		runes = runes[:120]
 	}
-	return string(rs[:maxRunes]) + "..."
-}
-
-func compactRichFallbackMarkdown(steps []core.ToolStep) string {
-	compactSteps := compactRichStepsForCardSize(steps, 3, 120)
-	if len(compactSteps) == 0 {
-		return ""
-	}
-	lines := []string{"Card content is large; showing recent activity:"}
-	for _, step := range compactSteps {
-		line := strings.TrimSpace(richStepRowContent(step))
-		if line == "" {
-			continue
-		}
-		line = strings.ReplaceAll(line, "\n", " - ")
-		lines = append(lines, "- "+line)
-	}
-	return strings.Join(lines, "\n")
+	return string(runes)
 }
 
 func splitMarkdownByTables(md string, maxTables int) []string {
@@ -6392,11 +6223,18 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	return parts
 }
 
-// BuildRichCard implements core.RichCardSupporter. The engine pre-composes
-// statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
-// splits it back into one dim notation block per line.
-func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+// BuildRichCard implements core.RichCardSupporter only on the interactive
+// wrapper. A plain *Platform returned for enable_feishu_card=false must not
+// advertise this capability or the engine would select rich mode and send the
+// card JSON through the plain-text fallback.
+func (p *interactivePlatform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
 	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+}
+
+// BuildLocalizedRichCard implements core.LocalizedRichCardSupporter. The
+// engine supplies copy for the active conversation locale.
+func (p *interactivePlatform) BuildLocalizedRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, _ string, copy core.RichCardCopy) string {
+	return buildRichCardWithCopy(status, title, steps, markdown, streaming, copy)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

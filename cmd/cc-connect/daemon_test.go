@@ -16,6 +16,9 @@ func TestParseDaemonInstallArgs_ConfigSetsWorkDir(t *testing.T) {
 	}
 
 	want := filepath.Clean("/tmp/example")
+	if cfg.ConfigPath != filepath.Clean("/tmp/example/config.toml") {
+		t.Fatalf("cfg.ConfigPath = %q, want explicit migrated config", cfg.ConfigPath)
+	}
 	if cfg.WorkDir != want {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
 	}
@@ -116,5 +119,8 @@ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
 	want := filepath.Clean("/tmp/override")
 	if cfg.WorkDir != want {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
+	}
+	if cfg.ConfigPath != filepath.Clean("/tmp/example/config.toml") {
+		t.Fatalf("cfg.ConfigPath = %q, want config independent from work dir", cfg.ConfigPath)
 	}
 }

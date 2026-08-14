@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/config"
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/config"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
-// These integration tests use real provider credentials from ~/.cc-connect/config.toml.
+// These integration tests use real provider credentials from ~/.cc-connect-next/config.toml.
 // They verify that provider switching correctly sets up env vars and that agent
 // sessions can be started with the right configuration.
 //
@@ -27,7 +27,7 @@ func skipIfNoConfig(t *testing.T) *config.Config {
 	if os.Getenv("CC_RUN_PROVIDER_INTEGRATION") != "1" {
 		t.Skip("set CC_RUN_PROVIDER_INTEGRATION=1 to run provider integration tests")
 	}
-	cfgPath := os.ExpandEnv("$HOME/.cc-connect/config.toml")
+	cfgPath := os.ExpandEnv("$HOME/.cc-connect-next/config.toml")
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		t.Skipf("config not found at %s", cfgPath)
 	}

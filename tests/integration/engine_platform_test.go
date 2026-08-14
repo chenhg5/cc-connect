@@ -1,6 +1,6 @@
 //go:build integration
 
-// Package integration contains integration tests for cc-connect.
+// Package integration contains integration tests for cc-connect-next.
 // These tests verify component interactions and require specific setup.
 // Run with: go test -tags=integration ./tests/integration/...
 package integration
@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
-	"github.com/chenhg5/cc-connect/tests/mocks"
-	"github.com/chenhg5/cc-connect/tests/mocks/fake"
+	"github.com/timmyagentic/cc-connect-next/core"
+	"github.com/timmyagentic/cc-connect-next/tests/mocks"
+	"github.com/timmyagentic/cc-connect-next/tests/mocks/fake"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

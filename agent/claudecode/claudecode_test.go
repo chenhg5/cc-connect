@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestNew_ParsesRunAsUserAndRunAsEnv(t *testing.T) {

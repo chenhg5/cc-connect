@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -1163,7 +1163,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
-	workDir := filepath.Join(homeDir, "codes", "cc-connect")
+	workDir := filepath.Join(homeDir, "codes", "cc-connect-next")
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1354,7 +1354,7 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 			model:           "gpt-5.4",
 			reasoningEffort: "xhigh",
 		},
-		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+		workDir: filepath.Join(homeDir, "codes", "cc-connect-next"),
 		report: &UsageReport{
 			Buckets: []UsageBucket{{
 				Name: "Rate limit",
@@ -1396,7 +1396,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
-	if err := os.MkdirAll(filepath.Join(homeDir, "codes", "cc-connect"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(homeDir, "codes", "cc-connect-next"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1426,7 +1426,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	agentSession := newControllableSession("s-footer-runtime")
 	agentSession.model = "gpt-5.4"
 	agentSession.reasoningEffort = "xhigh"
-	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect")
+	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect-next")
 	agentSession.workDir = sessionWorkDir
 	agentSession.report = &UsageReport{
 		Buckets: []UsageBucket{{
@@ -1824,7 +1824,7 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 }
 
-func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
+func TestProcessInteractiveEvents_RichCardStartsImmediatelyAndHidesThinking(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -1832,10 +1832,10 @@ func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		ThinkingMessages: true,
+		ThinkingMessages: false,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
-		ToolMessages:     true,
+		ToolMessages:     false,
 		Mode:             "full",
 		CardMode:         "rich",
 	})
@@ -1859,12 +1859,19 @@ func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want 1", len(starts))
 	}
-	if !strings.Contains(starts[0], "Inspecting event routing") {
-		t.Fatalf("rich card start should contain thinking content, got %q", starts[0])
+	if !strings.Contains(starts[0], "title=thinking") || strings.Contains(starts[0], "Kind:thinking") {
+		t.Fatalf("first rich card must be the immediate state before any agent event, got %q", starts[0])
+	}
+	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
+	if strings.Contains(rendered, "Inspecting event routing") {
+		t.Fatalf("rich card must not retain reasoning content, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Kind:thinking") {
+		t.Fatalf("rich card should expose an anonymous reasoning count, got %q", rendered)
 	}
 }
 
-func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
+func TestProcessInteractiveEvents_RichCardCountsToolWithoutRetainingDetails(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -1872,10 +1879,10 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
-		ThinkingMessages: true,
+		ThinkingMessages: false,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
-		ToolMessages:     true,
+		ToolMessages:     false,
 		Mode:             "full",
 		CardMode:         "rich",
 	})
@@ -1903,9 +1910,12 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 		t.Fatalf("preview starts = %d, want only the rich card start and no separate progress card", len(starts))
 	}
 	rendered := strings.Join(append(starts, p.getPreviewEdits()...), "\n")
-	for _, want := range []string{"echo hi", "completed", "hi"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("rich card should contain %q, got %q", want, rendered)
+	if !strings.Contains(rendered, "Kind:tool") {
+		t.Fatalf("rich card should expose an anonymous tool count, got %q", rendered)
+	}
+	for _, forbidden := range []string{"Bash", "echo hi", "Status:completed", "Result:hi"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("rich card retained private tool detail %q: %q", forbidden, rendered)
 		}
 	}
 }
@@ -1913,11 +1923,12 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 // stubRichCardSilentPlatform implements the full set of rich-card optional
 // interfaces (RichCardSupporter, PreviewStarter, MessageUpdater,
 // RichCardTextStreamer, PreviewCleaner) and tracks every call so tests can
-// assert that NO_REPLY in rich card mode leaves zero footprint.
+// assert that NO_REPLY leaves no lasting answer card.
 type stubRichCardSilentPlatform struct {
 	stubPlatformEngine
 	mu            sync.Mutex
 	previewStarts []string
+	startContexts []any
 	streamTexts   []string
 	updates       []string
 	deleteCount   int
@@ -1928,12 +1939,19 @@ func (p *stubRichCardSilentPlatform) BuildRichCard(status CardStatus, _ string, 
 	return fmt.Sprintf("rich:status=%s steps=%d body=%q", status, len(steps), markdown)
 }
 
-func (p *stubRichCardSilentPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+func (p *stubRichCardSilentPlatform) SendPreviewStart(_ context.Context, replyCtx any, content string) (any, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.previewStarts = append(p.previewStarts, content)
+	p.startContexts = append(p.startContexts, replyCtx)
 	p.nextHandleSeq++
 	return fmt.Sprintf("handle-%d", p.nextHandleSeq), nil
+}
+
+func (p *stubRichCardSilentPlatform) previewStartContexts() []any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]any(nil), p.startContexts...)
 }
 
 func (p *stubRichCardSilentPlatform) UpdateMessage(_ context.Context, _ any, content string) error {
@@ -1973,6 +1991,127 @@ type stubRichCardResolverPlatform struct {
 	calls      []bool
 }
 
+type stubDelayedRichCardResolverPlatform struct {
+	*stubRichCardSilentPlatform
+	imageMarkdown string
+}
+
+func (p *stubDelayedRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
+	if final {
+		return strings.ReplaceAll(markdown, p.imageMarkdown, "![chart](img_uploaded_later)")
+	}
+	return strings.ReplaceAll(markdown, p.imageMarkdown, "")
+}
+
+type stubRichCardTransformPlatform struct {
+	*stubRichCardSilentPlatform
+	transformMu       sync.Mutex
+	transformContexts []any
+}
+
+func (p *stubRichCardTransformPlatform) TransformRichCardMarkdown(_ context.Context, replyCtx any, markdown string) string {
+	p.transformMu.Lock()
+	p.transformContexts = append(p.transformContexts, replyCtx)
+	p.transformMu.Unlock()
+	return strings.ReplaceAll(markdown, "@Alice", "<at id=ou_alice></at>")
+}
+
+func (p *stubRichCardTransformPlatform) contexts() []any {
+	p.transformMu.Lock()
+	defer p.transformMu.Unlock()
+	return append([]any(nil), p.transformContexts...)
+}
+
+type stubRichCardSplitPlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+type stubRichCardStartFailurePlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *stubRichCardStartFailurePlatform) SendPreviewStart(context.Context, any, string) (any, error) {
+	return nil, errors.New("simulated rich-card start failure")
+}
+
+type stubRichCardUpdateFailurePlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *stubRichCardUpdateFailurePlatform) UpdateMessage(context.Context, any, string) error {
+	return errors.New("simulated rich-card update failure")
+}
+
+type shutdownAwareRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+	lifecycleMu       sync.Mutex
+	stopped           bool
+	updateContextErrs []error
+	updatedAfterStop  []bool
+}
+
+type shutdownBlockingRichCardResolverPlatform struct {
+	*shutdownAwareRichCardPlatform
+	finalStarted  chan struct{}
+	finalCanceled chan struct{}
+	startOnce     sync.Once
+	cancelOnce    sync.Once
+}
+
+func (p *shutdownBlockingRichCardResolverPlatform) ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string {
+	if !final {
+		return markdown
+	}
+	p.startOnce.Do(func() { close(p.finalStarted) })
+	<-ctx.Done()
+	p.cancelOnce.Do(func() { close(p.finalCanceled) })
+	return markdown
+}
+
+type cancelTurnControllableSession struct {
+	*controllableAgentSession
+	cancelOnce   sync.Once
+	cancelCalled chan struct{}
+}
+
+type localizedCopyRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *localizedCopyRichCardPlatform) BuildLocalizedRichCard(status CardStatus, _ string, _ []ToolStep, markdown string, _ bool, _ string, copy RichCardCopy) string {
+	return fmt.Sprintf("status=%s thinking=%q answering=%q done=%q error=%q body=%q", status, copy.Thinking, copy.Answering, copy.Done, copy.Error, markdown)
+}
+
+func (s *cancelTurnControllableSession) CancelTurn() error {
+	s.cancelOnce.Do(func() { close(s.cancelCalled) })
+	return nil
+}
+
+func (p *shutdownAwareRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	p.lifecycleMu.Lock()
+	p.updateContextErrs = append(p.updateContextErrs, ctx.Err())
+	p.updatedAfterStop = append(p.updatedAfterStop, p.stopped)
+	p.lifecycleMu.Unlock()
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *shutdownAwareRichCardPlatform) Stop() error {
+	p.lifecycleMu.Lock()
+	p.stopped = true
+	p.lifecycleMu.Unlock()
+	return nil
+}
+
+func (p *shutdownAwareRichCardPlatform) lifecycleSnapshot() ([]error, []bool) {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	return append([]error(nil), p.updateContextErrs...), append([]bool(nil), p.updatedAfterStop...)
+}
+
+func (p *stubRichCardSplitPlatform) SplitMarkdownByTables(markdown string, _ int) []string {
+	return []string{markdown, "unexpected overflow card"}
+}
+
 func (p *stubRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
 	p.resolverMu.Lock()
 	p.calls = append(p.calls, final)
@@ -1986,6 +2125,813 @@ func (p *stubRichCardResolverPlatform) resolverCallModes() []bool {
 	out := make([]bool, len(p.calls))
 	copy(out, p.calls)
 	return out
+}
+
+func TestProcessInteractiveEvents_RichCardErrorStaysOnCardAndHidesDetails(t *testing.T) {
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-error"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-error")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-error",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	privateError := "private token at /Users/example/project"
+	agentSession.events <- Event{Type: EventError, Error: errors.New(privateError)}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error", time.Now(), nil, nil, state.replyCtx)
+	starts, streams, updates, deletes := p.snapshot()
+
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+		t.Fatalf("expected one immediate thinking card, got %d: %v", len(starts), starts)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("expected same-card error update, got %d: %v", len(updates), updates)
+	}
+	rendered := strings.Join(append(append(starts, streams...), updates...), "\n")
+	if strings.Contains(rendered, privateError) {
+		t.Fatalf("rich card leaked private error details: %q", rendered)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no separate raw error message, got %v", sent)
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no card deletion, got %d", deletes)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPreservesReplyContextTransforms(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []Event
+		status string
+	}{
+		{
+			name: "completed",
+			events: []Event{
+				{Type: EventText, Content: "@Alice please review"},
+				{Type: EventResult, Content: "@Alice please review", Done: true},
+			},
+			status: "status=done",
+		},
+		{
+			name: "failed partial",
+			events: []Event{
+				{Type: EventText, Content: "@Alice partial"},
+				{Type: EventError, Error: errors.New("private failure")},
+			},
+			status: "status=error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := &stubRichCardTransformPlatform{stubRichCardSilentPlatform: base}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+			sessionKey := "feishu:user-rich-transform-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-transform-" + tt.name)
+			replyCtx := "ctx-rich-transform-" + tt.name
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: replyCtx}
+			e.interactiveStates[sessionKey] = state
+			for _, event := range tt.events {
+				agentSession.events <- event
+			}
+
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-transform", time.Now(), nil, nil, replyCtx)
+			_, streams, updates, _ := base.snapshot()
+			rendered := strings.Join(append(streams, updates...), "\n")
+			if !strings.Contains(rendered, tt.status) || !strings.Contains(rendered, "<at id=ou_alice></at>") {
+				t.Fatalf("rich card did not preserve transformed mention: %q", rendered)
+			}
+			if strings.Contains(rendered, "@Alice") {
+				t.Fatalf("rich card retained unresolved mention: %q", rendered)
+			}
+			for _, got := range p.contexts() {
+				if got != replyCtx {
+					t.Fatalf("transform reply context = %#v, want %#v", got, replyCtx)
+				}
+			}
+		})
+	}
+}
+
+func TestEngine_StopFinalizesActiveRichCardBeforeCancelingPlatform(t *testing.T) {
+	p := &shutdownAwareRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	sessionKey := "feishu:user-shutdown-rich"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-shutdown-rich")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-shutdown-rich",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	turnDone := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-shutdown-rich", time.Now(), nil, nil, state.replyCtx)
+		close(turnDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		starts, _, _, _ := p.snapshot()
+		if len(starts) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("immediate rich card was not created before shutdown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("active rich-card turn did not exit during shutdown")
+	}
+
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("active rich card did not reach a terminal error state: %v", updates)
+	}
+	contextErrs, updatedAfterStop := p.lifecycleSnapshot()
+	if len(contextErrs) == 0 || contextErrs[len(contextErrs)-1] != nil {
+		t.Fatalf("terminal card update used a canceled context: %v", contextErrs)
+	}
+	if updatedAfterStop[len(updatedAfterStop)-1] {
+		t.Fatal("terminal card update ran after platform Stop")
+	}
+}
+
+func TestEngine_StopInterruptsPermissionWaitBeforeFinalizingRichCard(t *testing.T) {
+	p := &shutdownAwareRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	sessionKey := "feishu:user-shutdown-permission"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-shutdown-permission")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-shutdown-permission",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	turnDone := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-shutdown-permission", time.Now(), nil, nil, state.replyCtx)
+		close(turnDone)
+	}()
+	agentSession.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-shutdown-permission",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/private",
+		ToolInputRaw: map[string]any{"path": "/tmp/private"},
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not enter the permission wait")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	stopStarted := time.Now()
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(stopStarted); elapsed >= time.Second {
+		t.Fatalf("Stop waited for the shutdown timeout while permission was pending: %v", elapsed)
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("permission-waiting turn did not exit during shutdown")
+	}
+
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	if pending != nil {
+		t.Fatal("shutdown left a stale pending permission")
+	}
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("permission-waiting rich card did not reach a terminal state: %v", updates)
+	}
+	contextErrs, updatedAfterStop := p.lifecycleSnapshot()
+	if len(contextErrs) == 0 || contextErrs[len(contextErrs)-1] != nil {
+		t.Fatalf("terminal card update used a canceled context: %v", contextErrs)
+	}
+	if updatedAfterStop[len(updatedAfterStop)-1] {
+		t.Fatal("terminal card update ran after platform Stop")
+	}
+}
+
+func TestEngine_StopInterruptsFinalImageResolutionBeforeDoneUpdate(t *testing.T) {
+	base := &shutdownAwareRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+	}
+	p := &shutdownBlockingRichCardResolverPlatform{
+		shutdownAwareRichCardPlatform: base,
+		finalStarted:                  make(chan struct{}),
+		finalCanceled:                 make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	sessionKey := "feishu:user-shutdown-final-image"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-shutdown-final-image")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-shutdown-final-image",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	turnDone := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-shutdown-final-image", time.Now(), nil, nil, state.replyCtx)
+		close(turnDone)
+	}()
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "answer with ![chart](https://example.com/chart.png)",
+		Done:    true,
+	}
+
+	select {
+	case <-p.finalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not enter final rich-card image resolution")
+	}
+
+	stopStarted := time.Now()
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(stopStarted); elapsed >= time.Second {
+		t.Fatalf("Stop waited for the image resolver instead of interrupting it: %v", elapsed)
+	}
+	select {
+	case <-p.finalCanceled:
+	default:
+		t.Fatal("shutdown did not cancel final image resolution")
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("image-resolving turn did not finish during shutdown")
+	}
+
+	_, _, updates, _ := base.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("final card did not reach Done after image resolution was interrupted: %v", updates)
+	}
+	contextErrs, updatedAfterStop := base.lifecycleSnapshot()
+	if len(contextErrs) == 0 || contextErrs[len(contextErrs)-1] != nil {
+		t.Fatalf("Done update used a canceled engine context: %v", contextErrs)
+	}
+	if updatedAfterStop[len(updatedAfterStop)-1] {
+		t.Fatal("Done update ran after platform Stop")
+	}
+}
+
+func TestHandleMessageRecallDeletesRichCardWithoutPersistingPartialOutput(t *testing.T) {
+	for _, supportsCancelTurn := range []bool{false, true} {
+		name := "close-session"
+		if supportsCancelTurn {
+			name = "cancel-turn"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+			sessionKey := "feishu:user-rich-recall-" + name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			baseAgentSession := newControllableSession("s-rich-recall-" + name)
+			var agentSession AgentSession = baseAgentSession
+			var cancelCalled <-chan struct{}
+			if supportsCancelTurn {
+				cancellable := &cancelTurnControllableSession{
+					controllableAgentSession: baseAgentSession,
+					cancelCalled:             make(chan struct{}),
+				}
+				agentSession = cancellable
+				cancelCalled = cancellable.cancelCalled
+			}
+			state := &interactiveState{
+				agentSession: agentSession,
+				platform:     p,
+				replyCtx:     "ctx-rich-recall",
+			}
+			e.interactiveStates[sessionKey] = state
+
+			turnDone := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-recall", time.Now(), nil, nil, state.replyCtx)
+				close(turnDone)
+			}()
+			baseAgentSession.events <- Event{Type: EventText, Content: "partial answer that must disappear"}
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				starts, streams, updates, _ := p.snapshot()
+				rendered := strings.Join(append(append([]string{}, streams...), updates...), "\n")
+				if len(starts) == 1 && strings.Contains(rendered, "partial answer that must disappear") {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("rich card did not expose the partial answer before recall: starts=%v rendered=%q", starts, rendered)
+				}
+				time.Sleep(time.Millisecond)
+			}
+
+			e.ReceiveMessage(p, &Message{Platform: "feishu", MessageID: "m-rich-recall", Recalled: true})
+			select {
+			case <-turnDone:
+			case <-time.After(time.Second):
+				t.Fatal("recalled rich-card turn did not exit")
+			}
+			if cancelCalled != nil {
+				select {
+				case <-cancelCalled:
+				case <-time.After(time.Second):
+					t.Fatal("recalled turn did not call CancelTurn")
+				}
+			}
+
+			_, _, updates, deletes := p.snapshot()
+			if deletes != 1 {
+				t.Fatalf("recalled rich card deletes = %d, want 1", deletes)
+			}
+			for _, update := range updates {
+				if strings.Contains(update, "status=error") {
+					t.Fatalf("recalled rich card was converted to a visible error: %v", updates)
+				}
+			}
+			for _, entry := range session.GetHistory(0) {
+				if entry.Role == "assistant" {
+					t.Fatalf("recalled partial output entered history: %+v", entry)
+				}
+			}
+			if sent := p.getSent(); len(sent) != 0 {
+				t.Fatalf("recall emitted side messages: %v", sent)
+			}
+		})
+	}
+}
+
+func TestSilentTurnCancellationSignalKeepsEmptyMessageIDActive(t *testing.T) {
+	state := &interactiveState{}
+	ch := state.silentTurnCancellationSignal("")
+	select {
+	case <-ch:
+		t.Fatal("an empty message ID was treated as an already-recalled turn")
+	default:
+	}
+}
+
+func TestProcessInteractiveEvents_CapturesRichCardLocalePerTurn(t *testing.T) {
+	p := &localizedCopyRichCardPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangAuto)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	e.i18n.DetectAndSet("你好")
+	zhCopy := NewI18n(LangChinese).RichCardCopy()
+	enCopy := NewI18n(LangEnglish).RichCardCopy()
+	sessionKey := "feishu:user-locale-snapshot"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-locale-snapshot")
+	e.i18n.DetectAndSet("hello")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-zh",
+		pendingMessages: []queuedMessage{{
+			messageID:     "m-en",
+			platform:      p,
+			replyCtx:      "ctx-en",
+			content:       "hello",
+			msgPlatform:   "feishu",
+			msgSessionKey: sessionKey,
+		}},
+	}
+	state.setTurnRichCardCopy("m-zh", e.i18n.RichCardCopyForText("你好"))
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-zh", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitForStarts := func(want int) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			starts, _, _, _ := p.snapshot()
+			if len(starts) >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("preview starts = %d, want at least %d", len(starts), want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitForStarts(1)
+
+	// The engine-wide detected locale is already English, simulating another
+	// session winning that shared mutable state before this loop begins.
+	agentSession.events <- Event{Type: EventResult, Content: "第一条", Done: true}
+	waitForStarts(2)
+	agentSession.events <- Event{Type: EventResult, Content: "second", Done: true}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("queued locale turns did not complete")
+	}
+
+	starts, _, updates, _ := p.snapshot()
+	if !strings.Contains(starts[0], `thinking="`+zhCopy.Thinking+`"`) {
+		t.Fatalf("first card did not start in Chinese: %q", starts[0])
+	}
+	if !strings.Contains(starts[1], `thinking="`+enCopy.Thinking+`"`) {
+		t.Fatalf("queued card did not refresh to English: %q", starts[1])
+	}
+	var chineseFinal, englishFinal string
+	for _, update := range updates {
+		if strings.Contains(update, `body="第一条"`) {
+			chineseFinal = update
+		}
+		if strings.Contains(update, `body="second"`) {
+			englishFinal = update
+		}
+	}
+	if chineseFinal == "" || !strings.Contains(chineseFinal, `done="`+zhCopy.Done+`"`) || strings.Contains(chineseFinal, `done="`+enCopy.Done+`"`) {
+		t.Fatalf("Chinese turn changed locale before completion: %q", chineseFinal)
+	}
+	if englishFinal == "" || !strings.Contains(englishFinal, `done="`+enCopy.Done+`"`) {
+		t.Fatalf("queued English turn did not use its own locale: %q", englishFinal)
+	}
+}
+
+func TestNotifyDroppedQueuedMessagesUsesEachMessageLocale(t *testing.T) {
+	tests := []struct {
+		name     string
+		cardMode string
+		wantZH   string
+		wantEN   string
+	}{
+		{name: "legacy", cardMode: "legacy", wantZH: "❌ 错误: agent stopped", wantEN: "❌ Error: agent stopped"},
+		{name: "rich", cardMode: "rich", wantZH: "本次处理未能完成，请稍后重试。", wantEN: "This request could not be completed. Please try again."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			makePlatform := func(name string) (Platform, func() []string) {
+				if tt.cardMode == "rich" {
+					p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: name}}
+					return p, p.getSent
+				}
+				p := &stubPlatformEngine{n: name}
+				return p, p.getSent
+			}
+			zhPlatform, zhSent := makePlatform("zh")
+			enPlatform, enSent := makePlatform("en")
+			e := NewEngine("test", &stubAgent{}, []Platform{zhPlatform, enPlatform}, "", LangAuto)
+			e.SetDisplayConfig(DisplayCfg{CardMode: tt.cardMode})
+			// Simulate another conversation changing the shared detected locale
+			// after both queued messages were accepted.
+			e.i18n.DetectAndSet("こんにちは")
+			state := &interactiveState{pendingMessages: []queuedMessage{
+				{platform: zhPlatform, replyCtx: "ctx-zh", content: "请帮我处理"},
+				{platform: enPlatform, replyCtx: "ctx-en", content: "please handle this"},
+			}}
+
+			e.notifyDroppedQueuedMessages(state, errors.New("agent stopped"))
+
+			if got := zhSent(); len(got) != 1 || got[0] != tt.wantZH {
+				t.Fatalf("Chinese queued notification = %v, want %q", got, tt.wantZH)
+			}
+			if got := enSent(); len(got) != 1 || got[0] != tt.wantEN {
+				t.Fatalf("English queued notification = %v, want %q", got, tt.wantEN)
+			}
+			if len(state.pendingMessages) != 0 {
+				t.Fatalf("dropped queue was not drained: %+v", state.pendingMessages)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorRetainsVisiblePartialAnswer(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, storePath, LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich", ThinkingMessages: true, ToolMessages: true})
+	sessionKey := "feishu:user-rich-partial-error"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-partial-error")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-partial-error"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "safe partial answer"}
+	agentSession.events <- Event{Type: EventError, Error: errors.New("private provider failure at /local/path")}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-partial-error", time.Now(), nil, nil, state.replyCtx)
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("expected a failed rich-card update")
+	}
+	last := updates[len(updates)-1]
+	if !strings.Contains(last, "status=error") || !strings.Contains(last, "safe partial answer") {
+		t.Fatalf("failed card did not preserve its visible partial answer: %q", last)
+	}
+	if strings.Contains(last, "private provider failure") || strings.Contains(last, "/local/path") {
+		t.Fatalf("failed card leaked runtime error details: %q", last)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != "safe partial answer" {
+		t.Fatalf("visible partial answer was not preserved in history: %+v", history)
+	}
+	if persisted, err := os.ReadFile(storePath); err != nil || !strings.Contains(string(persisted), "safe partial answer") {
+		t.Fatalf("visible partial answer was not saved: content=%q err=%v", persisted, err)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorOmitsUnrenderedPartialAnswer(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         StreamPreviewCfg
+		chunks      []string
+		wantVisible string
+		wantHidden  string
+	}{
+		{
+			name:       "preview-disabled",
+			cfg:        StreamPreviewCfg{Enabled: false},
+			chunks:     []string{"unrendered incomplete answer"},
+			wantHidden: "unrendered incomplete answer",
+		},
+		{
+			name:        "throttled-latest-chunk",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 60_000, MinDeltaChars: 1},
+			chunks:      []string{"rendered prefix", " plus unrendered suffix"},
+			wantVisible: "rendered prefix",
+			wantHidden:  "plus unrendered suffix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(tt.cfg)
+			sessionKey := "feishu:user-rich-unrendered-error-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-unrendered-error-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-unrendered-error-" + tt.name}
+			e.interactiveStates[sessionKey] = state
+
+			for _, chunk := range tt.chunks {
+				agentSession.events <- Event{Type: EventText, Content: chunk}
+			}
+			agentSession.events <- Event{Type: EventError, Error: errors.New("private failure")}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-unrendered-error-"+tt.name, time.Now(), nil, nil, state.replyCtx)
+
+			_, streams, updates, _ := p.snapshot()
+			if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+				t.Fatalf("missing terminal error card: %v", updates)
+			}
+			final := updates[len(updates)-1]
+			if tt.wantVisible != "" && (!strings.Contains(strings.Join(streams, "\n"), tt.wantVisible) || !strings.Contains(final, tt.wantVisible)) {
+				t.Fatalf("last rendered prefix was not retained: streams=%v final=%q", streams, final)
+			}
+			if strings.Contains(final, tt.wantHidden) {
+				t.Fatalf("failure card exposed an unrendered chunk: %q", final)
+			}
+			history := session.GetHistory(0)
+			var assistants []string
+			for _, entry := range history {
+				if entry.Role == "assistant" {
+					assistants = append(assistants, entry.Content)
+				}
+			}
+			if tt.wantVisible == "" {
+				if len(assistants) != 0 {
+					t.Fatalf("unrendered partial was persisted to history: %v", assistants)
+				}
+			} else if len(assistants) != 1 || assistants[0] != tt.wantVisible {
+				t.Fatalf("history = %v, want only last rendered prefix %q", assistants, tt.wantVisible)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorRetainsOnlyResolvedVisiblePartial(t *testing.T) {
+	const imageMarkdown = "![chart](https://example.com/pending.png)"
+	p := &stubDelayedRichCardResolverPlatform{
+		stubRichCardSilentPlatform: &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		imageMarkdown:              imageMarkdown,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, MinDeltaChars: 1})
+	sessionKey := "feishu:user-rich-resolved-partial-error"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-resolved-partial-error")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-resolved-partial-error"}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "visible before\n\n" + imageMarkdown + "\n\nvisible after"
+	visible := strings.TrimSpace(strings.ReplaceAll(raw, imageMarkdown, ""))
+	agentSession.events <- Event{Type: EventText, Content: raw}
+	agentSession.events <- Event{Type: EventError, Error: errors.New("private failure")}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-resolved-partial-error", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	if len(streams) == 0 || streams[len(streams)-1] != visible {
+		t.Fatalf("streamed body = %v, want resolved visible body %q", streams, visible)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "visible before") || !strings.Contains(updates[len(updates)-1], "visible after") {
+		t.Fatalf("terminal error card did not retain resolved visible body: %v", updates)
+	}
+	for _, forbidden := range []string{"https://example.com/pending.png", "img_uploaded_later"} {
+		if strings.Contains(updates[len(updates)-1], forbidden) {
+			t.Fatalf("terminal error card newly exposed unrendered image %q: %q", forbidden, updates[len(updates)-1])
+		}
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != visible {
+		t.Fatalf("history = %+v, want only resolved visible partial %q", history, visible)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardChannelClosePersistsAndShowsPartialAnswer(t *testing.T) {
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, storePath, LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-partial-close"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-partial-close")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-partial-close",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "partial answer that should survive"}
+	if err := agentSession.Close(); err != nil {
+		t.Fatalf("close agent session: %v", err)
+	}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-partial-close", time.Now(), nil, nil, state.replyCtx)
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("expected the rich card to be finalized as an error with partial content")
+	}
+	last := updates[len(updates)-1]
+	if !strings.Contains(last, "status=error") || !strings.Contains(last, "partial answer that should survive") {
+		t.Fatalf("partial answer was lost from the failed card: %q", last)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != "partial answer that should survive" {
+		t.Fatalf("partial answer was not preserved in session history: %+v", history)
+	}
+	persisted, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read persisted session store: %v", err)
+	}
+	if !strings.Contains(string(persisted), "partial answer that should survive") {
+		t.Fatalf("partial answer was not saved before returning: %s", persisted)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("partial answer should remain on the single rich card, got side messages %v", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardChannelCloseOmitsUnrenderedPartialAnswer(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         StreamPreviewCfg
+		chunks      []string
+		wantVisible string
+		wantHidden  string
+	}{
+		{
+			name:       "preview-disabled",
+			cfg:        StreamPreviewCfg{Enabled: false},
+			chunks:     []string{"unrendered incomplete answer"},
+			wantHidden: "unrendered incomplete answer",
+		},
+		{
+			name:        "throttled-latest-chunk",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 60_000, MinDeltaChars: 1},
+			chunks:      []string{"rendered prefix", " plus unrendered suffix"},
+			wantVisible: "rendered prefix",
+			wantHidden:  "plus unrendered suffix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(tt.cfg)
+			sessionKey := "feishu:user-rich-unrendered-close-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-unrendered-close-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-unrendered-close-" + tt.name}
+			e.interactiveStates[sessionKey] = state
+
+			for _, chunk := range tt.chunks {
+				agentSession.events <- Event{Type: EventText, Content: chunk}
+			}
+			if err := agentSession.Close(); err != nil {
+				t.Fatalf("close agent session: %v", err)
+			}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-unrendered-close-"+tt.name, time.Now(), nil, nil, state.replyCtx)
+
+			_, streams, updates, _ := p.snapshot()
+			if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") {
+				t.Fatalf("missing terminal error card: %v", updates)
+			}
+			final := updates[len(updates)-1]
+			if tt.wantVisible != "" && (!strings.Contains(strings.Join(streams, "\n"), tt.wantVisible) || !strings.Contains(final, tt.wantVisible)) {
+				t.Fatalf("last rendered prefix was not retained: streams=%v final=%q", streams, final)
+			}
+			if strings.Contains(final, tt.wantHidden) {
+				t.Fatalf("channel-close card exposed an unrendered chunk: %q", final)
+			}
+			history := session.GetHistory(0)
+			var assistants []string
+			for _, entry := range history {
+				if entry.Role == "assistant" {
+					assistants = append(assistants, entry.Content)
+				}
+			}
+			if tt.wantVisible == "" {
+				if len(assistants) != 0 {
+					t.Fatalf("unrendered partial was persisted to history: %v", assistants)
+				}
+			} else if len(assistants) != 1 || assistants[0] != tt.wantVisible {
+				t.Fatalf("history = %v, want only last rendered prefix %q", assistants, tt.wantVisible)
+			}
+		})
+	}
 }
 
 func TestProcessInteractiveEvents_RichCardResolvesMarkdownImages(t *testing.T) {
@@ -2044,6 +2990,254 @@ func TestProcessInteractiveEvents_RichCardResolvesMarkdownImages(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardRendersWorkspaceReferences(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+	sessionKey := "feishu:user-rich-reference"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-reference")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-reference",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "/root/code/demo-repo/src/services/user_profile_service.ts:42"
+	agentSession.events <- Event{Type: EventResult, Content: raw, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-reference", time.Now(), nil, nil, state.replyCtx)
+
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("expected a final rich-card update")
+	}
+	final := updates[len(updates)-1]
+	want := "📄 `demo-repo/src/services/user_profile_service.ts:42`"
+	if !strings.Contains(final, want) {
+		t.Fatalf("rich card did not apply workspace reference rendering: %q", final)
+	}
+	if strings.Contains(final, raw) {
+		t.Fatalf("rich card retained the raw absolute path: %q", final)
+	}
+}
+
+func TestProcessInteractiveEvents_FailedRichCardRendersWorkspaceReferences(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TransformLocalReferences path handling assumes Unix separators")
+	}
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	a := &namedStubModelModeAgent{name: "codex"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetReferenceConfig(ReferenceRenderCfg{
+		NormalizeAgents: []string{"codex"},
+		RenderPlatforms: []string{"feishu"},
+		DisplayPath:     "relative",
+		MarkerStyle:     "emoji",
+		EnclosureStyle:  "code",
+	})
+	sessionKey := "feishu:user-rich-failed-reference"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-failed-reference")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-failed-reference",
+		workspaceDir: "/root/code",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	raw := "/root/code/demo-repo/src/services/user_profile_service.ts:42"
+	agentSession.events <- Event{Type: EventText, Content: raw}
+	agentSession.events <- Event{Type: EventError, Error: errors.New("simulated private failure")}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-failed-reference", time.Now(), nil, nil, state.replyCtx)
+
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("expected a failed rich-card update")
+	}
+	final := updates[len(updates)-1]
+	want := "📄 `demo-repo/src/services/user_profile_service.ts:42`"
+	if !strings.Contains(final, "status=error") || !strings.Contains(final, want) {
+		t.Fatalf("failed rich card did not retain the rendered safe partial: %q", final)
+	}
+	if strings.Contains(final, raw) {
+		t.Fatalf("failed rich card reintroduced the raw absolute path: %q", final)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		platform    func(*stubRichCardSilentPlatform) Platform
+		wantDeletes int
+	}{
+		{
+			name: "start failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardStartFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+		},
+		{
+			name: "update failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+			wantDeletes: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := tt.platform(base)
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			sessionKey := "feishu:user-rich-fallback-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-fallback-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-fallback"}
+			e.interactiveStates[sessionKey] = state
+
+			answer := "Readable fallback answer."
+			agentSession.events <- Event{Type: EventResult, Content: answer, Done: true}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-fallback", time.Now(), nil, nil, state.replyCtx)
+
+			sent := base.getSent()
+			if len(sent) != 1 || sent[0] != answer {
+				t.Fatalf("fallback sent = %q, want only the assistant answer", sent)
+			}
+			if strings.Contains(sent[0], "rich:status=") {
+				t.Fatalf("fallback exposed rich-card JSON as message text: %q", sent[0])
+			}
+			_, _, _, deletes := base.snapshot()
+			if deletes != tt.wantDeletes {
+				t.Fatalf("stale-card deletes = %d, want %d", deletes, tt.wantDeletes)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorFallbackIsGenericAndCleansStaleCard(t *testing.T) {
+	tests := []struct {
+		name        string
+		platform    func(*stubRichCardSilentPlatform) Platform
+		wantDeletes int
+	}{
+		{
+			name: "start failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardStartFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+		},
+		{
+			name: "update failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+			},
+			wantDeletes: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := tt.platform(base)
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			sessionKey := "feishu:user-rich-error-fallback-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-error-fallback-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-error-fallback"}
+			e.interactiveStates[sessionKey] = state
+
+			privateError := "private token, Bash command, and /Users/example/secret"
+			agentSession.events <- Event{Type: EventError, Error: errors.New(privateError)}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error-fallback", time.Now(), nil, nil, state.replyCtx)
+
+			sent := base.getSent()
+			want := NewI18n(LangEnglish).T(MsgRichCardErrorBody)
+			if len(sent) != 1 || sent[0] != want {
+				t.Fatalf("error fallback sent = %q, want only localized generic failure %q", sent, want)
+			}
+			if strings.Contains(sent[0], privateError) || strings.Contains(sent[0], "/Users/example/secret") {
+				t.Fatalf("error fallback leaked private details: %q", sent[0])
+			}
+			_, _, _, deletes := base.snapshot()
+			if deletes != tt.wantDeletes {
+				t.Fatalf("stale-card deletes = %d, want %d", deletes, tt.wantDeletes)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorFallbackPreservesSafePartial(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	sessionKey := "feishu:user-rich-error-fallback-partial"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-error-fallback-partial")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-error-fallback-partial"}
+	e.interactiveStates[sessionKey] = state
+
+	safePartial := "Safe partial answer."
+	privateError := "private token at /Users/example/secret"
+	agentSession.events <- Event{Type: EventText, Content: safePartial}
+	agentSession.events <- Event{Type: EventError, Error: errors.New(privateError)}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error-fallback-partial", time.Now(), nil, nil, state.replyCtx)
+
+	sent := base.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], safePartial) || !strings.Contains(sent[0], NewI18n(LangEnglish).T(MsgRichCardErrorBody)) {
+		t.Fatalf("partial error fallback = %q, want safe partial plus generic failure", sent)
+	}
+	if strings.Contains(sent[0], privateError) || strings.Contains(sent[0], "/Users/example/secret") {
+		t.Fatalf("partial error fallback leaked private details: %q", sent[0])
+	}
+	_, _, _, deletes := base.snapshot()
+	if deletes != 1 {
+		t.Fatalf("stale-card deletes = %d, want 1", deletes)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardErrorFallbackUsesTurnLocale(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangAuto)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	sessionKey := "feishu:user-rich-error-turn-locale"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-error-turn-locale")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-error-turn-locale"}
+	state.setTurnRichCardCopy("m-rich-error-turn-locale", e.i18n.RichCardCopyForText("你好"))
+	e.interactiveStates[sessionKey] = state
+
+	// Simulate a concurrent English turn changing the engine-wide auto locale
+	// after this Chinese turn already captured its immutable card vocabulary.
+	e.i18n.DetectAndSet("hello")
+	agentSession.events <- Event{Type: EventError, Error: errors.New("simulated private failure")}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-error-turn-locale", time.Now(), nil, nil, state.replyCtx)
+
+	want := NewI18n(LangChinese).T(MsgRichCardErrorBody)
+	if sent := base.getSent(); len(sent) != 1 || sent[0] != want {
+		t.Fatalf("error fallback sent = %q, want captured turn locale %q", sent, want)
+	}
+}
+
 // runRichCardSilentScenario exercises processInteractiveEvents in rich
 // (Card 2.0) mode, sending the given EventText chunks followed by a terminal
 // EventResult. Returns call counts so each test case can assert the no-trace
@@ -2081,72 +3275,314 @@ func runRichCardSilentScenario(t *testing.T, name string, chunks []string, final
 	return p.snapshot()
 }
 
-// TestProcessInteractiveEvents_RichCard_NoReplySingleChunk asserts that a
-// single-chunk NO_REPLY response in rich card mode leaves zero trace: no
-// preview card created, no streaming text update, no card deletion. Lark
-// would otherwise render the Send-then-Delete lifecycle as a "撤回了一条消息"
-// gray bar.
-func TestProcessInteractiveEvents_RichCard_NoReplySingleChunk(t *testing.T) {
-	starts, streams, updates, deletes := runRichCardSilentScenario(t, "single", []string{"NO_REPLY"}, "NO_REPLY")
-	if len(starts) != 0 {
-		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+func runRichCardPreviewConfigScenario(t *testing.T, name string, cfg StreamPreviewCfg, events []Event) (starts, streams, updates []string, deletes int) {
+	t.Helper()
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich"})
+	e.SetStreamPreviewCfg(cfg)
+	sessionKey := "feishu:user-rich-preview-config-" + name
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-preview-config-" + name)
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-preview-config-" + name}
+	e.interactiveStates[sessionKey] = state
+
+	for _, event := range events {
+		agentSession.events <- event
 	}
-	if len(streams) != 0 {
-		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-preview-config-"+name, time.Now(), nil, nil, state.replyCtx)
+	return p.snapshot()
+}
+
+func TestProcessInteractiveEvents_RichCardHonorsStreamPreviewDisablement(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  StreamPreviewCfg
+	}{
+		{name: "globally-disabled", cfg: StreamPreviewCfg{Enabled: false}},
+		{name: "platform-disabled", cfg: StreamPreviewCfg{Enabled: true, DisabledPlatforms: []string{"FEISHU"}}},
 	}
-	if len(updates) != 0 {
-		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
-	}
-	if deletes != 0 {
-		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			starts, streams, updates, deletes := runRichCardPreviewConfigScenario(t, tt.name, tt.cfg, []Event{
+				{Type: EventThinking, Content: "private reasoning"},
+				{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"},
+				{Type: EventText, Content: "visible answer"},
+				{Type: EventResult, Content: "visible answer", Done: true},
+			})
+
+			if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+				t.Fatalf("initial lifecycle card = %v, want one thinking card", starts)
+			}
+			if len(streams) != 0 {
+				t.Fatalf("disabled stream preview emitted CardKit frames: %v", streams)
+			}
+			if len(updates) != 1 || !strings.Contains(updates[0], "status=done") || !strings.Contains(updates[0], "visible answer") {
+				t.Fatalf("updates = %v, want only the terminal Done card", updates)
+			}
+			if deletes != 0 {
+				t.Fatalf("completed card was unexpectedly deleted %d time(s)", deletes)
+			}
+		})
 	}
 }
 
-// TestProcessInteractiveEvents_RichCard_NoReplyChunked asserts the same
-// no-trace invariant when the agent emits NO_REPLY across two text chunks
-// ("NO_R" + "EPLY"). The silentHold gate must hold across chunks until the
-// segment proves it is no longer a NO_REPLY prefix (or stays one).
-func TestProcessInteractiveEvents_RichCard_NoReplyChunked(t *testing.T) {
-	starts, streams, updates, deletes := runRichCardSilentScenario(t, "chunked", []string{"NO_R", "EPLY"}, "NO_REPLY")
-	if len(starts) != 0 {
-		t.Fatalf("expected no SendPreviewStart, got %d: %v", len(starts), starts)
+func TestProcessInteractiveEvents_RichCardHonorsStreamPreviewThresholds(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         StreamPreviewCfg
+		chunks      []string
+		final       string
+		wantPreview string
+	}{
+		{
+			name:        "interval-and-max-chars",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 60_000, MinDeltaChars: 1, MaxChars: 5},
+			chunks:      []string{"123456", "789"},
+			final:       "123456789",
+			wantPreview: "12345…",
+		},
+		{
+			name:        "minimum-delta",
+			cfg:         StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 10},
+			chunks:      []string{"abc", "def"},
+			final:       "abcdef",
+			wantPreview: "abc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make([]Event, 0, len(tt.chunks)+1)
+			for _, chunk := range tt.chunks {
+				events = append(events, Event{Type: EventText, Content: chunk})
+			}
+			events = append(events, Event{Type: EventResult, Content: tt.final, Done: true})
+			_, streams, updates, _ := runRichCardPreviewConfigScenario(t, tt.name, tt.cfg, events)
+
+			if len(streams) != 2 || streams[0] != tt.wantPreview || streams[1] != tt.final {
+				t.Fatalf("stream frames = %v, want throttled preview %q then terminal %q", streams, tt.wantPreview, tt.final)
+			}
+			if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], tt.final) {
+				t.Fatalf("final lifecycle card is incomplete: %v", updates)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardShortAnswerUsesFirstChunkTypewriter(t *testing.T) {
+	_, streams, updates, deletes := runRichCardSilentScenario(t, "short-typewriter", []string{"Short answer."}, "Short answer.")
+	if deletes != 0 {
+		t.Fatalf("visible answer unexpectedly deleted its card: %d", deletes)
+	}
+	if len(streams) == 0 || streams[0] != "Short answer." {
+		t.Fatalf("first answer chunk was not sent through CardKit streaming: %v", streams)
+	}
+	if len(updates) < 2 {
+		t.Fatalf("expected answer-phase and final updates, got %v", updates)
+	}
+	if !strings.Contains(updates[0], "status=working") || !strings.Contains(updates[0], `body=""`) {
+		t.Fatalf("answer-phase transition should leave the body for CardKit streaming: %q", updates[0])
+	}
+	if !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], "Short answer.") {
+		t.Fatalf("final card is incomplete: %q", updates[len(updates)-1])
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardKeepsTableOverflowOnPrimaryCard(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardSplitPlatform{stubRichCardSilentPlatform: base}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	sessionKey := "feishu:user-rich-table-overflow"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-table-overflow")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-table-overflow"}
+	e.interactiveStates[sessionKey] = state
+
+	answer := "complete answer with many tables"
+	agentSession.events <- Event{Type: EventText, Content: answer}
+	agentSession.events <- Event{Type: EventResult, Content: answer, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-table-overflow", time.Now(), nil, nil, state.replyCtx)
+
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("rich turn created an unquoted overflow answer message: %v", sent)
+	}
+	_, _, updates, _ := base.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], answer) {
+		t.Fatalf("primary lifecycle card lost the complete answer: %v", updates)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPreservesTextAcrossToolBoundaries(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ToolMessages:     true,
+	})
+	sessionKey := "feishu:user-rich-text-tool-text"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-text-tool-text")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-text-tool-text"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Before the tool. "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "private result"}
+	agentSession.events <- Event{Type: EventText, Content: "After the tool."}
+	agentSession.events <- Event{Type: EventResult, Content: "After the tool.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-text-tool-text", time.Now(), nil, nil, state.replyCtx)
+
+	want := "Before the tool. After the tool."
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], want) {
+		t.Fatalf("final rich card lost pre-tool text: updates=%v", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != want {
+		t.Fatalf("history lost pre-tool text: %+v", history)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("rich-card text should stay on the primary card, got side messages %v", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPermissionDoesNotFlushAnswerText(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ToolMessages:     true,
+	})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: false})
+	sessionKey := "feishu:user-rich-permission"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-permission")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-permission"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-permission", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	agentSession.events <- Event{Type: EventText, Content: "Before permission. "}
+	agentSession.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-rich-permission",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/private",
+		ToolInputRaw: map[string]any{"path": "/tmp/private"},
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for rich-card permission request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Before permission.") {
+			t.Fatalf("rich-card answer text was flushed as a side message before permission: %q", sent)
+		}
+	}
+	if !e.handlePendingPermission(p, &Message{SessionKey: sessionKey, ReplyCtx: state.replyCtx}, "allow", sessionKey) {
+		t.Fatal("expected permission response to resolve the pending request")
+	}
+
+	agentSession.events <- Event{Type: EventText, Content: "After permission."}
+	agentSession.events <- Event{Type: EventResult, Content: "After permission.", Done: true}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("rich-card permission turn did not complete")
+	}
+
+	want := "Before permission. After permission."
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], want) {
+		t.Fatalf("final rich card lost text across permission boundary: %v", updates)
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Before permission.") || strings.Contains(sent, "After permission.") {
+			t.Fatalf("rich-card answer text escaped into a side message: %q", sent)
+		}
+	}
+}
+
+// A bare NO_REPLY turn removes the optimistic immediate card so the agent's
+// explicit silent-response contract leaves no lasting answer card.
+func TestProcessInteractiveEvents_RichCard_NoReplySingleChunk(t *testing.T) {
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "single", []string{"NO_REPLY"}, "NO_REPLY")
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+		t.Fatalf("expected one immediate thinking card, got %d: %v", len(starts), starts)
 	}
 	if len(streams) != 0 {
 		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
 	}
 	if len(updates) != 0 {
-		t.Fatalf("expected no UpdateMessage, got %d: %v", len(updates), updates)
+		t.Fatalf("expected no final rich-card update for a silent reply, got %d: %v", len(updates), updates)
 	}
-	if deletes != 0 {
-		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	if deletes != 1 {
+		t.Fatalf("expected one DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+// The same lifecycle applies when NO_REPLY arrives across multiple chunks.
+func TestProcessInteractiveEvents_RichCard_NoReplyChunked(t *testing.T) {
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "chunked", []string{"NO_R", "EPLY"}, "NO_REPLY")
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=thinking") {
+		t.Fatalf("expected one immediate thinking card, got %d: %v", len(starts), starts)
+	}
+	if len(streams) != 0 {
+		t.Fatalf("expected no StreamRichCardText, got %d: %v", len(streams), streams)
+	}
+	if len(updates) != 0 {
+		t.Fatalf("expected no final rich-card update for a silent reply, got %d: %v", len(updates), updates)
+	}
+	if deletes != 1 {
+		t.Fatalf("expected one DeletePreviewMessage, got %d", deletes)
 	}
 }
 
 // TestProcessInteractiveEvents_RichCard_PrefixThenContent verifies that a
 // stream which starts with a NO_REPLY prefix ("N") but continues into real
-// content ("ote that...") releases the silentHold and lazily creates the
-// preview card with the accumulated content already in the body. No recall.
+// content ("ote that...") releases the silentHold and switches the already
+// created card into the answer phase. No recall.
 func TestProcessInteractiveEvents_RichCard_PrefixThenContent(t *testing.T) {
-	starts, _, _, deletes := runRichCardSilentScenario(t, "prefix-then-content", []string{"N", "ote that the answer is 42"}, "Note that the answer is 42")
+	starts, streams, updates, deletes := runRichCardSilentScenario(t, "prefix-then-content", []string{"N", "ote that the answer is 42"}, "Note that the answer is 42")
 	if len(starts) != 1 {
-		t.Fatalf("expected exactly 1 SendPreviewStart (lazy create after release), got %d: %v", len(starts), starts)
+		t.Fatalf("expected exactly 1 immediate SendPreviewStart, got %d: %v", len(starts), starts)
 	}
-	if !strings.Contains(starts[0], "Note that the answer is 42") {
-		t.Fatalf("lazy-created card should contain accumulated content, got %q", starts[0])
+	rendered := strings.Join(append(streams, updates...), "\n")
+	if !strings.Contains(rendered, "Note that the answer is 42") {
+		t.Fatalf("answer-phase updates should contain accumulated content, got %q", rendered)
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
 	}
 }
 
-// TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody verifies
-// that when the agent emits visible text and then a trailing NO_REPLY marker
-// (engine sees EventResult.Content = "NO_REPLY", the dominant case for
-// claudecode where Content is the final assistant block), the card finalizes
-// with the pre-NO_REPLY text preserved instead of being blanked. Without this
-// the silent path's finalize-to-Done would overwrite the already-streamed body
-// with empty string, making the user's just-seen content "disappear".
-func TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody(t *testing.T) {
+// Even if a provider streamed speculative text before resolving to a bare
+// NO_REPLY result, the terminal contract wins and the optimistic card is
+// removed rather than retained as a visible Done response.
+func TestProcessInteractiveEvents_RichCard_TextThenNoReply_RemovesCard(t *testing.T) {
 	p := &stubRichCardSilentPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 	}
@@ -2179,30 +3615,18 @@ func TestProcessInteractiveEvents_RichCard_TextThenNoReply_PreservesBody(t *test
 	if len(starts) == 0 {
 		t.Fatalf("expected SendPreviewStart for the visible text chunk, got 0")
 	}
-	if deletes != 0 {
-		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	if deletes != 1 {
+		t.Fatalf("expected one DeletePreviewMessage, got %d", deletes)
 	}
-	if len(updates) == 0 {
-		t.Fatalf("expected at least one UpdateMessage (final Done finalize)")
-	}
-	last := updates[len(updates)-1]
-	if !strings.Contains(last, "Hello world") {
-		t.Fatalf("final card should preserve pre-NO_REPLY text, got %q", last)
-	}
-	if strings.Contains(last, "NO_REPLY") {
-		t.Fatalf("final card should not contain NO_REPLY marker, got %q", last)
-	}
-	if !strings.Contains(last, "status=done") {
-		t.Fatalf("final card should have status=done, got %q", last)
+	for _, update := range updates {
+		if strings.Contains(update, "status=done") {
+			t.Fatalf("silent reply must not leave a final Done card: %v", updates)
+		}
 	}
 }
 
-// TestProcessInteractiveEvents_RichCard_ToolThenNoReply verifies that when a
-// turn issues tool calls (creating the rich card with visible tool steps) and
-// then resolves to NO_REPLY, the card is finalized to Done — not deleted.
-// Deleting would leave a "撤回了一条消息" gray bar matched up with already-
-// visible tool activity. This mirrors legacy + full mode where tool messages
-// remain visible even when the final reply is silent.
+// Tool progress is also optimistic UI. A terminal NO_REPLY removes it instead
+// of converting anonymous activity into a visible answer card.
 func TestProcessInteractiveEvents_RichCard_ToolThenNoReply(t *testing.T) {
 	p := &stubRichCardSilentPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
@@ -2242,30 +3666,25 @@ func TestProcessInteractiveEvents_RichCard_ToolThenNoReply(t *testing.T) {
 	if len(streams) != 0 {
 		t.Fatalf("expected no StreamRichCardText (silentHold gates text path), got %d: %v", len(streams), streams)
 	}
-	if deletes != 0 {
-		t.Fatalf("expected no DeletePreviewMessage (tool card finalized in place), got %d", deletes)
+	if deletes != 1 {
+		t.Fatalf("expected one DeletePreviewMessage, got %d", deletes)
 	}
-	if len(updates) == 0 {
-		t.Fatalf("expected at least one UpdateMessage (final Done finalize)")
-	}
-	last := updates[len(updates)-1]
-	if !strings.Contains(last, "status=done") {
-		t.Fatalf("final update should show status=done, got %q", last)
-	}
-	if strings.Contains(last, "NO_REPLY") {
-		t.Fatalf("finalize should not include NO_REPLY in body, got %q", last)
+	for _, update := range updates {
+		if strings.Contains(update, "status=done") || strings.Contains(update, "NO_REPLY") {
+			t.Fatalf("silent reply left a visible final card update: %v", updates)
+		}
 	}
 }
 
 func TestAgentSystemPrompt_MentionsAttachmentSend(t *testing.T) {
 	prompt := AgentSystemPrompt()
-	if !strings.Contains(prompt, "cc-connect send --image") {
+	if !strings.Contains(prompt, "cc-connect-next send --image") {
 		t.Fatalf("prompt missing image send instructions: %q", prompt)
 	}
-	if !strings.Contains(prompt, "cc-connect send --file") {
+	if !strings.Contains(prompt, "cc-connect-next send --file") {
 		t.Fatalf("prompt missing file send instructions: %q", prompt)
 	}
-	if !strings.Contains(prompt, "cc-connect send --tts") {
+	if !strings.Contains(prompt, "cc-connect-next send --tts") {
 		t.Fatalf("prompt missing tts send instructions: %q", prompt)
 	}
 	if !strings.Contains(prompt, "NO_REPLY") {
@@ -3626,7 +5045,7 @@ func TestCmdHelp_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if got := p.sent[0]; got != e.i18n.T(MsgHelp) {
 		t.Fatalf("help text = %q, want legacy help text", got)
 	}
-	if strings.Contains(p.sent[0], "cc-connect 帮助") {
+	if strings.Contains(p.sent[0], "cc-connect-next 帮助") {
 		t.Fatalf("help text = %q, should not be card title fallback", p.sent[0])
 	}
 	if !strings.Contains(p.sent[0], "/cron [add|list|exec|del|enable|disable]") {
@@ -3673,7 +5092,7 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Focus") {
 		t.Fatalf("current text = %q, want session name 'Focus'", p.sent[0])
 	}
-	if strings.Contains(p.sent[0], "cc-connect") {
+	if strings.Contains(p.sent[0], "cc-connect-next") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
 	}
 }
@@ -5515,7 +6934,7 @@ func TestSwitchProvider_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 }
 
 // TestSwitchProvider_PersistsToSession verifies that `/provider switch <name>`
-// records the choice on the Session so it survives a cc-connect process
+// records the choice on the Session so it survives a cc-connect-next process
 // restart. Without this, the agent_session_id keeps the conversation alive
 // while the in-memory active provider reverts to default — see internal
 // task t-20260614-qp7xnl.
@@ -6153,7 +7572,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 
 	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 	// Register all agent sessions with the session manager so they pass the
-	// owned-session filter (simulates cc-connect having created each session).
+	// owned-session filter (simulates cc-connect-next having created each session).
 	var internalIDs []string
 	for i, s := range sessions {
 		sess := e.sessions.NewSession("test:user1", "session-"+string(rune('A'+i)))
@@ -6852,6 +8271,7 @@ type controllableAgentSession struct {
 	report          *UsageReport
 	contextUsage    *ContextUsage
 	usageErr        error
+	closeOnce       sync.Once
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -6881,13 +8301,11 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
-	s.alive = false
-	close(s.events)
-	select {
-	case <-s.closed:
-	default:
+	s.closeOnce.Do(func() {
+		s.alive = false
+		close(s.events)
 		close(s.closed)
-	}
+	})
 	return nil
 }
 
@@ -7499,7 +8917,10 @@ func TestSetupMemoryFile_WritesInstructions(t *testing.T) {
 	if !strings.Contains(string(content), ccConnectInstructionMarker) {
 		t.Error("expected instruction marker in file")
 	}
-	if !strings.Contains(string(content), "cc-connect cron add") {
+	if !strings.Contains(string(content), ccConnectInstructionEndMarker) {
+		t.Error("expected instruction end marker in file")
+	}
+	if !strings.Contains(string(content), "cc-connect-next cron add") {
 		t.Error("expected cron instructions in file")
 	}
 }
@@ -7523,6 +8944,34 @@ func TestSetupMemoryFile_Idempotent(t *testing.T) {
 	}
 }
 
+func TestSetupMemoryFile_UpgradesOfficialMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	existing := "project notes\n\n" + legacyCCConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	if err := os.WriteFile(memFile, []byte(existing), 0o644); err != nil {
+		t.Fatalf("write official instructions: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupOK || err != nil {
+		t.Fatalf("result = %d, err = %v; want setupOK", result, err)
+	}
+	content, err := os.ReadFile(memFile)
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	if got := strings.Count(string(content), "<!-- cc-connect"); got != 1 {
+		t.Fatalf("instruction marker count = %d, want 1; content=%q", got, content)
+	}
+	if strings.Contains(string(content), legacyCCConnectInstructionMarker) || !strings.Contains(string(content), ccConnectInstructionEndMarker) {
+		t.Fatalf("official marker was not upgraded to a delimited next block: %q", content)
+	}
+}
+
 func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	tmpDir := t.TempDir()
 	memFile := filepath.Join(tmpDir, "AGENTS.md")
@@ -7541,11 +8990,102 @@ func TestSetupMemoryFile_RefreshesLegacyInstructions(t *testing.T) {
 	}
 
 	content, _ := os.ReadFile(memFile)
-	if strings.Contains(string(content), "legacy instructions") {
-		t.Fatalf("legacy instructions should be refreshed, got %q", string(content))
+	if !strings.Contains(string(content), "legacy instructions") {
+		t.Fatalf("unknown legacy content must be preserved, got %q", string(content))
 	}
-	if !strings.Contains(string(content), "cc-connect send --image") {
-		t.Fatalf("expected refreshed attachment instructions, got %q", string(content))
+	if !strings.Contains(string(content), "cc-connect-next send --image") {
+		t.Fatalf("expected a current, delimited instruction block to be appended, got %q", string(content))
+	}
+}
+
+func TestSetupMemoryFile_UnknownLegacyBeforeCurrentBlockIsIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	existing := "project preface\n\n" +
+		legacyCCConnectInstructionMarker + "\ncustomized legacy instructions\n\n" +
+		"## User notes\nkeep this forever\n\n" +
+		ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n" + ccConnectInstructionEndMarker +
+		"\n\nproject trailer\n"
+	if err := os.WriteFile(memFile, []byte(existing), 0o644); err != nil {
+		t.Fatalf("write mixed legacy/current instructions: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupExists || err != nil {
+		t.Fatalf("result = %d, err = %v; want setupExists", result, err)
+	}
+	content, err := os.ReadFile(memFile)
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	if string(content) != existing {
+		t.Fatalf("idempotent setup modified mixed legacy/current content:\n%s", content)
+	}
+}
+
+func TestSetupMemoryFile_PreservesContentAfterKnownOfficialInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	legacyPrompt := strings.ReplaceAll(AgentSystemPrompt(), "cc-connect-next", "cc-connect")
+	existing := "project preface\n\n" + legacyCCConnectInstructionMarker + "\n" + legacyPrompt + "\n\n## User notes\nkeep this forever\n"
+	if err := os.WriteFile(memFile, []byte(existing), 0o644); err != nil {
+		t.Fatalf("write official instructions: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupOK || err != nil {
+		t.Fatalf("result = %d, err = %v; want setupOK", result, err)
+	}
+	content, err := os.ReadFile(memFile)
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "project preface") || !strings.Contains(text, "## User notes\nkeep this forever") {
+		t.Fatalf("setup removed user-authored content: %q", text)
+	}
+	if strings.Contains(text, legacyCCConnectInstructionMarker) {
+		t.Fatalf("legacy marker was not replaced: %q", text)
+	}
+	if strings.Count(text, ccConnectInstructionMarker) != 1 || strings.Count(text, ccConnectInstructionEndMarker) != 1 {
+		t.Fatalf("current generated block is not precisely delimited: %q", text)
+	}
+}
+
+func TestSetupMemoryFile_UpgradesKnownUndelimitedNextBlock(t *testing.T) {
+	tmpDir := t.TempDir()
+	memFile := filepath.Join(tmpDir, "AGENTS.md")
+	existing := "project preface\n\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n\n## User notes\nkeep this forever\n"
+	if err := os.WriteFile(memFile, []byte(existing), 0o644); err != nil {
+		t.Fatalf("write undelimited instructions: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubMemoryAgent{memFile: memFile}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	result, _, err := e.setupMemoryFile()
+	if result != setupOK || err != nil {
+		t.Fatalf("result = %d, err = %v; want setupOK", result, err)
+	}
+	content, err := os.ReadFile(memFile)
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	text := string(content)
+	if strings.Count(text, ccConnectInstructionMarker) != 1 || strings.Count(text, ccConnectInstructionEndMarker) != 1 {
+		t.Fatalf("known undelimited block was not upgraded exactly once: %q", text)
+	}
+	if !strings.Contains(text, "project preface") || !strings.Contains(text, "## User notes\nkeep this forever") {
+		t.Fatalf("upgrade removed user-authored content: %q", text)
 	}
 }
 
@@ -7590,7 +9130,7 @@ func TestCmdCronSetup_WritesAndReplies(t *testing.T) {
 		t.Errorf("reply = %q, want to contain filename", p.sent[0])
 	}
 	if !strings.Contains(p.sent[0], "attachment send-back") {
-		t.Errorf("reply = %q, want unified cc-connect setup success message", p.sent[0])
+		t.Errorf("reply = %q, want unified cc-connect-next setup success message", p.sent[0])
 	}
 
 	content, _ := os.ReadFile(memFile)
@@ -8664,6 +10204,138 @@ func TestProcessInteractiveEvents_QueuedMessageUsesItsOwnReplyCtx(t *testing.T) 
 				t.Errorf("turn2 reply used replyCtx=%v, want ctx-turn2 (regression: msg2's reply quoted msg1)", ev.replyCtx)
 			}
 		}
+	}
+}
+
+func TestProcessInteractiveEvents_QueuedRichCardsQuoteEachOwnTrigger(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sess := newQueuingSession("qs-rich-replyctx")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich", Mode: "compact"})
+
+	key := "feishu:user-rich-queued"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", messageID: "msg-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveStates[key] = state
+
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		for {
+			sess.sendMu.Lock()
+			sent := len(sess.sendCalls)
+			sess.sendMu.Unlock()
+			if sent > 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-turn1", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued rich-card turn did not finish")
+	}
+
+	contexts := p.previewStartContexts()
+	if len(contexts) != 2 {
+		t.Fatalf("rich preview starts = %d, want one card per turn; contexts=%v", len(contexts), contexts)
+	}
+	if contexts[0] != "ctx-turn1" || contexts[1] != "ctx-turn2" {
+		t.Fatalf("rich cards quoted the wrong trigger contexts: %v", contexts)
+	}
+}
+
+func TestProcessInteractiveEvents_SnapshotsDisplayConfigPerQueuedTurn(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sess := newQueuingSession("qs-rich-config-reload")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich", Mode: "compact"})
+
+	key := "feishu:user-rich-config-reload"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", messageID: "msg-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveStates[key] = state
+	session.AddHistory("user", "initial-msg")
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-turn1", time.Now(), nil, nil, "ctx-turn1")
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		starts, _, _, _ := p.snapshot()
+		if len(starts) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first turn did not create its immediate rich card")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Simulate management hot reload after the first turn has already chosen
+	// Rich Card. That turn must finish on its existing card, while the queued
+	// turn must pick up the new legacy mode when it begins.
+	e.SetDisplayConfig(DisplayCfg{CardMode: "legacy", Mode: "compact"})
+	sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+
+	for {
+		sess.sendMu.Lock()
+		sent := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if sent == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queued turn did not start after the first result")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("display-reload queued turns did not finish")
+	}
+
+	starts, _, updates, _ := p.snapshot()
+	if len(starts) != 1 {
+		t.Fatalf("preview starts = %d, want only the in-flight rich turn; starts=%v", len(starts), starts)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], "response1") {
+		t.Fatalf("in-flight rich turn did not finish on its original card: %v", updates)
+	}
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "response2" {
+		t.Fatalf("queued turn did not use reloaded legacy mode: %v", sent)
 	}
 }
 
@@ -10212,7 +11884,7 @@ func TestBuildSenderPrompt_Enabled(t *testing.T) {
 	e.SetInjectSender(true)
 
 	result := e.buildSenderPrompt("hello world", "user123", "Alice", "feishu", "feishu:channel42:user123", "")
-	expected := "[cc-connect sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
+	expected := "[cc-connect-next sender_id=user123 sender_name=\"Alice\" platform=feishu chat_id=channel42]\nhello world"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10243,7 +11915,7 @@ func TestBuildSenderPrompt_EmptyUserName(t *testing.T) {
 	e.SetInjectSender(true)
 
 	result := e.buildSenderPrompt("hello", "user1", "", "feishu", "feishu:ch:user1", "")
-	expected := "[cc-connect sender_id=user1 platform=feishu chat_id=ch]\nhello"
+	expected := "[cc-connect-next sender_id=user1 platform=feishu chat_id=ch]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10254,7 +11926,7 @@ func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
 	e.SetInjectSender(true)
 
 	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
-	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
+	expected := "[cc-connect-next sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10330,7 +12002,7 @@ func TestBuildSenderPrompt_ChannelKeyOverridesSessionKey(t *testing.T) {
 	// When channelKey is provided, it should be used as chat_id instead of
 	// extracting from sessionKey (which would give "g" for dingtalk).
 	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "cidXXX")
-	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	expected := "[cc-connect-next sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -10343,7 +12015,7 @@ func TestBuildSenderPrompt_FallbackWithoutChannelKey(t *testing.T) {
 	// When channelKey is empty, extractChannelID heuristic should detect
 	// the 4-segment format and extract the correct channel.
 	result := e.buildSenderPrompt("hello", "staff1", "Alice", "dingtalk", "dingtalk:g:cidXXX:staff1", "")
-	expected := "[cc-connect sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
+	expected := "[cc-connect-next sender_id=staff1 sender_name=\"Alice\" platform=dingtalk chat_id=cidXXX]\nhello"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
 	}
@@ -13129,24 +14801,226 @@ func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string
 // (e.g. DingTalk with AI Card configured), so instant reply should be skipped.
 type stubStreamingCardPlatform struct {
 	stubPlatformEngine
-	cardCreated bool
+	cardCreated atomic.Bool
 	cardFail    bool // when true, CreateStreamingCard returns an error
+	cardMu      sync.Mutex
+	card        *stubStreamingCard
 }
 
 func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
 	if p.cardFail {
 		return nil, fmt.Errorf("stub: card_template_id not configured")
 	}
-	p.cardCreated = true
-	return &stubStreamingCard{}, nil
+	p.cardCreated.Store(true)
+	p.cardMu.Lock()
+	defer p.cardMu.Unlock()
+	p.card = &stubStreamingCard{}
+	return p.card, nil
+}
+
+func (p *stubStreamingCardPlatform) getCard() *stubStreamingCard {
+	p.cardMu.Lock()
+	defer p.cardMu.Unlock()
+	return p.card
 }
 
 // stubStreamingCard is a minimal StreamingCard for tests.
-type stubStreamingCard struct{}
+type stubStreamingCard struct {
+	discarded atomic.Bool
+	finalized atomic.Bool
+}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
-func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                               { return false }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error {
+	c.finalized.Store(true)
+	return nil
+}
+func (c *stubStreamingCard) Discard(_ context.Context) error {
+	c.discarded.Store(true)
+	return nil
+}
+func (c *stubStreamingCard) Failed() bool { return false }
+
+func TestProcessInteractiveEvents_SilentReplyDiscardsStreamingCard(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "dingtalk:user-silent-stream-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-silent-stream-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-silent-stream-card"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-silent-stream-card", time.Now(), nil, nil, state.replyCtx)
+
+	card := p.getCard()
+	if card == nil || !card.discarded.Load() {
+		t.Fatal("silent turn did not discard its eager streaming card")
+	}
+	if card.finalized.Load() {
+		t.Fatal("engine bypassed the platform discard capability")
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("silent streaming-card turn emitted side messages: %v", sent)
+	}
+}
+
+func TestEngineStopDiscardsActiveStreamingCard(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "dingtalk:user-stop-stream-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stop-stream-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-stop-stream-card"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stop-stream-card", time.Now(), nil, nil, state.replyCtx)
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for !p.cardCreated.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("streaming card was not created before shutdown")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interactive turn did not exit after shutdown")
+	}
+
+	card := p.getCard()
+	if card == nil || !card.discarded.Load() {
+		t.Fatal("engine shutdown left its eager streaming card active")
+	}
+	if card.finalized.Load() {
+		t.Fatal("engine shutdown bypassed the platform discard capability")
+	}
+}
+
+func TestEngineStopDiscardsStreamingCardWhileWaitingForPermission(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "dingtalk:user-stop-permission-stream-card"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stop-permission-stream-card")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-stop-permission-stream-card"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stop-permission-stream-card", time.Now(), nil, nil, state.replyCtx)
+	}()
+	agentSession.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-stop-permission-stream-card",
+		ToolName:     "write_file",
+		ToolInput:    "/tmp/private",
+		ToolInputRaw: map[string]any{"path": "/tmp/private"},
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil && p.cardCreated.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not enter its permission wait with an active streaming card")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission wait did not exit after shutdown")
+	}
+
+	card := p.getCard()
+	if card == nil || !card.discarded.Load() {
+		t.Fatal("shutdown during permission wait left its streaming card active")
+	}
+	if card.finalized.Load() {
+		t.Fatal("shutdown during permission wait bypassed the platform discard capability")
+	}
+}
+
+func TestProcessInteractiveEvents_AbnormalExitDiscardsStreamingCard(t *testing.T) {
+	tests := []string{"event-error", "pending-send", "idle-timeout", "max-turn-time", "channel-closed"}
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "dingtalk:user-abnormal-" + name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-abnormal-" + name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-abnormal-" + name}
+			e.interactiveStates[sessionKey] = state
+
+			var sendDone <-chan error
+			switch name {
+			case "event-error":
+				agentSession.events <- Event{Type: EventError, Error: errors.New("private failure")}
+			case "pending-send":
+				failed := make(chan error, 1)
+				failed <- errors.New("prompt delivery failed")
+				sendDone = failed
+			case "idle-timeout":
+				e.SetEventIdleTimeout(20 * time.Millisecond)
+			case "max-turn-time":
+				e.SetEventIdleTimeout(0)
+				e.SetMaxTurnTime(20 * time.Millisecond)
+			case "channel-closed":
+				agentSession.events <- Event{Type: EventText, Content: "safe partial"}
+				_ = agentSession.Close()
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-abnormal-"+name, time.Now(), nil, sendDone, state.replyCtx)
+			}()
+			if name == "max-turn-time" {
+				deadline := time.Now().Add(2 * time.Second)
+				for !state.isStopped() {
+					if time.Now().After(deadline) {
+						t.Fatal("turn did not enter max-turn-time shutdown")
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				_ = agentSession.Close()
+			}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("abnormal turn did not exit")
+			}
+
+			card := p.getCard()
+			if card == nil || !card.discarded.Load() {
+				t.Fatalf("%s left its eager streaming card active", name)
+			}
+			if card.finalized.Load() {
+				t.Fatalf("%s bypassed the platform discard capability", name)
+			}
+		})
+	}
+}
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
@@ -13289,6 +15163,39 @@ func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T
 	for _, s := range sent {
 		if s == "🤔 Thinking..." {
 			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
+		}
+	}
+}
+
+func TestHandleMessage_RichModeKeepsNativeStreamingCardForNonRichPlatform(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich"})
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "must not be sent"})
+
+	e.handleMessage(p, &Message{
+		SessionKey: "dingtalk:user-rich-default",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	})
+
+	deadline := time.After(2 * time.Second)
+	for !p.cardCreated.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("native StreamingCardPlatform was disabled by the global rich-card default")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	for _, sent := range p.getSent() {
+		if sent == "must not be sent" {
+			t.Fatalf("instant reply was sent even though native streaming card started: %v", p.getSent())
 		}
 	}
 }
@@ -13582,7 +15489,7 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 
 	sess := newControllableSession("unsol-perm")
 	permRecorder := &permRecordingSession{
-		controllableAgentSession: *sess,
+		controllableAgentSession: sess,
 	}
 
 	sessions := e.sessions
@@ -13634,7 +15541,7 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 
 // permRecordingSession wraps controllableAgentSession and records permission responses.
 type permRecordingSession struct {
-	controllableAgentSession
+	*controllableAgentSession
 	mu             sync.Mutex
 	permCalls      int
 	lastPermResult PermissionResult
@@ -14266,7 +16173,7 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 }
 
 // TestCmdList_FilterExternalSessionsEnabled verifies that when
-// filter_external_sessions is enabled, only cc-connect-tracked sessions
+// filter_external_sessions is enabled, only cc-connect-next-tracked sessions
 // appear in /list.
 func TestCmdList_FilterExternalSessionsEnabled(t *testing.T) {
 	agentSessions := []AgentSessionInfo{
@@ -14347,7 +16254,7 @@ func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // setupFilterTestEngine creates a test Engine with 3 agent sessions, 2 tracked
-// by cc-connect and 1 external. Returns (engine, platform, userKey, agentSessions).
+// by cc-connect-next and 1 external. Returns (engine, platform, userKey, agentSessions).
 func setupFilterTestEngine(t *testing.T, filterEnabled bool) (*Engine, *stubPlatformEngine, string, []AgentSessionInfo) {
 	t.Helper()
 	agentSessions := []AgentSessionInfo{
@@ -14961,7 +16868,7 @@ func TestHandlePendingPermission_StalePermissionCallback_Dropped(t *testing.T) {
 
 // ─── Permission keyword tokenization (t-20260614-ayc85z) ────────────────
 // Group-chat platforms (wecom in particular) require the user to
-// @mention the bot for the message to reach cc-connect, so permission
+// @mention the bot for the message to reach cc-connect-next, so permission
 // replies arrive as "@bot 允许" / "允许 @bot" / etc. rather than the
 // bare keyword. The matchers must tolerate the surrounding mention
 // without losing word-boundary discipline (e.g. must NOT match
@@ -15016,8 +16923,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -15045,7 +16952,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {
@@ -15180,7 +17087,7 @@ func TestHandlePendingPermission_ApproveAllWithMention(t *testing.T) {
 }
 
 // ─── Audio / Video routing (t-20260615-cqjbk1) ────────────────────────
-// `cc-connect send --audio` / `--video` must reach AudioSender /
+// `cc-connect-next send --audio` / `--video` must reach AudioSender /
 // VideoSender — NOT SendFile. PR #1202 made the CLI flags exist but
 // silently routed clips through SendFile, defeating the
 // transcoding-and-render-as-native-bubble pipeline.

@@ -11,7 +11,7 @@ import (
 
 // prepareCmdForKill puts the spawned child into its own process group so that
 // the entire descendant tree can be terminated with a single signal aimed at
-// the negative PID. Without this, cc-connect can only signal the direct
+// the negative PID. Without this, cc-connect-next can only signal the direct
 // child (e.g. the `claude` CLI), leaving any grandchildren (MCP server
 // processes such as the Telegram bridge) as orphans that may spin at 100%
 // CPU when their parent disappears.

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	launchdLabel = "com.cc-connect.service"
+	launchdLabel = "com.cc-connect-next.service"
 )
 
 var runLaunchctl = func(args ...string) (string, error) {
@@ -59,7 +59,7 @@ func (m *launchdManager) Install(cfg Config) error {
 	// LaunchAgents path; root can still read but that is the user's own
 	// machine boundary. os.WriteFile only applies perm on create, so
 	// Chmod afterwards is required to harden reinstalls of files that
-	// pre-existed at 0644 from earlier cc-connect versions.
+	// pre-existed at 0644 from earlier cc-connect-next versions.
 	if err := os.WriteFile(plistPath, []byte(plist), 0600); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
@@ -301,6 +301,7 @@ func buildPlist(cfg Config) string {
 	if envPATH == "" {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
+	configPath := configPathFor(cfg)
 	envExtra := renderEnvExtraPlist(cfg.EnvExtra)
 	// User-supplied paths can legitimately contain XML-special characters
 	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
@@ -315,6 +316,8 @@ func buildPlist(cfg Config) string {
 	<string>%s</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>%s</string>
+		<string>--config</string>
 		<string>%s</string>
 	</array>
 	<key>WorkingDirectory</key>
@@ -348,6 +351,5 @@ func buildPlist(cfg Config) string {
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(configPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
 }
-

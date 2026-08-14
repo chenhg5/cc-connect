@@ -170,15 +170,14 @@ func (p *Platform) initCrypto(ctx context.Context, client *mautrix.Client) (*cry
 		return nil, fmt.Errorf("device ID not available from whoami")
 	}
 
-	homeDir, err := os.UserHomeDir()
+	dbPath, err := p.cryptoDatabasePath(client.DeviceID)
 	if err != nil {
-		return nil, fmt.Errorf("get home dir: %w", err)
+		return nil, fmt.Errorf("resolve crypto database path: %w", err)
 	}
-	cryptoDir := filepath.Join(homeDir, ".cc-connect")
+	cryptoDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(cryptoDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	dbPath := filepath.Join(cryptoDir, fmt.Sprintf("matrix-crypto-%s.db", client.DeviceID))
 
 	// Derive a stable pickle key from the access token
 	h := sha256.Sum256([]byte(p.accessToken))
@@ -186,6 +185,10 @@ func (p *Platform) initCrypto(ctx context.Context, client *mautrix.Client) (*cry
 	copy(pickleKey, h[:])
 
 	return p.tryInitCrypto(ctx, client, pickleKey, dbPath, false)
+}
+
+func (p *Platform) cryptoDatabasePath(deviceID id.DeviceID) (string, error) {
+	return p.persistencePath(fmt.Sprintf("matrix-crypto-%s.db", deviceID))
 }
 
 func (p *Platform) tryInitCrypto(ctx context.Context, client *mautrix.Client, pickleKey []byte, dbPath string, isRetry bool) (*cryptohelper.CryptoHelper, error) {

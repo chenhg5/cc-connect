@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestBodyFromItemList_Text(t *testing.T) {
@@ -411,7 +411,7 @@ func TestContextToken_PersistAndReload(t *testing.T) {
 		t.Errorf("after reload, user-bbb = %q, want %q", got, "token-B")
 	}
 
-	// 3. ReconstructReplyCtx (the cron / cc-connect send path) must succeed
+	// 3. ReconstructReplyCtx (the cron / cc-connect-next send path) must succeed
 	//    using the reloaded token.
 	rc, err := p2.ReconstructReplyCtx(sessionKeyPrefix + "user-aaa")
 	if err != nil {
@@ -442,7 +442,7 @@ func TestContextToken_LoadMissingFile(t *testing.T) {
 	}
 }
 
-// TestReconstructReplyCtx_MissingToken verifies the cron / cc-connect send
+// TestReconstructReplyCtx_MissingToken verifies the cron / cc-connect-next send
 // path returns the expected actionable error when no context_token has ever
 // been stored for a peer. This is the "user must message the bot first"
 // case that the original #1087 reporter hit.

@@ -15,7 +15,7 @@ import (
 
 const (
 	windowsTaskName   = ServiceName
-	windowsScriptName = "cc-connect-daemon.ps1"
+	windowsScriptName = "cc-connect-next-daemon.ps1"
 )
 
 var runPowerShell = func(script string) (string, error) {
@@ -51,7 +51,7 @@ func (m *schtasksManager) Install(cfg Config) error {
 	// 0644 has weak semantics on Windows; the file ACL is what matters.
 	// We still write 0600 so the file's POSIX bits do not advertise read
 	// access, and rely on the user's own profile ACLs for primary defense
-	// (the script lives under %USERPROFILE%\.cc-connect by default).
+	// (the script lives under %USERPROFILE%\.cc-connect-next by default).
 	// WriteFile only applies perm on create, so Chmod the existing file
 	// after writing to harden reinstalls of pre-existing 0644 scripts.
 	if err := os.WriteFile(scriptPath, []byte(buildWindowsTaskScript(cfg)), 0600); err != nil {
@@ -206,7 +206,7 @@ func buildWindowsTaskScript(cfg Config) string {
 	}
 	fmt.Fprintf(&sb, "Set-Location -LiteralPath %s\r\n", powerShellLiteral(cfg.WorkDir))
 	sb.WriteString("while ($true) {\r\n")
-	fmt.Fprintf(&sb, "  & %s\r\n", powerShellLiteral(cfg.BinaryPath))
+	fmt.Fprintf(&sb, "  & %s '--config' %s\r\n", powerShellLiteral(cfg.BinaryPath), powerShellLiteral(configPathFor(cfg)))
 	sb.WriteString("  $exitCode = $LASTEXITCODE\r\n")
 	sb.WriteString("  if ($exitCode -eq 0) { exit 0 }\r\n")
 	sb.WriteString("  Start-Sleep -Seconds 10\r\n")

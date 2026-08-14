@@ -2,12 +2,13 @@ package matrix
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -50,6 +51,25 @@ func TestNew_ValidConfig(t *testing.T) {
 	}
 	if plat.autoJoin != true {
 		t.Error("autoJoin should default to true")
+	}
+}
+
+func TestNew_UsesInjectedDataDirForPersistence(t *testing.T) {
+	dataDir := t.TempDir()
+	p, err := New(map[string]any{
+		"homeserver":   "https://matrix.org",
+		"access_token": "syt_test",
+		"cc_data_dir":  dataDir,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	got, err := p.(*Platform).persistencePath("matrix-crypto-DEVICE.db")
+	if err != nil {
+		t.Fatalf("persistencePath() error = %v", err)
+	}
+	if want := filepath.Join(dataDir, "matrix-crypto-DEVICE.db"); got != want {
+		t.Fatalf("persistencePath() = %q, want %q", got, want)
 	}
 }
 

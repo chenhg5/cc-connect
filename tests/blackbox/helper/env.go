@@ -1,6 +1,6 @@
 // Package helper provides test environment setup for blackbox tests.
 //
-// BlackboxEnv wraps a real cc-connect Engine, a real Agent (Claude Code,
+// BlackboxEnv wraps a real cc-connect-next Engine, a real Agent (Claude Code,
 // Codex, etc.), and a MockPlatform. Tests inject messages and assert on what
 // the platform receives — exactly what a real user would see.
 package helper
@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
-	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
+	"github.com/timmyagentic/cc-connect-next/core"
+	bbplatform "github.com/timmyagentic/cc-connect-next/tests/blackbox/platform"
 
 )
 
@@ -238,7 +238,7 @@ func (e *Env) WaitForMessageContaining(startIdx int, substr string, timeout time
 }
 
 // SessionKey returns the session key for the default user/chat, matching the
-// format cc-connect uses internally: "<platform>:<chat>:<user>".
+// format cc-connect-next uses internally: "<platform>:<chat>:<user>".
 func (e *Env) SessionKey() string {
 	return fmt.Sprintf("%s:%s:%s", e.Platform.Name(), DefaultChat, DefaultUser)
 }

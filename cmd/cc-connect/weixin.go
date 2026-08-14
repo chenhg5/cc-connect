@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/config"
+	"github.com/timmyagentic/cc-connect-next/config"
 )
 
 const (
@@ -149,7 +149,7 @@ func runWeixinSetup(args []string, requestedMode string) {
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: QR login failed: %v\n", err)
-			fmt.Fprintln(os.Stderr, "Tip: bind an existing token with: cc-connect weixin bind --token <token>")
+			fmt.Fprintln(os.Stderr, "Tip: bind an existing token with: cc-connect-next weixin bind --token <token>")
 			os.Exit(1)
 		}
 		outToken = res.BotToken
@@ -206,7 +206,7 @@ func runWeixinSetup(args []string, requestedMode string) {
 		fmt.Printf("   allow_from: %s\n", saveResult.AllowFrom)
 	}
 	fmt.Println()
-	fmt.Println("Next: run cc-connect (or restart the daemon) and send a message from WeChat to finish linking context_token.")
+	fmt.Println("Next: run cc-connect-next (or restart the daemon) and send a message from WeChat to finish linking context_token.")
 }
 
 func resolveWeixinSetupMode(requested, token string) (string, error) {
@@ -223,7 +223,7 @@ func resolveWeixinSetupMode(requested, token string) (string, error) {
 		return weixinSetupModeBind, nil
 	case weixinSetupModeNew:
 		if token != "" {
-			return "", errors.New("new/QR mode does not accept --token; use `cc-connect weixin bind --token ...`")
+			return "", errors.New("new/QR mode does not accept --token; use `cc-connect-next weixin bind --token ...`")
 		}
 		return weixinSetupModeNew, nil
 	default:
@@ -501,7 +501,7 @@ func weixinPollQRStatus(ctx context.Context, apiBase, qrKey, routeTag string, de
 func verifyWeixinToken(ctx context.Context, apiBase, token, routeTag string, debug bool) error {
 	base := strings.TrimRight(apiBase, "/") + "/"
 	u := strings.TrimRight(base, "/") + "/ilink/bot/getupdates"
-	body := []byte(`{"get_updates_buf":"","base_info":{"channel_version":"cc-connect-weixin-setup/1.0"}}`)
+	body := []byte(`{"get_updates_buf":"","base_info":{"channel_version":"cc-connect-next-weixin-setup/1.0"}}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -551,7 +551,7 @@ func randomWeixinUIN() string {
 }
 
 func printWeixinUsage() {
-	fmt.Println(`Usage: cc-connect weixin <command> [options]
+	fmt.Println(`Usage: cc-connect-next weixin <command> [options]
 
 Commands:
   setup   QR login when no --token; with --token => bind existing ilink bot token
@@ -574,7 +574,7 @@ Options:
   --debug                   Verbose HTTP logs
 
 Examples:
-  cc-connect weixin setup --project my-bot
-  cc-connect weixin bind --project my-bot --token eyJ...
-  cc-connect weixin setup --project my-bot --token eyJ...`)
+  cc-connect-next weixin setup --project my-bot
+  cc-connect-next weixin bind --project my-bot --token eyJ...
+  cc-connect-next weixin setup --project my-bot --token eyJ...`)
 }

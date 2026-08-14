@@ -16,7 +16,7 @@
 # Environment inputs (set by the Go caller via the shell invocation):
 #   CC_PROBE_WORKDIR        — project work_dir (required)
 #   CC_PROBE_OTHER_USERS    — space-separated list of other run_as_user
-#                             values configured in the same cc-connect
+#                             values configured in the same cc-connect-next
 #                             instance, for cross-user denial tests
 #   CC_PROBE_SUPERVISOR     — the supervisor Unix username (for denial test)
 

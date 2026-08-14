@@ -11,10 +11,9 @@ const zlib = require("zlib");
 
 const PACKAGE = require("./package.json");
 const VERSION = `v${PACKAGE.version}`;
-const NAME = "cc-connect";
+const NAME = "cc-connect-next";
 
-const GITHUB_REPO = "chenhg5/cc-connect";
-const GITEE_REPO = "cg33/cc-connect";
+const GITHUB_REPO = "timmyagentic/cc-connect-next";
 
 const PLATFORM_MAP = {
   darwin: "darwin",
@@ -44,7 +43,6 @@ function getPlatformInfo() {
 function getDownloadURLs(filename) {
   return [
     `https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${filename}`,
-    `https://gitee.com/${GITEE_REPO}/releases/download/${VERSION}/${filename}`,
   ];
 }
 
@@ -53,7 +51,7 @@ function fetch(url, redirects = 5) {
     if (redirects <= 0) return reject(new Error("Too many redirects"));
     const mod = url.startsWith("https") ? https : http;
     mod
-      .get(url, { headers: { "User-Agent": "cc-connect-npm" } }, (res) => {
+      .get(url, { headers: { "User-Agent": "cc-connect-next-npm" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           return resolve(fetch(res.headers.location, redirects - 1));
         }
@@ -73,16 +71,16 @@ function fetch(url, redirects = 5) {
 async function download(urls) {
   for (const url of urls) {
     try {
-      console.log(`[cc-connect] Downloading from ${url}`);
+      console.log(`[cc-connect-next] Downloading from ${url}`);
       const data = await fetch(url);
-      console.log(`[cc-connect] Downloaded ${(data.length / 1024 / 1024).toFixed(1)} MB`);
+      console.log(`[cc-connect-next] Downloaded ${(data.length / 1024 / 1024).toFixed(1)} MB`);
       return data;
     } catch (err) {
-      console.warn(`[cc-connect] Failed: ${err.message}, trying next source...`);
+      console.warn(`[cc-connect-next] Failed: ${err.message}, trying next source...`);
     }
   }
   throw new Error(
-    `[cc-connect] Could not download binary from any source.\n` +
+    `[cc-connect-next] Could not download binary from any source.\n` +
       `  Tried: ${urls.join(", ")}\n` +
       `  You can download manually from https://github.com/${GITHUB_REPO}/releases`
   );
@@ -153,7 +151,7 @@ function isNewerOrEqual(installed, expected) {
 
 async function main() {
   const { platform, arch, ext, filename } = getPlatformInfo();
-  console.log(`[cc-connect] Platform: ${platform}/${arch}`);
+  console.log(`[cc-connect-next] Platform: ${platform}/${arch}`);
 
   const binDir = path.join(__dirname, "bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -166,19 +164,19 @@ async function main() {
       const out = execSync(`"${binaryPath}" --version`, { encoding: "utf8", timeout: 5000 });
       const expectedVer = VERSION.slice(1); // remove leading "v"
       if (out.includes(expectedVer)) {
-        console.log(`[cc-connect] Binary ${VERSION} already installed, skipping.`);
+        console.log(`[cc-connect-next] Binary ${VERSION} already installed, skipping.`);
         return;
       }
       // Don't downgrade: if existing binary is newer, keep it
       const match = out.match(/(\d+\.\d+\.\d+[^\s]*)/);
       if (match && isNewerOrEqual(match[1], expectedVer)) {
-        console.log(`[cc-connect] Binary ${match[1]} is newer than ${VERSION}, skipping.`);
+        console.log(`[cc-connect-next] Binary ${match[1]} is newer than ${VERSION}, skipping.`);
         return;
       }
-      console.log(`[cc-connect] Existing binary is outdated, upgrading to ${VERSION}...`);
+      console.log(`[cc-connect-next] Existing binary is outdated, upgrading to ${VERSION}...`);
       fs.unlinkSync(binaryPath);
     } catch {
-      console.log(`[cc-connect] Replacing existing binary with ${VERSION}...`);
+      console.log(`[cc-connect-next] Replacing existing binary with ${VERSION}...`);
       fs.unlinkSync(binaryPath);
     }
   }
@@ -199,19 +197,19 @@ async function main() {
   if (platform === "darwin") {
     try {
       execSync(`xattr -d com.apple.quarantine "${binaryPath}"`, { stdio: "pipe" });
-      console.log(`[cc-connect] Removed macOS quarantine attribute`);
+      console.log(`[cc-connect-next] Removed macOS quarantine attribute`);
     } catch {
       // xattr fails if the attribute doesn't exist, which is fine
     }
   }
 
-  console.log(`[cc-connect] Installed to ${binaryPath}`);
+  console.log(`[cc-connect-next] Installed to ${binaryPath}`);
 }
 
 main().catch((err) => {
   console.error(err.message);
   console.error(
-    "[cc-connect] Installation failed. You can install manually:\n" +
+    "[cc-connect-next] Installation failed. You can install manually:\n" +
       `  https://github.com/${GITHUB_REPO}/releases/tag/${VERSION}`
   );
   process.exit(1);

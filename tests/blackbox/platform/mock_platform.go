@@ -1,7 +1,7 @@
 // Package platform provides the MockPlatform used in blackbox tests.
 //
 // MockPlatform implements core.Platform without connecting to any real IM
-// service. Tests inject messages via InjectMessage and verify cc-connect's
+// service. Tests inject messages via InjectMessage and verify cc-connect-next's
 // output via WaitForReply / GetSentMessages.
 package platform
 
@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
-// SentMessage captures a single outbound call from cc-connect to the platform.
+// SentMessage captures a single outbound call from cc-connect-next to the platform.
 type SentMessage struct {
 	Content  string
 	Card     *core.Card // non-nil when SendCard/ReplyCard was called
@@ -107,7 +107,7 @@ func (p *MockPlatform) SendFile(ctx context.Context, replyCtx any, file core.Fil
 
 // ── Message injection ────────────────────────────────────────────────────────
 
-// InjectMessage simulates a user sending a plain-text message to cc-connect.
+// InjectMessage simulates a user sending a plain-text message to cc-connect-next.
 // userID and chatID form the session key; each unique (userID, chatID) pair is
 // an independent session.
 func (p *MockPlatform) InjectMessage(userID, chatID, content string) {
@@ -141,7 +141,7 @@ func (p *MockPlatform) InjectMessageWithAttachments(
 // WaitForTurnComplete waits until the message stream has been "stable" —
 // no new messages — for at least idlePeriod, then returns all messages
 // received since startIdx. This is the right way to wait for a full agent
-// turn when cc-connect may send multiple messages per turn (thinking indicators,
+// turn when cc-connect-next may send multiple messages per turn (thinking indicators,
 // progress updates, then the final reply).
 //
 // A good idlePeriod for real agents is 3-5s; set timeout to your test deadline.

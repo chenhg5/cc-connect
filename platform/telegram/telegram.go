@@ -16,7 +16,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"

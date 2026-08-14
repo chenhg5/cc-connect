@@ -429,6 +429,20 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveCardModeDefaultsToRichAndAllowsLegacyOverride(t *testing.T) {
+	if got := EffectiveCardMode(&Config{}, &ProjectConfig{}); got != "rich" {
+		t.Fatalf("default card mode = %q, want rich", got)
+	}
+	legacy := "legacy"
+	if got := EffectiveCardMode(&Config{Display: DisplayConfig{CardMode: &legacy}}, &ProjectConfig{}); got != "legacy" {
+		t.Fatalf("explicit global card mode = %q, want legacy", got)
+	}
+	rich := "rich"
+	if got := EffectiveCardMode(&Config{Display: DisplayConfig{CardMode: &legacy}}, &ProjectConfig{Display: &DisplayConfig{CardMode: &rich}}); got != "rich" {
+		t.Fatalf("project card mode = %q, want rich", got)
+	}
+}
+
 func TestEffectiveHistoryMaxLen(t *testing.T) {
 	globalLen, projectLen, unlimited := 800, 1200, 0
 
@@ -537,7 +551,7 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	want := filepath.Join(dir, ".cc-connect")
+	want := filepath.Join(dir, ".cc-connect-next")
 	if cfg.DataDir != want {
 		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
 	}

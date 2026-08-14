@@ -42,6 +42,24 @@ func TestBuildUnit_EscapesEnvValue(t *testing.T) {
 	}
 }
 
+func TestBuildUnit_LaunchesExplicitConfigFromIndependentWorkDir(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath: `/opt/cc connect/cc%next`,
+		WorkDir:    `/srv/original project`,
+		ConfigPath: `/srv/migrated config/config.toml`,
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+	}
+	out := mgr.buildUnit(cfg)
+	if !strings.Contains(out, `ExecStart="/opt/cc connect/cc%%next" --config "/srv/migrated config/config.toml"`) {
+		t.Fatalf("unit does not pass the explicit migrated config safely:\n%s", out)
+	}
+	if !strings.Contains(out, `WorkingDirectory="/srv/original project"`) {
+		t.Fatalf("unit does not preserve the independent runtime work dir:\n%s", out)
+	}
+}
+
 func TestBuildUnit_DropsInvalidEnvName(t *testing.T) {
 	mgr := &systemdManager{system: false}
 	cfg := Config{
@@ -74,7 +92,7 @@ func TestBuildUnit_DropsEmptyValue(t *testing.T) {
 
 // TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
 // path: os.WriteFile would truncate-in-place and KEEP the old 0644
-// permissions of a unit file left over from earlier cc-connect
+// permissions of a unit file left over from earlier cc-connect-next
 // versions, leaving captured token values world-readable.
 func TestSystemdInstall_TightensExistingUnitFrom0644(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

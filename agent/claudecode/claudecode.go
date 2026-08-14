@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func init() {
@@ -59,11 +59,11 @@ type Agent struct {
 	proxyLocalURL  string              // local URL of the proxy
 	platformPrompt string              // platform-specific formatting instructions
 
-	// ccDataDir is injected by the cc-connect host (see buildAgentOptions
+	// ccDataDir is injected by the cc-connect-next host (see buildAgentOptions
 	// in cmd/cc-connect/main.go). It locates the global directory where
-	// we write the shared cc-connect system prompt file (issue #1376
+	// we write the shared cc-connect-next system prompt file (issue #1376
 	// workaround for Windows 8192-byte cmdline limit). The file at
-	// <ccDataDir>/agent-prompts/cc-connect-system.md is written once per
+	// <ccDataDir>/agent-prompts/cc-connect-next-system.md is written once per
 	// startup and shared across all sessions that don't need per-spawn
 	// customisation. Empty value falls back to os.TempDir.
 	ccDataDir string
@@ -106,7 +106,7 @@ var claudeProviderManagedEnvVars = map[string]struct{}{
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
 
 	// Provider-specific base URL env vars for thinking rewrite proxy routing.
-	// These are set by cc-connect when thinking override is needed for
+	// These are set by cc-connect-next when thinking override is needed for
 	// Bedrock/Vertex/Foundry providers that don't use base_url config.
 	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
 	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
@@ -235,10 +235,10 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	// Eagerly materialise the shared cc-connect-system.md at startup so
+	// Eagerly materialise the shared cc-connect-next-system.md at startup so
 	// the file exists on disk before the first spawn. claude reads it
 	// via --append-system-prompt-file; the lazy fallback in
-	// newClaudeSession still covers content drift (cc-connect upgrades)
+	// newClaudeSession still covers content drift (cc-connect-next upgrades)
 	// and the empty-ccDataDir corner case. Failure here is non-fatal —
 	// the next spawn will retry and surface the error then.
 	if _, err := ensureSharedSystemPromptFile(ccDataDir, core.AgentSystemPrompt()); err != nil {
@@ -786,7 +786,7 @@ func (a *Agent) GetMode() string {
 // agent instances created lazily by core.Engine.getOrCreateWorkspaceAgent.
 // Without this, workspace agents are constructed with a fresh opts map
 // that never contained run_as_user, silently dropping back to the legacy
-// supervisor-user spawn path — which is exactly the leak cc-connect#496
+// supervisor-user spawn path — which is exactly the leak from upstream cc-connect#496
 // is designed to prevent.
 func (a *Agent) GetRunAsUser() string {
 	a.mu.Lock()
@@ -825,7 +825,7 @@ func (a *Agent) GetRunAsEnv() []string {
 // propagate to every workspace agent. sessionEnv is excluded (runtime-only).
 //
 // run_as_user / run_as_env are also omitted because the engine has its own
-// dedicated propagation path via GetRunAsUser/GetRunAsEnv (see cc-connect#496).
+// dedicated propagation path via GetRunAsUser/GetRunAsEnv (see upstream cc-connect#496).
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()

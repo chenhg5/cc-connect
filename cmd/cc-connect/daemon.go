@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/daemon"
+	"github.com/timmyagentic/cc-connect-next/daemon"
 )
 
 func runDaemon(args []string) {
@@ -55,10 +55,9 @@ func daemonInstall(args []string) {
 		os.Exit(1)
 	}
 
-	configPath := cfg.WorkDir + "/config.toml"
-	if _, err := os.Stat(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
-		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+	if _, err := os.Stat(cfg.ConfigPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: config.toml not found at %s\n", cfg.ConfigPath)
+		fmt.Fprintf(os.Stderr, "  Use --config to point to the config file and --work-dir to preserve its runtime working directory\n")
 		os.Exit(1)
 	}
 
@@ -83,26 +82,28 @@ func daemonInstall(args []string) {
 		LogFile:     cfg.LogFile,
 		LogMaxSize:  cfg.LogMaxSize,
 		WorkDir:     cfg.WorkDir,
+		ConfigPath:  cfg.ConfigPath,
 		BinaryPath:  cfg.BinaryPath,
 		InstalledAt: daemon.NowISO(),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
 	}
 
-	fmt.Println("cc-connect daemon installed and started.")
+	fmt.Println("cc-connect-next daemon installed and started.")
 	fmt.Println()
 	fmt.Printf("  Platform:  %s\n", mgr.Platform())
 	fmt.Printf("  Binary:    %s\n", cfg.BinaryPath)
 	fmt.Printf("  WorkDir:   %s\n", cfg.WorkDir)
+	fmt.Printf("  Config:    %s\n", cfg.ConfigPath)
 	fmt.Printf("  Log:       %s\n", cfg.LogFile)
 	fmt.Printf("  LogMax:    %d MB\n", cfg.LogMaxSize/1024/1024)
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  cc-connect daemon status    - Check status")
-	fmt.Println("  cc-connect daemon logs -f   - Follow logs")
-	fmt.Println("  cc-connect daemon restart   - Restart")
-	fmt.Println("  cc-connect daemon stop      - Stop")
-	fmt.Println("  cc-connect daemon uninstall - Remove")
+	fmt.Println("  cc-connect-next daemon status    - Check status")
+	fmt.Println("  cc-connect-next daemon logs -f   - Follow logs")
+	fmt.Println("  cc-connect-next daemon restart   - Restart")
+	fmt.Println("  cc-connect-next daemon stop      - Stop")
+	fmt.Println("  cc-connect-next daemon uninstall - Remove")
 
 	// Check linger for user-mode systemd
 	if strings.Contains(mgr.Platform(), "user") {
@@ -110,7 +111,7 @@ func daemonInstall(args []string) {
 		if !enabled {
 			fmt.Println()
 			fmt.Println("⚠️  Warning: Linger is not enabled for this user.")
-			fmt.Println("   cc-connect will stop when your last login session ends (e.g., SSH disconnect).")
+			fmt.Println("   cc-connect-next will stop when your last login session ends (e.g., SSH disconnect).")
 			fmt.Println("   To keep it running persistently, run:")
 			fmt.Printf("     sudo loginctl enable-linger %s\n", user)
 		}
@@ -176,15 +177,18 @@ func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 			if err != nil {
 				return daemon.Config{}, false, err
 			}
-			cfg.WorkDir = filepath.Dir(value)
+			cfg.ConfigPath = value
 			i = next
 		case strings.HasPrefix(arg, "--config="):
-			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "--config="))
+			cfg.ConfigPath = strings.TrimPrefix(arg, "--config=")
 		case strings.HasPrefix(arg, "-config="):
-			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "-config="))
+			cfg.ConfigPath = strings.TrimPrefix(arg, "-config=")
 		default:
 			return daemon.Config{}, false, fmt.Errorf("unknown flag: %s", arg)
 		}
+	}
+	if cfg.WorkDir == "" && cfg.ConfigPath != "" {
+		cfg.WorkDir = filepath.Dir(cfg.ConfigPath)
 	}
 
 	return cfg, force, nil
@@ -229,7 +233,7 @@ func daemonUninstall() {
 	}
 
 	daemon.RemoveMeta()
-	fmt.Println("cc-connect daemon uninstalled.")
+	fmt.Println("cc-connect-next daemon uninstalled.")
 }
 
 // ── start / stop / restart ──────────────────────────────────
@@ -241,7 +245,7 @@ func daemonStart() {
 		fmt.Fprintf(os.Stderr, "Start failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon started.")
+	fmt.Println("cc-connect-next daemon started.")
 }
 
 func daemonStop() {
@@ -251,7 +255,7 @@ func daemonStop() {
 		fmt.Fprintf(os.Stderr, "Stop failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon stopped.")
+	fmt.Println("cc-connect-next daemon stopped.")
 }
 
 func daemonRestart(args []string) {
@@ -267,7 +271,10 @@ func daemonRestart(args []string) {
 
 	if force {
 		if meta, err := daemon.LoadMeta(); err == nil {
-			configPath := meta.WorkDir + "/config.toml"
+			configPath := meta.ConfigPath
+			if configPath == "" {
+				configPath = filepath.Join(meta.WorkDir, "config.toml")
+			}
 			KillExistingInstance(configPath)
 		}
 	}
@@ -276,14 +283,14 @@ func daemonRestart(args []string) {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon restarted.")
+	fmt.Println("cc-connect-next daemon restarted.")
 }
 
 func requireInstalled(mgr daemon.Manager) {
 	st, _ := mgr.Status()
 	if st == nil || !st.Installed {
 		fmt.Fprintln(os.Stderr, "Service is not installed. Run first:")
-		fmt.Fprintln(os.Stderr, "  cc-connect daemon install --work-dir /path/to/config-dir")
+		fmt.Fprintln(os.Stderr, "  cc-connect-next daemon install --config /path/to/config.toml --work-dir /path/to/runtime-dir")
 		os.Exit(1)
 	}
 }
@@ -298,14 +305,14 @@ func daemonStatus() {
 		os.Exit(1)
 	}
 
-	fmt.Println("cc-connect daemon status")
+	fmt.Println("cc-connect-next daemon status")
 	fmt.Println()
 
 	if !st.Installed {
 		fmt.Println("  Status:    Not installed")
 		fmt.Printf("  Platform:  %s\n", st.Platform)
 		fmt.Println()
-		fmt.Println("  Run: cc-connect daemon install")
+		fmt.Println("  Run: cc-connect-next daemon install")
 		return
 	}
 
@@ -322,6 +329,9 @@ func daemonStatus() {
 	if meta, err := daemon.LoadMeta(); err == nil {
 		fmt.Printf("  Log:       %s\n", meta.LogFile)
 		fmt.Printf("  WorkDir:   %s\n", meta.WorkDir)
+		if meta.ConfigPath != "" {
+			fmt.Printf("  Config:    %s\n", meta.ConfigPath)
+		}
 		if t, err := time.Parse(time.RFC3339, meta.InstalledAt); err == nil {
 			fmt.Printf("  Installed: %s\n", t.Format("2006-01-02 15:04:05"))
 		}
@@ -433,7 +443,7 @@ func mustManager() daemon.Manager {
 }
 
 func printDaemonUsage() {
-	fmt.Println(`Usage: cc-connect daemon <command> [flags]
+	fmt.Println(`Usage: cc-connect-next daemon <command> [flags]
 
 Commands:
   install     Install and start as system service
@@ -445,10 +455,11 @@ Commands:
   logs        View log output
 
 Install flags:
-  --config PATH         Path to config.toml (uses its parent as work dir)
-  --log-file PATH       Log file path (default: ~/.cc-connect/logs/cc-connect.log)
+  --config PATH         Path to config.toml (default: WORK_DIR/config.toml)
+  --log-file PATH       Log file path (default: ~/.cc-connect-next/logs/cc-connect-next.log)
   --log-max-size N      Max log file size in MB (default: 10)
-  --work-dir DIR        Directory containing config.toml (default: current dir)
+  --work-dir DIR        Runtime working directory for relative paths (default:
+                        config parent when --config is set, otherwise current dir)
   --force               Overwrite existing installation
   --no-capture-secrets  Do not capture config.toml ${ENV} placeholders into
                         the service file. Also enabled by setting

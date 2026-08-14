@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestHandleSessionEvent_AssistantMessage(t *testing.T) {
@@ -393,8 +393,8 @@ func TestSessionConfig_MatchesCopilotCreateResumeShape(t *testing.T) {
 	if cfg.SessionID != "sess-1" {
 		t.Fatalf("SessionID = %q, want sess-1", cfg.SessionID)
 	}
-	if cfg.ClientName != "cc-connect" {
-		t.Fatalf("ClientName = %q, want cc-connect", cfg.ClientName)
+	if cfg.ClientName != "cc-connect-next" {
+		t.Fatalf("ClientName = %q, want cc-connect-next", cfg.ClientName)
 	}
 	if cfg.Model != "gpt-5.2" {
 		t.Fatalf("Model = %q, want gpt-5.2", cfg.Model)
@@ -572,7 +572,7 @@ func TestSession_SendWithImages(t *testing.T) {
 
 	// Just ensure no panic and images dir gets created
 	_ = cs.Send("describe image", images, nil)
-	imgDir := tmpDir + "/.cc-connect/images"
+	imgDir := tmpDir + "/.cc-connect-next/images"
 	entries, _ := os.ReadDir(imgDir)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 image file, got %d", len(entries))

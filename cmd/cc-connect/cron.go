@@ -124,7 +124,7 @@ func runCronAdd(args []string) {
 		}
 	}
 
-	// Fallback to env vars (set by cc-connect when spawning agent)
+	// Fallback to env vars (set by cc-connect-next when spawning agent)
 	if project == "" {
 		project = os.Getenv("CC_PROJECT")
 	}
@@ -154,7 +154,7 @@ func runCronAdd(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -227,7 +227,7 @@ func runCronList(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -321,7 +321,7 @@ func runCronExec(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -365,7 +365,7 @@ func runCronDel(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -407,14 +407,14 @@ func runCronInfo(args []string) {
 
 	if id == "" {
 		fmt.Fprintln(os.Stderr, "Error: job ID is required")
-		fmt.Fprintln(os.Stderr, "Usage: cc-connect cron info <id> [field]")
-		fmt.Fprintln(os.Stderr, "Use 'cc-connect cron list' to see all task IDs.")
+		fmt.Fprintln(os.Stderr, "Usage: cc-connect-next cron info <id> [field]")
+		fmt.Fprintln(os.Stderr, "Use 'cc-connect-next cron list' to see all task IDs.")
 		os.Exit(1)
 	}
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -506,17 +506,17 @@ func runCronEdit(args []string) {
 
 	if id == "" {
 		fmt.Fprintln(os.Stderr, "Error: job ID is required")
-		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect-next cron edit --help' for usage.")
 		os.Exit(1)
 	}
 	if field == "" {
 		fmt.Fprintln(os.Stderr, "Error: field name is required")
-		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect-next cron edit --help' for usage.")
 		os.Exit(1)
 	}
 	if valueStr == "" {
 		fmt.Fprintln(os.Stderr, "Error: value is required")
-		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
+		fmt.Fprintln(os.Stderr, "Run 'cc-connect-next cron edit --help' for usage.")
 		os.Exit(1)
 	}
 
@@ -528,7 +528,7 @@ func runCronEdit(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: cc-connect-next is not running (socket not found: %s)\n", sockPath)
 		os.Exit(1)
 	}
 
@@ -564,7 +564,7 @@ func runCronEdit(args []string) {
 // "unknown or invalid field: <field>".
 //
 // `silent` was previously missing from the bool case here even though it's
-// documented as a bool in printCronEditUsage, so `cc-connect cron edit <id>
+// documented as a bool in printCronEditUsage, so `cc-connect-next cron edit <id>
 // silent true` failed with "unknown or invalid field: silent" — see the
 // regression test in cron_edit_test.go.
 func parseCronEditValue(field, valueStr string) (any, error) {
@@ -600,7 +600,7 @@ func apiPost(sockPath, path string, payload []byte) (*http.Response, error) {
 }
 
 func printCronUsage() {
-	fmt.Println(`Usage: cc-connect cron <command> [options]
+	fmt.Println(`Usage: cc-connect-next cron <command> [options]
 
 Commands:
   add       Create a new scheduled task
@@ -611,11 +611,11 @@ Commands:
                      (optionally filter to a single field)
   del <id>  Delete a scheduled task
 
-Run 'cc-connect cron <command> --help' for details.`)
+Run 'cc-connect-next cron <command> --help' for details.`)
 }
 
 func printCronAddUsage() {
-	fmt.Println(`Usage: cc-connect cron add [options] [<min> <hour> <day> <month> <weekday> <prompt>]
+	fmt.Println(`Usage: cc-connect-next cron add [options] [<min> <hour> <day> <month> <weekday> <prompt>]
 
 Create a new scheduled task (agent prompt or shell command).
 
@@ -629,32 +629,32 @@ Options:
       --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --silent               Suppress cron start notification
-      --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --data-dir <path>      Data directory (default: ~/.cc-connect-next)
   -h, --help                 Show this help
 
 Examples:
-  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
-  cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
-  cc-connect cron add --cron "0 9 * * *" --prompt "Daily standup reminder" --silent
-  cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
+  cc-connect-next cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
+  cc-connect-next cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
+  cc-connect-next cron add --cron "0 9 * * *" --prompt "Daily standup reminder" --silent
+  cc-connect-next cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
 }
 
 func printCronExecUsage() {
-	fmt.Println(`Usage: cc-connect cron exec <id> [options]
+	fmt.Println(`Usage: cc-connect-next cron exec <id> [options]
 
 Trigger an existing scheduled task immediately.
 
 Options:
-      --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --data-dir <path>      Data directory (default: ~/.cc-connect-next)
   -h, --help                 Show this help
 
 Example:
-  cc-connect cron exec abc123
-  cc-connect cron run abc123`)
+  cc-connect-next cron exec abc123
+  cc-connect-next cron run abc123`)
 }
 
 func printCronEditUsage() {
-	fmt.Println(`Usage: cc-connect cron edit <id> <field> <value> [options]
+	fmt.Println(`Usage: cc-connect-next cron edit <id> <field> <value> [options]
 
 Edit a specific field of an existing scheduled task.
 
@@ -680,13 +680,13 @@ Read-only Fields (cannot be edited):
   id, created_at, last_run, last_error
 
 Options:
-      --data-dir <path>  Data directory (default: ~/.cc-connect)
+      --data-dir <path>  Data directory (default: ~/.cc-connect-next)
   -h, --help             Show this help
 
 Examples:
-  cc-connect cron edit abc123 cron_expr "0 9 * * *"
-  cc-connect cron edit abc123 enabled false
-  cc-connect cron edit abc123 description "Daily standup reminder"
-  cc-connect cron edit abc123 timeout_mins 60
-  cc-connect cron edit abc123 mute true`)
+  cc-connect-next cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect-next cron edit abc123 enabled false
+  cc-connect-next cron edit abc123 description "Daily standup reminder"
+  cc-connect-next cron edit abc123 timeout_mins 60
+  cc-connect-next cron edit abc123 mute true`)
 }

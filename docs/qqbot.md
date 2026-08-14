@@ -1,8 +1,8 @@
 # QQ Bot 官方平台接入指南 / QQ Bot Official Platform Setup Guide
 
-cc-connect 通过 [QQ 官方机器人 API v2](https://bot.q.qq.com/wiki/) 连接 QQ，无需第三方适配器，无需公网 IP。
+cc-connect-next 通过 [QQ 官方机器人 API v2](https://bot.q.qq.com/wiki/) 连接 QQ，无需第三方适配器，无需公网 IP。
 
-cc-connect connects to QQ via the [official QQ Bot Platform API v2](https://bot.q.qq.com/wiki/). No third-party adapter needed, no public IP required.
+cc-connect-next connects to QQ via the [official QQ Bot Platform API v2](https://bot.q.qq.com/wiki/). No third-party adapter needed, no public IP required.
 
 ## 与 QQ (OneBot) 的区别 / Difference from QQ (OneBot)
 
@@ -18,7 +18,7 @@ cc-connect connects to QQ via the [official QQ Bot Platform API v2](https://bot.
 ## 架构 / Architecture
 
 ```
-QQ Open Platform ←WebSocket→ cc-connect ←→ Agent (Claude Code / etc.)
+QQ Open Platform ←WebSocket→ cc-connect-next ←→ Agent (Claude Code / etc.)
 ```
 
 ## 前置条件 / Prerequisites
@@ -45,7 +45,7 @@ QQ Open Platform ←WebSocket→ cc-connect ←→ Agent (Claude Code / etc.)
 3. 在 **开发 → 开发设置** 中获取 `AppID` 和 `AppSecret`
    Get `AppID` and `AppSecret` from **Development → Development Settings**
 
-### 2. 配置 cc-connect / Configure cc-connect
+### 2. 配置 cc-connect-next / Configure cc-connect-next
 
 在 `config.toml` 中添加 QQ Bot 平台 / Add QQ Bot platform to `config.toml`:
 
@@ -73,7 +73,7 @@ allow_from = "*"                 # 允许的用户 openid，"*" 表示所有 / A
 ### 3. 启动 / Start
 
 ```bash
-cc-connect
+cc-connect-next
 ```
 
 看到如下日志表示连接成功 / You should see:
@@ -126,8 +126,8 @@ One-on-one private messages are supported without @mention.
 - 检查机器人是否已上线（未上线只能使用沙箱）/ Check if the bot is published (unpublished bots can only use sandbox)
 
 **Q: 断线重连？/ Reconnection?**
-- cc-connect 内置自动重连机制，断线后会自动尝试恢复（最多 30 次）
-- cc-connect has built-in automatic reconnection with resume support (up to 30 attempts)
+- cc-connect-next 内置自动重连机制，断线后会自动尝试恢复（最多 30 次）
+- cc-connect-next has built-in automatic reconnection with resume support (up to 30 attempts)
 
 ## 沙箱环境 / Sandbox
 

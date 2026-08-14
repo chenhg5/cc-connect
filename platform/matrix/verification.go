@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"maunium.net/go/mautrix"
@@ -282,11 +281,7 @@ func (p *Platform) crossSigningSeedsPath() (string, error) {
 	if client == nil || client.DeviceID == "" {
 		return "", fmt.Errorf("matrix: device ID not available")
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
-	}
-	return filepath.Join(homeDir, ".cc-connect", fmt.Sprintf("matrix-cross-signing-%s.json", client.DeviceID)), nil
+	return p.persistencePath(fmt.Sprintf("matrix-cross-signing-%s.json", client.DeviceID))
 }
 
 // setupCrossSigning bootstraps cross-signing for the bot's own device.

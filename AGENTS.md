@@ -272,6 +272,6 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_copilot`, `no_cursor`
 3. Register in `init()`: `core.RegisterAgent("newagent", factory)`
 4. Create `cmd/cc-connect/plugin_agent_newagent.go` with `//go:build !no_newagent` tag
 5. Add `newagent` to `ALL_AGENTS` in `Makefile`
-6. Optionally implement `AgentDoctorInfo` for `cc-connect doctor` support
+6. Optionally implement `AgentDoctorInfo` for `cc-connect-next doctor` support
 7. Add config example in `config.example.toml`
 8. Add unit tests

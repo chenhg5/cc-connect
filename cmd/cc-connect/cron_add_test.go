@@ -8,10 +8,10 @@ import (
 )
 
 // TestPrintCronAddUsage_DocumentsSilent is a help-text guard for the
-// `cc-connect cron add --silent` flag. The flag is parsed in runCronAdd
+// `cc-connect-next cron add --silent` flag. The flag is parsed in runCronAdd
 // (cmd/cc-connect/cron.go) and sets body["silent"] = true on the /cron/add
 // request; if printCronAddUsage ever drifts and stops mentioning it, users
-// who run `cc-connect cron add --help` will not discover the feature even
+// who run `cc-connect-next cron add --help` will not discover the feature even
 // though it still works.
 //
 // This complements TestParseCronEditValue (cron_edit_test.go), which guards
@@ -44,7 +44,7 @@ func TestPrintCronAddUsage_DocumentsSilent(t *testing.T) {
 	if !strings.Contains(help, "Suppress cron start notification") {
 		t.Errorf("printCronAddUsage does not describe --silent; got:\n%s", help)
 	}
-	if !strings.Contains(help, "cc-connect cron add --cron \"0 9 * * *\" --prompt \"Daily standup reminder\" --silent") {
+	if !strings.Contains(help, "cc-connect-next cron add --cron \"0 9 * * *\" --prompt \"Daily standup reminder\" --silent") {
 		t.Errorf("printCronAddUsage does not include --silent example; got:\n%s", help)
 	}
 }

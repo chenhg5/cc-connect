@@ -58,7 +58,7 @@ The Slack platform was added in commit `eaec71f` with basic functionality:
 ### --continue on First Connection (hasConnectedOnce)
 - On first session creation after engine startup, always uses `--continue`
 - Picks up most recent CLI session regardless of what's stored in session manager
-- Bridges direct CLI usage and cc-connect sessions
+- Bridges direct CLI usage and cc-connect-next sessions
 - `hasConnectedOnce` atomic.Bool prevents subsequent connections from using --continue
 
 ## Current Configuration Options

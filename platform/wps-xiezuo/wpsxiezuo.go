@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 	"github.com/gorilla/websocket"
 )
 
@@ -1088,7 +1088,7 @@ func cleanReplyContent(content string) string {
 //     whitespace inside a block where the markdown renderer preserves
 //     content verbatim, so visually nothing changes).
 //
-// We deliberately do not normalize "\r\n" → "\n" first; cc-connect engine
+// We deliberately do not normalize "\r\n" → "\n" first; cc-connect-next engine
 // emits Unix newlines, and forcing the transform on already-converted
 // "  \n" would over-indent (which is also visually benign but pointless).
 func applyWPSLineBreaks(content string) string {

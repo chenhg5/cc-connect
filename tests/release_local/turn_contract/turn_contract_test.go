@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 type turnRecord struct {
@@ -828,7 +828,7 @@ func TestDisplayVisibilityConfigurationMatrix(t *testing.T) {
 	}
 }
 
-func TestRichCardModeKeepsToolStepsAndFinalMetadataInOneCard(t *testing.T) {
+func TestRichCardModeKeepsAnonymousProgressAndFinalAnswerInOneCard(t *testing.T) {
 	agent := newTurnAgent()
 	agent.model = "glm-5.1"
 	agent.workDir = "/tmp/release-agent"
@@ -864,9 +864,14 @@ func TestRichCardModeKeepsToolStepsAndFinalMetadataInOneCard(t *testing.T) {
 		t.Fatalf("rich lifecycle = texts:%#v starts:%#v updates:%#v deletes:%#v, want one editable rich card", texts, starts, updates, deletes)
 	}
 	final := updates[len(updates)-1]
-	for _, want := range []string{"status=done", "step=Bash", "rich output", "markdown=rich final", "[ctx: ~14%] · glm-5.1"} {
+	for _, want := range []string{"status=done", "step= summary=", "markdown=rich final"} {
 		if !strings.Contains(final, want) {
 			t.Fatalf("final rich card = %q, want contains %q", final, want)
+		}
+	}
+	for _, forbidden := range []string{"Bash", "echo rich", "rich output", "[ctx:", "glm-5.1"} {
+		if strings.Contains(final, forbidden) {
+			t.Fatalf("final rich card leaked private detail %q: %q", forbidden, final)
 		}
 	}
 }

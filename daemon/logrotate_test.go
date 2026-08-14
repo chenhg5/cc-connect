@@ -54,7 +54,7 @@ func TestMetaSaveLoad(t *testing.T) {
 		LogMaxSize:    1024,
 		LogMaxBackups: 3,
 		WorkDir:       "/tmp",
-		BinaryPath:    "/usr/local/bin/cc-connect",
+		BinaryPath:    "/usr/local/bin/cc-connect-next",
 		InstalledAt:  NowISO(),
 	}
 

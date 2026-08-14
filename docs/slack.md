@@ -1,11 +1,11 @@
 # Slack Setup Guide
 
-This guide walks you through connecting **cc-connect** to Slack, so you can chat with your local Claude Code via a Slack bot.
+This guide walks you through connecting **cc-connect-next** to Slack, so you can chat with your local Claude Code via a Slack bot.
 
 ## Prerequisites
 
 - A Slack workspace account (with permission to create apps)
-- A machine that can run cc-connect (no public IP needed)
+- A machine that can run cc-connect-next (no public IP needed)
 - Claude Code installed and configured
 
 > 💡 **Advantage**: Uses Socket Mode (WebSocket) — no public IP, no domain, no reverse proxy needed.
@@ -26,7 +26,7 @@ Go to [Slack API](https://api.slack.com/apps) and sign in with your Slack accoun
 
 | Field | Suggested Value |
 |-------|----------------|
-| App Name | `cc-connect` |
+| App Name | `cc-connect-next` |
 | Development Slack Workspace | Select your workspace |
 
 4. Click "Create App"
@@ -46,7 +46,7 @@ In the left sidebar, click "App Home".
 
 | Field | Suggested Value |
 |-------|----------------|
-| Display Name (Bot Name) | `cc-connect` |
+| Display Name (Bot Name) | `cc-connect-next` |
 | Default Username | `cc_connect` |
 
 ### 2.3 Always Show Bot Online
@@ -91,7 +91,7 @@ In the left sidebar, click "Socket Mode".
 
 ### 4.3 Generate App-Level Token
 
-1. Enter a token name (e.g. `cc-connect-socket-token`)
+1. Enter a token name (e.g. `cc-connect-next-socket-token`)
 2. Add the following scope:
    - `connections:write` — establish WebSocket connections
 3. Click "Generate"
@@ -152,7 +152,7 @@ Bot User OAuth Token: xoxb-xxxxxxx...
 
 ---
 
-## Step 7: Configure cc-connect
+## Step 7: Configure cc-connect-next
 
 Add both tokens to your `config.toml`:
 
@@ -184,14 +184,14 @@ app_token = "xapp-xxxxxxx..."
 
 ---
 
-## Step 8: Start cc-connect
+## Step 8: Start cc-connect-next
 
 ### 8.1 Launch
 
 ```bash
-cc-connect
+cc-connect-next
 # Or specify a config file
-cc-connect -config /path/to/config.toml
+cc-connect-next -config /path/to/config.toml
 ```
 
 ### 8.2 Verify Connection
@@ -201,7 +201,7 @@ You should see logs like:
 ```
 level=INFO msg="slack: connected"
 level=INFO msg="platform started" project=my-project platform=slack
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="cc-connect-next is running" projects=1
 ```
 
 ---
@@ -227,9 +227,9 @@ level=INFO msg="cc-connect is running" projects=1
 ```
 User: @cc_connect Help me analyze the current project structure
 
-cc-connect: 🤔 Thinking...
-cc-connect: 🔧 Tool: Bash(ls -la)
-cc-connect: Here's the project structure...
+cc-connect-next: 🤔 Thinking...
+cc-connect-next: 🔧 Tool: Bash(ls -la)
+cc-connect-next: Here's the project structure...
 ```
 
 ---
@@ -249,7 +249,7 @@ cc-connect: Here's the project structure...
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                         │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► Your Project Code    │
+│   cc-connect-next ◄──► Claude Code CLI ◄──► Your Project Code    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```

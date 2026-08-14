@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func envSliceToMap(env []string) map[string]string {
@@ -20,7 +20,7 @@ func envSliceToMap(env []string) map[string]string {
 }
 
 // TestKimi_SessionResume_PreservesActiveProvider is a regression test for the
-// multi-provider session resume bug (PR #1356). After a cc-connect process
+// multi-provider session resume bug (PR #1356). After a cc-connect-next process
 // restart, calling SetActiveProvider with the name persisted on the session
 // must restore providerEnv (KIMI_API_KEY + custom env) so that the next
 // --resume spawn does not silently use the wrong provider.

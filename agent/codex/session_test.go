@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestNormalizeReasoningEffort_RejectsMinimal(t *testing.T) {
@@ -190,7 +190,7 @@ func TestBuildExecArgs_ModeMapping(t *testing.T) {
 //
 //	error: unexpected argument '--sandbox' found
 //
-// silently destroying the user's session on cc-connect restart / idle reset.
+// silently destroying the user's session on cc-connect-next restart / idle reset.
 func TestBuildExecArgs_ResumeUsesSandboxModeConfigOverride(t *testing.T) {
 	tests := []struct {
 		mode            string
@@ -422,7 +422,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	if imagePath == "" {
 		t.Fatalf("args missing --image: %v", args)
 	}
-	if !strings.HasPrefix(imagePath, filepath.Join(workDir, ".cc-connect", "images")+string(filepath.Separator)) {
+	if !strings.HasPrefix(imagePath, filepath.Join(workDir, ".cc-connect-next", "images")+string(filepath.Separator)) {
 		t.Fatalf("image path = %q, want under work dir image cache", imagePath)
 	}
 	data, err := os.ReadFile(imagePath)

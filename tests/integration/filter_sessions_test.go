@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 // skipUnlessBinaryAvailable skips if the agent binary is not in PATH.
@@ -115,7 +115,7 @@ func writeClaudeCodeSessionFixture(t *testing.T, projectDir, sessionID, userProm
 }
 
 // setupFilterSessionTest creates a real agent with fixture session files and
-// wires it into a real Engine. Some sessions are tracked by cc-connect (via
+// wires it into a real Engine. Some sessions are tracked by cc-connect-next (via
 // SessionManager), others are "external" (exist on disk but not tracked).
 // This tests the full pipeline: real agent adapter → ListSessions → Engine filtering.
 func setupFilterSessionTest(t *testing.T, agentType string, filterEnabled bool) (
