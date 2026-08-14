@@ -5018,6 +5018,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if err != nil {
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				sp.discard()
+				discardStreamingCard()
 				if stopTyping != nil {
 					stopTyping()
 					stopTyping = nil
@@ -5045,6 +5046,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			discardStreamingCard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
@@ -5065,6 +5067,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			discardStreamingCard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -5119,6 +5122,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				discardSilentTurn()
 				return
 			}
+			sp.discard()
+			discardStreamingCard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
@@ -5135,6 +5140,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		if state.isStopped() {
 			sp.discard()
+			discardStreamingCard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
@@ -5901,12 +5907,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyStart := time.Now()
 
 			// --- StreamingCard path ---
-			if streamCard != nil && !streamCard.Failed() && !isSilent {
+			if streamCard != nil && streamCard.Failed() {
+				discardStreamingCard()
+			}
+			if streamCard != nil && !isSilent {
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Build final card content with full response
 				finalContent := buildCardContent(cardThinkingText, cardToolCalls, fullResponse)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
+					discardStreamingCard()
 					// Fallback: send the response as a normal message
 					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
@@ -6234,6 +6244,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			discardStreamingCard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -6286,6 +6297,7 @@ channelClosed:
 	state.mu.Lock()
 	closedPlatform := state.platform
 	state.mu.Unlock()
+	discardStreamingCard()
 	if len(textParts) == 0 {
 		if !markRichCardFailed(closedPlatform, cardMessageID) && usesRichCard(closedPlatform) {
 			sendGenericRichFailure(closedPlatform, replyCtx, cardMessageID)

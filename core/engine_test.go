@@ -14888,6 +14888,68 @@ func TestEngineStopDiscardsStreamingCardWhileWaitingForPermission(t *testing.T) 
 	}
 }
 
+func TestProcessInteractiveEvents_AbnormalExitDiscardsStreamingCard(t *testing.T) {
+	tests := []string{"event-error", "pending-send", "idle-timeout", "max-turn-time", "channel-closed"}
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "dingtalk:user-abnormal-" + name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-abnormal-" + name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-abnormal-" + name}
+			e.interactiveStates[sessionKey] = state
+
+			var sendDone <-chan error
+			switch name {
+			case "event-error":
+				agentSession.events <- Event{Type: EventError, Error: errors.New("private failure")}
+			case "pending-send":
+				failed := make(chan error, 1)
+				failed <- errors.New("prompt delivery failed")
+				sendDone = failed
+			case "idle-timeout":
+				e.SetEventIdleTimeout(20 * time.Millisecond)
+			case "max-turn-time":
+				e.SetEventIdleTimeout(0)
+				e.SetMaxTurnTime(20 * time.Millisecond)
+			case "channel-closed":
+				agentSession.events <- Event{Type: EventText, Content: "safe partial"}
+				_ = agentSession.Close()
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-abnormal-"+name, time.Now(), nil, sendDone, state.replyCtx)
+			}()
+			if name == "max-turn-time" {
+				deadline := time.Now().Add(2 * time.Second)
+				for !state.isStopped() {
+					if time.Now().After(deadline) {
+						t.Fatal("turn did not enter max-turn-time shutdown")
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				_ = agentSession.Close()
+			}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("abnormal turn did not exit")
+			}
+
+			card := p.getCard()
+			if card == nil || !card.discarded.Load() {
+				t.Fatalf("%s left its eager streaming card active", name)
+			}
+			if card.finalized.Load() {
+				t.Fatalf("%s bypassed the platform discard capability", name)
+			}
+		})
+	}
+}
+
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	agentSession := newResultAgentSession("agent reply")
