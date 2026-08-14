@@ -5019,9 +5019,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var deferredEvent Event
 	hasDeferredEvent := false
 	channelClosedPending := false
+	idleTimeoutPending := false
 	for {
 		if channelClosedPending {
 			goto channelClosed
+		}
+		if idleTimeoutPending {
+			goto idleTimedOut
 		}
 		var event Event
 		var ok bool
@@ -5095,25 +5099,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				continue
 			case <-idleCh:
-				slog.Error("agent session idle timeout: no events for too long, killing session",
-					"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
-				discardStreamingCard()
-				state.mu.Lock()
-				state.eventsNeedResync = true
-				p := state.platform
-				state.mu.Unlock()
-				safePartial := persistVisibleRichPartial(p)
-				if !markRichCardFailed(p, cardMessageID, safePartial) {
-					if usesRichCard(p) {
-						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-					} else {
-						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+				// An idle timeout is also a semantic assistant boundary. Render any
+				// safe buffered candidate through the ordinary text path before the
+				// failure state; an exact private footer remains omitted by Flush.
+				if turnDisplay.HideAgentFooter {
+					if tail := agentFooterFilter.Flush(); tail != "" {
+						event = Event{Type: EventText, Content: tail}
+						textAlreadyFiltered = true
+						idleTimeoutPending = true
+						break
 					}
 				}
-				e.cleanupInteractiveState(sessionKey, state)
-				return
+				goto idleTimedOut
 			case <-turnDeadlineCh:
 				elapsed := time.Since(turnStart)
 				slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
@@ -6401,6 +6398,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			return
 		}
+	}
+
+idleTimedOut:
+	{
+		slog.Error("agent session idle timeout: no events for too long, killing session",
+			"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
+		cp.Finalize(ProgressCardStateFailed)
+		sp.discard()
+		discardStreamingCard()
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		timedOutPlatform := state.platform
+		state.mu.Unlock()
+		safePartial := persistVisibleRichPartial(timedOutPlatform)
+		if !markRichCardFailed(timedOutPlatform, cardMessageID, safePartial) {
+			if usesRichCard(timedOutPlatform) {
+				sendGenericRichFailure(timedOutPlatform, replyCtx, cardMessageID, safePartial)
+			} else {
+				e.send(timedOutPlatform, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			}
+		}
+		e.cleanupInteractiveState(sessionKey, state)
+		return
 	}
 
 channelClosed:

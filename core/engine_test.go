@@ -2942,6 +2942,38 @@ func TestProcessInteractiveEvents_RichCardChannelCloseFlushesBufferedFooterCandi
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardIdleTimeoutFlushesBufferedFooterCandidate(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+	e.SetEventIdleTimeout(50 * time.Millisecond)
+
+	sessionKey := "feishu:user-rich-buffered-timeout"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-buffered-timeout")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-buffered-timeout"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Done"}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-buffered-timeout", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	if len(streams) == 0 || streams[len(streams)-1] != "Done" {
+		t.Fatalf("buffered partial was not streamed before idle-timeout handling: %v", streams)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") || !strings.Contains(updates[len(updates)-1], "Done") {
+		t.Fatalf("failed rich card lost the buffered partial: %v", updates)
+	}
+	if strings.Contains(strings.Join(updates, "\n"), "status=done") {
+		t.Fatalf("idle timeout was rendered as a completed answer: %v", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != "Done" {
+		t.Fatalf("buffered partial was not preserved in history: %+v", history)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardChannelCloseOmitsUnrenderedPartialAnswer(t *testing.T) {
 	tests := []struct {
 		name        string
