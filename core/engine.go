@@ -6014,23 +6014,61 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Keep the entire answer on the one quoted lifecycle card. Feishu's
 				// renderer converts tables beyond its per-card component budget to
 				// fenced text, avoiding extra unquoted overflow cards.
+				finalBody := resolveRichCardMarkdown(fullResponse, true)
+				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				sendAnswerFallback := func() bool {
-					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+					if abortIfTerminalDeliveryCanceled() {
+						return false
+					}
+					// If the initial lifecycle card could not be created at all, retain
+					// the legacy plain-message degradation path. There is no prior card
+					// to replace or clean up in this case.
+					if cardMessageID == nil {
+						for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+							if abortIfTerminalDeliveryCanceled() {
+								return false
+							}
+							if err := sendWorkspaceWithContextError(terminalDeliveryCtx, p, replyCtx, chunk); err != nil {
+								slog.Error("failed to send rich-card unavailable fallback answer", "platform", p.Name(), "error", err)
+								return false
+							}
+						}
+						return true
+					}
+					starter, canStart := p.(PreviewStarter)
+					_, canDelete := p.(PreviewCleaner)
+					if !canStart || !canDelete {
+						slog.Error("rich card: cannot deliver a recall-safe fallback card", "platform", p.Name(), "can_start", canStart, "can_delete", canDelete)
+						abortRichCardCompletion(false)
+						return false
+					}
+					if err := e.waitOutgoingWithContext(terminalDeliveryCtx, p); err != nil {
+						slog.Debug("rich card: fallback card rate-limit wait canceled", "platform", p.Name(), "error", err)
+						abortIfTerminalDeliveryCanceled()
+						return false
+					}
+					previousHandle := cardMessageID
+					replacementHandle, err := starter.SendPreviewStart(terminalDeliveryCtx, replyCtx, finalCard)
+					if err != nil || replacementHandle == nil {
 						if abortIfTerminalDeliveryCanceled() {
 							return false
 						}
-						if err := sendWorkspaceWithContextError(terminalDeliveryCtx, p, replyCtx, chunk); err != nil {
-							slog.Error("failed to send rich card fallback answer", "error", err)
-							return false
-						}
-						if abortIfTerminalDeliveryCanceled() {
-							return false
-						}
+						slog.Error("rich card: failed to send recall-safe fallback card", "platform", p.Name(), "error", err, "handle_nil", replacementHandle == nil)
+						abortRichCardCompletion(false)
+						return false
+					}
+					// Track the replacement before any further work. If recall won the
+					// API race and the platform still created the message, the next
+					// cancellation check can now delete that exact card as well.
+					cardMessageID = replacementHandle
+					if previousHandle != nil {
+						removeRichCardForFallback(p, previousHandle)
+					}
+					if abortIfTerminalDeliveryCanceled() {
+						return false
 					}
 					return true
 				}
-				finalBody := resolveRichCardMarkdown(fullResponse, true)
-				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
 					// Re-check after completion bookkeeping. This window is intentionally
 					// tiny, but an explicit recall must still prevent a final card patch
@@ -6053,11 +6091,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(terminalDeliveryCtx, cardMessageID, finalCard); err != nil {
-							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
+							slog.Debug("rich card: final update failed, falling back to a replacement card", "platform", p.Name(), "error", err)
 							if abortIfTerminalDeliveryCanceled() {
 								return
 							}
-							removeRichCardForFallback(p, cardMessageID)
 							if !sendAnswerFallback() {
 								return
 							}
@@ -6066,7 +6103,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						if abortIfTerminalDeliveryCanceled() {
 							return
 						}
-						removeRichCardForFallback(p, cardMessageID)
 						if !sendAnswerFallback() {
 							return
 						}

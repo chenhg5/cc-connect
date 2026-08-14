@@ -229,20 +229,26 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           npm_tag="${NPM_DIST_TAG}"
+          safe_version="$(printf '%s' "$version" | tr -c '[:alnum:]-' '-')"
+          staging_tag="release-${safe_version}-${GITHUB_RUN_ID}"
           current_tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
           tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"
+          publish_tag="$npm_tag"
+          if [ "$tag_relation" = "older" ]; then
+            publish_tag="$staging_tag"
+          fi
           if npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
             echo "cc-connect-next@${version} is already published"
           else
-            publish_tag="$npm_tag"
-            if [ "$tag_relation" = "older" ]; then
-              safe_version="$(printf '%s' "$version" | tr -c '[:alnum:]-' '-')"
-              publish_tag="release-${safe_version}-${GITHUB_RUN_ID}"
-            fi
             npm publish --access public --tag "$publish_tag" --provenance
-            if [ "$publish_tag" != "$npm_tag" ]; then
-              npm dist-tag rm cc-connect-next "$publish_tag" --registry=https://registry.npmjs.org
-            fi
+          fi
+          staging_tagged="$(
+            npm view cc-connect-next dist-tags --json --registry=https://registry.npmjs.org |
+              node -e 'const fs = require("node:fs"); const tags = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(tags[process.argv[1]] || "");' "$staging_tag"
+          )"
+          if [ -n "$staging_tagged" ]; then
+            test "$staging_tagged" = "$version"
+            npm dist-tag rm cc-connect-next "$staging_tag" --registry=https://registry.npmjs.org
           fi
           current_tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
           tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"

@@ -70,10 +70,30 @@ test("release reruns preserve newer npm tags and GitHub Latest", () => {
   );
   assert.match(
     workflow,
-    /if \[ "\$tag_relation" = "older" \]; then[\s\S]*publish_tag="release-/
+    /if \[ "\$tag_relation" = "older" \]; then[\s\S]*publish_tag="\$staging_tag"/
   );
   assert.match(
     workflow,
     /case "\$latest_relation" in[\s\S]*older\)[\s\S]*latest_flag="--latest=false"/
   );
+});
+
+test("idempotent npm reruns remove stale staging tags", () => {
+  const stagingAssignment = workflow.indexOf(
+    'staging_tag="release-${safe_version}-${GITHUB_RUN_ID}"'
+  );
+  const publishedCheck = workflow.indexOf(
+    'if npm view "cc-connect-next@${version}" version'
+  );
+  const stagingLookup = workflow.indexOf(
+    "npm view cc-connect-next dist-tags --json"
+  );
+  const stagingRemoval = workflow.indexOf(
+    'npm dist-tag rm cc-connect-next "$staging_tag"'
+  );
+
+  assert.ok(stagingAssignment >= 0, "workflow must derive a stable per-run staging tag");
+  assert.ok(publishedCheck > stagingAssignment, "staging tag must exist before the idempotent published check");
+  assert.ok(stagingLookup > publishedCheck, "reruns must query staging tags after reuse or publish");
+  assert.ok(stagingRemoval > stagingLookup, "reruns must remove a stale staging tag when present");
 });
