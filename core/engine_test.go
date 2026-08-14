@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3583,11 +3585,13 @@ func TestProcessInteractiveEvents_RichCardKeepsAnsweringPhaseVisibleBeforeDone(t
 
 func TestProcessInteractiveEvents_RichCardAnsweringDwellHonorsTurnCancellation(t *testing.T) {
 	tests := []struct {
-		name   string
-		cancel func(*interactiveState, string)
+		name          string
+		discardAnswer bool
+		cancel        func(*interactiveState, string)
 	}{
 		{
-			name: "recalled trigger",
+			name:          "recalled trigger",
+			discardAnswer: true,
 			cancel: func(state *interactiveState, msgID string) {
 				state.cancelTurnSilently(msgID)
 			},
@@ -3605,14 +3609,35 @@ func TestProcessInteractiveEvents_RichCardAnsweringDwellHonorsTurnCancellation(t
 			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 			p := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: 200 * time.Millisecond}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			var sentHooks atomic.Int32
+			hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Hook-Event") == string(HookEventMessageSent) {
+					sentHooks.Add(1)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer hookServer.Close()
+			synchronous := false
+			e.hooks = NewHookManager("test", []HookConfig{{
+				Event: string(HookEventMessageSent),
+				Type:  string(HookHandlerHTTP),
+				URL:   hookServer.URL,
+				Async: &synchronous,
+			}}, "", "", "")
 			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
 			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
 
 			sessionKey := "feishu:user-rich-answer-dwell-cancel-" + tt.name
 			msgID := "m-rich-answer-dwell-cancel-" + tt.name
 			session := e.sessions.GetOrCreateActive(sessionKey)
+			initialHistoryLen := session.HistoryLen()
 			agentSession := newControllableSession("s-rich-answer-dwell-cancel-" + tt.name)
-			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-answer-dwell-cancel"}
+			state := &interactiveState{
+				agentSession:                 agentSession,
+				platform:                     p,
+				replyCtx:                     "ctx-rich-answer-dwell-cancel",
+				currentTurnUserMessageTimeMs: 123,
+			}
 			e.interactiveStates[sessionKey] = state
 
 			agentSession.events <- Event{Type: EventText, Content: "One-shot answer."}
@@ -3648,6 +3673,18 @@ func TestProcessInteractiveEvents_RichCardAnsweringDwellHonorsTurnCancellation(t
 			}
 			if sent := base.getSent(); len(sent) != 0 {
 				t.Fatalf("canceled turn emitted a fallback answer: %v", sent)
+			}
+			if history := session.GetHistory(0); tt.discardAnswer && len(history) != initialHistoryLen {
+				t.Fatalf("recalled turn persisted an undelivered answer: %v", history)
+			}
+			if tt.discardAnswer && sentHooks.Load() != 0 {
+				t.Fatalf("recalled turn emitted %d message.sent hooks", sentHooks.Load())
+			}
+			state.mu.Lock()
+			completedAtMs := state.lastCompletedUserMessageTimeMs
+			state.mu.Unlock()
+			if completedAtMs != 0 {
+				t.Fatalf("canceled turn advanced completion watermark to %d", completedAtMs)
 			}
 		})
 	}

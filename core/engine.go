@@ -4974,6 +4974,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 		removeRichCardForFallback(p, cardMessageID)
 	}
+	abortRichCardCompletion := func(discardTurn bool) {
+		if discardTurn {
+			discardSilentTurn()
+			return
+		}
+		sp.discard()
+		discardStreamingCard()
+		state.mu.Lock()
+		if e.ctx.Err() != nil {
+			state.eventsNeedResync = true
+		}
+		p := state.platform
+		state.mu.Unlock()
+		if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+			removeRichCardForFallback(p, cardMessageID)
+		}
+	}
 
 	// Product contract: accepted Feishu turns show a non-empty card before the
 	// first Agent event, including during a long provider/tool startup. A future
@@ -5848,6 +5865,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
 
+			// Treat the platform-selected answering dwell as a delivery commit gate.
+			// Until it completes, a recalled trigger (or stopped engine/session) must
+			// not persist an answer, emit message.sent, or advance the completed-turn
+			// watermark for a card that will never reach its terminal state.
+			richAnswerDwellApplied := false
+			if hasRichCard && cardMessageID != nil && !isSilentReply(baseResponse) {
+				dwellCompleted := true
+				if dwellProvider, ok := p.(RichCardAnsweringDwellProvider); ok && !richAnswerStartedAt.IsZero() {
+					richAnswerDwellApplied = true
+					dwellCompleted = waitForRichCardAnsweringDwell(e.ctx, richAnswerStartedAt, dwellProvider.RichCardAnsweringDwell(), silentCancelCh, stopCh)
+				}
+				discardTurn := state.shouldDiscardTurn(msgID)
+				if !dwellCompleted || discardTurn || (richAnswerDwellApplied && (state.isStopped() || e.ctx.Err() != nil)) {
+					abortRichCardCompletion(discardTurn)
+					return
+				}
+			}
+
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
@@ -6008,34 +6043,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				finalBody := resolveRichCardMarkdown(fullResponse, true)
 				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
-					// Some Agent backends (notably `codex exec --json`) deliver the
-					// complete answer as one EventText immediately followed by
-					// EventResult. Give Feishu's native streaming renderer a small,
-					// platform-selected window to show the answering/typewriter phase
-					// before the terminal full-card patch replaces it. Naturally
-					// streamed answers have already exceeded this window and do not
-					// incur an extra delay.
-					if dwellProvider, ok := p.(RichCardAnsweringDwellProvider); ok && !richAnswerStartedAt.IsZero() {
-						dwellCompleted := waitForRichCardAnsweringDwell(e.ctx, richAnswerStartedAt, dwellProvider.RichCardAnsweringDwell(), silentCancelCh, stopCh)
-						discardTurn := state.shouldDiscardTurn(msgID)
-						if !dwellCompleted || discardTurn || state.isStopped() || e.ctx.Err() != nil {
-							if discardTurn {
-								discardSilentTurn()
-								return
-							}
-							sp.discard()
-							discardStreamingCard()
-							state.mu.Lock()
-							if e.ctx.Err() != nil {
-								state.eventsNeedResync = true
-							}
-							p = state.platform
-							state.mu.Unlock()
-							if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
-								removeRichCardForFallback(p, cardMessageID)
-							}
-							return
-						}
+					// Re-check after completion bookkeeping. This window is intentionally
+					// tiny, but an explicit recall must still prevent a final card patch
+					// if it races with footer/log bookkeeping.
+					discardTurn := state.shouldDiscardTurn(msgID)
+					if discardTurn || (richAnswerDwellApplied && (state.isStopped() || e.ctx.Err() != nil)) {
+						abortRichCardCompletion(discardTurn)
+						return
 					}
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. Configured throttling
