@@ -285,9 +285,11 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	}
 
 	mainDestination := &migrationDestination{
-		Scope:  "data",
-		Target: target,
-		Files:  make(map[string]plannedMigrationFile),
+		Scope:          "data",
+		Target:         target,
+		Files:          make(map[string]plannedMigrationFile),
+		PreserveAccess: true,
+		Access:         make(map[string]migrationAccessMetadata),
 	}
 	report := migrationReport{
 		DryRun:        opts.DryRun,
@@ -1186,6 +1188,18 @@ func prepareMigrationStage(destination *migrationDestination) error {
 		for rel, metadata := range destination.Access {
 			access[rel] = metadata
 		}
+		// Generated files such as the rewritten config intentionally use the
+		// migration's secure mode instead of inheriting a stale target mode
+		// during --force. Source-backed files have explicit access metadata.
+		for rel, file := range destination.Files {
+			if file.Content == nil {
+				continue
+			}
+			cleanRel := filepath.Clean(rel)
+			if _, sourceBacked := destination.Access[cleanRel]; !sourceBacked {
+				delete(access, cleanRel)
+			}
+		}
 	}
 
 	if destination.Existed {
@@ -1271,11 +1285,11 @@ func verifyMigrationPlanUnchanged(original, fresh *preparedMigration) error {
 			}
 		}
 		if len(before.Access) != len(after.Access) {
-			return fmt.Errorf("project data access metadata changed during migration for %s; no target was activated", target)
+			return fmt.Errorf("migration access metadata changed during migration for %s; no target was activated", target)
 		}
 		for rel, beforeAccess := range before.Access {
 			if afterAccess, ok := after.Access[rel]; !ok || beforeAccess != afterAccess {
-				return fmt.Errorf("project data access metadata changed during migration: %s; no target was activated", filepath.Join(target, rel))
+				return fmt.Errorf("migration access metadata changed during migration: %s; no target was activated", filepath.Join(target, rel))
 			}
 		}
 	}

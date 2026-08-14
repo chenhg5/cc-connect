@@ -1015,6 +1015,73 @@ work_dir = "`+filepath.ToSlash(project)+`"
 	}
 }
 
+func TestMigrateLegacyDataPreservesGlobalRunAsTraversalAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX global access modes are not available on Windows")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	promptDir := filepath.Join(source, "agent-prompts")
+	promptFile := filepath.Join(promptDir, "cc-connect-system.md")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "isolated"
+run_as_user = "agent-user"
+[projects.agent]
+type = "claudecode"
+`)
+	writeMigrationFixture(t, promptFile, "shared prompt")
+	if err := os.Chmod(source, 0o755); err != nil {
+		t.Fatalf("chmod global source: %v", err)
+	}
+	if err := os.Chmod(promptDir, 0o755); err != nil {
+		t.Fatalf("chmod prompt directory: %v", err)
+	}
+	if err := os.Chmod(promptFile, 0o644); err != nil {
+		t.Fatalf("chmod prompt file: %v", err)
+	}
+
+	// A forced merge must not restore a looser pre-existing config mode when
+	// config.toml is regenerated with the migrated data_dir.
+	writeMigrationFixture(t, filepath.Join(target, "config.toml"), "language = \"en\"\n")
+	if err := os.Chmod(filepath.Join(target, "config.toml"), 0o644); err != nil {
+		t.Fatalf("chmod existing target config: %v", err)
+	}
+
+	if _, err := migrateLegacyData(source, target, true, false); err != nil {
+		t.Fatalf("migrateLegacyData() error = %v", err)
+	}
+	for _, check := range []struct {
+		source string
+		target string
+		mode   os.FileMode
+	}{
+		{source: source, target: target, mode: 0o755},
+		{source: promptDir, target: filepath.Join(target, "agent-prompts"), mode: 0o755},
+		{source: promptFile, target: filepath.Join(target, "agent-prompts", "cc-connect-system.md"), mode: 0o644},
+		{target: filepath.Join(target, "config.toml"), mode: 0o600},
+	} {
+		info, err := os.Stat(check.target)
+		if err != nil {
+			t.Fatalf("stat migrated global path %s: %v", check.target, err)
+		}
+		if got := info.Mode().Perm(); got != check.mode {
+			t.Fatalf("migrated mode for %s = %#o, want %#o", check.target, got, check.mode)
+		}
+		if check.source != "" {
+			sourceInfo, err := os.Stat(check.source)
+			if err != nil {
+				t.Fatalf("stat global access source %s: %v", check.source, err)
+			}
+			sourceUID, sourceGID, sourceHasOwner := migrationOwnership(sourceInfo)
+			targetUID, targetGID, targetHasOwner := migrationOwnership(info)
+			if sourceHasOwner != targetHasOwner || (sourceHasOwner && (sourceUID != targetUID || sourceGID != targetGID)) {
+				t.Fatalf("migrated ownership for %s = %d:%d, want %d:%d", check.target, targetUID, targetGID, sourceUID, sourceGID)
+			}
+		}
+	}
+}
+
 func TestVerifyMigrationPlanUnchangedDetectsAddedPersistentFile(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
