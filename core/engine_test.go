@@ -2097,11 +2097,14 @@ func (p *stubBlockingFallbackRichCardPlatform) SendPreviewStart(ctx context.Cont
 
 type stubDeliveredFallbackRichCardPlatform struct {
 	*stubRichCardSilentPlatform
-	replacementSent chan struct{}
-	releaseReturn   chan struct{}
-	startOnce       sync.Once
-	deleteMu        sync.Mutex
-	deletedHandles  []any
+	initialStartFails bool
+	replacementSent   chan struct{}
+	releaseReturn     chan struct{}
+	startOnce         sync.Once
+	attemptMu         sync.Mutex
+	startAttempts     int
+	deleteMu          sync.Mutex
+	deletedHandles    []any
 }
 
 func (p *stubDeliveredFallbackRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
@@ -2112,8 +2115,14 @@ func (p *stubDeliveredFallbackRichCardPlatform) UpdateMessage(ctx context.Contex
 }
 
 func (p *stubDeliveredFallbackRichCardPlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
-	starts, _, _, _ := p.snapshot()
-	if len(starts) == 0 {
+	p.attemptMu.Lock()
+	p.startAttempts++
+	attempt := p.startAttempts
+	p.attemptMu.Unlock()
+	if attempt == 1 && p.initialStartFails {
+		return nil, errors.New("simulated initial rich-card start failure")
+	}
+	if attempt == 1 {
 		return p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
 	}
 	handle, err := p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
@@ -2207,10 +2216,27 @@ type stubRichCardSplitPlatform struct {
 
 type stubRichCardStartFailurePlatform struct {
 	*stubRichCardSilentPlatform
+	startMu       sync.Mutex
+	startAttempts int
 }
 
-func (p *stubRichCardStartFailurePlatform) SendPreviewStart(context.Context, any, string) (any, error) {
-	return nil, errors.New("simulated rich-card start failure")
+type stubRichCardPermanentStartFailurePlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *stubRichCardStartFailurePlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
+	p.startMu.Lock()
+	p.startAttempts++
+	attempt := p.startAttempts
+	p.startMu.Unlock()
+	if attempt == 1 {
+		return nil, errors.New("simulated initial rich-card start failure")
+	}
+	return p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
+}
+
+func (p *stubRichCardPermanentStartFailurePlatform) SendPreviewStart(context.Context, any, string) (any, error) {
+	return nil, errors.New("simulated permanent rich-card start failure")
 }
 
 type stubRichCardUpdateFailurePlatform struct {
@@ -3378,26 +3404,34 @@ func TestProcessInteractiveEvents_FailedRichCardRendersWorkspaceReferences(t *te
 
 func TestProcessInteractiveEvents_RichCardFallbackKeepsAnswerReadable(t *testing.T) {
 	tests := []struct {
-		name        string
-		platform    func(*stubRichCardSilentPlatform) Platform
-		wantSent    int
-		wantStarts  int
-		wantDeletes int
+		name             string
+		platform         func(*stubRichCardSilentPlatform) Platform
+		wantStarts       int
+		wantDeletes      int
+		wantHistoryDelta int
 	}{
 		{
-			name: "start failure",
+			name: "initial start failure",
 			platform: func(base *stubRichCardSilentPlatform) Platform {
 				return &stubRichCardStartFailurePlatform{stubRichCardSilentPlatform: base}
 			},
-			wantSent: 1,
+			wantStarts:       1,
+			wantHistoryDelta: 1,
 		},
 		{
 			name: "update failure",
 			platform: func(base *stubRichCardSilentPlatform) Platform {
 				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
 			},
-			wantStarts:  2,
-			wantDeletes: 1,
+			wantStarts:       2,
+			wantDeletes:      1,
+			wantHistoryDelta: 1,
+		},
+		{
+			name: "permanent start failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardPermanentStartFailurePlatform{stubRichCardSilentPlatform: base}
+			},
 		},
 	}
 
@@ -3409,6 +3443,7 @@ func TestProcessInteractiveEvents_RichCardFallbackKeepsAnswerReadable(t *testing
 			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
 			sessionKey := "feishu:user-rich-fallback-" + tt.name
 			session := e.sessions.GetOrCreateActive(sessionKey)
+			initialHistoryLen := session.HistoryLen()
 			agentSession := newControllableSession("s-rich-fallback-" + tt.name)
 			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-fallback"}
 			e.interactiveStates[sessionKey] = state
@@ -3418,21 +3453,24 @@ func TestProcessInteractiveEvents_RichCardFallbackKeepsAnswerReadable(t *testing
 			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-fallback", time.Now(), nil, nil, state.replyCtx)
 
 			sent := base.getSent()
-			if len(sent) != tt.wantSent {
-				t.Fatalf("ordinary fallback sent = %q, want %d messages", sent, tt.wantSent)
-			}
-			if tt.wantSent == 1 && sent[0] != answer {
-				t.Fatalf("fallback sent = %q, want only the assistant answer", sent)
+			if len(sent) != 0 {
+				t.Fatalf("fallback sent undeletable ordinary messages: %q", sent)
 			}
 			starts, _, _, deletes := base.snapshot()
 			if len(starts) != tt.wantStarts {
 				t.Fatalf("fallback card starts = %d, want %d: %v", len(starts), tt.wantStarts, starts)
 			}
-			if tt.wantStarts == 2 && (!strings.Contains(starts[1], "status=done") || !strings.Contains(starts[1], answer)) {
-				t.Fatalf("replacement fallback card does not contain the completed answer: %q", starts[1])
+			if tt.wantStarts > 0 {
+				finalStart := starts[len(starts)-1]
+				if !strings.Contains(finalStart, "status=done") || !strings.Contains(finalStart, answer) {
+					t.Fatalf("replacement fallback card does not contain the completed answer: %q", finalStart)
+				}
 			}
 			if deletes != tt.wantDeletes {
 				t.Fatalf("stale-card deletes = %d, want %d", deletes, tt.wantDeletes)
+			}
+			if got := session.HistoryLen() - initialHistoryLen; got != tt.wantHistoryDelta {
+				t.Fatalf("assistant history delta = %d, want %d", got, tt.wantHistoryDelta)
 			}
 		})
 	}
@@ -4115,6 +4153,66 @@ func TestProcessInteractiveEvents_RichCardRecallRemovesDeliveredFallbackReplacem
 	}
 	if history := session.GetHistory(0); len(history) != initialHistoryLen {
 		t.Fatalf("recalled replacement persisted an undelivered answer: %v", history)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallRemovesDeliveredCardlessFallbackReplacement(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubDeliveredFallbackRichCardPlatform{
+		stubRichCardSilentPlatform: base,
+		initialStartFails:          true,
+		replacementSent:            make(chan struct{}),
+		releaseReturn:              make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+
+	sessionKey := "feishu:user-rich-cardless-fallback-recall"
+	msgID := "m-rich-cardless-fallback-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-cardless-fallback-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-cardless-fallback-recall",
+		currentTurnUserMessageTimeMs: 989,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: strings.Repeat("cardless fallback answer ", 400), Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.replacementSent:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not retry cardless delivery through a tracked replacement")
+	}
+	state.cancelTurnSilently(msgID)
+	close(p.releaseReturn)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not clean up its cardless fallback replacement")
+	}
+
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("cardless fallback emitted undeletable ordinary messages: %v", sent)
+	}
+	starts, _, _, _ := base.snapshot()
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=done") {
+		t.Fatalf("fallback starts = %v, want one completed tracked replacement", starts)
+	}
+	deleted := p.deleted()
+	if len(deleted) != 1 || deleted[0] != "handle-1" {
+		t.Fatalf("deleted handles = %v, want the cardless replacement handle", deleted)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled cardless replacement persisted an undelivered answer: %v", history)
 	}
 }
 

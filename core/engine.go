@@ -4796,9 +4796,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
-	sendWorkspaceWithContextError := func(ctx context.Context, p Platform, replyCtx any, content string) error {
-		return e.sendWithErrorForWorkspaceContext(ctx, p, replyCtx, content, workspaceDir)
-	}
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
@@ -6019,21 +6016,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sendAnswerFallback := func() bool {
 					if abortIfTerminalDeliveryCanceled() {
 						return false
-					}
-					// If the initial lifecycle card could not be created at all, retain
-					// the legacy plain-message degradation path. There is no prior card
-					// to replace or clean up in this case.
-					if cardMessageID == nil {
-						for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-							if abortIfTerminalDeliveryCanceled() {
-								return false
-							}
-							if err := sendWorkspaceWithContextError(terminalDeliveryCtx, p, replyCtx, chunk); err != nil {
-								slog.Error("failed to send rich-card unavailable fallback answer", "platform", p.Name(), "error", err)
-								return false
-							}
-						}
-						return true
 					}
 					starter, canStart := p.(PreviewStarter)
 					_, canDelete := p.(PreviewCleaner)
@@ -12242,16 +12224,12 @@ func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspac
 }
 
 func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
-	return e.sendWithErrorForWorkspaceContext(e.ctx, p, replyCtx, content, workspaceDir)
-}
-
-func (e *Engine) sendWithErrorForWorkspaceContext(ctx context.Context, p Platform, replyCtx any, content, workspaceDir string) error {
-	if err := e.waitOutgoingWithContext(ctx, p); err != nil {
+	if err := e.waitOutgoing(p); err != nil {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
 	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
-	return e.sendAlreadyRenderedWithErrorContext(ctx, p, replyCtx, content)
+	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
@@ -12316,12 +12294,8 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 }
 
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
-	return e.sendAlreadyRenderedWithErrorContext(e.ctx, p, replyCtx, content)
-}
-
-func (e *Engine) sendAlreadyRenderedWithErrorContext(ctx context.Context, p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(ctx, replyCtx, content); err != nil {
+	if err := p.Send(e.ctx, replyCtx, content); err != nil {
 		// Check for context_token missing error (common for Weixin platform)
 		if strings.Contains(err.Error(), "missing context_token") {
 			slog.Error("platform send failed: context_token missing",
