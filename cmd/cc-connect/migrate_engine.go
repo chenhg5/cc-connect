@@ -1089,14 +1089,18 @@ func resolveLegacyRuntimeWorkDir(override, sourceRoot, home string) (string, err
 		return canonical, nil
 	}
 
-	metadataPath := filepath.Join(sourceRoot, "daemon.json")
+	// Official v1.4.1 writes daemon metadata under its default product data
+	// directory even when config.toml is loaded from another working directory.
+	// Do not trust a same-named file beside an arbitrary --source config.
+	metadataRoot := filepath.Join(home, ".cc-connect")
+	metadataPath := filepath.Join(metadataRoot, "daemon.json")
 	data, err := os.ReadFile(metadataPath)
 	if err == nil {
 		var metadata struct {
 			WorkDir string `json:"work_dir"`
 		}
 		if json.Unmarshal(data, &metadata) == nil && strings.TrimSpace(metadata.WorkDir) != "" {
-			resolved, resolveErr := resolveLegacyConfigPath(metadata.WorkDir, sourceRoot, home)
+			resolved, resolveErr := resolveLegacyConfigPath(metadata.WorkDir, metadataRoot, home)
 			if resolveErr != nil {
 				return "", fmt.Errorf("resolve official daemon work_dir: %w", resolveErr)
 			}

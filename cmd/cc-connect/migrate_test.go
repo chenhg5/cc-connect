@@ -877,6 +877,56 @@ work_dir = "project"
 	}
 }
 
+func TestMigrateLegacyDataFindsDefaultDaemonMetadataForSeparateConfig(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "service")
+	source := filepath.Join(root, "workspace", "project-config")
+	target := filepath.Join(root, ".cc-connect-next")
+	runtimeWorkDir := filepath.Join(root, "official-runtime")
+	projectDir := filepath.Join(runtimeWorkDir, "project")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "state"
+
+[[projects]]
+name = "demo"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "project"
+`)
+	// A same-named project file is not official daemon metadata and must not
+	// override the metadata stored in the product's default data directory.
+	writeMigrationFixture(t, filepath.Join(source, "daemon.json"), `{"work_dir":"`+filepath.ToSlash(source)+`"}`)
+	writeMigrationFixture(t, filepath.Join(home, ".cc-connect", "daemon.json"), `{"work_dir":"`+filepath.ToSlash(runtimeWorkDir)+`"}`)
+	writeMigrationFixture(t, filepath.Join(runtimeWorkDir, "state", "sessions", "demo.json"), "relative-state")
+	writeMigrationFixture(t, filepath.Join(projectDir, ".cc-connect", "images", "relative.png"), "relative-project-data")
+
+	report, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               home,
+		IncludeProjectData: true,
+	})
+	if err != nil {
+		t.Fatalf("migrate separate config with default daemon metadata: %v", err)
+	}
+	canonicalRuntime, err := canonicalExistingDirectory(runtimeWorkDir)
+	if err != nil {
+		t.Fatalf("canonical runtime work dir: %v", err)
+	}
+	if report.SourceWorkDir != canonicalRuntime {
+		t.Fatalf("source runtime work_dir = %q, want default metadata value %q", report.SourceWorkDir, canonicalRuntime)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "sessions", "demo.json")); err != nil || string(got) != "relative-state" {
+		t.Fatalf("relative data_dir state was not migrated: content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(projectDir, ".cc-connect-next", "images", "relative.png")); err != nil || string(got) != "relative-project-data" {
+		t.Fatalf("relative project data was not migrated: content=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "daemon.json")); !os.IsNotExist(err) {
+		t.Fatalf("runtime daemon metadata should not be copied, err=%v", err)
+	}
+}
+
 func TestMigrateLegacyDataDiscoversProjectDataFromStateAndBindings(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
