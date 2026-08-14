@@ -39,7 +39,10 @@ function readReleaseVersion() {
 
 function main() {
   const release = readReleaseVersion();
-  const expectedTag = String(process.argv[2] || process.env.GITHUB_REF_NAME || "").trim();
+  // Callers that must bind metadata to a release tag pass it explicitly.
+  // GITHUB_REF_NAME is a branch or values such as "3/merge" on pull requests,
+  // so treating it as an implicit tag would make ordinary CI fail.
+  const expectedTag = String(process.argv[2] || "").trim();
   if (expectedTag && expectedTag !== release.tag) {
     fail(`release tag ${expectedTag} does not match ${release.tag}`);
   }
