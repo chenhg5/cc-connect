@@ -6037,7 +6037,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// streamed answers have already exceeded this window and do not
 					// incur an extra delay.
 					if dwellProvider, ok := p.(RichCardAnsweringDwellProvider); ok && !richAnswerStartedAt.IsZero() {
-						waitForRichCardAnsweringDwell(e.ctx, richAnswerStartedAt, dwellProvider.RichCardAnsweringDwell())
+						dwellCompleted := waitForRichCardAnsweringDwell(e.ctx, richAnswerStartedAt, dwellProvider.RichCardAnsweringDwell(), silentCancelCh, stopCh)
+						discardTurn := state.shouldDiscardTurn(msgID)
+						if !dwellCompleted || discardTurn || state.isStopped() || e.ctx.Err() != nil {
+							if discardTurn {
+								discardSilentTurn()
+								return
+							}
+							sp.discard()
+							discardStreamingCard()
+							state.mu.Lock()
+							if e.ctx.Err() != nil {
+								state.eventsNeedResync = true
+							}
+							p = state.platform
+							state.mu.Unlock()
+							if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+								removeRichCardForFallback(p, cardMessageID)
+							}
+							return
+						}
 					}
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. Configured throttling

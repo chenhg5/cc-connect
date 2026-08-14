@@ -3463,6 +3463,78 @@ func TestProcessInteractiveEvents_RichCardKeepsAnsweringPhaseVisibleBeforeDone(t
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardAnsweringDwellHonorsTurnCancellation(t *testing.T) {
+	tests := []struct {
+		name   string
+		cancel func(*interactiveState, string)
+	}{
+		{
+			name: "recalled trigger",
+			cancel: func(state *interactiveState, msgID string) {
+				state.cancelTurnSilently(msgID)
+			},
+		},
+		{
+			name: "stopped turn",
+			cancel: func(state *interactiveState, _ string) {
+				state.markStopped()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: 200 * time.Millisecond}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+			sessionKey := "feishu:user-rich-answer-dwell-cancel-" + tt.name
+			msgID := "m-rich-answer-dwell-cancel-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-rich-answer-dwell-cancel-" + tt.name)
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-answer-dwell-cancel"}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventText, Content: "One-shot answer."}
+			agentSession.events <- Event{Type: EventResult, Content: "One-shot answer.", Done: true}
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+				close(done)
+			}()
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				firstStreamAt, _ := p.lifecycleTimes()
+				if !firstStreamAt.IsZero() {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("answering phase did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			tt.cancel(state, msgID)
+
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("turn cancellation did not interrupt the answering dwell")
+			}
+
+			_, completedAt := p.lifecycleTimes()
+			if !completedAt.IsZero() {
+				t.Fatal("canceled turn still patched the rich card to Done")
+			}
+			if sent := base.getSent(); len(sent) != 0 {
+				t.Fatalf("canceled turn emitted a fallback answer: %v", sent)
+			}
+		})
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardNeverStreamsFragmentedAgentFooter(t *testing.T) {
 	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
