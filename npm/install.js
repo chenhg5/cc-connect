@@ -2,12 +2,12 @@
 
 "use strict";
 
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
-const zlib = require("zlib");
 
 const PACKAGE = require("./package.json");
 const VERSION = `v${PACKAGE.version}`;
@@ -46,6 +46,12 @@ function getDownloadURLs(filename) {
   ];
 }
 
+function getChecksumURLs() {
+  return [
+    `https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/checksums.txt`,
+  ];
+}
+
 function fetch(url, redirects = 5) {
   return new Promise((resolve, reject) => {
     if (redirects <= 0) return reject(new Error("Too many redirects"));
@@ -53,7 +59,8 @@ function fetch(url, redirects = 5) {
     mod
       .get(url, { headers: { "User-Agent": "cc-connect-next-npm" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          return resolve(fetch(res.headers.location, redirects - 1));
+          const redirect = new URL(res.headers.location, url).toString();
+          return resolve(fetch(redirect, redirects - 1));
         }
         if (res.statusCode !== 200) {
           res.resume();
@@ -66,6 +73,68 @@ function fetch(url, redirects = 5) {
       })
       .on("error", reject);
   });
+}
+
+function parseChecksumManifest(manifest, filename) {
+  const matches = [];
+  for (const line of String(manifest).split(/\r?\n/)) {
+    const match = line.match(/^([0-9a-fA-F]{64})[ \t]+(?:\*)?(.+)$/);
+    if (match && match[2] === filename) {
+      matches.push(match[1].toLowerCase());
+    }
+  }
+  if (matches.length === 0) {
+    throw new Error(`[cc-connect-next] checksums.txt does not contain ${filename}`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`[cc-connect-next] checksums.txt contains more than one entry for ${filename}`);
+  }
+  return matches[0];
+}
+
+function verifyChecksum(data, expected, filename) {
+  if (!/^[0-9a-fA-F]{64}$/.test(expected)) {
+    throw new Error(`[cc-connect-next] invalid SHA-256 for ${filename}`);
+  }
+  const actual = crypto.createHash("sha256").update(data).digest("hex");
+  const matches = crypto.timingSafeEqual(
+    Buffer.from(actual, "hex"),
+    Buffer.from(expected, "hex")
+  );
+  if (!matches) {
+    throw new Error(
+      `[cc-connect-next] checksum mismatch for ${filename}; refusing to extract the archive`
+    );
+  }
+  return actual;
+}
+
+function replaceBinary(stagedPath, binaryPath) {
+  const backupPath = `${binaryPath}.previous-${process.pid}`;
+  const hadExisting = fs.existsSync(binaryPath);
+  if (hadExisting) {
+    fs.renameSync(binaryPath, backupPath);
+  }
+  try {
+    fs.renameSync(stagedPath, binaryPath);
+    if (hadExisting) {
+      fs.rmSync(backupPath, { force: true });
+    }
+  } catch (err) {
+    if (hadExisting && fs.existsSync(backupPath) && !fs.existsSync(binaryPath)) {
+      fs.renameSync(backupPath, binaryPath);
+    }
+    throw err;
+  }
+}
+
+function validateExtractedBinary(extractDir, archiveBinaryName) {
+  const extractedPath = path.join(extractDir, archiveBinaryName);
+  const info = fs.lstatSync(extractedPath);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new Error(`[cc-connect-next] archive entry is not a regular file: ${archiveBinaryName}`);
+  }
+  return extractedPath;
 }
 
 async function download(urls) {
@@ -86,37 +155,41 @@ async function download(urls) {
   );
 }
 
-function extractTarGz(buffer, destDir, binaryName) {
-  const tmpFile = path.join(destDir, "_tmp.tar.gz");
-  fs.writeFileSync(tmpFile, buffer);
+function extractTarGz(buffer, destDir, binaryName, archiveBinaryName) {
+  const extractDir = fs.mkdtempSync(path.join(destDir, ".extract-"));
+  const tmpFile = path.join(extractDir, "archive.tar.gz");
   try {
-    execSync(`tar xzf "${tmpFile}" -C "${destDir}"`, { stdio: "pipe" });
+    fs.writeFileSync(tmpFile, buffer);
+    execFileSync("tar", ["xzf", tmpFile, "-C", extractDir], { stdio: "pipe" });
+    const extractedPath = validateExtractedBinary(extractDir, archiveBinaryName);
+    const stagedPath = path.join(destDir, `.${binaryName}.install-${process.pid}-${crypto.randomBytes(6).toString("hex")}`);
+    fs.renameSync(extractedPath, stagedPath);
+    replaceBinary(stagedPath, path.join(destDir, binaryName));
   } finally {
-    fs.unlinkSync(tmpFile);
-  }
-  const extracted = fs.readdirSync(destDir).find((f) => f.startsWith(NAME) && !f.endsWith(".tar.gz"));
-  if (extracted && extracted !== binaryName) {
-    fs.renameSync(path.join(destDir, extracted), path.join(destDir, binaryName));
+    fs.rmSync(extractDir, { recursive: true, force: true });
   }
 }
 
-function extractZip(buffer, destDir, binaryName) {
-  const tmpFile = path.join(destDir, "_tmp.zip");
-  fs.writeFileSync(tmpFile, buffer);
+function extractZip(buffer, destDir, binaryName, archiveBinaryName) {
+  const extractDir = fs.mkdtempSync(path.join(destDir, ".extract-"));
+  const tmpFile = path.join(extractDir, "archive.zip");
   try {
+    fs.writeFileSync(tmpFile, buffer);
     try {
-      execSync(`unzip -o "${tmpFile}" -d "${destDir}"`, { stdio: "pipe" });
+      execFileSync("unzip", ["-o", tmpFile, "-d", extractDir], { stdio: "pipe" });
     } catch {
-      execSync(`powershell -Command "Expand-Archive -Force '${tmpFile}' '${destDir}'"`, {
+      const quotePowerShell = (value) => value.replace(/'/g, "''");
+      execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+        `Expand-Archive -Force -LiteralPath '${quotePowerShell(tmpFile)}' -DestinationPath '${quotePowerShell(extractDir)}'`], {
         stdio: "pipe",
       });
     }
+    const extractedPath = validateExtractedBinary(extractDir, archiveBinaryName);
+    const stagedPath = path.join(destDir, `.${binaryName}.install-${process.pid}-${crypto.randomBytes(6).toString("hex")}`);
+    fs.renameSync(extractedPath, stagedPath);
+    replaceBinary(stagedPath, path.join(destDir, binaryName));
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch {}
-  }
-  const extracted = fs.readdirSync(destDir).find((f) => f.startsWith(NAME) && f.endsWith(".exe"));
-  if (extracted && extracted !== binaryName) {
-    fs.renameSync(path.join(destDir, extracted), path.join(destDir, binaryName));
+    fs.rmSync(extractDir, { recursive: true, force: true });
   }
 }
 
@@ -161,7 +234,7 @@ async function main() {
 
   if (fs.existsSync(binaryPath)) {
     try {
-      const out = execSync(`"${binaryPath}" --version`, { encoding: "utf8", timeout: 5000 });
+      const out = execFileSync(binaryPath, ["--version"], { encoding: "utf8", timeout: 5000 });
       const expectedVer = VERSION.slice(1); // remove leading "v"
       if (out.includes(expectedVer)) {
         console.log(`[cc-connect-next] Binary ${VERSION} already installed, skipping.`);
@@ -174,20 +247,23 @@ async function main() {
         return;
       }
       console.log(`[cc-connect-next] Existing binary is outdated, upgrading to ${VERSION}...`);
-      fs.unlinkSync(binaryPath);
     } catch {
       console.log(`[cc-connect-next] Replacing existing binary with ${VERSION}...`);
-      fs.unlinkSync(binaryPath);
     }
   }
 
-  const urls = getDownloadURLs(filename);
-  const data = await download(urls);
+  const checksumData = await download(getChecksumURLs());
+  const expectedChecksum = parseChecksumManifest(checksumData.toString("utf8"), filename);
+  const data = await download(getDownloadURLs(filename));
+  verifyChecksum(data, expectedChecksum, filename);
+  console.log(`[cc-connect-next] Verified SHA-256 for ${filename}`);
+
+  const archiveBinaryName = `${NAME}-${VERSION}-${platform}-${arch}${platform === "windows" ? ".exe" : ""}`;
 
   if (ext === ".tar.gz") {
-    extractTarGz(data, binDir, binaryName);
+    extractTarGz(data, binDir, binaryName, archiveBinaryName);
   } else {
-    extractZip(data, binDir, binaryName);
+    extractZip(data, binDir, binaryName, archiveBinaryName);
   }
 
   if (platform !== "windows") {
@@ -196,7 +272,7 @@ async function main() {
 
   if (platform === "darwin") {
     try {
-      execSync(`xattr -d com.apple.quarantine "${binaryPath}"`, { stdio: "pipe" });
+      execFileSync("xattr", ["-d", "com.apple.quarantine", binaryPath], { stdio: "pipe" });
       console.log(`[cc-connect-next] Removed macOS quarantine attribute`);
     } catch {
       // xattr fails if the attribute doesn't exist, which is fine
@@ -206,11 +282,20 @@ async function main() {
   console.log(`[cc-connect-next] Installed to ${binaryPath}`);
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  console.error(
-    "[cc-connect-next] Installation failed. You can install manually:\n" +
-      `  https://github.com/${GITHUB_REPO}/releases/tag/${VERSION}`
-  );
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.message);
+    console.error(
+      "[cc-connect-next] Installation failed. You can install manually:\n" +
+        `  https://github.com/${GITHUB_REPO}/releases/tag/${VERSION}`
+    );
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  getPlatformInfo,
+  isNewerOrEqual,
+  parseChecksumManifest,
+  verifyChecksum,
+};

@@ -126,6 +126,8 @@ show_context_indicator = false  # Keep model/token/context metadata out of chat
 #                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
 reply_footer = false             # Keep model/token/workdir footer out of chat
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+hide_agent_footer = true         # Strip equivalent model/token/context lines emitted by the Agent itself
+#                                # 隐藏 Agent 自己输出的模型、token、上下文状态行（默认 false）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.

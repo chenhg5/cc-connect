@@ -72,7 +72,9 @@ web/tsconfig.tsbuildinfo
 # Testing & temporary files
 # ============================================================================
 test/
-scripts/
+scripts/*
+!scripts/check-release-assets.js
+!scripts/check-release-version.js
 tmp/
 temp/
 *.tmp

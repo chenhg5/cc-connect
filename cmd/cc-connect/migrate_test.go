@@ -13,6 +13,123 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestNormalizeMigrationSourceVersion(t *testing.T) {
+	for _, version := range []string{
+		"v1.4.1",
+		"1.4.1",
+		"v1.5.0-beta.1",
+		"v1.5.0-beta.2",
+		"v1.5.0-beta.3",
+	} {
+		got, err := normalizeMigrationSourceVersion(version)
+		if err != nil {
+			t.Fatalf("normalizeMigrationSourceVersion(%q): %v", version, err)
+		}
+		if !strings.HasPrefix(got, "v") {
+			t.Fatalf("normalizeMigrationSourceVersion(%q) = %q, want canonical v prefix", version, got)
+		}
+	}
+
+	if got, err := normalizeMigrationSourceVersion("auto"); err != nil || got != automaticMigrationSourceVersion {
+		t.Fatalf("auto source version = %q, %v", got, err)
+	}
+	if _, err := normalizeMigrationSourceVersion("v1.5.0-beta.4"); err == nil {
+		t.Fatal("unknown future source release was accepted")
+	}
+}
+
+func TestPrepareLegacyMigration_KnownSourceReleaseMatrix(t *testing.T) {
+	for _, version := range []string{
+		"v1.4.1",
+		"v1.5.0-beta.1",
+		"v1.5.0-beta.2",
+		"v1.5.0-beta.3",
+	} {
+		t.Run(version, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			configText := `[[projects]]
+name = "known-release"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`
+			if version == "v1.5.0-beta.3" {
+				configText = "[display]\nhide_agent_footer = true\n" + configText
+			}
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), configText)
+
+			plan, err := prepareLegacyMigration(migrationOptions{
+				Source:        source,
+				Target:        target,
+				Home:          root,
+				SourceVersion: version,
+				DryRun:        true,
+			})
+			if err != nil {
+				t.Fatalf("prepare %s migration: %v", version, err)
+			}
+			if plan.SourceVersion != version || plan.Report.SourceVersion != version {
+				t.Fatalf("source version provenance = plan %q report %q, want %q", plan.SourceVersion, plan.Report.SourceVersion, version)
+			}
+		})
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsUnavailableConfiguredPlugin(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "future-project"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "future-platform"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not provide") {
+		t.Fatalf("unsupported configured plugin error = %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after compatibility failure: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsUnsupportedConfigBehavior(t *testing.T) {
+	for _, setting := range []string{
+		"[[projects]]\nname = \"idle\"\nagent_session_idle_timeout_mins = 10\n[projects.agent]\ntype = \"codex\"\n",
+	} {
+		root := t.TempDir()
+		source := filepath.Join(root, ".cc-connect")
+		target := filepath.Join(root, ".cc-connect-next")
+		writeMigrationFixture(t, filepath.Join(source, "config.toml"), setting)
+
+		_, err := prepareLegacyMigration(migrationOptions{
+			Source:        source,
+			Target:        target,
+			Home:          root,
+			SourceVersion: "v1.5.0-beta.3",
+			DryRun:        true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "preserve bytes but not behavior") {
+			t.Fatalf("unsupported source setting error = %v", err)
+		}
+		if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+			t.Fatalf("target was written after schema failure: %v", statErr)
+		}
+	}
+}
+
 func TestRunMigrateCommandReturnsFailureForMissingSource(t *testing.T) {
 	root := t.TempDir()
 	var stdout bytes.Buffer
@@ -155,7 +272,7 @@ func TestMigrateLegacyDataRewritesAllTOMLStringForms(t *testing.T) {
 		{name: "escaped quoted key", config: `"data\u005fdir" = """$SOURCE"""` + "\n"},
 		{
 			name: "ignore assignment text inside preceding multiline value",
-			config: "note = \"\"\"\n" +
+			config: "provider_presets_url = \"\"\"\n" +
 				`data_dir = "/must-not-match"` + "\n\"\"\"\n" +
 				`data_dir = """$SOURCE"""` + "\n",
 		},
@@ -437,6 +554,9 @@ work_dir = "`+filepath.ToSlash(workDir)+`"
 	var manifest migrationManifest
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatalf("parse migration manifest: %v", err)
+	}
+	if manifest.Version != 2 || manifest.SourceVersion != automaticMigrationSourceVersion {
+		t.Fatalf("manifest compatibility metadata = version %d source %q, want 2 and %q", manifest.Version, manifest.SourceVersion, automaticMigrationSourceVersion)
 	}
 	if manifest.SourceDataDir != canonicalData || len(manifest.Files) != 6 {
 		t.Fatalf("manifest does not inventory the complete migration: %+v", manifest)

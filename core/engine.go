@@ -311,6 +311,7 @@ type DisplayCfg struct {
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -1272,6 +1273,32 @@ var privilegedCommands = map[string]bool{
 	"upgrade": true,
 	"web":     true,
 	"diff":    true,
+}
+
+// isPrivilegedCommandInvocation extends the static privileged command list to
+// subcommands that can install arbitrary shell execution at runtime. Listing
+// and prompt-only command management remain available to ordinary users.
+func isPrivilegedCommandInvocation(cmdID string, args []string) bool {
+	if privilegedCommands[cmdID] {
+		return true
+	}
+	if len(args) == 0 {
+		return false
+	}
+	subcommand := strings.ToLower(args[0])
+	switch cmdID {
+	case "commands":
+		return matchSubCommand(subcommand, []string{
+			"list", "add", "addexec", "del", "delete", "rm", "remove",
+		}) == "addexec"
+	case "cron":
+		return matchSubCommand(subcommand, []string{
+			"add", "addexec", "list", "del", "delete", "rm", "remove",
+			"enable", "disable", "mute", "unmute", "setup",
+		}) == "addexec"
+	default:
+		return false
+	}
 }
 
 // isAdmin checks whether the given user ID is authorized for privileged commands.
@@ -3868,7 +3895,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- as.Send(promptContent, msg.Images, scopeFileAttachments(msg.Files, msg.MessageID))
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -5452,7 +5479,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			if event.Content != "" && !isEllipsisOnly(event.Content) {
+			content := event.Content
+			if e.display.HideAgentFooter {
+				content = stripAgentFooterLines(content)
+			}
+			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
 				// end-of-stream when the text resolves to bare NO_REPLY (Lark
@@ -5460,19 +5491,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// paths share this single transition; couldBeSilentPrefix is
 				// monotonically decreasing as segments grow, so the transition
 				// is held → released at most once per segment.
-				peekSegment := strings.Join(textParts[segmentStart:], "") + event.Content
+				peekSegment := strings.Join(textParts[segmentStart:], "") + content
 				prevHold := silentHold
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
 
 				handledByStreamCard := false
 				if streamCard != nil && !streamCard.Failed() {
-					textParts = append(textParts, event.Content) // always accumulate for history
+					textParts = append(textParts, content) // always accumulate for history
 					if !silentHold {
 						if releasedNow {
 							cardAnswerText.WriteString(peekSegment)
 						} else {
-							cardAnswerText.WriteString(event.Content)
+							cardAnswerText.WriteString(content)
 						}
 						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					}
@@ -5498,8 +5529,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							sp.setStatus(CardStatusWorking)
 						}
 					}
-					textParts = append(textParts, event.Content)
-					partialText += event.Content
+					textParts = append(textParts, content)
+					partialText += content
 					if hasRichCard {
 						if !silentHold && richCardPreviewEnabled {
 							previewBody := truncateStreamPreviewText(partialText, turnStreamPreview.MaxChars)
@@ -5595,7 +5626,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							if releasedNow {
 								sp.appendText(peekSegment) // flush all held chunks at once
 							} else {
-								sp.appendText(event.Content)
+								sp.appendText(content)
 							}
 						}
 					}
@@ -5724,6 +5755,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				return
 			}
+			if !hasRichCard {
+				sp.unfreeze()
+			}
 
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
@@ -5772,6 +5806,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
+			if e.display.HideAgentFooter {
+				fullResponse = stripAgentFooterLines(fullResponse)
+			}
 			// Rich cards always hide tool details regardless of the legacy
 			// ToolMessages setting, so textParts is the authoritative answer across
 			// every tool boundary. EventResult.Content may contain only the final
@@ -5786,6 +5823,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
+			}
+			// A footer can be split across EventText chunks, so filter the fully
+			// assembled response as well as each streaming chunk.
+			if e.display.HideAgentFooter {
+				fullResponse = stripAgentFooterLines(fullResponse)
 			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
@@ -6722,7 +6764,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	}
 
-	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+	if cmdID != "" && isPrivilegedCommandInvocation(cmdID, args) && !e.isAdmin(msg.UserID) {
 		slog.Info("audit: command_blocked",
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
@@ -17192,6 +17234,31 @@ func contextIndicatorText(inputTokens int) string {
 // Used to strip such markers from delivered text — the ctx indicator is now
 // rendered exclusively in the reply footer.
 var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
+
+// agentFooterLineRe matches a standalone agent-emitted status line only when
+// it contains the characteristic output, input, and context metrics. Requiring
+// all three prevents ordinary prose from being removed.
+var agentFooterLineRe = regexp.MustCompile(`^[ \t]*\*?[A-Za-z0-9][^\n]*\s+·\s+out\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bin\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bctx\s+[0-9]+(?:\.[0-9]+)?%[^\n]*\*?[ \t]*$`)
+
+func stripAgentFooterLines(text string) string {
+	if text == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	removed := false
+	for _, line := range lines {
+		if agentFooterLineRe.MatchString(line) {
+			removed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !removed {
+		return text
+	}
+	return strings.TrimRight(strings.Join(kept, "\n"), "\n ")
+}
 
 // silentReplyRe matches a bare NO_REPLY marker (case-insensitive, optional surrounding whitespace).
 // When the agent emits exactly this as its full response, the platform send is suppressed

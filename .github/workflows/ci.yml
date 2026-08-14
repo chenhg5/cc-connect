@@ -34,6 +34,15 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      - name: Verify release metadata and npm installer
+        run: |
+          set -euo pipefail
+          node scripts/check-release-version.js
+          npm --prefix npm test
+          node --check npm/install.js
+          node --check npm/run.js
+          (cd npm && npm pack --dry-run)
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

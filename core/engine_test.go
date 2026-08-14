@@ -17284,3 +17284,15 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
 	}
 }
+
+func TestStripAgentFooterLines(t *testing.T) {
+	input := "answer\n\n*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*"
+	if got, want := stripAgentFooterLines(input), "answer"; got != want {
+		t.Fatalf("stripAgentFooterLines() = %q, want %q", got, want)
+	}
+
+	prose := "The words out 10, in 20, and ctx 30% can appear in prose."
+	if got := stripAgentFooterLines(prose); got != prose {
+		t.Fatalf("stripAgentFooterLines() stripped prose: %q", got)
+	}
+}

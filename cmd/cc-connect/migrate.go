@@ -21,6 +21,7 @@ type migrationReport struct {
 	SkippedProjects    []migrationSkippedProjectRecord
 	SourceDataDir      string
 	SourceWorkDir      string
+	SourceVersion      string
 	BackupDir          string
 	Backups            []migrationBackupRecord
 	ManifestPath       string
@@ -55,8 +56,9 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	dryRun := flags.Bool("dry-run", false, "validate and report without writing files")
 	skipProjectData := flags.Bool("skip-project-data", false, "do not copy project-local .cc-connect images and attachments")
 	runtimeWorkDir := flags.String("runtime-work-dir", "", "official runtime working directory for resolving relative config paths (auto-detected)")
+	sourceVersion := flags.String("source-version", "auto", "official CC Connect release (auto, v1.4.1, or v1.5.0-beta.1 through beta.3)")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(flags.Output(), "Usage: cc-connect-next migrate [--source DIR] [--target DIR] [--runtime-work-dir DIR] [--dry-run] [--force] [--skip-project-data]")
+		_, _ = fmt.Fprintln(flags.Output(), "Usage: cc-connect-next migrate [--source DIR] [--target DIR] [--source-version RELEASE] [--runtime-work-dir DIR] [--dry-run] [--force] [--skip-project-data]")
 		_, _ = fmt.Fprintln(flags.Output(), "Copies configuration, the effective data_dir, and project-local state while excluding daemon, logs, locks, and sockets.")
 		flags.PrintDefaults()
 	}
@@ -72,6 +74,7 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 		Target:             expandMigrationPath(*target, home),
 		Home:               home,
 		RuntimeWorkDir:     expandMigrationPath(*runtimeWorkDir, home),
+		SourceVersion:      *sourceVersion,
 		Force:              *force,
 		DryRun:             *dryRun,
 		IncludeProjectData: !*skipProjectData,
@@ -110,6 +113,9 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !writeOutput("Official runtime work_dir: %s. Effective data_dir: %s. Project-local directories: %d.\n", report.SourceWorkDir, report.SourceDataDir, report.ProjectDirectories) {
+		return 1
+	}
+	if !writeOutput("Source compatibility: %s.\n", report.SourceVersion) {
 		return 1
 	}
 	if !report.DryRun {
@@ -155,6 +161,7 @@ func migrateLegacyData(source, target string, force, dryRun bool) (migrationRepo
 		Force:              force,
 		DryRun:             dryRun,
 		IncludeProjectData: true,
+		SourceVersion:      "auto",
 	})
 }
 

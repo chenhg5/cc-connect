@@ -359,6 +359,22 @@ func (sp *streamPreview) freeze() {
 	sp.degraded = true
 }
 
+// unfreeze resumes a legacy stream after an interrupting permission prompt.
+// The frozen preview remains as the pre-permission segment; the next text
+// event starts a new preview rather than being buffered until turn completion.
+func (sp *streamPreview) unfreeze() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+	sp.lastSentAt = time.Time{}
+	sp.fullText = ""
+	sp.lastSentText = ""
+	sp.lastSentViaUpdate = false
+	sp.pendingStatus = ""
+	sp.degraded = false
+}
+
 // discard removes the preview message when possible and disables further
 // preview updates. Call this when the caller intends to send a separate
 // non-preview message (for example after tool use or on terminal errors).

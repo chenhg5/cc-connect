@@ -78,9 +78,10 @@ type ImageAttachment struct {
 
 // FileAttachment represents a file (PDF, doc, spreadsheet, etc.) sent by the user.
 type FileAttachment struct {
-	MimeType string // e.g. "application/pdf", "text/plain"
-	Data     []byte // raw file bytes
-	FileName string // original filename
+	MimeType  string // e.g. "application/pdf", "text/plain"
+	Data      []byte // raw file bytes
+	FileName  string // original filename
+	MessageID string // source message ID used to isolate duplicate filenames
 }
 
 // SaveFilesToDisk saves file attachments to workDir/.cc-connect-next/attachments/
@@ -96,26 +97,80 @@ func SaveFilesToDisk(workDir string, files []FileAttachment) []string {
 	if len(files) == 0 {
 		return nil
 	}
-	attachDir := filepath.Join(workDir, ".cc-connect-next", "attachments")
-	if err := os.MkdirAll(attachDir, 0o755); err != nil {
-		slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		absWorkDir = workDir
+		slog.Warn("SaveFilesToDisk: filepath.Abs failed, using raw workDir", "workDir", workDir, "error", err)
 	}
+	baseDir := filepath.Join(absWorkDir, ".cc-connect-next", "attachments")
 
 	var paths []string
 	for i, f := range files {
+		attachDir := baseDir
+		if messageID := sanitizeAttachmentFileName(f.MessageID); messageID != "" {
+			attachDir = filepath.Join(baseDir, messageID)
+		}
+		if err := os.MkdirAll(attachDir, 0o755); err != nil {
+			slog.Warn("SaveFilesToDisk: mkdir failed", "dir", attachDir, "error", err)
+			continue
+		}
 		fname := sanitizeAttachmentFileName(f.FileName)
 		if fname == "" {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
+			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixNano(), i)
 		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Error("SaveFilesToDisk: write failed", "error", err)
+		fpath, ok := writeUniqueAttachmentFile(attachDir, fname, f.Data)
+		if !ok {
 			continue
 		}
 		paths = append(paths, fpath)
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
 	return paths
+}
+
+func writeUniqueAttachmentFile(dir, name string, data []byte) (string, bool) {
+	for index := 0; ; index++ {
+		candidate := name
+		if index > 0 {
+			extension := filepath.Ext(name)
+			stem := strings.TrimSuffix(name, extension)
+			candidate = fmt.Sprintf("%s_%d%s", stem, index, extension)
+		}
+		path := filepath.Join(dir, candidate)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			slog.Error("SaveFilesToDisk: create failed", "path", path, "error", err)
+			return "", false
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			slog.Error("SaveFilesToDisk: write failed", "path", path, "error", err)
+			return "", false
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			slog.Error("SaveFilesToDisk: close failed", "path", path, "error", err)
+			return "", false
+		}
+		return path, true
+	}
+}
+
+func scopeFileAttachments(files []FileAttachment, messageID string) []FileAttachment {
+	if len(files) == 0 || strings.TrimSpace(messageID) == "" {
+		return files
+	}
+	scoped := append([]FileAttachment(nil), files...)
+	for i := range scoped {
+		if strings.TrimSpace(scoped[i].MessageID) == "" {
+			scoped[i].MessageID = messageID
+		}
+	}
+	return scoped
 }
 
 // sanitizeAttachmentFileName reduces a user-supplied attachment filename to a
@@ -231,20 +286,20 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
-	Type         EventType
-	Content      string
-	ToolName     string         // populated for EventToolUse, EventPermissionRequest
-	ToolInput    string         // human-readable summary of tool input
-	ToolInputRaw map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
-	ToolResult   string         // populated for EventToolResult
-	ToolStatus   string         // optional status for EventToolResult (e.g. completed/failed)
-	ToolExitCode *int           // optional exit code for EventToolResult
-	ToolSuccess  *bool          // optional success flag for EventToolResult
-	SessionID    string         // agent-managed session ID for conversation continuity
-	RequestID    string         // unique request ID for EventPermissionRequest
-	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
-	Done         bool
-	Error        error
+	Type                     EventType
+	Content                  string
+	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
+	ToolInput                string         // human-readable summary of tool input
+	ToolInputRaw             map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
+	ToolResult               string         // populated for EventToolResult
+	ToolStatus               string         // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode             *int           // optional exit code for EventToolResult
+	ToolSuccess              *bool          // optional success flag for EventToolResult
+	SessionID                string         // agent-managed session ID for conversation continuity
+	RequestID                string         // unique request ID for EventPermissionRequest
+	Questions                []UserQuestion // populated when ToolName == "AskUserQuestion"
+	Done                     bool
+	Error                    error
 	InputTokens              int // token usage from agent result events
 	OutputTokens             int
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
