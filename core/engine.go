@@ -5020,12 +5020,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	hasDeferredEvent := false
 	channelClosedPending := false
 	idleTimeoutPending := false
+	turnDeadlinePending := false
 	for {
 		if channelClosedPending {
 			goto channelClosed
 		}
 		if idleTimeoutPending {
 			goto idleTimedOut
+		}
+		if turnDeadlinePending {
+			goto turnDeadlineExceeded
 		}
 		var event Event
 		var ok bool
@@ -5112,61 +5116,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				goto idleTimedOut
 			case <-turnDeadlineCh:
-				elapsed := time.Since(turnStart)
-				slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
-					"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
-				cp.Finalize(ProgressCardStateFailed)
-				sp.discard()
-				discardStreamingCard()
-				state.mu.Lock()
-				p := state.platform
-				state.mu.Unlock()
-				safePartial := persistVisibleRichPartial(p)
-				if !markRichCardFailed(p, cardMessageID, safePartial) {
-					if usesRichCard(p) {
-						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-					} else {
-						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-							fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+				// The absolute turn deadline is a semantic assistant boundary too.
+				// Render a safe buffered candidate before entering the failure and
+				// shutdown path; exact private footers are still dropped by Flush.
+				if turnDisplay.HideAgentFooter {
+					if tail := agentFooterFilter.Flush(); tail != "" {
+						event = Event{Type: EventText, Content: tail}
+						textAlreadyFiltered = true
+						turnDeadlinePending = true
+						break
 					}
 				}
-
-				// Two-phase shutdown: first try a graceful stop so the agent can
-				// write its final state before dying (preserves --resume ability).
-				// If it doesn't exit within a short grace window, force-kill.
-				state.markStopped()
-				gracePeriod := 10 * time.Second
-				graceTimer := time.NewTimer(gracePeriod)
-			graceLoop:
-				for {
-					select {
-					case evt, ok := <-state.agentSession.Events():
-						if !ok || (ok && evt.Done) {
-							// Agent exited cleanly; state is intact, resume will work.
-							slog.Info("agent exited gracefully after max_turn_time stop signal",
-								"session_key", sessionKey, "elapsed", time.Since(turnStart))
-							graceTimer.Stop()
-							state.mu.Lock()
-							state.eventsNeedResync = false
-							state.mu.Unlock()
-							break graceLoop
-						}
-					case <-graceTimer.C:
-						// Agent did not stop within grace period — force-kill.
-						slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
-							"session_key", sessionKey, "grace_period", gracePeriod)
-						graceTimer.Stop()
-						state.mu.Lock()
-						state.eventsNeedResync = true
-						state.mu.Unlock()
-						e.cleanupInteractiveState(sessionKey, state)
-						return
-					}
-				}
-				// Graceful exit path: cleanupInteractiveState closes the session,
-				// but eventsNeedResync=false so the next --resume works correctly.
-				e.cleanupInteractiveState(sessionKey, state)
-				return
+				goto turnDeadlineExceeded
 			case <-e.ctx.Done():
 				if state.shouldDiscardTurn(msgID) {
 					discardSilentTurn()
@@ -6419,6 +6380,65 @@ idleTimedOut:
 				e.send(timedOutPlatform, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			}
 		}
+		e.cleanupInteractiveState(sessionKey, state)
+		return
+	}
+
+turnDeadlineExceeded:
+	{
+		elapsed := time.Since(turnStart)
+		slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
+			"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
+		cp.Finalize(ProgressCardStateFailed)
+		sp.discard()
+		discardStreamingCard()
+		state.mu.Lock()
+		deadlinePlatform := state.platform
+		state.mu.Unlock()
+		safePartial := persistVisibleRichPartial(deadlinePlatform)
+		if !markRichCardFailed(deadlinePlatform, cardMessageID, safePartial) {
+			if usesRichCard(deadlinePlatform) {
+				sendGenericRichFailure(deadlinePlatform, replyCtx, cardMessageID, safePartial)
+			} else {
+				e.send(deadlinePlatform, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+					fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			}
+		}
+
+		// Two-phase shutdown: first try a graceful stop so the agent can
+		// write its final state before dying (preserves --resume ability).
+		// If it doesn't exit within a short grace window, force-kill.
+		state.markStopped()
+		gracePeriod := 10 * time.Second
+		graceTimer := time.NewTimer(gracePeriod)
+	graceLoop:
+		for {
+			select {
+			case evt, ok := <-state.agentSession.Events():
+				if !ok || (ok && evt.Done) {
+					// Agent exited cleanly; state is intact, resume will work.
+					slog.Info("agent exited gracefully after max_turn_time stop signal",
+						"session_key", sessionKey, "elapsed", time.Since(turnStart))
+					graceTimer.Stop()
+					state.mu.Lock()
+					state.eventsNeedResync = false
+					state.mu.Unlock()
+					break graceLoop
+				}
+			case <-graceTimer.C:
+				// Agent did not stop within grace period — force-kill.
+				slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
+					"session_key", sessionKey, "grace_period", gracePeriod)
+				graceTimer.Stop()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			}
+		}
+		// Graceful exit path: cleanupInteractiveState closes the session,
+		// but eventsNeedResync=false so the next --resume works correctly.
 		e.cleanupInteractiveState(sessionKey, state)
 		return
 	}
