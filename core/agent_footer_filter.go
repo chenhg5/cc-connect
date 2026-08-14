@@ -11,7 +11,8 @@ const maxAgentFooterModelTokenLen = 128
 //
 // Most answer text passes through immediately. Only a line prefix that can still
 // become the model-token + middle-dot footer signature is held until it is
-// disambiguated, terminated by a newline, or flushed at EventResult.
+// disambiguated, terminated by a newline, or flushed at a semantic event
+// boundary.
 type agentFooterStreamFilter struct {
 	enabled     bool
 	pendingLine string
@@ -69,8 +70,9 @@ func (f *agentFooterStreamFilter) Push(chunk string) string {
 	return output.String()
 }
 
-// Flush resolves the unterminated final line. Exact footer lines are omitted;
-// incomplete candidates and footer-shaped prose are returned verbatim.
+// Flush resolves an unterminated line at a semantic event boundary. Exact
+// footer lines are omitted; incomplete candidates and footer-shaped prose are
+// returned verbatim.
 func (f *agentFooterStreamFilter) Flush() string {
 	if !f.enabled {
 		return ""

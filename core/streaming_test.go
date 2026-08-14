@@ -226,6 +226,7 @@ func TestStreamPreview_UnfreezeStartsFreshPreview(t *testing.T) {
 		lastSentText:      "before permission",
 		lastSentAt:        time.Now(),
 		lastSentViaUpdate: true,
+		previewMsgID:      "stale-preview",
 		degraded:          true,
 		pendingStatus:     CardStatusWorking,
 	}
@@ -240,6 +241,9 @@ func TestStreamPreview_UnfreezeStartsFreshPreview(t *testing.T) {
 	}
 	if preview.lastSentViaUpdate || preview.pendingStatus != "" {
 		t.Fatalf("preview delivery state was not reset: %#v", preview)
+	}
+	if preview.previewMsgID != nil {
+		t.Fatalf("preview retained stale pre-permission handle: %#v", preview.previewMsgID)
 	}
 }
 

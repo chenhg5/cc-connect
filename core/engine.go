@@ -5016,46 +5016,93 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 	events := state.agentSession.Events()
+	var deferredEvent Event
+	hasDeferredEvent := false
 	for {
 		var event Event
 		var ok bool
 
-		select {
-		case <-silentCancelCh:
-			discardSilentTurn()
-			return
-		case <-stopCh:
-			if state.shouldDiscardTurn(msgID) {
+		if hasDeferredEvent {
+			event = deferredEvent
+			hasDeferredEvent = false
+		} else {
+			select {
+			case <-silentCancelCh:
 				discardSilentTurn()
 				return
-			}
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			p := state.platform
-			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
-				removeRichCardForFallback(p, cardMessageID)
-			}
-			return
-		case event, ok = <-events:
-			if !ok {
-				goto channelClosed
-			}
-		case err := <-pendingSend:
-			pendingSend = nil
-			if err != nil {
-				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+			case <-stopCh:
+				if state.shouldDiscardTurn(msgID) {
+					discardSilentTurn()
+					return
+				}
 				sp.discard()
 				discardStreamingCard()
-				if stopTyping != nil {
-					stopTyping()
-					stopTyping = nil
+				state.mu.Lock()
+				p := state.platform
+				state.mu.Unlock()
+				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+					removeRichCardForFallback(p, cardMessageID)
 				}
-				e.notifyDroppedQueuedMessages(state, err)
-				if state.agentSession == nil || !state.agentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
+				return
+			case event, ok = <-events:
+				if !ok {
+					goto channelClosed
 				}
+			case err := <-pendingSend:
+				pendingSend = nil
+				if err != nil {
+					slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+					sp.discard()
+					discardStreamingCard()
+					if stopTyping != nil {
+						stopTyping()
+						stopTyping = nil
+					}
+					e.notifyDroppedQueuedMessages(state, err)
+					if state.agentSession == nil || !state.agentSession.Alive() {
+						e.cleanupInteractiveState(sessionKey, state)
+					}
+					state.mu.Lock()
+					p := state.platform
+					state.mu.Unlock()
+					safePartial := persistVisibleRichPartial(p)
+					if !markRichCardFailed(p, cardMessageID, safePartial) {
+						if usesRichCard(p) {
+							sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+						} else {
+							e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+						}
+					}
+					return
+				}
+				continue
+			case <-idleCh:
+				slog.Error("agent session idle timeout: no events for too long, killing session",
+					"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				discardStreamingCard()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				p := state.platform
+				state.mu.Unlock()
+				safePartial := persistVisibleRichPartial(p)
+				if !markRichCardFailed(p, cardMessageID, safePartial) {
+					if usesRichCard(p) {
+						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+					} else {
+						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+					}
+				}
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			case <-turnDeadlineCh:
+				elapsed := time.Since(turnStart)
+				slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
+					"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				discardStreamingCard()
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
@@ -5064,103 +5111,77 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if usesRichCard(p) {
 						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
 					} else {
-						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+							fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
 					}
 				}
-				return
-			}
-			continue
-		case <-idleCh:
-			slog.Error("agent session idle timeout: no events for too long, killing session",
-				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			state.eventsNeedResync = true
-			p := state.platform
-			state.mu.Unlock()
-			safePartial := persistVisibleRichPartial(p)
-			if !markRichCardFailed(p, cardMessageID, safePartial) {
-				if usesRichCard(p) {
-					sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-				} else {
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-				}
-			}
-			e.cleanupInteractiveState(sessionKey, state)
-			return
-		case <-turnDeadlineCh:
-			elapsed := time.Since(turnStart)
-			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
-				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
-			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			p := state.platform
-			state.mu.Unlock()
-			safePartial := persistVisibleRichPartial(p)
-			if !markRichCardFailed(p, cardMessageID, safePartial) {
-				if usesRichCard(p) {
-					sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-				} else {
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-						fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
-				}
-			}
 
-			// Two-phase shutdown: first try a graceful stop so the agent can
-			// write its final state before dying (preserves --resume ability).
-			// If it doesn't exit within a short grace window, force-kill.
-			state.markStopped()
-			gracePeriod := 10 * time.Second
-			graceTimer := time.NewTimer(gracePeriod)
-		graceLoop:
-			for {
-				select {
-				case evt, ok := <-state.agentSession.Events():
-					if !ok || (ok && evt.Done) {
-						// Agent exited cleanly; state is intact, resume will work.
-						slog.Info("agent exited gracefully after max_turn_time stop signal",
-							"session_key", sessionKey, "elapsed", time.Since(turnStart))
+				// Two-phase shutdown: first try a graceful stop so the agent can
+				// write its final state before dying (preserves --resume ability).
+				// If it doesn't exit within a short grace window, force-kill.
+				state.markStopped()
+				gracePeriod := 10 * time.Second
+				graceTimer := time.NewTimer(gracePeriod)
+			graceLoop:
+				for {
+					select {
+					case evt, ok := <-state.agentSession.Events():
+						if !ok || (ok && evt.Done) {
+							// Agent exited cleanly; state is intact, resume will work.
+							slog.Info("agent exited gracefully after max_turn_time stop signal",
+								"session_key", sessionKey, "elapsed", time.Since(turnStart))
+							graceTimer.Stop()
+							state.mu.Lock()
+							state.eventsNeedResync = false
+							state.mu.Unlock()
+							break graceLoop
+						}
+					case <-graceTimer.C:
+						// Agent did not stop within grace period — force-kill.
+						slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
+							"session_key", sessionKey, "grace_period", gracePeriod)
 						graceTimer.Stop()
 						state.mu.Lock()
-						state.eventsNeedResync = false
+						state.eventsNeedResync = true
 						state.mu.Unlock()
-						break graceLoop
+						e.cleanupInteractiveState(sessionKey, state)
+						return
 					}
-				case <-graceTimer.C:
-					// Agent did not stop within grace period — force-kill.
-					slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
-						"session_key", sessionKey, "grace_period", gracePeriod)
-					graceTimer.Stop()
-					state.mu.Lock()
-					state.eventsNeedResync = true
-					state.mu.Unlock()
-					e.cleanupInteractiveState(sessionKey, state)
+				}
+				// Graceful exit path: cleanupInteractiveState closes the session,
+				// but eventsNeedResync=false so the next --resume works correctly.
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			case <-e.ctx.Done():
+				if state.shouldDiscardTurn(msgID) {
+					discardSilentTurn()
 					return
 				}
-			}
-			// Graceful exit path: cleanupInteractiveState closes the session,
-			// but eventsNeedResync=false so the next --resume works correctly.
-			e.cleanupInteractiveState(sessionKey, state)
-			return
-		case <-e.ctx.Done():
-			if state.shouldDiscardTurn(msgID) {
-				discardSilentTurn()
+				sp.discard()
+				discardStreamingCard()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				p := state.platform
+				state.mu.Unlock()
+				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+					removeRichCardForFallback(p, cardMessageID)
+				}
 				return
 			}
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			state.eventsNeedResync = true
-			p := state.platform
-			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
-				removeRichCardForFallback(p, cardMessageID)
+		}
+
+		textAlreadyFiltered := false
+		if event.Type != EventText && turnDisplay.HideAgentFooter {
+			// Agent events delimit semantic assistant segments even though
+			// EventText transport chunks do not. Resolve any possible footer line
+			// before the tool/thinking/permission/result event is processed, then
+			// resume the original event on the next loop iteration.
+			if tail := agentFooterFilter.Flush(); tail != "" {
+				deferredEvent = event
+				hasDeferredEvent = true
+				event = Event{Type: EventText, Content: tail}
+				textAlreadyFiltered = true
 			}
-			return
 		}
 
 		if state.shouldDiscardTurn(msgID) {
@@ -5481,7 +5502,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			content := agentFooterFilter.Push(event.Content)
+			content := event.Content
+			if !textAlreadyFiltered {
+				content = agentFooterFilter.Push(content)
+			}
 			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
@@ -5811,12 +5835,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			fullResponse := event.Content
 			if turnDisplay.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
-				// EventText is transport-framed rather than line-framed. Preserve a
-				// final buffered line only after it is known not to be a complete
-				// private Agent footer; an exact footer is discarded by Flush.
-				if tail := agentFooterFilter.Flush(); tail != "" {
-					textParts = append(textParts, tail)
-				}
 			}
 			// Rich cards always hide tool details regardless of the legacy
 			// ToolMessages setting, so textParts is the authoritative answer across

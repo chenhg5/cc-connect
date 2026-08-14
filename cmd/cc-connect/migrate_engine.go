@@ -192,7 +192,7 @@ func normalizeMigrationSourceVersion(raw string) (string, error) {
 	return value, nil
 }
 
-func validateMigrationProjectPlugins(cfg legacyMigrationConfig) error {
+func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 	agents := stringSet(core.ListRegisteredAgents())
 	platforms := stringSet(core.ListRegisteredPlatforms())
 	for _, project := range cfg.Projects {
@@ -222,11 +222,11 @@ func validateMigrationProjectPlugins(cfg legacyMigrationConfig) error {
 	return nil
 }
 
-func validateMigrationConfigSchema(configBytes []byte) error {
+func decodeAndValidateMigrationConfig(configBytes []byte) (*ccconfig.Config, error) {
 	var cfg ccconfig.Config
 	metadata, err := toml.Decode(string(configBytes), &cfg)
 	if err != nil {
-		return fmt.Errorf("source config is incompatible with this cc-connect-next build: %w", err)
+		return nil, fmt.Errorf("source config is incompatible with this cc-connect-next build: %w", err)
 	}
 	undecoded := metadata.Undecoded()
 	if len(undecoded) > 0 {
@@ -235,12 +235,18 @@ func validateMigrationConfigSchema(configBytes []byte) error {
 			keys = append(keys, key.String())
 		}
 		sort.Strings(keys)
-		return fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
+		return nil, fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
 	}
+	// Load resolves environment placeholders and provider references before
+	// semantic validation. Migration preserves the original TOML bytes, but its
+	// preflight must evaluate them with the same process environment and runtime
+	// semantics as the successor that will later read those bytes.
+	cfg.ResolveEnvironment()
+	cfg.ResolveProviderRefs()
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("source config is semantically incompatible with this cc-connect-next build: %w; no target was written", err)
+		return nil, fmt.Errorf("source config is semantically incompatible with this cc-connect-next build: %w; no target was written", err)
 	}
-	return nil
+	return &cfg, nil
 }
 
 func stringSet(values []string) map[string]struct{} {
@@ -361,14 +367,15 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if _, err := toml.Decode(string(configBytes), &legacyCfg); err != nil {
 		return nil, fmt.Errorf("source config is invalid TOML: %w", err)
 	}
-	if err := validateMigrationConfigSchema(configBytes); err != nil {
+	validatedCfg, err := decodeAndValidateMigrationConfig(configBytes)
+	if err != nil {
 		return nil, err
 	}
 	sourceVersion, err := normalizeMigrationSourceVersion(opts.SourceVersion)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateMigrationProjectPlugins(legacyCfg); err != nil {
+	if err := validateMigrationProjectPlugins(validatedCfg); err != nil {
 		return nil, err
 	}
 	runtimeWorkDir, err := resolveLegacyRuntimeWorkDir(opts.RuntimeWorkDir, source, opts.Home)

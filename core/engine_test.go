@@ -1931,6 +1931,7 @@ type stubRichCardSilentPlatform struct {
 	startContexts []any
 	streamTexts   []string
 	updates       []string
+	calls         []string
 	deleteCount   int
 	nextHandleSeq int
 }
@@ -1979,6 +1980,7 @@ func (p *stubRichCardSilentPlatform) SendPreviewStart(_ context.Context, replyCt
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.previewStarts = append(p.previewStarts, content)
+	p.calls = append(p.calls, "start:"+content)
 	p.startContexts = append(p.startContexts, replyCtx)
 	p.nextHandleSeq++
 	return fmt.Sprintf("handle-%d", p.nextHandleSeq), nil
@@ -1994,6 +1996,7 @@ func (p *stubRichCardSilentPlatform) UpdateMessage(_ context.Context, _ any, con
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.updates = append(p.updates, content)
+	p.calls = append(p.calls, "update:"+content)
 	return nil
 }
 
@@ -2001,6 +2004,7 @@ func (p *stubRichCardSilentPlatform) StreamRichCardText(_ context.Context, _ any
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.streamTexts = append(p.streamTexts, fullText)
+	p.calls = append(p.calls, "stream:"+fullText)
 	return nil
 }
 
@@ -2019,6 +2023,12 @@ func (p *stubRichCardSilentPlatform) snapshot() (starts, streams, updates []stri
 	updates = append(updates, p.updates...)
 	deletes = p.deleteCount
 	return
+}
+
+func (p *stubRichCardSilentPlatform) callSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
 }
 
 type stubRichCardResolverPlatform struct {
@@ -3508,6 +3518,40 @@ func TestProcessInteractiveEvents_RichCardPreservesFooterLikeLineWhenContinuatio
 	rendered := strings.Join(append(streams, updates...), "\n")
 	if !strings.Contains(rendered, footerLike+continuation) {
 		t.Fatalf("footer-like prose split at a transport boundary was lost: %q", rendered)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardFlushesFooterCandidateBeforeToolBoundary(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-footer-boundary"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-footer-boundary")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-footer-boundary"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Searching..."}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "private-tool"}
+	agentSession.events <- Event{Type: EventText, Content: " Found it."}
+	agentSession.events <- Event{Type: EventResult, Content: "Searching... Found it.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-footer-boundary", time.Now(), nil, nil, state.replyCtx)
+
+	calls := p.callSnapshot()
+	searchingStream := -1
+	toolProgress := -1
+	for i, call := range calls {
+		if call == "stream:Searching..." {
+			searchingStream = i
+		}
+		if strings.HasPrefix(call, "update:") && strings.Contains(call, "steps=1") && toolProgress < 0 {
+			toolProgress = i
+		}
+	}
+	if searchingStream < 0 || toolProgress < 0 || searchingStream >= toolProgress {
+		t.Fatalf("pre-tool text was not flushed before anonymous tool progress: %v", calls)
 	}
 }
 

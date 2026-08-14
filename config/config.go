@@ -1007,6 +1007,13 @@ func (c *Config) Validate() error {
 	return c.validate()
 }
 
+// ResolveEnvironment applies the same ${NAME} substitution used by Load.
+// It is exported for callers that decode Config directly but still need their
+// validation and runtime registry checks to match normal startup semantics.
+func (c *Config) ResolveEnvironment() {
+	resolveEnvInConfig(c)
+}
+
 func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err

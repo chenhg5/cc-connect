@@ -394,6 +394,7 @@ func (sp *streamPreview) unfreeze() {
 	sp.fullText = ""
 	sp.lastSentText = ""
 	sp.lastSentViaUpdate = false
+	sp.previewMsgID = nil
 	sp.pendingStatus = ""
 	sp.degraded = false
 }

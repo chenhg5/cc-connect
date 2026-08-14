@@ -166,6 +166,42 @@ type = "feishu"
 	}
 }
 
+func TestPrepareLegacyMigration_ResolvesEnvironmentBeforeSemanticAndRegistryValidation(t *testing.T) {
+	t.Setenv("CC_NEXT_MIGRATION_DISPLAY_MODE", "compact")
+	t.Setenv("CC_NEXT_MIGRATION_AGENT_TYPE", "codex")
+	t.Setenv("CC_NEXT_MIGRATION_PLATFORM_TYPE", "feishu")
+
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[display]
+mode = "${CC_NEXT_MIGRATION_DISPLAY_MODE}"
+[[projects]]
+name = "environment-backed"
+[projects.agent]
+type = "${CC_NEXT_MIGRATION_AGENT_TYPE}"
+[[projects.platforms]]
+type = "${CC_NEXT_MIGRATION_PLATFORM_TYPE}"
+`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err != nil {
+		t.Fatalf("environment-backed config was rejected before migration: %v", err)
+	}
+	if plan == nil {
+		t.Fatal("environment-backed config produced no migration plan")
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run wrote target state: %v", statErr)
+	}
+}
+
 func TestPrepareLegacyMigration_RejectsSemanticallyInvalidConfigBeforeWrites(t *testing.T) {
 	tests := []struct {
 		name       string
