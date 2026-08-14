@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -19,9 +21,14 @@ import (
 )
 
 // dshSession runs a multi-turn dsh conversation. Each Send() spawns
-// `dsh --profile headless` as a one-shot process; the persisted dsh session
-// (identified by the cc-connect-owned session id) is resumed on every run,
-// so context carries across turns.
+// `dsh --profile headless --jsonl` as a one-shot process; the persisted dsh
+// session (identified by the cc-connect-owned session id) is resumed on every
+// run, so context carries across turns.
+//
+// With --jsonl the dsh headless runner streams events on stdout (text /
+// thinking deltas, tool calls, approval requests, result/done envelopes) and
+// reads approval responses from stdin, so cc-connect can show tool progress
+// in the chat and relay permission decisions from the human (Feishu card).
 type dshSession struct {
 	cmd       string
 	extraArgs []string // extra args from cmd, prepended before dsh args
@@ -35,6 +42,15 @@ type dshSession struct {
 	cancel    context.CancelFunc
 	sendWg    sync.WaitGroup // tracks in-flight Send() calls
 	alive     atomic.Bool
+
+	// per-run process wiring (nil between runs)
+	runMu   sync.Mutex // guards stdin + pendingApprovals
+	stdin   io.WriteCloser
+	pending map[string]struct{} // approval ids awaiting a human decision
+
+	// resultSent is set once the JSONL reader emits the terminal EventResult
+	// (on the `done` envelope), so Send does not emit a duplicate.
+	resultSent atomic.Bool
 }
 
 // newDSHSession creates a session. sessionID is the cc-connect-persisted dsh
@@ -66,10 +82,10 @@ func newDSHSession(ctx context.Context, cmd string, extraArgs []string, workDir,
 
 // ── Send ─────────────────────────────────────────────────────
 
-// Send runs one headless dsh turn: spawns `dsh --profile headless
-// --session-id <id> [--model <m>] [--mode <mode>] <prompt>`, waits for the
-// process to finish, then emits the final assistant text (stdout) and the
-// turn result. stderr lines are surfaced as EventError when the run fails.
+// Send runs one headless dsh turn in --jsonl mode: spawns
+// `dsh --profile headless --session-id <id> [--model <m>] [--mode <mode>] --jsonl <prompt>`,
+// streams events into the events channel (text/thinking/tool calls), relays
+// approval requests as permission cards, and finishes with an EventResult.
 func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	s.sendWg.Add(1)
 	defer s.sendWg.Done()
@@ -91,6 +107,10 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 	}
 	cmd.Env = env
 
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("dsh: stdin pipe: %w", err)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("dsh: stdout pipe: %w", err)
@@ -104,10 +124,32 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 		return fmt.Errorf("dsh: start: %w", err)
 	}
 
-	// Read the final assistant text (headless prints it on stdout and exits).
-	output, readErr := readAllString(stdout)
+	s.runMu.Lock()
+	s.stdin = stdinPipe
+	s.pending = make(map[string]struct{})
+	s.runMu.Unlock()
+
+	// Reader goroutine: stream JSONL events until the process exits.
+	finalText := new(string)
+	resultSent := new(atomic.Bool)
+	readerDone := make(chan struct{})
+	go s.readJSONL(stdout, finalText, resultSent, readerDone)
 
 	err = cmd.Wait()
+	// The reader drains stdout; wait for it to finish emitting (it may have
+	// buffered the trailing result/done lines).
+	<-readerDone
+
+	// The turn is over — close stdin so the runner's readline releases and
+	// the process can exit cleanly.
+	s.runMu.Lock()
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+		s.stdin = nil
+	}
+	s.pending = nil
+	s.runMu.Unlock()
+
 	stderrMsg := strings.TrimSpace(stderrBuf.String())
 	if err != nil {
 		// emit() drops events once s.ctx is done (Close/cancel), so a
@@ -115,25 +157,162 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 		slog.Error("dshSession: process error", "cmd", s.cmd, "error", err, "stderr", truncStr(stderrMsg, 1000))
 	}
 
-	text := strings.TrimSpace(output)
-	if text != "" {
-		s.emit(core.Event{Type: core.EventText, Content: text})
-	}
-	if readErr != nil {
-		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("dsh: read stdout: %w", readErr)})
-	}
 	if stderrMsg != "" {
 		// Surface actionable stderr (e.g. "dsh: MISSING_CREDENTIAL: ...").
 		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("dsh: %s", truncStr(stderrMsg, 2000))})
 	}
-	if err != nil {
+	if err != nil && *finalText == "" {
 		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("dsh: %s", err)})
 	}
 
-	// Signal turn completion.
-	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+	// Signal turn completion (EventResult with the full final text; the
+	// engine prefers event.Content over the accumulated stream deltas).
+	if !resultSent.Load() {
+		s.emit(core.Event{Type: core.EventResult, Content: *finalText, SessionID: s.CurrentSessionID(), Done: true})
+	}
 	return nil
 }
+
+// readJSONL reads the dsh --jsonl event stream and maps it to core.Events.
+// It emits a terminal EventResult (Done: true) when the `done` envelope
+// arrives (marking resultSent), then closes readerDone.
+func (s *dshSession) readJSONL(stdout io.ReadCloser, finalText *string, resultSent *atomic.Bool, done chan struct{}) {
+	defer close(done)
+	defer func() { _ = stdout.Close() }()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var thinkingBuf strings.Builder
+	flushThinking := func() {
+		if thinkingBuf.Len() == 0 {
+			return
+		}
+		s.emit(core.Event{Type: core.EventThinking, Content: thinkingBuf.String()})
+		thinkingBuf.Reset()
+	}
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var evt struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Name      string          `json:"name"`
+			Arguments string          `json:"arguments"`
+			CallID    string          `json:"callId"`
+			Content   string          `json:"content"`
+			IsError   bool            `json:"isError"`
+			ID        string          `json:"id"`
+			ToolName  string          `json:"toolName"`
+			Reason    string          `json:"reason"`
+			Success   bool            `json:"success"`
+			SessionID string          `json:"sessionId"`
+			Extra     json.RawMessage `json:"-"`
+		}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			slog.Debug("dshSession: non-JSON line", "line", truncStr(line, 100))
+			continue
+		}
+
+		switch evt.Type {
+		case "text":
+			if evt.Text == "" {
+				continue
+			}
+			flushThinking()
+			s.emit(core.Event{Type: core.EventText, Content: evt.Text})
+
+		case "thinking":
+			if evt.Text == "" {
+				continue
+			}
+			thinkingBuf.WriteString(evt.Text)
+
+		case "tool/call":
+			flushThinking()
+			s.emit(core.Event{Type: core.EventToolUse, ToolName: evt.Name, ToolInput: truncStr(evt.Arguments, 500)})
+
+		case "tool/result":
+			flushThinking()
+			s.emit(core.Event{Type: core.EventToolResult, ToolName: evt.Name, Content: truncStr(evt.Content, 500)})
+
+		case "approval/request":
+			flushThinking()
+			requestID := "dsh_" + evt.ID
+			s.runMu.Lock()
+			if s.pending != nil {
+				s.pending[requestID] = struct{}{}
+			}
+			s.runMu.Unlock()
+			reason := evt.Reason
+			if reason == "" {
+				reason = fmt.Sprintf("tool %q requires your approval", evt.ToolName)
+			}
+			s.emit(core.Event{
+				Type:      core.EventPermissionRequest,
+				RequestID: requestID,
+				ToolName:  evt.ToolName,
+				ToolInput: reason,
+				ToolInputRaw: map[string]any{
+					"toolName": evt.ToolName,
+					"reason":   evt.Reason,
+					"callId":   evt.CallID,
+				},
+			})
+
+		case "result":
+			*finalText = evt.Text
+
+		case "done":
+			flushThinking()
+			resultSent.Store(true)
+			s.emit(core.Event{Type: core.EventResult, Content: *finalText, SessionID: s.CurrentSessionID(), Done: true})
+			return
+		}
+	}
+
+	// Process exited without a done envelope (e.g. hard failure).
+	flushThinking()
+}
+
+// ── RespondPermission ────────────────────────────────────────
+
+// RespondPermission writes the human's decision back to the running dsh
+// process's stdin (the headless runner's approval answerer waits for it).
+func (s *dshSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.stdin == nil {
+		return nil // no active run; nothing to answer
+	}
+	id := strings.TrimPrefix(requestID, "dsh_")
+	if _, ok := s.pending[requestID]; !ok {
+		slog.Warn("dshSession: RespondPermission for unknown request", "requestID", requestID)
+		return nil
+	}
+	outcome := "rejected"
+	if result.Behavior == "allow" {
+		outcome = "allowed-once"
+	}
+	line, err := json.Marshal(map[string]string{
+		"type":    "approval/response",
+		"id":      id,
+		"outcome": outcome,
+	})
+	if err != nil {
+		return fmt.Errorf("dsh: marshal approval response: %w", err)
+	}
+	_, err = s.stdin.Write(append(line, '\n'))
+	if err != nil {
+		return fmt.Errorf("dsh: write approval response: %w", err)
+	}
+	return nil
+}
+
+// ── buildArgs / buildPrompt ─────────────────────────────────
 
 // buildPrompt saves attachments to disk and appends file references so the
 // dsh agent can read them with its own tools.
@@ -159,6 +338,7 @@ func (s *dshSession) buildArgs(prompt string) []string {
 	if s.mode != "" {
 		args = append(args, "--mode", s.mode)
 	}
+	args = append(args, "--jsonl")
 	return append(args, prompt)
 }
 
@@ -184,36 +364,22 @@ func (s *dshSession) Alive() bool {
 	return s.alive.Load()
 }
 
-func (s *dshSession) RespondPermission(_ string, _ core.PermissionResult) error {
-	// Headless runs are one-shot: there is no interactive permission channel,
-	// so permission decisions are not forwarded. dsh's own approval seam
-	// fails closed under headless (no answerer) — mode controls that behavior.
-	return nil
-}
-
 func (s *dshSession) Close() error {
 	s.alive.Store(false)
 	s.cancel()
+	s.runMu.Lock()
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+		s.stdin = nil
+	}
+	s.pending = nil
+	s.runMu.Unlock()
 	s.sendWg.Wait()
 	close(s.events)
 	return nil
 }
 
 // ── Helpers ──────────────────────────────────────────────────
-
-func readAllString(r interface{ Read([]byte) (int, error) }) (string, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	var sb strings.Builder
-	for scanner.Scan() {
-		sb.WriteString(scanner.Text())
-		sb.WriteString("\n")
-	}
-	if err := scanner.Err(); err != nil {
-		return sb.String(), err
-	}
-	return sb.String(), nil
-}
 
 // saveImages writes image attachments under workDir/.cc-connect/images and
 // returns their absolute paths (dsh cannot ingest image bytes through the

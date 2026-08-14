@@ -1,6 +1,7 @@
 package dsh
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/klauspost/compress/zstd"
 )
 
 // ── normalizeMode ────────────────────────────────────────────
@@ -198,7 +200,7 @@ func TestBuildArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := s.buildArgs("hello world")
-	want := []string{"--profile", "headless", "--session-id", "session-abc", "--mode", "confirm", "hello world"}
+	want := []string{"--profile", "headless", "--session-id", "session-abc", "--mode", "confirm", "--jsonl", "hello world"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("buildArgs() = %v, want %v", args, want)
 	}
@@ -235,19 +237,38 @@ func TestSessionID_GeneratedWhenEmpty(t *testing.T) {
 // ── Send with a fake dsh script ──────────────────────────────
 
 // fakeDSHScript writes a shell script that acts like the patched headless
-// runner: it dumps its full argv to $1 (an env-provided file) and prints a
-// canned final answer on stdout. When wantErr is set it exits non-zero with
-// a message on stderr instead.
-func fakeDSHScript(t *testing.T, argvFile string, wantErr bool) string {
+// runner in --jsonl mode: it dumps its full argv to $1 (an env-provided
+// file), emits streaming JSONL events, and (optionally) handles an approval
+// request over stdin. When wantErr is set it exits non-zero with a message
+// on stderr instead.
+//
+// JSONL emitted: text deltas, a tool call, a tool result, the final result
+// envelope and the done envelope. When wantApproval is set it emits an
+// approval/request line and echoes the first stdin line back to stdout
+// before finishing.
+func fakeDSHScript(t *testing.T, argvFile string, wantErr, wantApproval bool) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "fake-dsh.sh")
+	approval := ``
+	if wantApproval {
+		approval = `echo '{"type":"approval/request","id":"ap-1","toolName":"bash","reason":"approve bash"}' 
+read -r RESPONSE
+echo "got:$RESPONSE"
+`
+	}
 	body := `#!/bin/sh
 echo "$@" > "` + argvFile + `"
 if [ "` + fmt.Sprint(wantErr) + `" = "true" ]; then
   echo "dsh: BOOM: test failure" >&2
   exit 1
 fi
-printf 'final answer line 1\nfinal answer line 2\n'
+echo '{"type":"text","text":"hel"}'
+echo '{"type":"text","text":"lo"}'
+echo '{"type":"thinking","text":"thinking about it"}'
+echo '{"type":"tool/call","callId":"c1","name":"bash","arguments":"{\"command\":\"ls\"}"}'
+echo '{"type":"tool/result","callId":"c1","name":"bash","content":"ok"}'
+` + approval + `echo '{"type":"result","text":"final answer"}'
+echo '{"type":"done","success":true}'
 `
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -257,7 +278,7 @@ printf 'final answer line 1\nfinal answer line 2\n'
 
 func TestSend_Success(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
-	script := fakeDSHScript(t, argvFile, false)
+	script := fakeDSHScript(t, argvFile, false, false)
 
 	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "deepseek-v4-flash", "confirm", "session-test-1", nil)
 	if err != nil {
@@ -269,6 +290,8 @@ func TestSend_Success(t *testing.T) {
 	go func() { done <- s.Send("please reply", "msg-1", nil, nil) }()
 
 	var texts []string
+	var thinks []string
+	var tools []string
 	var result *core.Event
 	timeout := time.After(15 * time.Second)
 loop:
@@ -278,6 +301,10 @@ loop:
 			switch evt.Type {
 			case core.EventText:
 				texts = append(texts, evt.Content)
+			case core.EventThinking:
+				thinks = append(thinks, evt.Content)
+			case core.EventToolUse:
+				tools = append(tools, evt.ToolName)
 			case core.EventResult:
 				result = &evt
 				break loop
@@ -292,10 +319,16 @@ loop:
 		t.Fatalf("Send() error = %v", err)
 	}
 
-	if len(texts) != 1 || texts[0] != "final answer line 1\nfinal answer line 2" {
-		t.Errorf("EventText = %q", texts)
+	if len(texts) != 2 || texts[0] != "hel" || texts[1] != "lo" {
+		t.Errorf("EventText = %q, want streaming hel/lo", texts)
 	}
-	if result == nil || !result.Done || result.SessionID != "session-test-1" {
+	if len(thinks) != 1 || thinks[0] != "thinking about it" {
+		t.Errorf("EventThinking = %q", thinks)
+	}
+	if len(tools) != 1 || tools[0] != "bash" {
+		t.Errorf("EventToolUse = %v, want [bash]", tools)
+	}
+	if result == nil || !result.Done || result.SessionID != "session-test-1" || result.Content != "final answer" {
 		t.Errorf("EventResult = %+v", result)
 	}
 
@@ -305,16 +338,84 @@ loop:
 		t.Fatal(err)
 	}
 	joined := string(argv)
-	for _, want := range []string{"--profile", "headless", "--session-id", "session-test-1", "--model", "deepseek-v4-flash", "--mode", "confirm", "please reply"} {
+	for _, want := range []string{"--profile", "headless", "--session-id", "session-test-1", "--model", "deepseek-v4-flash", "--mode", "confirm", "--jsonl", "please reply"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("fake dsh argv %q missing %q", joined, want)
 		}
 	}
 }
 
+func TestSend_Approval(t *testing.T) {
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	script := fakeDSHScript(t, argvFile, false, true)
+
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "confirm", "session-approval", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- s.Send("please reply", "msg-1", nil, nil) }()
+
+	var result *core.Event
+	var permReq *core.Event
+	timeout := time.After(15 * time.Second)
+loop:
+	for {
+		select {
+		case evt := <-s.Events():
+			switch evt.Type {
+			case core.EventPermissionRequest:
+				permReq = &evt
+				// Answer the permission request (the engine would do this
+				// from the Feishu card buttons).
+				if err := s.RespondPermission(evt.RequestID, core.PermissionResult{Behavior: "allow"}); err != nil {
+					t.Fatalf("RespondPermission error: %v", err)
+				}
+			case core.EventResult:
+				result = &evt
+				break loop
+			case core.EventError:
+				t.Fatalf("unexpected error event: %v", evt.Error)
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for result")
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if permReq == nil {
+		t.Fatal("expected EventPermissionRequest")
+	}
+	if permReq.ToolName != "bash" || !strings.HasPrefix(permReq.RequestID, "dsh_") {
+		t.Errorf("EventPermissionRequest = %+v", permReq)
+	}
+	if permReq.ToolInput == "" {
+		t.Error("EventPermissionRequest.ToolInput is empty")
+	}
+	if result == nil || !result.Done || result.Content != "final answer" {
+		t.Errorf("EventResult = %+v", result)
+	}
+}
+
+func TestRespondPermission_NoActiveRun(t *testing.T) {
+	s, err := newDSHSession(context.Background(), "echo", nil, t.TempDir(), "", "", "session-x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// No run in flight: RespondPermission must be a harmless no-op.
+	if err := s.RespondPermission("dsh_unknown", core.PermissionResult{Behavior: "allow"}); err != nil {
+		t.Fatalf("RespondPermission on idle session: %v", err)
+	}
+}
+
 func TestSend_Error(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
-	script := fakeDSHScript(t, argvFile, true)
+	script := fakeDSHScript(t, argvFile, true, false)
 
 	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "session-test-2", nil)
 	if err != nil {
@@ -382,5 +483,89 @@ func TestListDSHSessions(t *testing.T) {
 	// Newest first.
 	if sessions[0].ID != "session-bbb" {
 		t.Errorf("sessions[0].ID = %q, want session-bbb (newest first)", sessions[0].ID)
+	}
+}
+
+// ── Session titles ───────────────────────────────────────────
+
+func TestListDSHSessions_WithTitles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DSH_HOME", home)
+	workDir := t.TempDir()
+	root := dshSessionsRoot(workDir)
+	if root == "" {
+		t.Fatal("dshSessionsRoot empty")
+	}
+
+	// Write a session with a title event (dsh stores logs zstd-compressed).
+	sessDir := filepath.Join(root, "session-aaa")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"type":"session","data":{"id":"session-aaa","version":1}}
+{"type":"user/message","data":{"message":{"role":"user","content":[{"type":"text","text":"帮我配置 superpowers"}]}}}
+{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"text","text":"好的"}]}}}
+{"type":"session/title","data":{"title":"配置superpowers到dsh"}}
+`
+	var buf bytes.Buffer
+	w, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(log)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "session.jsonl.zstd"), buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := listDSHSessions(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("listDSHSessions len = %d, want 1", len(sessions))
+	}
+	if sessions[0].Summary != "配置superpowers到dsh" {
+		t.Errorf("Summary = %q, want title", sessions[0].Summary)
+	}
+	if sessions[0].MessageCount != 1 {
+		t.Errorf("MessageCount = %d, want 1", sessions[0].MessageCount)
+	}
+}
+
+func TestListDSHSessions_FallbackToFirstUserMessage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DSH_HOME", home)
+	workDir := t.TempDir()
+	root := dshSessionsRoot(workDir)
+	sessDir := filepath.Join(root, "session-bbb")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"type":"session","data":{"id":"session-bbb","version":1}}
+{"type":"user/message","data":{"message":{"role":"user","content":[{"type":"text","text":"这是一个很长很长的第一条用户消息,用来测试标题回退逻辑"}]}}}
+{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"text","text":"好"}]}}}
+`
+	var buf bytes.Buffer
+	w, _ := zstd.NewWriter(&buf)
+	_, _ = w.Write([]byte(log))
+	_ = w.Close()
+	if err := os.WriteFile(filepath.Join(sessDir, "session.jsonl.zstd"), buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := listDSHSessions(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len = %d, want 1", len(sessions))
+	}
+	if !strings.Contains(sessions[0].Summary, "这是一个很长很长") {
+		t.Errorf("Summary = %q, want first-user-message fallback", sessions[0].Summary)
 	}
 }
