@@ -137,10 +137,10 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 	// pipe (tool calls, the result/done envelopes). The reader reaches EOF
 	// when the process exits and closes its write end.
 	<-readerDone
-	err = cmd.Wait()
 
-	// The turn is over — close stdin so the runner's readline releases and
-	// the process can exit cleanly.
+	// The turn is over — close stdin BEFORE cmd.Wait() so the dsh runner's
+	// approval readline sees EOF and the one-shot process can exit promptly
+	// (it would otherwise wait for the driver to close stdin).
 	s.runMu.Lock()
 	if s.stdin != nil {
 		_ = s.stdin.Close()
@@ -148,6 +148,8 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 	}
 	s.pending = nil
 	s.runMu.Unlock()
+
+	err = cmd.Wait()
 
 	stderrMsg := strings.TrimSpace(stderrBuf.String())
 	if err != nil {
