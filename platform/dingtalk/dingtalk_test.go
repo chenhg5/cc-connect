@@ -108,6 +108,74 @@ func TestAICardDiscardFinalizesEmpty(t *testing.T) {
 	}
 }
 
+func TestAICardDiscardRetriesAfterRetryableStreamFailure(t *testing.T) {
+	tests := []struct {
+		name           string
+		statuses       []int
+		wantDiscardErr bool
+		wantState      string
+	}{
+		{name: "terminal-retry-recovers", statuses: []int{http.StatusTooManyRequests, http.StatusOK}, wantState: "finished"},
+		{name: "terminal-retry-fails-cleanly", statuses: []int{http.StatusTooManyRequests, http.StatusBadGateway}, wantDiscardErr: true, wantState: "failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var payloads []map[string]any
+			calls := 0
+			client := &http.Client{Transport: dingtalkRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var payload map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				payloads = append(payloads, payload)
+				status := tt.statuses[calls]
+				calls++
+				return &http.Response{
+					StatusCode: status,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"success":true}`)),
+					Request:    r,
+				}, nil
+			})}
+
+			p := &Platform{
+				httpClient:  client,
+				accessToken: "test-token",
+				tokenExpiry: time.Now().Add(time.Hour),
+			}
+			card := &aiCard{
+				outTrackId:  "track-retry",
+				templateKey: "content",
+				platform:    p,
+				state:       "processing",
+				done:        make(chan struct{}),
+			}
+
+			if err := card.Update(context.Background(), "partial answer"); err != nil {
+				t.Fatalf("Update() error = %v", err)
+			}
+			if !card.Failed() {
+				t.Fatal("card did not enter failed state after retryable stream response")
+			}
+			err := card.Discard(context.Background())
+			if (err != nil) != tt.wantDiscardErr {
+				t.Fatalf("Discard() error = %v, want error=%v", err, tt.wantDiscardErr)
+			}
+			if calls != 2 || len(payloads) != 2 {
+				t.Fatalf("stream calls = %d payloads=%d, want failed update plus terminal retry", calls, len(payloads))
+			}
+			terminal := payloads[1]
+			if terminal["content"] != "" || terminal["isFinalize"] != true {
+				t.Fatalf("terminal retry payload = %#v, want empty finalized frame", terminal)
+			}
+			if card.state != tt.wantState {
+				t.Fatalf("card state = %q, want %q", card.state, tt.wantState)
+			}
+		})
+	}
+}
+
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
