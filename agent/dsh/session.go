@@ -132,10 +132,12 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 	readerDone := make(chan struct{})
 	go s.readJSONL(stdout, finalText, resultSent, readerDone)
 
-	err = cmd.Wait()
-	// The reader drains stdout; wait for it to finish emitting (it may have
-	// buffered the trailing result/done lines).
+	// Drain stdout to EOF BEFORE cmd.Wait(): Wait() closes the stdout pipe,
+	// and a concurrent close would discard the lines still buffered in the
+	// pipe (tool calls, the result/done envelopes). The reader reaches EOF
+	// when the process exits and closes its write end.
 	<-readerDone
+	err = cmd.Wait()
 
 	// The turn is over — close stdin so the runner's readline releases and
 	// the process can exit cleanly.
