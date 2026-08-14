@@ -367,6 +367,10 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if _, err := toml.Decode(string(configBytes), &legacyCfg); err != nil {
 		return nil, fmt.Errorf("source config is invalid TOML: %w", err)
 	}
+	// Keep raw path fields for the migration-specific fail-closed resolver,
+	// which rejects unset environment placeholders instead of turning them into
+	// empty paths. Use validatedCfg for runtime identities such as project names
+	// so inventory matches the configuration that startup will actually use.
 	validatedCfg, err := decodeAndValidateMigrationConfig(configBytes)
 	if err != nil {
 		return nil, err
@@ -443,7 +447,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if dataDirIsSource && dataDirExists {
 		var collectErr error
 		if customDataDir {
-			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
+			collectErr = collectLegacyDataDir(dataDir, validatedCfg, mainDestination, &report)
 		} else {
 			collectErr = collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report)
 		}
@@ -453,7 +457,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	} else if dataDirExists {
 		var collectErr error
 		if customDataDir {
-			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
+			collectErr = collectLegacyDataDir(dataDir, validatedCfg, mainDestination, &report)
 		} else {
 			// An omitted data_dir means the official product-owned default
 			// ~/.cc-connect even when config.toml was loaded from elsewhere.
@@ -933,7 +937,7 @@ var legacyPersistentRootFiles = map[string]struct{}{
 	"workspace_bindings.json": {},
 }
 
-func collectLegacyDataDir(root string, cfg legacyMigrationConfig, destination *migrationDestination, report *migrationReport) error {
+func collectLegacyDataDir(root string, cfg *ccconfig.Config, destination *migrationDestination, report *migrationReport) error {
 	policy := func(rel string, entry fs.DirEntry) error {
 		if isKnownLegacyDataDirPath(rel, entry.IsDir(), cfg) {
 			return nil
@@ -943,7 +947,7 @@ func collectLegacyDataDir(root string, cfg legacyMigrationConfig, destination *m
 	return collectMigrationTreeExcludingWithPolicy(root, "data-dir", true, nil, policy, destination, report)
 }
 
-func isKnownLegacyDataDirPath(rel string, isDir bool, cfg legacyMigrationConfig) bool {
+func isKnownLegacyDataDirPath(rel string, isDir bool, cfg *ccconfig.Config) bool {
 	rel = filepath.Clean(rel)
 	for _, project := range cfg.Projects {
 		if isLegacyProjectSessionPath(rel, isDir, project.Name) {

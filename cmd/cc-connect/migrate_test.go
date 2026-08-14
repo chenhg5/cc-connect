@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	ccconfig "github.com/timmyagentic/cc-connect-next/config"
 )
 
 func TestNormalizeMigrationSourceVersion(t *testing.T) {
@@ -196,6 +197,41 @@ type = "${CC_NEXT_MIGRATION_PLATFORM_TYPE}"
 	}
 	if plan == nil {
 		t.Fatal("environment-backed config produced no migration plan")
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run wrote target state: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_UsesResolvedProjectNamesForCustomDataInventory(t *testing.T) {
+	t.Setenv("CC_NEXT_MIGRATION_PROJECT_NAME", "environment-backed")
+
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	customData := filepath.Join(root, "official-state")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(customData)+`"
+[[projects]]
+name = "${CC_NEXT_MIGRATION_PROJECT_NAME}"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`)
+	writeMigrationFixture(t, filepath.Join(customData, "environment-backed.json"), `{"sessions":{}}`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err != nil {
+		t.Fatalf("resolved project session inventory was rejected: %v", err)
+	}
+	if _, ok := plan.Main.Files["environment-backed.json"]; !ok {
+		t.Fatalf("resolved project session file is missing from the migration plan: %v", plan.Main.Files)
 	}
 	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
 		t.Fatalf("dry-run wrote target state: %v", statErr)
@@ -1142,7 +1178,7 @@ func TestMigrateLegacyDataUsesDefaultDataDirContainingCustomConfigRoot(t *testin
 }
 
 func TestKnownLegacyDataDirPathAllowsOnlyOwnedPersistentPaths(t *testing.T) {
-	cfg := legacyMigrationConfig{Projects: []legacyMigrationProject{{Name: "demo"}, {Name: " bot "}, {Name: "team/bot"}}}
+	cfg := &ccconfig.Config{Projects: []ccconfig.ProjectConfig{{Name: "demo"}, {Name: " bot "}, {Name: "team/bot"}}}
 	tests := []struct {
 		rel   string
 		isDir bool
