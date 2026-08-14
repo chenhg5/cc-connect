@@ -284,7 +284,7 @@ func TestSend_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	done := make(chan error, 1)
 	go func() { done <- s.Send("please reply", "msg-1", nil, nil) }()
@@ -353,7 +353,7 @@ func TestSend_Approval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	done := make(chan error, 1)
 	go func() { done <- s.Send("please reply", "msg-1", nil, nil) }()
@@ -406,7 +406,7 @@ func TestRespondPermission_NoActiveRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	// No run in flight: RespondPermission must be a harmless no-op.
 	if err := s.RespondPermission("dsh_unknown", core.PermissionResult{Behavior: "allow"}); err != nil {
 		t.Fatalf("RespondPermission on idle session: %v", err)
@@ -421,7 +421,7 @@ func TestSend_Error(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	done := make(chan error, 1)
 	go func() { done <- s.Send("boom", "msg-1", nil, nil) }()

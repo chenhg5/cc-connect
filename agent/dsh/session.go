@@ -48,9 +48,6 @@ type dshSession struct {
 	stdin   io.WriteCloser
 	pending map[string]struct{} // approval ids awaiting a human decision
 
-	// resultSent is set once the JSONL reader emits the terminal EventResult
-	// (on the `done` envelope), so Send does not emit a duplicate.
-	resultSent atomic.Bool
 }
 
 // newDSHSession creates a session. sessionID is the cc-connect-persisted dsh
