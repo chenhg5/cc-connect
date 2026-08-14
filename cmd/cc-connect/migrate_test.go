@@ -105,6 +105,67 @@ type = "future-platform"
 	}
 }
 
+func TestPrepareLegacyMigration_RejectsPluginNamesThatRuntimeRegistryWouldReject(t *testing.T) {
+	tests := []struct {
+		name       string
+		configText string
+	}{
+		{
+			name: "agent casing",
+			configText: `[[projects]]
+name = "agent-casing"
+[projects.agent]
+type = "Codex"
+[[projects.platforms]]
+type = "feishu"
+`,
+		},
+		{
+			name: "platform casing",
+			configText: `[[projects]]
+name = "platform-casing"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "Feishu"
+`,
+		},
+		{
+			name: "agent whitespace",
+			configText: `[[projects]]
+name = "agent-whitespace"
+[projects.agent]
+type = " codex "
+[[projects.platforms]]
+type = "feishu"
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), tt.configText)
+
+			_, err := prepareLegacyMigration(migrationOptions{
+				Source:        source,
+				Target:        target,
+				Home:          root,
+				SourceVersion: "v1.5.0-beta.3",
+				DryRun:        true,
+			})
+			if err == nil || !strings.Contains(err.Error(), "does not provide") {
+				t.Fatalf("registry-semantics error = %v, want unavailable-plugin refusal", err)
+			}
+			if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+				t.Fatalf("target was written after registry-semantics failure: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestPrepareLegacyMigration_RejectsSemanticallyInvalidConfigBeforeWrites(t *testing.T) {
 	tests := []struct {
 		name       string

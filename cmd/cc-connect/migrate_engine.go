@@ -200,14 +200,17 @@ func validateMigrationProjectPlugins(cfg legacyMigrationConfig) error {
 		if projectName == "" {
 			projectName = "<unnamed>"
 		}
-		agentType := strings.ToLower(strings.TrimSpace(project.Agent.Type))
+		// Runtime registry lookups are exact and case-sensitive. Preflight must
+		// use identical semantics so it cannot approve a config that startup
+		// later rejects (for example, "Codex" or " codex ").
+		agentType := project.Agent.Type
 		if agentType != "" {
 			if _, ok := agents[agentType]; !ok {
 				return fmt.Errorf("source project %q uses agent %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, project.Agent.Type)
 			}
 		}
 		for _, platform := range project.Platforms {
-			platformType := strings.ToLower(strings.TrimSpace(platform.Type))
+			platformType := platform.Type
 			if platformType == "" {
 				continue
 			}
@@ -243,7 +246,7 @@ func validateMigrationConfigSchema(configBytes []byte) error {
 func stringSet(values []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		set[strings.ToLower(strings.TrimSpace(value))] = struct{}{}
+		set[value] = struct{}{}
 	}
 	return set
 }
