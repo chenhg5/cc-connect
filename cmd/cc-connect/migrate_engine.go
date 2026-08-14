@@ -1155,7 +1155,7 @@ func resolveLegacyWorkspaceBaseDir(raw, runtimeWorkDir, home string) (string, er
 
 func prepareMigrationStage(destination *migrationDestination) error {
 	parent := filepath.Dir(destination.Target)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
+	if err := ensureMigrationDestinationParent(destination); err != nil {
 		return err
 	}
 	stage, err := os.MkdirTemp(parent, "."+filepath.Base(destination.Target)+".migrate-*")
@@ -1233,6 +1233,48 @@ func prepareMigrationStage(destination *migrationDestination) error {
 	if destination.PreserveAccess {
 		if err := applyMigrationAccessTree(stage, access); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// ensureMigrationDestinationParent creates only missing target ancestors. New
+// ancestors inherit the source data root's traversal mode and ownership so a
+// run_as_user process can reach the migrated tree. Existing ancestors are
+// intentionally left untouched because they may be shared with unrelated data.
+func ensureMigrationDestinationParent(destination *migrationDestination) error {
+	parent := filepath.Dir(destination.Target)
+	missing := make([]string, 0)
+	for current := parent; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return fmt.Errorf("migration target parent is not a directory: %s", current)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect migration target parent %s: %w", current, err)
+		}
+		missing = append(missing, current)
+		next := filepath.Dir(current)
+		if next == current {
+			return fmt.Errorf("cannot find existing ancestor for migration target %s", destination.Target)
+		}
+	}
+
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := os.Mkdir(missing[i], 0o700); err != nil {
+			return fmt.Errorf("create migration target parent %s: %w", missing[i], err)
+		}
+	}
+	metadata, preserve := destination.Access["."]
+	if !destination.PreserveAccess || !preserve || !metadata.IsDir {
+		return nil
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := applyMigrationAccessPath(missing[i], metadata); err != nil {
+			return fmt.Errorf("preserve migration target parent access for %s: %w", missing[i], err)
 		}
 	}
 	return nil
@@ -1518,21 +1560,28 @@ func applyMigrationAccessTree(root string, access map[string]migrationAccessMeta
 			path = filepath.Join(root, rel)
 		}
 		metadata := access[rel]
-		if metadata.HasOwner {
-			info, err := os.Stat(path)
-			if err != nil {
-				return err
-			}
-			uid, gid, ok := migrationOwnership(info)
-			if !ok || uid != metadata.UID || gid != metadata.GID {
-				if err := os.Chown(path, metadata.UID, metadata.GID); err != nil {
-					return fmt.Errorf("preserve ownership for %s: %w", path, err)
-				}
+		if err := applyMigrationAccessPath(path, metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMigrationAccessPath(path string, metadata migrationAccessMetadata) error {
+	if metadata.HasOwner {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		uid, gid, ok := migrationOwnership(info)
+		if !ok || uid != metadata.UID || gid != metadata.GID {
+			if err := os.Chown(path, metadata.UID, metadata.GID); err != nil {
+				return fmt.Errorf("preserve ownership for %s: %w", path, err)
 			}
 		}
-		if err := os.Chmod(path, metadata.Mode.Perm()); err != nil {
-			return fmt.Errorf("preserve access mode for %s: %w", path, err)
-		}
+	}
+	if err := os.Chmod(path, metadata.Mode.Perm()); err != nil {
+		return fmt.Errorf("preserve access mode for %s: %w", path, err)
 	}
 	return nil
 }

@@ -1132,6 +1132,54 @@ type = "claudecode"
 	}
 }
 
+func TestMigrateLegacyDataPreservesRunAsTraversalOnCreatedTargetParents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX global access modes are not available on Windows")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	targetParent := filepath.Join(root, "new", "nested")
+	target := filepath.Join(targetParent, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "isolated"
+run_as_user = "agent-user"
+[projects.agent]
+type = "claudecode"
+`)
+	writeMigrationFixture(t, filepath.Join(source, "agent-prompts", "cc-connect-system.md"), "shared prompt")
+	if err := os.Chmod(source, 0o755); err != nil {
+		t.Fatalf("chmod global source: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(source, "agent-prompts"), 0o755); err != nil {
+		t.Fatalf("chmod prompt directory: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(source, "agent-prompts", "cc-connect-system.md"), 0o644); err != nil {
+		t.Fatalf("chmod prompt file: %v", err)
+	}
+
+	if _, err := migrateLegacyData(source, target, false, false); err != nil {
+		t.Fatalf("migrateLegacyData() error = %v", err)
+	}
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("stat global source: %v", err)
+	}
+	sourceUID, sourceGID, sourceHasOwner := migrationOwnership(sourceInfo)
+	for _, path := range []string{filepath.Join(root, "new"), targetParent, target} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat created migration path %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o755 {
+			t.Fatalf("created migration path mode for %s = %#o, want 0755", path, got)
+		}
+		targetUID, targetGID, targetHasOwner := migrationOwnership(info)
+		if sourceHasOwner != targetHasOwner || (sourceHasOwner && (sourceUID != targetUID || sourceGID != targetGID)) {
+			t.Fatalf("created migration path ownership for %s = %d:%d, want %d:%d", path, targetUID, targetGID, sourceUID, sourceGID)
+		}
+	}
+}
+
 func TestVerifyMigrationPlanUnchangedDetectsAddedPersistentFile(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
