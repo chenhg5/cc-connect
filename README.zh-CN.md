@@ -68,7 +68,7 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。即使 `--source` 指向单独的配置目录，迁移仍会从官方 v1.4.1 的 `$HOME/.cc-connect/daemon.json` 读取这份元数据，不会信任任意配置目录旁边的同名文件。如果没有配置 `data_dir`，迁移也会严格沿用 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态；自定义配置根中只复制 `config.toml`。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`；该参数优先级最高。
+相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。即使 `--source` 指向单独的配置目录，迁移仍会从官方 v1.4.1 的 `$HOME/.cc-connect/daemon.json` 读取这份元数据，不会信任任意配置目录旁边的同名文件。元数据格式损坏，或其中记录的工作目录已经不存在、无法访问时，预检会直接失败，不会改用另一个目录解析相对路径。如果没有配置 `data_dir`，迁移也会严格沿用 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态；自定义配置根中只复制 `config.toml`。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`；该参数优先级最高。
 
 出于安全考虑，如果实际生效的 `data_dir` 包含官方配置根目录（例如 `data_dir = "~"`），迁移会直接拒绝执行。即使自定义 `data_dir` 与配置根完全分离，也只会按 CC Connect v1.4.1 明确拥有的持久路径清点：会话、项目状态与模型缓存、cron/timer、绑定、heartbeat/目录历史、MiniMax 本地配置、微信状态、Agent prompt 和 Matrix 加密状态。只要出现意外的普通文件或目录，预检就会直接失败；因此配置放在 `/etc`、数据却误指向整个 service home 时，也不会把 SSH 密钥、浏览器资料或其他无关数据递归带走。请先把官方安装指向专用数据目录并确认状态，再重新迁移；命令不会静默生成不完整目标。
 

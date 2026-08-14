@@ -927,6 +927,50 @@ work_dir = "project"
 	}
 }
 
+func TestMigrateLegacyDataRejectsUnavailableDefaultDaemonWorkDir(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "service")
+	source := filepath.Join(root, "workspace", "project-config")
+	target := filepath.Join(root, ".cc-connect-next")
+	missingRuntimeWorkDir := filepath.Join(root, "missing-official-runtime")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "state"`)
+	writeMigrationFixture(t, filepath.Join(home, ".cc-connect", "daemon.json"), `{"work_dir":"`+filepath.ToSlash(missingRuntimeWorkDir)+`"}`)
+
+	_, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               home,
+		IncludeProjectData: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "read official daemon work_dir") || !strings.Contains(err.Error(), "--runtime-work-dir") {
+		t.Fatalf("migrate with unavailable recorded daemon work_dir error = %v, want fail-closed override guidance", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written despite unavailable daemon work_dir: %v", statErr)
+	}
+
+	override := filepath.Join(root, "verified-runtime")
+	writeMigrationFixture(t, filepath.Join(override, "state", "sessions", "demo.json"), "verified-state")
+	report, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               home,
+		RuntimeWorkDir:     override,
+		DryRun:             true,
+		IncludeProjectData: true,
+	})
+	if err != nil {
+		t.Fatalf("migrate with explicit runtime work_dir override: %v", err)
+	}
+	canonicalOverride, err := canonicalExistingDirectory(override)
+	if err != nil {
+		t.Fatalf("canonical runtime override: %v", err)
+	}
+	if report.SourceWorkDir != canonicalOverride {
+		t.Fatalf("source runtime work_dir = %q, want explicit override %q", report.SourceWorkDir, canonicalOverride)
+	}
+}
+
 func TestMigrateLegacyDataDiscoversProjectDataFromStateAndBindings(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

@@ -1099,14 +1099,19 @@ func resolveLegacyRuntimeWorkDir(override, sourceRoot, home string) (string, err
 		var metadata struct {
 			WorkDir string `json:"work_dir"`
 		}
-		if json.Unmarshal(data, &metadata) == nil && strings.TrimSpace(metadata.WorkDir) != "" {
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			return "", fmt.Errorf("parse official daemon metadata: %w; pass --runtime-work-dir with the verified original working directory", err)
+		}
+		if strings.TrimSpace(metadata.WorkDir) != "" {
 			resolved, resolveErr := resolveLegacyConfigPath(metadata.WorkDir, metadataRoot, home)
 			if resolveErr != nil {
 				return "", fmt.Errorf("resolve official daemon work_dir: %w", resolveErr)
 			}
-			if canonical, canonicalErr := canonicalExistingDirectory(resolved); canonicalErr == nil {
-				return canonical, nil
+			canonical, canonicalErr := canonicalExistingDirectory(resolved)
+			if canonicalErr != nil {
+				return "", fmt.Errorf("read official daemon work_dir: %w; pass --runtime-work-dir with the verified original working directory", canonicalErr)
 			}
+			return canonical, nil
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("read official daemon metadata: %w", err)

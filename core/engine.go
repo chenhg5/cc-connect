@@ -6327,6 +6327,18 @@ channelClosed:
 		}
 		fullResponse = stripped
 	}
+	if usesRichCard(p) {
+		// A channel close is an abnormal exit, not a completed answer. Keep only
+		// the body confirmed by a successful rich-card create/update; disabled,
+		// throttled, or failed frames must not become visible retroactively or be
+		// persisted as assistant history.
+		safePartial := persistVisibleRichPartial(p)
+		sp.discard()
+		if !markRichCardFailed(p, cardMessageID, safePartial) {
+			sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+		}
+		return
+	}
 
 	session.AddHistory("assistant", fullResponse)
 	// Persist before any rich-card or platform update. This path is an
