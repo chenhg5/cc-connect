@@ -648,6 +648,12 @@ func collectLegacyDataDir(root string, cfg legacyMigrationConfig, destination *m
 }
 
 func isKnownLegacyDataDirPath(rel string, isDir bool, cfg legacyMigrationConfig) bool {
+	rel = filepath.Clean(rel)
+	for _, project := range cfg.Projects {
+		if isLegacyProjectSessionPath(rel, isDir, project.Name) {
+			return true
+		}
+	}
 	parts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
 	if len(parts) == 0 || parts[0] == "." || parts[0] == "" {
 		return false
@@ -709,11 +715,6 @@ func isKnownLegacyDataDirPath(rel string, isDir bool, cfg legacyMigrationConfig)
 	if isLegacyMatrixStateFile(name) || name == "sessions.json" || strings.HasSuffix(name, ".sessions.json") {
 		return true
 	}
-	for _, project := range cfg.Projects {
-		if isLegacyProjectSessionFile(name, project.Name) {
-			return true
-		}
-	}
 	return false
 }
 
@@ -727,24 +728,63 @@ func isLegacyMatrixStateFile(name string) bool {
 	return strings.HasSuffix(name, ".db") || strings.HasSuffix(name, ".db-shm") || strings.HasSuffix(name, ".db-wal") || strings.HasSuffix(name, ".db-journal")
 }
 
-func isLegacyProjectSessionFile(name, projectName string) bool {
-	if strings.TrimSpace(projectName) == "" || filepath.Base(projectName) != projectName {
+func isLegacyProjectSessionPath(rel string, isDir bool, projectName string) bool {
+	if strings.TrimSpace(projectName) == "" {
 		return false
 	}
-	if name == projectName+".json" || name == projectName+".sessions.json" {
-		return true
-	}
-	prefix := projectName + "_"
-	for _, suffix := range []string{".json", ".sessions.json"} {
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+
+	directCandidates := []string{projectName + ".json", projectName + ".sessions.json"}
+	for _, rawCandidate := range directCandidates {
+		candidate, ok := safeLegacySessionRelativePath(rawCandidate)
+		if !ok {
 			continue
 		}
-		hash := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		if isDir && isLegacySessionCandidateParent(rel, candidate) {
+			return true
+		}
+		if !isDir && rel == candidate {
+			return true
+		}
+	}
+
+	for _, suffix := range []string{".json", ".sessions.json"} {
+		template, ok := safeLegacySessionRelativePath(projectName + "_00000000" + suffix)
+		if !ok {
+			continue
+		}
+		if isDir {
+			if isLegacySessionCandidateParent(rel, template) {
+				return true
+			}
+			continue
+		}
+		marker := "00000000" + suffix
+		if !strings.HasSuffix(template, marker) || !strings.HasSuffix(rel, suffix) {
+			continue
+		}
+		prefix := strings.TrimSuffix(template, marker)
+		if !strings.HasPrefix(rel, prefix) {
+			continue
+		}
+		hash := strings.TrimSuffix(strings.TrimPrefix(rel, prefix), suffix)
 		if len(hash) == 8 && isLowerHex(hash) {
 			return true
 		}
 	}
 	return false
+}
+
+func safeLegacySessionRelativePath(raw string) (string, bool) {
+	cleaned := filepath.Clean(raw)
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return cleaned, true
+}
+
+func isLegacySessionCandidateParent(rel, candidate string) bool {
+	dir := filepath.Dir(candidate)
+	return dir != "." && (rel == dir || pathStrictlyWithin(rel, dir))
 }
 
 func isLowerHex(value string) bool {

@@ -714,7 +714,7 @@ func TestPrepareLegacyMigrationRejectsBroadCustomDataDirOutsideSourceTree(t *tes
 }
 
 func TestKnownLegacyDataDirPathAllowsOnlyOwnedPersistentPaths(t *testing.T) {
-	cfg := legacyMigrationConfig{Projects: []legacyMigrationProject{{Name: "demo"}, {Name: " bot "}}}
+	cfg := legacyMigrationConfig{Projects: []legacyMigrationProject{{Name: "demo"}, {Name: " bot "}, {Name: "team/bot"}}}
 	tests := []struct {
 		rel   string
 		isDir bool
@@ -735,6 +735,9 @@ func TestKnownLegacyDataDirPathAllowsOnlyOwnedPersistentPaths(t *testing.T) {
 		{rel: "demo.json", want: true},
 		{rel: "demo_0123abcd.sessions.json", want: true},
 		{rel: " bot _0123abcd.json", want: true},
+		{rel: "team", isDir: true, want: true},
+		{rel: "team/bot_0123abcd.json", want: true},
+		{rel: "team/private.json", want: false},
 		{rel: ".ssh", isDir: true, want: false},
 		{rel: "projects/repository", isDir: true, want: false},
 		{rel: "sessions/private.pem", want: false},
