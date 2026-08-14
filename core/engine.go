@@ -5864,6 +5864,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
+			historyResponse := baseResponse
 
 			// Treat the platform-selected answering dwell as a delivery commit gate.
 			// Until it completes, a recalled trigger (or stopped engine/session) must
@@ -5883,7 +5884,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
+			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), historyResponse)
+			autoCompressTokenEstimate := 0
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).
@@ -5895,9 +5897,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Unlock()
 				if estimate >= e.autoCompressMaxTokens && (last.IsZero() || now.Sub(last) >= e.autoCompressMinGap) {
 					triggerAutoCompress = true
-					state.mu.Lock()
-					state.lastAutoCompressTokens = estimate
-					state.mu.Unlock()
+					autoCompressTokenEstimate = estimate
 				}
 			}
 
@@ -5906,11 +5906,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   1. bare marker (isSilentReply)               → fully silent
 			//   2. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
 			//   3. trailing marker with empty strip result   → fully silent
-			// History records the ORIGINAL baseResponse so the agent retains context of its own
-			// decision; only the outbound platform text gets rewritten/suppressed.
-			session.AddHistory("assistant", baseResponse)
-			sessions.Save()
-
 			isSilent := isSilentReply(baseResponse)
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
@@ -5921,15 +5916,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						cleanResponse = stripped
 					}
 				}
-			}
-
-			if !isSilent {
-				e.hooks.Emit(HookEvent{
-					Event:      HookEventMessageSent,
-					SessionKey: sessionKey,
-					Platform:   p.Name(),
-					Content:    baseResponse,
-				})
 			}
 
 			// statusFooter holds the structured CCD-style footer separately so
@@ -5956,30 +5942,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			fullResponse = cleanResponse
-
-			turnDuration := time.Since(turnStart)
-			slog.Info("turn complete",
-				"session", session.ID,
-				"agent_session", session.GetAgentSessionID(),
-				"msg_id", msgID,
-				"tools", toolCount,
-				"response_len", len(fullResponse),
-				"turn_duration", turnDuration,
-				"input_tokens", event.InputTokens,
-				"output_tokens", event.OutputTokens,
-				"silent", isSilent,
-			)
-			// DEBUG: full assistant response for in-depth debugging.
-			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
-				slog.Debug("turn response",
-					"session", session.ID,
-					"agent_session", session.GetAgentSessionID(),
-					"history_len", session.HistoryLen(),
-					"response", previewText(fullResponse, 500),
-				)
-			}
-
-			e.noteUserTurnCompleted(state)
 
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
@@ -6125,6 +6087,55 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+
+			// Commit conversational state only after the terminal delivery path has
+			// succeeded. In rich mode, this keeps a recall during final image
+			// resolution or the final card update from persisting an answer that the
+			// user never received.
+			if hasRichCard && !isSilent && state.shouldDiscardTurn(msgID) {
+				discardSilentTurn()
+				return
+			}
+			// History records the ORIGINAL baseResponse so the agent retains context
+			// of its own NO_REPLY decision; only outbound text is rewritten/suppressed.
+			session.AddHistory("assistant", historyResponse)
+			sessions.Save()
+			if triggerAutoCompress {
+				state.mu.Lock()
+				state.lastAutoCompressTokens = autoCompressTokenEstimate
+				state.mu.Unlock()
+			}
+			if !isSilent {
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventMessageSent,
+					SessionKey: sessionKey,
+					Platform:   p.Name(),
+					Content:    baseResponse,
+				})
+			}
+			e.noteUserTurnCompleted(state)
+
+			turnDuration := time.Since(turnStart)
+			slog.Info("turn complete",
+				"session", session.ID,
+				"agent_session", session.GetAgentSessionID(),
+				"msg_id", msgID,
+				"tools", toolCount,
+				"response_len", len(fullResponse),
+				"turn_duration", turnDuration,
+				"input_tokens", event.InputTokens,
+				"output_tokens", event.OutputTokens,
+				"silent", isSilent,
+			)
+			// DEBUG: full assistant response for in-depth debugging.
+			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
+				slog.Debug("turn response",
+					"session", session.ID,
+					"agent_session", session.GetAgentSessionID(),
+					"history_len", session.HistoryLen(),
+					"response", previewText(fullResponse, 500),
+				)
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
@@ -8115,11 +8126,24 @@ func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, b
 }
 
 // postPermissionPreviewSegment removes a previously delivered legacy-preview
-// prefix only when streamed evidence proves EventResult contains the aggregate
-// turn. A final-only result can coincidentally start with the same bytes as the
-// earlier prefix; retaining it is safer than truncating user-visible content.
+// prefix when exact equality or streamed suffix evidence proves EventResult
+// contains the aggregate turn. A final-only result can coincidentally start
+// with the same bytes as the earlier prefix; retaining it is safer than
+// truncating user-visible content.
 func postPermissionPreviewSegment(fullResponse, deliveredPrefix, streamedSuffix string) (string, bool) {
-	if deliveredPrefix == "" || streamedSuffix == "" || fullResponse == streamedSuffix {
+	if deliveredPrefix == "" {
+		return fullResponse, false
+	}
+	if streamedSuffix == "" {
+		// Terminal response cleanup trims trailing whitespace before this helper,
+		// while the already-visible preview retains it. Treat that canonical form
+		// as the same aggregate prefix, not as a new assistant message.
+		if fullResponse == deliveredPrefix || fullResponse == strings.TrimRight(deliveredPrefix, "\n ") {
+			return "", true
+		}
+		return fullResponse, false
+	}
+	if fullResponse == streamedSuffix {
 		return fullResponse, false
 	}
 	if !strings.HasPrefix(fullResponse, deliveredPrefix) {

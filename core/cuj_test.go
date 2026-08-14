@@ -1430,12 +1430,14 @@ type cujPermissionPreviewSession struct {
 	events             chan Event
 	permissionResolved chan struct{}
 	permissionOnce     sync.Once
+	postPermissionText string
 }
 
-func newCUJPermissionPreviewSession() *cujPermissionPreviewSession {
+func newCUJPermissionPreviewSession(postPermissionText string) *cujPermissionPreviewSession {
 	return &cujPermissionPreviewSession{
 		events:             make(chan Event, 8),
 		permissionResolved: make(chan struct{}),
+		postPermissionText: postPermissionText,
 	}
 }
 
@@ -1450,8 +1452,10 @@ func (s *cujPermissionPreviewSession) Send(_ string, _ []ImageAttachment, _ []Fi
 			ToolInputRaw: map[string]any{"path": "demo.txt"},
 		}
 		<-s.permissionResolved
-		s.events <- Event{Type: EventText, Content: "After permission."}
-		s.events <- Event{Type: EventResult, Content: "Before permission. After permission.", Done: true}
+		if s.postPermissionText != "" {
+			s.events <- Event{Type: EventText, Content: s.postPermissionText}
+		}
+		s.events <- Event{Type: EventResult, Content: "Before permission. " + s.postPermissionText, Done: true}
 	}()
 	return nil
 }
@@ -1516,80 +1520,100 @@ func (p *cujEditablePreviewPlatform) visiblePreviews() []string {
 }
 
 // CUJ-C7 · A permission prompt permanently closes the current editable
-// preview. After approval, the next preview must contain only the new suffix;
-// an Agent's aggregate EventResult must not duplicate the earlier message.
+// preview. After approval, the next preview must contain only the new suffix,
+// or no new preview at all when permission ends the turn. An Agent's aggregate
+// EventResult must not duplicate the earlier message in either case.
 func TestCUJ_C7_PermissionPreviewDoesNotDuplicateEarlierText(t *testing.T) {
-	session := newCUJPermissionPreviewSession()
-	agent := &cujPermissionPreviewAgent{session: session}
-	platform := &cujEditablePreviewPlatform{
-		stubPlatformEngine: stubPlatformEngine{n: "telegram"},
-		visible:            make(map[string]string),
+	tests := []struct {
+		name               string
+		postPermissionText string
+		wantPreviews       []string
+	}{
+		{
+			name:               "post-permission suffix",
+			postPermissionText: "After permission.",
+			wantPreviews:       []string{"Before permission. ", "After permission."},
+		},
+		{
+			name:         "permission ends turn",
+			wantPreviews: []string{"Before permission. "},
+		},
 	}
-	engine := NewEngine("test", agent, []Platform{platform}, t.TempDir()+"/sessions.json", LangEnglish)
-	engine.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "legacy"})
-	engine.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1, MaxChars: 500})
-	engine.SetReplyFooterEnabled(false)
 
-	waitFor := func(reason string, condition func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			if condition() {
-				return
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := newCUJPermissionPreviewSession(tt.postPermissionText)
+			agent := &cujPermissionPreviewAgent{session: session}
+			platform := &cujEditablePreviewPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "telegram"},
+				visible:            make(map[string]string),
 			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for %s; previews=%q sent=%q", reason, platform.visiblePreviews(), platform.getSent())
-	}
+			engine := NewEngine("test", agent, []Platform{platform}, t.TempDir()+"/sessions.json", LangEnglish)
+			engine.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "legacy"})
+			engine.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1, MaxChars: 500})
+			engine.SetReplyFooterEnabled(false)
 
-	sessionKey := "telegram:cuj-preview-user"
-	engine.ReceiveMessage(platform, &Message{
-		SessionKey: sessionKey,
-		Platform:   "telegram",
-		MessageID:  "cuj-preview-question",
-		UserID:     "cuj-preview-user",
-		Content:    "Please update demo.txt",
-		ReplyCtx:   "cuj-preview-chat",
-	})
-	waitFor("permission prompt and first preview", func() bool {
-		return len(platform.getSent()) > 0 && len(platform.visiblePreviews()) == 1
-	})
-
-	engine.ReceiveMessage(platform, &Message{
-		SessionKey: sessionKey,
-		Platform:   "telegram",
-		MessageID:  "cuj-preview-allow",
-		UserID:     "cuj-preview-user",
-		Content:    "allow",
-		ReplyCtx:   "cuj-preview-chat",
-	})
-	waitFor("post-permission preview completion", func() bool {
-		previews := platform.visiblePreviews()
-		return len(previews) == 2 && strings.Contains(previews[1], "After permission.")
-	})
-
-	previews := platform.visiblePreviews()
-	if got, want := previews[0], "Before permission. "; got != want {
-		t.Fatalf("first visible preview = %q, want %q", got, want)
-	}
-	if got, want := previews[1], "After permission."; got != want {
-		t.Fatalf("second visible preview = %q, want only the post-permission suffix %q", got, want)
-	}
-	for _, sent := range platform.getSent() {
-		if strings.Contains(sent, "Before permission. After permission.") {
-			t.Fatalf("aggregate response was duplicated as a side message: %q", sent)
-		}
-	}
-
-	waitFor("aggregate assistant history", func() bool {
-		history := engine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
-		for _, entry := range history {
-			if entry.Role == "assistant" && entry.Content == "Before permission. After permission." {
-				return true
+			waitFor := func(reason string, condition func() bool) {
+				t.Helper()
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					if condition() {
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				t.Fatalf("timed out waiting for %s; previews=%q sent=%q", reason, platform.visiblePreviews(), platform.getSent())
 			}
-		}
-		return false
-	})
+
+			sessionKey := "telegram:cuj-preview-user-" + tt.name
+			engine.ReceiveMessage(platform, &Message{
+				SessionKey: sessionKey,
+				Platform:   "telegram",
+				MessageID:  "cuj-preview-question",
+				UserID:     "cuj-preview-user",
+				Content:    "Please update demo.txt",
+				ReplyCtx:   "cuj-preview-chat",
+			})
+			waitFor("permission prompt and first preview", func() bool {
+				return len(platform.getSent()) > 0 && len(platform.visiblePreviews()) == 1
+			})
+
+			engine.ReceiveMessage(platform, &Message{
+				SessionKey: sessionKey,
+				Platform:   "telegram",
+				MessageID:  "cuj-preview-allow",
+				UserID:     "cuj-preview-user",
+				Content:    "allow",
+				ReplyCtx:   "cuj-preview-chat",
+			})
+
+			aggregate := strings.TrimRight("Before permission. "+tt.postPermissionText, "\n ")
+			waitFor("aggregate assistant history", func() bool {
+				history := engine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
+				for _, entry := range history {
+					if entry.Role == "assistant" && entry.Content == aggregate {
+						return true
+					}
+				}
+				return false
+			})
+
+			previews := platform.visiblePreviews()
+			if len(previews) != len(tt.wantPreviews) {
+				t.Fatalf("visible previews = %q, want %q", previews, tt.wantPreviews)
+			}
+			for i, want := range tt.wantPreviews {
+				if previews[i] != want {
+					t.Fatalf("visible preview %d = %q, want %q", i, previews[i], want)
+				}
+			}
+			for _, sent := range platform.getSent() {
+				if strings.Contains(sent, aggregate) {
+					t.Fatalf("aggregate response was duplicated as a side message: %q", sent)
+				}
+			}
+		})
+	}
 }
 
 // ===========================================================================

@@ -2044,6 +2044,22 @@ type stubDelayedRichCardResolverPlatform struct {
 	imageMarkdown string
 }
 
+type stubBlockingRichCardResolverPlatform struct {
+	*stubRichCardAnswerDwellPlatform
+	finalStarted chan struct{}
+	releaseFinal chan struct{}
+	startOnce    sync.Once
+}
+
+func (p *stubBlockingRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
+	if !final {
+		return markdown
+	}
+	p.startOnce.Do(func() { close(p.finalStarted) })
+	<-p.releaseFinal
+	return markdown
+}
+
 func (p *stubDelayedRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
 	if final {
 		return strings.ReplaceAll(markdown, p.imageMarkdown, "![chart](img_uploaded_later)")
@@ -3687,6 +3703,88 @@ func TestProcessInteractiveEvents_RichCardAnsweringDwellHonorsTurnCancellation(t
 				t.Fatalf("canceled turn advanced completion watermark to %d", completedAtMs)
 			}
 		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallDuringFinalResolutionDoesNotCommitAnswer(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	dwellPlatform := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: 20 * time.Millisecond}
+	p := &stubBlockingRichCardResolverPlatform{
+		stubRichCardAnswerDwellPlatform: dwellPlatform,
+		finalStarted:                    make(chan struct{}),
+		releaseFinal:                    make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	var sentHooks atomic.Int32
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hook-Event") == string(HookEventMessageSent) {
+			sentHooks.Add(1)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hookServer.Close()
+	synchronous := false
+	e.hooks = NewHookManager("test", []HookConfig{{
+		Event: string(HookEventMessageSent),
+		Type:  string(HookHandlerHTTP),
+		URL:   hookServer.URL,
+		Async: &synchronous,
+	}}, "", "", "")
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-final-resolution-recall"
+	msgID := "m-rich-final-resolution-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-final-resolution-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-final-resolution-recall",
+		currentTurnUserMessageTimeMs: 456,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Answer with image."}
+	agentSession.events <- Event{Type: EventResult, Content: "Answer with image.", Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.finalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not enter final rich-card resolution after the answering dwell")
+	}
+	state.cancelTurnSilently(msgID)
+	close(p.releaseFinal)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not leave final rich-card resolution")
+	}
+
+	_, _, updates, _ := base.snapshot()
+	if len(updates) > 0 && strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("recalled turn patched the rich card to Done: %v", updates)
+	}
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("recalled turn emitted a fallback answer: %v", sent)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled turn persisted an undelivered answer: %v", history)
+	}
+	if sentHooks.Load() != 0 {
+		t.Fatalf("recalled turn emitted %d message.sent hooks", sentHooks.Load())
+	}
+	state.mu.Lock()
+	completedAtMs := state.lastCompletedUserMessageTimeMs
+	state.mu.Unlock()
+	if completedAtMs != 0 {
+		t.Fatalf("recalled turn advanced completion watermark to %d", completedAtMs)
 	}
 }
 
@@ -17723,6 +17821,13 @@ func TestPostPermissionPreviewSegmentRequiresAggregateEvidence(t *testing.T) {
 			fullResponse: "Before permission. After permission.",
 			delivered:    "Before permission. ",
 			want:         "Before permission. After permission.",
+		},
+		{
+			name:         "permission ends the turn",
+			fullResponse: "Before permission.",
+			delivered:    "Before permission. ",
+			want:         "",
+			wantTrimmed:  true,
 		},
 	}
 
