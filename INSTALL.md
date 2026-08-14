@@ -105,7 +105,7 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If that metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`.
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. An omitted `data_dir` still means official v1.4.1's `$HOME/.cc-connect`, even when `--source` is a custom config root. A separate custom `data_dir` is accepted only when every regular path matches known CC Connect persistent state; unexpected files or directories fail preflight instead of being copied from a broad service home. If daemon metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`.
 
 Configuration paths follow official CC Connect's `${NAME}` placeholder semantics. A configured `data_dir` that does not exist yet is treated as empty, so the valid configuration root still migrates. Unreadable optional project data or malformed project state/binding metadata does not discard the global migration, and the metadata file itself is still copied verbatim; each skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
@@ -179,10 +179,11 @@ Expected isolated identities:
 
 ## 6. Deliberate production switch
 
-Only after a separate live test succeeds, stop the official daemon and start the successor:
+Only after a separate live test succeeds, stop the official daemon and start the successor. If the migrated config contains relative paths, run the install from the `Official runtime work_dir` printed by migration so those paths retain their original meaning:
 
 ```bash
 cc-connect daemon stop
+cd /absolute/original/cwd
 cc-connect-next daemon install
 cc-connect-next daemon status
 ```
@@ -205,6 +206,7 @@ An installing agent should report each item separately:
 - `~/.cc-connect-next` and config permission checks;
 - dry-run migration result and whether a real migration was authorized;
 - migration manifest path and every timestamped pre-migration backup;
+- the reported official runtime work directory when the config contains relative paths;
 - confirmation that official files and services were not modified during install/migration;
 - independent command, data directory, service, and API socket names;
 - whether live Feishu validation used a separate app;
