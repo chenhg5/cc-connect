@@ -92,7 +92,7 @@ source: ~/.cc-connect
 target: ~/.cc-connect-next
 ```
 
-The command inventories the configuration root, the effective `data_dir` (including a custom location), and project-local `.cc-connect` directories referenced by configured work directories, multi-workspace roots, project state, or workspace bindings. It copies persistent configuration, sessions, project overrides, cron/timer/heartbeat state, bindings, local provider configuration, and project-local images/attachments. Agent-native stores such as Codex and Claude sessions remain in their original locations, so their existing IDs stay valid.
+The command reads exactly the official `config.toml`, inventories the effective `data_dir` (including a custom location), and inventories project-local `.cc-connect` directories referenced by configured work directories, multi-workspace roots, project state, or workspace bindings. If the config file is separate from the effective data directory, its sibling files and directories are never inventoried. It copies persistent configuration, sessions, project overrides, cron/timer/heartbeat state, bindings, local provider configuration, and project-local images/attachments without copying a surrounding repository, `.env`, backup tree, or service home. Agent-native stores such as Codex and Claude sessions remain in their original locations, so their existing IDs stay valid.
 
 Before activation it hashes every source, builds the complete result in sibling staging directories, verifies the staged files, and checks the sources again. It activates each destination with an atomic rename and rolls back earlier activations if a later one fails, then writes `migration-manifest.json` with source, target, size, and SHA-256 records. Logs, sockets, locks, restart notifications, daemon metadata, and source symlinks are excluded. A non-empty target is rejected unless `--force` is explicit; with `--force`, the previous target is first preserved as a timestamped `*.pre-migration-*` backup. Use `--skip-project-data` only to deliberately omit project-local images and attachments. The official installation is never stopped or modified.
 
@@ -105,9 +105,9 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. An omitted `data_dir` still means official v1.4.1's `$HOME/.cc-connect`, even when `--source` is a custom config root. A separate custom `data_dir` is accepted only when every regular path matches known CC Connect persistent state; unexpected files or directories fail preflight instead of being copied from a broad service home. If daemon metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`.
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. An omitted `data_dir` still means official v1.4.1's `$HOME/.cc-connect`, even when `--source` is a custom config root; only that root's `config.toml` is copied. A separate custom `data_dir` is accepted only when every regular path matches known CC Connect persistent state; unexpected files or directories fail preflight instead of being copied from a broad service home. If daemon metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`.
 
-Configuration paths follow official CC Connect's `${NAME}` placeholder semantics. A configured `data_dir` that does not exist yet is treated as empty, so the valid configuration root still migrates. Unreadable optional project data or malformed project state/binding metadata does not discard the global migration, and the metadata file itself is still copied verbatim; each skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
+Configuration paths follow official CC Connect's `${NAME}` placeholder semantics. A configured `data_dir` that does not exist yet is treated as empty, so the valid configuration file still migrates. Unreadable optional project data or malformed project state/binding metadata does not discard the global migration, and the metadata file itself is still copied verbatim; each skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
 ## 4. Configure native Feishu cards
 
@@ -179,12 +179,13 @@ Expected isolated identities:
 
 ## 6. Deliberate production switch
 
-Only after a separate live test succeeds, stop the official daemon and start the successor. If the migrated config contains relative paths, run the install from the `Official runtime work_dir` printed by migration so those paths retain their original meaning:
+Only after a separate live test succeeds, stop the official daemon and start the successor. Pass both the migrated config and the `Official runtime work_dir` printed by migration. The service then reads the new config while every relative path retains its official runtime meaning:
 
 ```bash
 cc-connect daemon stop
-cd /absolute/original/cwd
-cc-connect-next daemon install
+cc-connect-next daemon install \
+  --config ~/.cc-connect-next/config.toml \
+  --work-dir /absolute/original/cwd
 cc-connect-next daemon status
 ```
 

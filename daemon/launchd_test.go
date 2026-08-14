@@ -15,11 +15,15 @@ func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
 	cfg := Config{
 		BinaryPath: "/opt/cc-connect-next/cc-connect-next",
 		WorkDir:    "/tmp/wd",
+		ConfigPath: "/tmp/migrated/config.toml",
 		LogFile:    "/tmp/log",
 		LogMaxSize: 10485760,
 		EnvPATH:    "/usr/bin",
 	}
 	xml := buildPlist(cfg)
+	if !strings.Contains(xml, "<string>--config</string>") || !strings.Contains(xml, "<string>/tmp/migrated/config.toml</string>") {
+		t.Fatalf("plist does not launch the explicit migrated config:\n%s", xml)
+	}
 	if !strings.Contains(xml, "<key>SuccessfulExit</key>") {
 		t.Fatal("plist should use KeepAlive dict with SuccessfulExit so exit 0 does not respawn")
 	}

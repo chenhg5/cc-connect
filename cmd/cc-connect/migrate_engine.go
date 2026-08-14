@@ -296,14 +296,22 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		ManifestPath:  filepath.Join(target, migrationManifestFilename),
 	}
 
-	var configRootExclusions []string
-	if dataDir != source && pathStrictlyWithin(source, dataDir) {
-		configRootExclusions = append(configRootExclusions, dataDir)
-	}
-	if err := collectMigrationTreeExcluding(source, "config-root", true, configRootExclusions, mainDestination, &report); err != nil {
-		return nil, fmt.Errorf("inventory source config directory: %w", err)
-	}
-	if dataDir != source && dataDirExists {
+	// --source is the directory containing config.toml, not necessarily a
+	// product-owned data directory. Only traverse it when it is also the
+	// effective data_dir; otherwise a project-local config could cause an
+	// entire repository, .env files, or service home to be copied. The config
+	// file itself is added explicitly below.
+	if dataDir == source && dataDirExists {
+		var collectErr error
+		if customDataDir {
+			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
+		} else {
+			collectErr = collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report)
+		}
+		if collectErr != nil {
+			return nil, fmt.Errorf("inventory source data_dir: %w", collectErr)
+		}
+	} else if dataDirExists {
 		var collectErr error
 		if customDataDir {
 			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
@@ -344,7 +352,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	var skippedProjects []migrationSkippedProjectRecord
 	if opts.IncludeProjectData {
 		var projectRoots []string
-		projectRoots, skippedProjects, err = discoverLegacyProjectRoots(legacyCfg, runtimeWorkDir, source, dataDir, opts.Home)
+		projectRoots, skippedProjects, err = discoverLegacyProjectRoots(legacyCfg, runtimeWorkDir, dataDir, opts.Home)
 		if err != nil {
 			return nil, err
 		}
@@ -855,7 +863,7 @@ func availableMigrationRel(files map[string]plannedMigrationFile, candidate stri
 	}
 }
 
-func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourceRoot, dataDir, home string) ([]string, []migrationSkippedProjectRecord, error) {
+func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, dataDir, home string) ([]string, []migrationSkippedProjectRecord, error) {
 	roots := make(map[string]struct{})
 	skipped := make(map[string]migrationSkippedProjectRecord)
 	recordSkip := func(path, reason string) {
@@ -912,13 +920,11 @@ func discoverLegacyProjectRoots(cfg legacyMigrationConfig, runtimeWorkDir, sourc
 		}
 	}
 
-	for _, stateRoot := range []string{dataDir, sourceRoot} {
-		if err := discoverProjectRootsFromState(stateRoot, addRoot, recordSkip); err != nil {
-			return nil, nil, err
-		}
-		if err := discoverProjectRootsFromBindings(stateRoot, addRoot, recordSkip); err != nil {
-			return nil, nil, err
-		}
+	if err := discoverProjectRootsFromState(dataDir, addRoot, recordSkip); err != nil {
+		return nil, nil, err
+	}
+	if err := discoverProjectRootsFromBindings(dataDir, addRoot, recordSkip); err != nil {
+		return nil, nil, err
 	}
 
 	result := make([]string, 0, len(roots))

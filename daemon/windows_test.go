@@ -21,7 +21,8 @@ func TestStrictPowerShellStopsOnCmdletErrors(t *testing.T) {
 func TestBuildWindowsTaskScript(t *testing.T) {
 	cfg := Config{
 		BinaryPath: `C:\Program Files\cc-connect-next\cc-connect-next.exe`,
-		WorkDir:    `C:\Users\me\.cc-connect-next`,
+		WorkDir:    `C:\Users\me\original project`,
+		ConfigPath: `C:\Users\me\.cc-connect-next\config.toml`,
 		LogFile:    `C:\Users\me\.cc-connect-next\logs\cc-connect-next.log`,
 		LogMaxSize: 10 * 1024 * 1024,
 		EnvPATH:    `C:\Program Files\nodejs;C:\Users\me\AppData\Local\Programs`,
@@ -38,9 +39,9 @@ func TestBuildWindowsTaskScript(t *testing.T) {
 		`$env:PATH = 'C:\Program Files\nodejs;C:\Users\me\AppData\Local\Programs'`,
 		`$env:HTTPS_PROXY = 'http://127.0.0.1:7890'`,
 		`$env:http_proxy = 'http://127.0.0.1:7890'`,
-		`Set-Location -LiteralPath 'C:\Users\me\.cc-connect-next'`,
+		`Set-Location -LiteralPath 'C:\Users\me\original project'`,
 		`while ($true) {`,
-		`& 'C:\Program Files\cc-connect-next\cc-connect-next.exe'`,
+		`& 'C:\Program Files\cc-connect-next\cc-connect-next.exe' '--config' 'C:\Users\me\.cc-connect-next\config.toml'`,
 		`if ($exitCode -eq 0) { exit 0 }`,
 		`Start-Sleep -Seconds 10`,
 	} {

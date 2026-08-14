@@ -49,7 +49,7 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	flags := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	source := flags.String("source", filepath.Join(home, ".cc-connect"), "official CC Connect data directory")
+	source := flags.String("source", filepath.Join(home, ".cc-connect"), "official CC Connect configuration directory")
 	target := flags.String("target", filepath.Join(home, ".cc-connect-next"), "cc-connect-next data directory")
 	force := flags.Bool("force", false, "merge into an existing target and overwrite matching files")
 	dryRun := flags.Bool("dry-run", false, "validate and report without writing files")
@@ -125,6 +125,12 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		if !writeOutput("Next: cc-connect-next --config %s\n", filepath.Join(expandMigrationPath(*target, home), "config.toml")) {
+			return 1
+		}
+		if !writeOutput("Daemon config: %s\n", filepath.Join(expandMigrationPath(*target, home), "config.toml")) {
+			return 1
+		}
+		if !writeOutput("Daemon work_dir: %s\n", report.SourceWorkDir) {
 			return 1
 		}
 	}

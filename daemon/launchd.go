@@ -301,6 +301,7 @@ func buildPlist(cfg Config) string {
 	if envPATH == "" {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
+	configPath := configPathFor(cfg)
 	envExtra := renderEnvExtraPlist(cfg.EnvExtra)
 	// User-supplied paths can legitimately contain XML-special characters
 	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
@@ -315,6 +316,8 @@ func buildPlist(cfg Config) string {
 	<string>%s</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>%s</string>
+		<string>--config</string>
 		<string>%s</string>
 	</array>
 	<key>WorkingDirectory</key>
@@ -348,6 +351,5 @@ func buildPlist(cfg Config) string {
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(configPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
 }
-

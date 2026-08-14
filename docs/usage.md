@@ -947,7 +947,7 @@ cc-connect-next relay send --to gemini "What do you think about this architectur
 Run as background service.
 
 ```bash
-cc-connect-next daemon install --config ~/.cc-connect-next/config.toml
+cc-connect-next daemon install --config ~/.cc-connect-next/config.toml --work-dir /absolute/runtime/cwd
 cc-connect-next daemon start
 cc-connect-next daemon stop
 cc-connect-next daemon restart

@@ -860,7 +860,7 @@ cc-connect-next relay send --to gemini "你觉得这个架构怎么样？"
 后台服务运行。
 
 ```bash
-cc-connect-next daemon install --config ~/.cc-connect-next/config.toml
+cc-connect-next daemon install --config ~/.cc-connect-next/config.toml --work-dir /原运行目录的绝对路径
 cc-connect-next daemon start
 cc-connect-next daemon stop
 cc-connect-next daemon restart

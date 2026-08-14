@@ -42,6 +42,24 @@ func TestBuildUnit_EscapesEnvValue(t *testing.T) {
 	}
 }
 
+func TestBuildUnit_LaunchesExplicitConfigFromIndependentWorkDir(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath: `/opt/cc connect/cc%next`,
+		WorkDir:    `/srv/original project`,
+		ConfigPath: `/srv/migrated config/config.toml`,
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+	}
+	out := mgr.buildUnit(cfg)
+	if !strings.Contains(out, `ExecStart="/opt/cc connect/cc%%next" --config "/srv/migrated config/config.toml"`) {
+		t.Fatalf("unit does not pass the explicit migrated config safely:\n%s", out)
+	}
+	if !strings.Contains(out, `WorkingDirectory="/srv/original project"`) {
+		t.Fatalf("unit does not preserve the independent runtime work dir:\n%s", out)
+	}
+}
+
 func TestBuildUnit_DropsInvalidEnvName(t *testing.T) {
 	mgr := &systemdManager{system: false}
 	cfg := Config{

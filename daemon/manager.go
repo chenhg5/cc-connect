@@ -21,13 +21,14 @@ const (
 )
 
 type Config struct {
-	BinaryPath        string
-	WorkDir           string
-	LogFile           string
-	LogMaxSize        int64
-	LogMaxBackups     int
-	EnvPATH           string            // capture user's PATH so agents are accessible
-	EnvExtra          map[string]string // selected environment variables needed by the service runtime
+	BinaryPath    string
+	WorkDir       string
+	ConfigPath    string // config.toml to pass explicitly; independent from WorkDir
+	LogFile       string
+	LogMaxSize    int64
+	LogMaxBackups int
+	EnvPATH       string            // capture user's PATH so agents are accessible
+	EnvExtra      map[string]string // selected environment variables needed by the service runtime
 	// NoCaptureSecrets, when true, restricts the install-time env capture
 	// to proxy-related variables only and skips both the config.toml ${ENV}
 	// placeholder scan and any extension discoverers registered via
@@ -74,12 +75,13 @@ func DefaultDataDir() string {
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {
-	LogFile      string `json:"log_file"`
-	LogMaxSize   int64  `json:"log_max_size"`
-	LogMaxBackups int   `json:"log_max_backups"`
-	WorkDir      string `json:"work_dir"`
-	BinaryPath   string `json:"binary_path"`
-	InstalledAt  string `json:"installed_at"`
+	LogFile       string `json:"log_file"`
+	LogMaxSize    int64  `json:"log_max_size"`
+	LogMaxBackups int    `json:"log_max_backups"`
+	WorkDir       string `json:"work_dir"`
+	ConfigPath    string `json:"config_path,omitempty"`
+	BinaryPath    string `json:"binary_path"`
+	InstalledAt   string `json:"installed_at"`
 }
 
 func metaPath() string {
@@ -136,6 +138,20 @@ func Resolve(cfg *Config) error {
 		}
 		cfg.WorkDir = wd
 	}
+	workDir, err := filepath.Abs(filepath.Clean(cfg.WorkDir))
+	if err != nil {
+		return fmt.Errorf("cannot resolve working directory: %w", err)
+	}
+	cfg.WorkDir = workDir
+	if cfg.ConfigPath == "" {
+		cfg.ConfigPath = filepath.Join(cfg.WorkDir, "config.toml")
+	} else {
+		configPath, err := filepath.Abs(filepath.Clean(cfg.ConfigPath))
+		if err != nil {
+			return fmt.Errorf("cannot resolve config path: %w", err)
+		}
+		cfg.ConfigPath = configPath
+	}
 	if cfg.LogFile == "" {
 		cfg.LogFile = DefaultLogFile()
 	}
@@ -151,10 +167,17 @@ func Resolve(cfg *Config) error {
 	if len(cfg.EnvExtra) == 0 {
 		cfg.EnvExtra = captureDaemonEnv(cfg.NoCaptureSecrets)
 		if !cfg.NoCaptureSecrets {
-			captureConfigEnvPlaceholders(filepath.Join(cfg.WorkDir, "config.toml"), cfg.EnvExtra)
+			captureConfigEnvPlaceholders(cfg.ConfigPath, cfg.EnvExtra)
 		}
 	}
 	return nil
+}
+
+func configPathFor(cfg Config) string {
+	if strings.TrimSpace(cfg.ConfigPath) != "" {
+		return cfg.ConfigPath
+	}
+	return filepath.Join(cfg.WorkDir, "config.toml")
 }
 
 // captureDaemonEnv builds the EnvExtra map baked into the installed
@@ -269,4 +292,3 @@ func captureConfigEnvPlaceholdersInString(s string, env map[string]string) {
 		}
 	}
 }
-

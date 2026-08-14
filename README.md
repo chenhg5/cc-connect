@@ -53,7 +53,7 @@ cc-connect-next migrate
 cc-connect-next --config ~/.cc-connect-next/config.toml
 ```
 
-The one-command migration inventories three layers before writing anything: the official configuration root, the effective `data_dir` (including a custom path), and every project-local `.cc-connect` directory discoverable from configured work directories, multi-workspace roots, project state, or workspace bindings. It therefore preserves configuration, sessions, project overrides, cron/timer and heartbeat state, bindings, local provider configuration, and staged images/attachments. External Agent stores such as Codex or Claude sessions stay in place and their existing IDs remain valid.
+The one-command migration covers three sources before writing anything: exactly the official `config.toml`, the effective `data_dir` (including a custom path), and every project-local `.cc-connect` directory discoverable from configured work directories, multi-workspace roots, project state, or workspace bindings. When the config file lives outside the effective data directory, no sibling file or directory beside it is inventoried. The command therefore preserves configuration, sessions, project overrides, cron/timer and heartbeat state, bindings, local provider configuration, and staged images/attachments without accidentally copying a repository, `.env`, backup tree, or service home. External Agent stores such as Codex or Claude sessions stay in place and their existing IDs remain valid.
 
 Every source file is hashed during preflight and the complete result is built and verified in sibling staging directories. Immediately before activation, migration rebuilds the full source inventory; any added or deleted file, changed content, changed project discovery, or changed project-local access metadata fails closed without activating an incomplete target. Existing destinations are also snapshotted before staging, revalidated after copying, checked again immediately before each promotion, and compared once more at the backup path after the atomic rename. If another cc-connect-next process creates or changes target state during the migration—even through an already-open writer at the rename boundary, and especially during a `--force` merge—the command restores and leaves that newer target untouched instead of activating a stale staged copy. Stable destinations are then activated with atomic renames. If a later destination fails, every earlier promoted tree is preserved in a unique `.failed-migration-*/preserved` recovery directory before its pre-migration backup is restored; rollback never deletes a tree that may contain post-promotion writes, and the error prints every recovery path. Every destination is canonicalized and refused if it overlaps any official source tree, including project-local targets discovered below the official configuration root. Project-local `.cc-connect-next` trees preserve the source `.cc-connect` directory/file modes and ownership for `run_as_user` compatibility. Runtime-only logs, sockets, locks, restart notifications, and daemon metadata are excluded; source symlinks are skipped. Existing non-empty targets are refused by default. With an explicit `--force`, merging is deliberate; every previous target that existed, including an empty one, remains available as a timestamped `*.pre-migration-*` backup and is recorded in the report and manifest. The result includes `migration-manifest.json` with every source, destination, size, and SHA-256. Use `--skip-project-data` only when project-local images and attachments are intentionally not wanted.
 
@@ -68,11 +68,11 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If `data_dir` is omitted, migration follows official v1.4.1 and uses `$HOME/.cc-connect` even when `--source` points to a custom config root such as `/etc/cc-connect`. If daemon metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly.
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If `data_dir` is omitted, migration follows official v1.4.1 and uses `$HOME/.cc-connect` even when `--source` points to a custom config root such as `/etc/cc-connect`; only that root's `config.toml` is copied. If daemon metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly.
 
 For safety, migration refuses an effective `data_dir` that contains the official configuration root (for example, `data_dir = "~"`). A separate custom `data_dir` is also inventoried only through the persistent paths owned by CC Connect v1.4.1: sessions, project state/model caches, cron/timer state, bindings, heartbeat/history state, MiniMax local config, Weixin state, Agent prompt files, and Matrix encryption state. Any unexpected regular file or directory makes preflight fail, even when the configuration root lives elsewhere, instead of recursively copying a service home, SSH keys, browser profiles, or unrelated datasets. Point the official installation at a dedicated data directory and verify its state before rerunning migration; the command will never silently create a partial target for this case.
 
-Configuration paths use the same `${NAME}` placeholder syntax as official CC Connect. Every referenced variable must also be present in the migration process; an unset variable fails closed instead of being replaced with an empty string that could select the wrong directory. A configured `data_dir` that has not been created yet is treated as empty, so the valid configuration root still migrates. If optional project data cannot be read, or project state/binding metadata is malformed, the global migration continues and still copies that metadata verbatim; every skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
+Configuration paths use the same `${NAME}` placeholder syntax as official CC Connect. Every referenced variable must also be present in the migration process; an unset variable fails closed instead of being replaced with an empty string that could select the wrong directory. A configured `data_dir` that has not been created yet is treated as empty, so the valid configuration file still migrates. If optional project data cannot be read, or project state/binding metadata is malformed, the global migration continues and still copies that metadata verbatim; every skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
 ## Recommended Feishu configuration
 
@@ -131,6 +131,17 @@ Official CC Connect and cc-connect-next can be installed side by side:
 
 Do not run both against the same Feishu app credentials at the same time: two WebSocket consumers can race or duplicate handling. Use a separate test app for parallel runtime testing, or stop the official daemon only when you deliberately switch production traffic. Installation and migration themselves are safe to perform while the official daemon remains installed.
 
+When switching the service, keep the migrated config and the original runtime working directory independent. This preserves every relative `work_dir`, `base_dir`, and provider path while guaranteeing that the successor reads the migrated configuration:
+
+```bash
+cc-connect daemon stop
+cc-connect-next daemon install \
+  --config ~/.cc-connect-next/config.toml \
+  --work-dir /absolute/original/cwd
+```
+
+The migration command prints the detected `Official runtime work_dir`; use that exact value. `daemon status` reports both paths, and the installed launchd, systemd, or Windows task always passes the migrated config explicitly.
+
 Rollback is simply:
 
 ```bash
@@ -153,7 +164,9 @@ Use the beta package if it is published; otherwise build the current source. The
 then run the real one-command migration only after confirming the target is ~/.cc-connect-next.
 Check its migration-manifest.json and report any timestamped pre-migration backups.
 Validate `cc-connect-next --version`, config permissions, independent daemon name,
-and independent API socket. Do not start both runtimes with the same Feishu app.
+and independent API socket. For the eventual service switch, install with both
+`--config ~/.cc-connect-next/config.toml` and `--work-dir` set to the exact
+`Official runtime work_dir` printed by migration. Do not start both runtimes with the same Feishu app.
 ```
 
 ## Development

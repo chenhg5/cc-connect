@@ -53,7 +53,7 @@ cc-connect-next migrate
 cc-connect-next --config ~/.cc-connect-next/config.toml
 ```
 
-这一条命令会在写入前清点三层数据：官方配置根目录、配置实际生效的 `data_dir`（包括自定义路径），以及从项目配置、多工作区根目录、项目状态和 workspace bindings 中发现的每个项目内 `.cc-connect`。因此配置、会话、项目覆盖、cron/timer/heartbeat、绑定、本地 provider 配置以及项目内暂存的图片和附件都会迁移。Codex、Claude 等 Agent 自己的外部会话库保持原位，原有 session ID 继续有效。
+这一条命令会在写入前覆盖三类来源：只读取官方的 `config.toml`、清点配置实际生效的 `data_dir`（包括自定义路径），以及从项目配置、多工作区根目录、项目状态和 workspace bindings 中发现的每个项目内 `.cc-connect`。当配置文件与实际数据目录分离时，它不会清点配置文件旁边的任何兄弟文件或目录。因此配置、会话、项目覆盖、cron/timer/heartbeat、绑定、本地 provider 配置以及项目内暂存的图片和附件都会迁移，但项目仓库、`.env`、备份目录或整个 service home 不会被误带走。Codex、Claude 等 Agent 自己的外部会话库保持原位，原有 session ID 继续有效。
 
 迁移会先为每个源文件计算 SHA-256，在同级 staging 目录构建并校验完整结果；正式启用前还会重新生成一遍完整源清单，任何新增、删除、内容变化、项目发现变化或项目内访问权限变化都会让本次迁移安全失败，不会启用一个不完整的目标。已有目标也会在 staging 前建立包含内容、类型、权限和属主的快照，复制后重新校验，在每个目标正式切换前再次校验，并在原子 rename 后通过备份路径做最后一次比对；如果另一个 cc-connect-next 进程在迁移期间新建或改写目标状态，即使是已打开的写入句柄恰好在 rename 边界落盘，尤其是 `--force` 合并期间，命令也会恢复并原样保留较新的目标，而不会启用陈旧的 staging 副本。清单稳定后才以原子 rename 逐个启用目标；如果后续目标启用失败，每个已经启用的目标都会先完整移动到唯一的 `.failed-migration-*/preserved` 恢复目录，再恢复迁移前备份。回滚绝不会删除可能包含切换后新写入的数据，错误信息会列出全部恢复路径。所有目标都会先解析真实路径；只要与任一官方源目录重叠就会拒绝执行，包括意外落在官方配置根目录内的项目目标。项目内 `.cc-connect-next` 会保留原 `.cc-connect` 的目录/文件权限与属主，兼容 `run_as_user`。日志、socket、锁、重启通知和 daemon 元数据不会复制，源符号链接会跳过。目标非空时默认拒绝；显式使用 `--force` 表示有意合并。只要目标原先存在，即使它是空目录，也会完整保留为带时间戳的 `*.pre-migration-*` 备份，并同时记录在报告和 manifest 中。最终生成 `migration-manifest.json`，逐项记录源、目标、大小和 SHA-256。只有明确不需要项目内图片和附件时才使用 `--skip-project-data`。
 
@@ -68,11 +68,11 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。如果没有配置 `data_dir`，迁移会严格沿用官方 v1.4.1 的 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`。
+相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。如果没有配置 `data_dir`，迁移会严格沿用官方 v1.4.1 的 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态；自定义配置根中只复制 `config.toml`。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`。
 
 出于安全考虑，如果实际生效的 `data_dir` 包含官方配置根目录（例如 `data_dir = "~"`），迁移会直接拒绝执行。即使自定义 `data_dir` 与配置根完全分离，也只会按 CC Connect v1.4.1 明确拥有的持久路径清点：会话、项目状态与模型缓存、cron/timer、绑定、heartbeat/目录历史、MiniMax 本地配置、微信状态、Agent prompt 和 Matrix 加密状态。只要出现意外的普通文件或目录，预检就会直接失败；因此配置放在 `/etc`、数据却误指向整个 service home 时，也不会把 SSH 密钥、浏览器资料或其他无关数据递归带走。请先把官方安装指向专用数据目录并确认状态，再重新迁移；命令不会静默生成不完整目标。
 
-配置路径中的环境变量沿用官方 CC Connect 的 `${NAME}` 占位符语法，但迁移进程必须实际拥有每个被引用的变量；变量未设置时会安全拒绝，而不会用空字符串误选其他目录。配置了但尚未创建的 `data_dir` 会按空目录处理，已有配置根仍能正常迁移。如果可选的项目内数据无法读取，或项目状态 / binding 元数据已损坏，全局迁移仍会继续，且这些元数据文件仍会原样复制；每个跳过的发现来源都会输出并写入 `migration-manifest.json`。授权或修复元数据后应重新迁移，确认项目内数据完整。
+配置路径中的环境变量沿用官方 CC Connect 的 `${NAME}` 占位符语法，但迁移进程必须实际拥有每个被引用的变量；变量未设置时会安全拒绝，而不会用空字符串误选其他目录。配置了但尚未创建的 `data_dir` 会按空目录处理，已有配置文件仍能正常迁移。如果可选的项目内数据无法读取，或项目状态 / binding 元数据已损坏，全局迁移仍会继续，且这些元数据文件仍会原样复制；每个跳过的发现来源都会输出并写入 `migration-manifest.json`。授权或修复元数据后应重新迁移，确认项目内数据完整。
 
 ## 推荐飞书配置
 
@@ -129,6 +129,17 @@ done_emoji = "Done"
 
 两者可以同时安装，但不要让它们同时使用同一个飞书应用凭证建立 WebSocket：两个消费者可能争抢或重复处理消息。并行验收请使用单独的飞书测试应用；正式切换时再停止官方 daemon。安装和迁移本身不会影响官方实例。
 
+正式切换服务时，迁移后的配置路径与官方原运行目录必须分别传入。这样既保证新服务读取迁移后的配置，也保留所有相对 `work_dir`、`base_dir` 和 provider 路径的原语义：
+
+```bash
+cc-connect daemon stop
+cc-connect-next daemon install \
+  --config ~/.cc-connect-next/config.toml \
+  --work-dir /原运行目录的绝对路径
+```
+
+迁移命令会输出检测到的 `Official runtime work_dir`，请原样使用。`daemon status` 会同时显示两条路径，安装后的 launchd、systemd 或 Windows 计划任务都会显式传入迁移配置。
+
 回滚只需要：
 
 ```bash
@@ -148,7 +159,9 @@ Beta 已发布时使用 npm 包，否则从当前源码构建。先执行
 `cc-connect-next migrate --dry-run`，确认目标目录确实是
 ~/.cc-connect-next，再执行真实的一键迁移；检查 migration-manifest.json，并报告所有
 带时间戳的迁移前备份。验证版本、配置文件权限、独立 daemon 名称
-和独立 API socket。不要让两个运行时同时连接同一个飞书应用。
+和独立 API socket。正式切换服务时，同时传入
+`--config ~/.cc-connect-next/config.toml`，并把 `--work-dir` 设为迁移输出的
+`Official runtime work_dir` 原值。不要让两个运行时同时连接同一个飞书应用。
 ```
 
 ## 开发与验证

@@ -348,7 +348,6 @@ work_dir = "`+filepath.ToSlash(workDir)+`"
 	}
 
 	for _, rel := range []string{
-		"backups/config.toml.bak",
 		"sessions/demo.json",
 		"crons/jobs.json",
 		"workspace_bindings.json",
@@ -356,6 +355,9 @@ work_dir = "`+filepath.ToSlash(workDir)+`"
 		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); err != nil {
 			t.Fatalf("persistent file %s was not copied: %v", rel, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "backups", "config.toml.bak")); !os.IsNotExist(err) {
+		t.Fatalf("separate config-root backup was migrated: %v", err)
 	}
 	for _, rel := range []string{"images/input.png", "attachments/prompt.txt"} {
 		migrated := filepath.Join(workDir, ".cc-connect-next", filepath.FromSlash(rel))
@@ -375,7 +377,7 @@ work_dir = "`+filepath.ToSlash(workDir)+`"
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatalf("parse migration manifest: %v", err)
 	}
-	if manifest.SourceDataDir != canonicalData || len(manifest.Files) < 7 {
+	if manifest.SourceDataDir != canonicalData || len(manifest.Files) != 6 {
 		t.Fatalf("manifest does not inventory the complete migration: %+v", manifest)
 	}
 	for _, file := range manifest.Files {
@@ -745,6 +747,31 @@ func TestMigrateLegacyDataUsesOfficialDefaultDataDirWithCustomConfigRoot(t *test
 	}
 }
 
+func TestMigrateLegacyDataRestrictsSeparateConfigRootToConfigFile(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "service")
+	source := filepath.Join(root, "workspace", "project")
+	dataDir := filepath.Join(home, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	writeMigrationFixture(t, filepath.Join(source, ".env"), "PRIVATE_TOKEN=must-not-copy")
+	writeMigrationFixture(t, filepath.Join(source, ".git", "config"), "repository metadata")
+	writeMigrationFixture(t, filepath.Join(source, "backups", "config.toml.bak"), "user backup")
+	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"sessions":{}}`)
+
+	if _, err := migrateLegacyDataWithOptions(migrationOptions{Source: source, Target: target, Home: home}); err != nil {
+		t.Fatalf("migrate separate working-directory config: %v", err)
+	}
+	for _, rel := range []string{".env", ".git/config", "backups/config.toml.bak"} {
+		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("unrelated config-root path %s was migrated: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "sessions", "demo.json")); err != nil {
+		t.Fatalf("effective default data_dir was not migrated: %v", err)
+	}
+}
+
 func TestMigrateLegacyDataUsesDefaultDataDirContainingCustomConfigRoot(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home", "service")
@@ -758,13 +785,14 @@ func TestMigrateLegacyDataUsesDefaultDataDirContainingCustomConfigRoot(t *testin
 	if _, err := migrateLegacyDataWithOptions(migrationOptions{Source: source, Target: target, Home: home}); err != nil {
 		t.Fatalf("migrate nested custom config root with default data_dir: %v", err)
 	}
-	for _, rel := range []string{"backups/config.toml.bak", "sessions/demo.json"} {
-		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); err != nil {
-			t.Fatalf("nested-default migration lost %s: %v", rel, err)
-		}
+	if _, err := os.Stat(filepath.Join(target, "sessions", "demo.json")); err != nil {
+		t.Fatalf("nested-default migration lost effective session state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "backups", "config.toml.bak")); !os.IsNotExist(err) {
+		t.Fatalf("separate config-root backup was migrated at the target root: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(target, "configs", "bot", "backups", "config.toml.bak")); !os.IsNotExist(err) {
-		t.Fatalf("nested config root was duplicated through default data_dir inventory: %v", err)
+		t.Fatalf("nested config root was copied through default data_dir inventory: %v", err)
 	}
 }
 
@@ -1049,7 +1077,7 @@ base_dir = "~/workspaces"
 	}
 }
 
-func TestMigrateLegacyDataArchivesConflictingConfigRootState(t *testing.T) {
+func TestMigrateLegacyDataIgnoresStaleStateBesideSeparateConfig(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")
 	customData := filepath.Join(root, "official-state")
@@ -1065,8 +1093,8 @@ func TestMigrateLegacyDataArchivesConflictingConfigRootState(t *testing.T) {
 		t.Fatalf("effective data_dir did not remain authoritative: content=%q err=%v", got, err)
 	}
 	archive := filepath.Join(target, "migration-archive", "config-root", "sessions", "demo.json")
-	if got, err := os.ReadFile(archive); err != nil || string(got) != "stale-config-root-session" {
-		t.Fatalf("conflicting config-root state was not preserved: content=%q err=%v", got, err)
+	if _, err := os.Stat(archive); !os.IsNotExist(err) {
+		t.Fatalf("stale state beside separate config was migrated: %v", err)
 	}
 }
 
@@ -1440,8 +1468,8 @@ func TestMigrateLegacyDataTreatsMissingConfiguredDataDirAsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing lazy data_dir blocked config migration: %v", err)
 	}
-	if got, want := report.CopiedFiles, 2; got != want {
-		t.Fatalf("copied files = %d, want %d config-root files", got, want)
+	if got, want := report.CopiedFiles, 1; got != want {
+		t.Fatalf("copied files = %d, want only the rewritten config", got)
 	}
 	canonicalMissingData, err := canonicalDestinationPath(missingData)
 	if err != nil {
@@ -1453,8 +1481,8 @@ func TestMigrateLegacyDataTreatsMissingConfiguredDataDirAsEmpty(t *testing.T) {
 	if _, err := os.Stat(missingData); !os.IsNotExist(err) {
 		t.Fatalf("migration created the absent legacy data_dir, err=%v", err)
 	}
-	if got, err := os.ReadFile(filepath.Join(target, "backups", "config.toml.bak")); err != nil || string(got) != "backup" {
-		t.Fatalf("config-root persistent file was not migrated: content=%q err=%v", got, err)
+	if _, err := os.Stat(filepath.Join(target, "backups", "config.toml.bak")); !os.IsNotExist(err) {
+		t.Fatalf("unrelated config-root backup was migrated: %v", err)
 	}
 	configBytes, err := os.ReadFile(filepath.Join(target, "config.toml"))
 	if err != nil {

@@ -206,7 +206,7 @@ func buildWindowsTaskScript(cfg Config) string {
 	}
 	fmt.Fprintf(&sb, "Set-Location -LiteralPath %s\r\n", powerShellLiteral(cfg.WorkDir))
 	sb.WriteString("while ($true) {\r\n")
-	fmt.Fprintf(&sb, "  & %s\r\n", powerShellLiteral(cfg.BinaryPath))
+	fmt.Fprintf(&sb, "  & %s '--config' %s\r\n", powerShellLiteral(cfg.BinaryPath), powerShellLiteral(configPathFor(cfg)))
 	sb.WriteString("  $exitCode = $LASTEXITCODE\r\n")
 	sb.WriteString("  if ($exitCode -eq 0) { exit 0 }\r\n")
 	sb.WriteString("  Start-Sleep -Seconds 10\r\n")
