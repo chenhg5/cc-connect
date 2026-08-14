@@ -189,6 +189,11 @@ func newCUJEnv(t *testing.T) *cujEnv {
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
 	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop CUJ engine: %v", err)
+		}
+	})
 	return &cujEnv{
 		t:       t,
 		engine:  e,
@@ -984,6 +989,24 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 	}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop reconnect CUJ engine: %v", err)
+		}
+	})
+	waitForFinalReply := func(reason string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			for _, sent := range plat.getSent() {
+				if strings.Contains(sent, "ok") {
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%s did not produce a final reply. Got: %v", reason, plat.getSent())
+	}
 
 	// 1. Initial connect.
 	e.OnPlatformReady(plat)
@@ -998,15 +1021,7 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 		Content: "before disconnect", ReplyCtx: "ctx-karen",
 	}
 	e.ReceiveMessage(plat, msg1)
-	deadline := time.After(2 * time.Second)
-	for len(plat.getSent()) < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("first message did not produce a reply")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	waitForFinalReply("first message")
 	plat.clearSent()
 
 	// 3. Simulate WS drop.
@@ -1025,15 +1040,7 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 		Content: "after reconnect", ReplyCtx: "ctx-karen",
 	}
 	e.ReceiveMessage(plat, msg2)
-	deadline = time.After(2 * time.Second)
-	for len(plat.getSent()) < 1 {
-		select {
-		case <-deadline:
-			t.Fatalf("post-reconnect message did not produce a reply (engine wedged?). Got: %v", plat.getSent())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	waitForFinalReply("post-reconnect message")
 }
 
 // errSimDisconnect is a sentinel used by CUJ-G3 to simulate a transient
@@ -1061,10 +1068,18 @@ func TestCUJ_A1_FirstMessageGetsReply(t *testing.T) {
 // prompts. Asserts the history-injection contract end-to-end.
 func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	env := newCUJEnv(t)
+	promptCount := func() int {
+		env.agent.mu.Lock()
+		defer env.agent.mu.Unlock()
+		if len(env.agent.sessions) == 0 {
+			return 0
+		}
+		return len(env.agent.sessions[0].getSentPrompts())
+	}
 	env.userSends("alex", "my name is alex")
-	env.waitFor("turn1 reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.waitFor("turn1 agent prompt", 2*time.Second, func() bool { return promptCount() >= 1 })
 	env.userSends("alex", "what is my name")
-	env.waitFor("turn2 reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 2 })
+	env.waitFor("turn2 agent prompt", 2*time.Second, func() bool { return promptCount() >= 2 })
 
 	// Verify the agent has stored at least 2 user prompts; this guards
 	// against any regression that drops history from the agent's input.

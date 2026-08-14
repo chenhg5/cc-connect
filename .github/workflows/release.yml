@@ -167,7 +167,15 @@ jobs:
           if [ "$prerelease" = "true" ]; then
             latest_flag="--latest=false"
           else
-            latest_flag="--latest"
+            stable_tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
+            newest_stable="$(printf '%s\n' "$stable_tags" | node scripts/release-channel-policy.js --max)"
+            latest_relation="$(node scripts/release-channel-policy.js --relation "${tag#v}" "$newest_stable")"
+            case "$latest_relation" in
+              newer|equal|missing) latest_flag="--latest" ;;
+              older) latest_flag="--latest=false" ;;
+              *) echo "Unexpected stable release relation: $latest_relation" >&2; exit 1 ;;
+            esac
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             published_dir="$(mktemp -d)"
@@ -186,6 +194,14 @@ jobs:
               --notes-file "$notes" \
               --prerelease="$prerelease" \
               "$latest_flag"
+          fi
+          if [ "$prerelease" = "false" ]; then
+            actual_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+            if [ "$latest_relation" = "older" ]; then
+              test "${actual_latest#v}" = "$newest_stable"
+            else
+              test "${actual_latest#v}" = "${tag#v}"
+            fi
           fi
 
       - name: Verify public GitHub release downloads
@@ -210,12 +226,32 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           npm_tag="${NPM_DIST_TAG}"
+          current_tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"
           if npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
             echo "cc-connect-next@${version} is already published"
           else
-            npm publish --access public --tag "$npm_tag" --provenance
+            publish_tag="$npm_tag"
+            if [ "$tag_relation" = "older" ]; then
+              safe_version="$(printf '%s' "$version" | tr -c '[:alnum:]-' '-')"
+              publish_tag="release-${safe_version}-${GITHUB_RUN_ID}"
+            fi
+            npm publish --access public --tag "$publish_tag" --provenance
+            if [ "$publish_tag" != "$npm_tag" ]; then
+              npm dist-tag rm cc-connect-next "$publish_tag" --registry=https://registry.npmjs.org
+            fi
           fi
-          npm dist-tag add "cc-connect-next@${version}" "$npm_tag" --registry=https://registry.npmjs.org
+          current_tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"
+          case "$tag_relation" in
+            newer|missing)
+              npm dist-tag add "cc-connect-next@${version}" "$npm_tag" --registry=https://registry.npmjs.org
+              ;;
+            equal|older)
+              echo "Preserving ${npm_tag} at ${current_tagged}"
+              ;;
+            *) echo "Unexpected npm tag relation: $tag_relation" >&2; exit 1 ;;
+          esac
 
       - name: Verify the public npm registry
         working-directory: npm
@@ -225,5 +261,9 @@ jobs:
           published="$(npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org)"
           npm_tag="${{ steps.release_policy.outputs.npm_tag }}"
           tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org)"
+          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$tagged")"
           test "$published" = "$version"
-          test "$tagged" = "$version"
+          case "$tag_relation" in
+            equal|older) ;;
+            *) echo "${npm_tag} is behind ${version}: ${tagged}" >&2; exit 1 ;;
+          esac

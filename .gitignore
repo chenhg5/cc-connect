@@ -75,6 +75,7 @@ test/
 scripts/*
 !scripts/check-release-assets.js
 !scripts/check-release-version.js
+!scripts/release-channel-policy.js
 !scripts/release-policy.test.js
 tmp/
 temp/
