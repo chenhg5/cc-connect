@@ -23,7 +23,7 @@
 
 ### npm Beta
 
-首个 Beta 发布后：
+安装公开 Beta 渠道：
 
 ```bash
 npm install -g cc-connect-next@beta

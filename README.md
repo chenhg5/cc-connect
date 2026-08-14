@@ -21,9 +21,9 @@ Privacy is enforced at two layers: the engine stores only anonymous event kinds 
 
 ## Install
 
-### npm release build
+### npm beta
 
-After the first beta is published:
+Install the published beta channel:
 
 ```bash
 npm install -g cc-connect-next@beta
