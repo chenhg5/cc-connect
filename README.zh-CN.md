@@ -129,16 +129,18 @@ done_emoji = "Done"
 
 两者可以同时安装，但不要让它们同时使用同一个飞书应用凭证建立 WebSocket：两个消费者可能争抢或重复处理消息。并行验收请使用单独的飞书测试应用；正式切换时再停止官方 daemon。安装和迁移本身不会影响官方实例。
 
-正式切换服务时，迁移后的配置路径与官方原运行目录必须分别传入。这样既保证新服务读取迁移后的配置，也保留所有相对 `work_dir`、`base_dir` 和 provider 路径的原语义：
+正式切换服务时，迁移后的配置路径与官方原运行目录必须分别传入。若此前用独立飞书测试应用启动过 Next，应先停掉测试实例。停止官方 CC Connect 后、启动生产 Next 前必须再做一次最终迁移，把前一次测试迁移之后新增的会话、绑定、定时器和项目状态同步过来。此时目标已经存在，所以显式使用 `--force`；命令会先把整个旧目标保留为带时间戳的备份，再从已经静止的官方源刷新：
 
 ```bash
 cc-connect daemon stop
+cc-connect-next migrate --dry-run --force
+cc-connect-next migrate --force
 cc-connect-next daemon install \
   --config ~/.cc-connect-next/config.toml \
   --work-dir /原运行目录的绝对路径
 ```
 
-迁移命令会输出检测到的 `Official runtime work_dir`，请原样使用。`daemon status` 会同时显示两条路径，安装后的 launchd、systemd 或 Windows 计划任务都会显式传入迁移配置。
+最终同步必须重复此前用过的所有自定义 `--source`、`--target`、`--runtime-work-dir` 参数，并在启动前检查新的 manifest 和备份路径。本次刷新以官方配置为准；应从测试目标备份中有选择地重新应用确实需要的 Next 专属设置，绝不能恢复过期的测试应用凭证。最终迁移失败时不要启动 Next，应先重启官方 daemon，再处理命令报告的源目录、权限或并发问题。迁移命令会输出检测到的 `Official runtime work_dir`，请原样使用。`daemon status` 会同时显示两条路径，安装后的 launchd、systemd 或 Windows 计划任务都会显式传入迁移配置。
 
 回滚只需要：
 
@@ -159,9 +161,12 @@ Beta 已发布时使用 npm 包，否则从当前源码构建。先执行
 `cc-connect-next migrate --dry-run`，确认目标目录确实是
 ~/.cc-connect-next，再执行真实的一键迁移；检查 migration-manifest.json，并报告所有
 带时间戳的迁移前备份。验证版本、配置文件权限、独立 daemon 名称
-和独立 API socket。正式切换服务时，同时传入
+和独立 API socket。正式切换时，先停止官方 CC Connect，再依次执行
+`cc-connect-next migrate --dry-run --force` 与 `cc-connect-next migrate --force`，
+检查新的 manifest 和备份，然后同时传入
 `--config ~/.cc-connect-next/config.toml`，并把 `--work-dir` 设为迁移输出的
-`Official runtime work_dir` 原值。不要让两个运行时同时连接同一个飞书应用。
+`Official runtime work_dir` 原值。最终迁移失败时重启官方 daemon，不要启动 Next。
+不要让两个运行时同时连接同一个飞书应用。
 ```
 
 ## 开发与验证

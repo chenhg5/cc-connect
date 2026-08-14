@@ -131,16 +131,18 @@ Official CC Connect and cc-connect-next can be installed side by side:
 
 Do not run both against the same Feishu app credentials at the same time: two WebSocket consumers can race or duplicate handling. Use a separate test app for parallel runtime testing, or stop the official daemon only when you deliberately switch production traffic. Installation and migration themselves are safe to perform while the official daemon remains installed.
 
-When switching the service, keep the migrated config and the original runtime working directory independent. This preserves every relative `work_dir`, `base_dir`, and provider path while guaranteeing that the successor reads the migrated configuration:
+When switching the service, keep the migrated config and the original runtime working directory independent. Stop any separately configured test successor first. After stopping official CC Connect, rerun migration before starting production so sessions, bindings, timers, and project state written since the earlier test migration are not lost. The final `--force` run preserves the entire previous target in timestamped backups before refreshing it from the now-quiescent official source:
 
 ```bash
 cc-connect daemon stop
+cc-connect-next migrate --dry-run --force
+cc-connect-next migrate --force
 cc-connect-next daemon install \
   --config ~/.cc-connect-next/config.toml \
   --work-dir /absolute/original/cwd
 ```
 
-The migration command prints the detected `Official runtime work_dir`; use that exact value. `daemon status` reports both paths, and the installed launchd, systemd, or Windows task always passes the migrated config explicitly.
+Repeat any custom migration path options during this final synchronization. Inspect its manifest and backups before startup. The official config is authoritative during the refresh; deliberately reapply only required successor-specific settings from the backed-up tested config, never stale test-app credentials. If migration fails, do not start cc-connect-next; restart the official daemon and fix the reported problem. The migration command prints the detected `Official runtime work_dir`; use that exact value. `daemon status` reports both paths, and the installed launchd, systemd, or Windows task always passes the migrated config explicitly.
 
 Rollback is simply:
 
@@ -164,9 +166,12 @@ Use the beta package if it is published; otherwise build the current source. The
 then run the real one-command migration only after confirming the target is ~/.cc-connect-next.
 Check its migration-manifest.json and report any timestamped pre-migration backups.
 Validate `cc-connect-next --version`, config permissions, independent daemon name,
-and independent API socket. For the eventual service switch, install with both
+and independent API socket. For the eventual service switch, stop official CC Connect,
+rerun `cc-connect-next migrate --dry-run --force` and `cc-connect-next migrate --force`,
+inspect the new manifest and backups, then install with both
 `--config ~/.cc-connect-next/config.toml` and `--work-dir` set to the exact
-`Official runtime work_dir` printed by migration. Do not start both runtimes with the same Feishu app.
+`Official runtime work_dir` printed by migration. If final migration fails, restart the
+official daemon and do not start Next. Never run both runtimes with the same Feishu app.
 ```
 
 ## Development

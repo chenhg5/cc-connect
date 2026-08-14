@@ -179,17 +179,23 @@ Expected isolated identities:
 
 ## 6. Deliberate production switch
 
-Only after a separate live test succeeds, stop the official daemon and start the successor. Pass both the migrated config and the `Official runtime work_dir` printed by migration. The service then reads the new config while every relative path retains its official runtime meaning:
+Only after a separate live test succeeds, stop any running test successor, stop the official daemon, and perform one final migration before starting production. This second migration is mandatory: it captures sessions, bindings, timers, and project state written by official CC Connect after the earlier test migration. Repeat any custom `--source`, `--target`, or `--runtime-work-dir` options used before. `--force` is deliberate here because the tested target already exists; it first preserves that entire target in timestamped backups.
 
 ```bash
+# If a separately configured test successor is running, stop it first:
+cc-connect-next daemon stop
 cc-connect daemon stop
+
+cc-connect-next migrate --dry-run --force
+cc-connect-next migrate --force
+
 cc-connect-next daemon install \
   --config ~/.cc-connect-next/config.toml \
   --work-dir /absolute/original/cwd
 cc-connect-next daemon status
 ```
 
-If cc-connect-next was already installed as a service, use `cc-connect-next daemon start` instead of reinstalling it.
+Inspect the final command's `migration-manifest.json` path and timestamped backups before startup. The official config is authoritative during this refresh; review the backed-up tested config and deliberately reapply only required successor-specific settings, never stale test-app credentials. If either final migration command fails, do not start cc-connect-next; restart `cc-connect` and resolve the reported source, permission, or concurrency problem. If cc-connect-next was already installed as a service with the exact migrated config and work directory, use `cc-connect-next daemon start` instead of reinstalling it.
 
 Rollback leaves official data intact:
 
@@ -207,6 +213,7 @@ An installing agent should report each item separately:
 - `~/.cc-connect-next` and config permission checks;
 - dry-run migration result and whether a real migration was authorized;
 - migration manifest path and every timestamped pre-migration backup;
+- confirmation that a final `--force` migration ran after the official daemon stopped and before the successor started;
 - the reported official runtime work directory when the config contains relative paths;
 - confirmation that official files and services were not modified during install/migration;
 - independent command, data directory, service, and API socket names;
