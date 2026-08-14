@@ -5018,9 +5018,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	events := state.agentSession.Events()
 	var deferredEvent Event
 	hasDeferredEvent := false
+	channelClosedPending := false
 	for {
+		if channelClosedPending {
+			goto channelClosed
+		}
 		var event Event
 		var ok bool
+		textAlreadyFiltered := false
 
 		if hasDeferredEvent {
 			event = deferredEvent
@@ -5046,6 +5051,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				return
 			case event, ok = <-events:
 				if !ok {
+					// A closed transport is also a semantic assistant boundary.
+					// Route any safe buffered candidate through the ordinary text
+					// path before abnormal-exit handling so it is rendered and can
+					// become the confirmed partial; an exact private footer remains
+					// omitted by Flush.
+					if turnDisplay.HideAgentFooter {
+						if tail := agentFooterFilter.Flush(); tail != "" {
+							event = Event{Type: EventText, Content: tail}
+							textAlreadyFiltered = true
+							channelClosedPending = true
+							break
+						}
+					}
 					goto channelClosed
 				}
 			case err := <-pendingSend:
@@ -5170,7 +5188,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 		}
 
-		textAlreadyFiltered := false
 		if event.Type != EventText && turnDisplay.HideAgentFooter {
 			// Agent events delimit semantic assistant segments even though
 			// EventText transport chunks do not. Resolve any possible footer line
