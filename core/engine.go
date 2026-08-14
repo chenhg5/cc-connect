@@ -4727,6 +4727,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	var legacyPermissionDeliveredPrefix string
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -5681,6 +5682,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					segmentStart = len(textParts)
 					silentHold = false
 				}
+				if segmentStart > 0 {
+					legacyPermissionDeliveredPrefix = strings.Join(textParts[:segmentStart], "")
+				}
 				sp.freeze()
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
@@ -6084,6 +6088,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+			} else if finalSegment, ok := postPermissionPreviewSegment(fullResponse, legacyPermissionDeliveredPrefix, strings.Join(textParts[segmentStart:], "")); ok {
+				// A legacy permission prompt permanently leaves the current preview
+				// visible. Some Agents report the aggregate turn in EventResult, so
+				// finalize the newly un-frozen preview with only the suffix that has
+				// not already been delivered before the permission boundary.
+				if finalSegment == "" {
+					sp.discard()
+				} else if sp.finish(finalSegment, statusFooter) {
+					slog.Debug("EventResult: finalized post-permission stream preview", "response_len", len(finalSegment), "footer_len", len(statusFooter))
+				} else if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, finalSegment, statusFooter, sendWorkspaceWithError) {
+					return
+				}
 			} else if sp.finish(fullResponse, statusFooter) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse), "footer_len", len(statusFooter))
 			} else {
@@ -6221,6 +6237,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				silentCancelCh = state.silentTurnCancellationSignal(msgID)
 				textParts = nil
 				segmentStart = 0
+				legacyPermissionDeliveredPrefix = ""
 				toolCount = 0
 				turnStart = time.Now()
 				firstEventLogged = false
@@ -8081,6 +8098,24 @@ func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, b
 		}
 	}
 	return true
+}
+
+// postPermissionPreviewSegment removes a previously delivered legacy-preview
+// prefix only when streamed evidence proves EventResult contains the aggregate
+// turn. A final-only result can coincidentally start with the same bytes as the
+// earlier prefix; retaining it is safer than truncating user-visible content.
+func postPermissionPreviewSegment(fullResponse, deliveredPrefix, streamedSuffix string) (string, bool) {
+	if deliveredPrefix == "" || streamedSuffix == "" || fullResponse == streamedSuffix {
+		return fullResponse, false
+	}
+	if !strings.HasPrefix(fullResponse, deliveredPrefix) {
+		return fullResponse, false
+	}
+	finalSegment := strings.TrimPrefix(fullResponse, deliveredPrefix)
+	if !strings.HasPrefix(finalSegment, streamedSuffix) {
+		return fullResponse, false
+	}
+	return finalSegment, true
 }
 
 func appendReplyFooter(content, footer string) string {

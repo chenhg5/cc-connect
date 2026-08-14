@@ -17656,3 +17656,45 @@ func TestStripAgentFooterLines(t *testing.T) {
 		t.Fatalf("stripAgentFooterLines(CRLF) = %q, want %q", got, want)
 	}
 }
+
+func TestPostPermissionPreviewSegmentRequiresAggregateEvidence(t *testing.T) {
+	tests := []struct {
+		name           string
+		fullResponse   string
+		delivered      string
+		streamedSuffix string
+		want           string
+		wantTrimmed    bool
+	}{
+		{
+			name:           "aggregate turn",
+			fullResponse:   "Before permission. After permission.",
+			delivered:      "Before permission. ",
+			streamedSuffix: "After permission.",
+			want:           "After permission.",
+			wantTrimmed:    true,
+		},
+		{
+			name:           "final-only suffix shares prefix",
+			fullResponse:   "okay",
+			delivered:      "ok",
+			streamedSuffix: "okay",
+			want:           "okay",
+		},
+		{
+			name:         "no streamed suffix evidence",
+			fullResponse: "Before permission. After permission.",
+			delivered:    "Before permission. ",
+			want:         "Before permission. After permission.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, trimmed := postPermissionPreviewSegment(tt.fullResponse, tt.delivered, tt.streamedSuffix)
+			if got != tt.want || trimmed != tt.wantTrimmed {
+				t.Fatalf("postPermissionPreviewSegment() = (%q, %v), want (%q, %v)", got, trimmed, tt.want, tt.wantTrimmed)
+			}
+		})
+	}
+}

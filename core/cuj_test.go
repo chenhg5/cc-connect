@@ -1424,6 +1424,174 @@ func TestCUJ_C6_ModeSwitchAcknowledged(t *testing.T) {
 	}
 }
 
+// cujPermissionPreviewSession reproduces an Agent that reports the entire turn
+// in EventResult after streaming text on both sides of a permission prompt.
+type cujPermissionPreviewSession struct {
+	events             chan Event
+	permissionResolved chan struct{}
+	permissionOnce     sync.Once
+}
+
+func newCUJPermissionPreviewSession() *cujPermissionPreviewSession {
+	return &cujPermissionPreviewSession{
+		events:             make(chan Event, 8),
+		permissionResolved: make(chan struct{}),
+	}
+}
+
+func (s *cujPermissionPreviewSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventText, Content: "Before permission. "}
+		s.events <- Event{
+			Type:         EventPermissionRequest,
+			RequestID:    "cuj-preview-permission",
+			ToolName:     "write_file",
+			ToolInput:    "demo.txt",
+			ToolInputRaw: map[string]any{"path": "demo.txt"},
+		}
+		<-s.permissionResolved
+		s.events <- Event{Type: EventText, Content: "After permission."}
+		s.events <- Event{Type: EventResult, Content: "Before permission. After permission.", Done: true}
+	}()
+	return nil
+}
+
+func (s *cujPermissionPreviewSession) RespondPermission(_ string, _ PermissionResult) error {
+	s.permissionOnce.Do(func() { close(s.permissionResolved) })
+	return nil
+}
+func (s *cujPermissionPreviewSession) Events() <-chan Event     { return s.events }
+func (s *cujPermissionPreviewSession) CurrentSessionID() string { return "cuj-preview-session" }
+func (s *cujPermissionPreviewSession) Alive() bool              { return true }
+func (s *cujPermissionPreviewSession) Close() error             { return nil }
+
+type cujPermissionPreviewAgent struct {
+	session *cujPermissionPreviewSession
+}
+
+func (a *cujPermissionPreviewAgent) Name() string { return "cuj-permission-preview" }
+func (a *cujPermissionPreviewAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.session, nil
+}
+func (a *cujPermissionPreviewAgent) ListSessions(context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *cujPermissionPreviewAgent) Stop() error { return nil }
+
+// cujEditablePreviewPlatform records the content of each distinct editable
+// message exactly as a user would see it after all updates.
+type cujEditablePreviewPlatform struct {
+	stubPlatformEngine
+	previewMu sync.Mutex
+	nextID    int
+	order     []string
+	visible   map[string]string
+}
+
+func (p *cujEditablePreviewPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	p.nextID++
+	handle := fmt.Sprintf("preview-%d", p.nextID)
+	p.order = append(p.order, handle)
+	p.visible[handle] = content
+	return handle, nil
+}
+
+func (p *cujEditablePreviewPlatform) UpdateMessage(_ context.Context, handle any, content string) error {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	p.visible[fmt.Sprint(handle)] = content
+	return nil
+}
+
+func (p *cujEditablePreviewPlatform) visiblePreviews() []string {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	result := make([]string, 0, len(p.order))
+	for _, handle := range p.order {
+		result = append(result, p.visible[handle])
+	}
+	return result
+}
+
+// CUJ-C7 · A permission prompt permanently closes the current editable
+// preview. After approval, the next preview must contain only the new suffix;
+// an Agent's aggregate EventResult must not duplicate the earlier message.
+func TestCUJ_C7_PermissionPreviewDoesNotDuplicateEarlierText(t *testing.T) {
+	session := newCUJPermissionPreviewSession()
+	agent := &cujPermissionPreviewAgent{session: session}
+	platform := &cujEditablePreviewPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "telegram"},
+		visible:            make(map[string]string),
+	}
+	engine := NewEngine("test", agent, []Platform{platform}, t.TempDir()+"/sessions.json", LangEnglish)
+	engine.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "legacy"})
+	engine.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1, MaxChars: 500})
+	engine.SetReplyFooterEnabled(false)
+
+	waitFor := func(reason string, condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if condition() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s; previews=%q sent=%q", reason, platform.visiblePreviews(), platform.getSent())
+	}
+
+	sessionKey := "telegram:cuj-preview-user"
+	engine.ReceiveMessage(platform, &Message{
+		SessionKey: sessionKey,
+		Platform:   "telegram",
+		MessageID:  "cuj-preview-question",
+		UserID:     "cuj-preview-user",
+		Content:    "Please update demo.txt",
+		ReplyCtx:   "cuj-preview-chat",
+	})
+	waitFor("permission prompt and first preview", func() bool {
+		return len(platform.getSent()) > 0 && len(platform.visiblePreviews()) == 1
+	})
+
+	engine.ReceiveMessage(platform, &Message{
+		SessionKey: sessionKey,
+		Platform:   "telegram",
+		MessageID:  "cuj-preview-allow",
+		UserID:     "cuj-preview-user",
+		Content:    "allow",
+		ReplyCtx:   "cuj-preview-chat",
+	})
+	waitFor("post-permission preview completion", func() bool {
+		previews := platform.visiblePreviews()
+		return len(previews) == 2 && strings.Contains(previews[1], "After permission.")
+	})
+
+	previews := platform.visiblePreviews()
+	if got, want := previews[0], "Before permission. "; got != want {
+		t.Fatalf("first visible preview = %q, want %q", got, want)
+	}
+	if got, want := previews[1], "After permission."; got != want {
+		t.Fatalf("second visible preview = %q, want only the post-permission suffix %q", got, want)
+	}
+	for _, sent := range platform.getSent() {
+		if strings.Contains(sent, "Before permission. After permission.") {
+			t.Fatalf("aggregate response was duplicated as a side message: %q", sent)
+		}
+	}
+
+	waitFor("aggregate assistant history", func() bool {
+		history := engine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
+		for _, entry := range history {
+			if entry.Role == "assistant" && entry.Content == "Before permission. After permission." {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // ===========================================================================
 // SPRINT 2 · D organization (security & permissions)
 // ===========================================================================
