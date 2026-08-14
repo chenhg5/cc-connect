@@ -42,6 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/check-release-version.js "${GITHUB_REF_NAME}"
+          node --test scripts/*.test.js
           npm --prefix npm test
           node --check npm/install.js
           node --check npm/run.js
@@ -151,22 +152,40 @@ jobs:
           node scripts/check-release-version.js "${GITHUB_REF_NAME}"
           node scripts/check-release-assets.js dist
 
-      - name: Publish or update the GitHub prerelease
+      - name: Select release channels
+        id: release_policy
+        run: node scripts/check-release-version.js "${GITHUB_REF_NAME}" --github-output >> "$GITHUB_OUTPUT"
+
+      - name: Publish or reuse the immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           notes="changelogs/${tag}.md"
+          prerelease="${{ steps.release_policy.outputs.prerelease }}"
+          if [ "$prerelease" = "true" ]; then
+            latest_flag="--latest=false"
+          else
+            latest_flag="--latest"
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/*.tar.gz dist/*.zip dist/checksums.txt --clobber
-            gh release edit "$tag" --title "cc-connect-next ${tag}" --notes-file "$notes" --prerelease
+            published_dir="$(mktemp -d)"
+            trap 'rm -rf "$published_dir"' EXIT
+            gh release download "$tag" --dir "$published_dir"
+            node scripts/check-release-assets.js "$published_dir"
+            gh release edit "$tag" \
+              --title "cc-connect-next ${tag}" \
+              --notes-file "$notes" \
+              --prerelease="$prerelease" \
+              "$latest_flag"
           else
             gh release create "$tag" dist/*.tar.gz dist/*.zip dist/checksums.txt \
               --verify-tag \
               --title "cc-connect-next ${tag}" \
               --notes-file "$notes" \
-              --prerelease
+              --prerelease="$prerelease" \
+              "$latest_flag"
           fi
 
       - name: Verify public GitHub release downloads
@@ -182,18 +201,21 @@ jobs:
           done
           node scripts/check-release-assets.js "$verify_dir"
 
-      - name: Publish npm beta idempotently
+      - name: Publish npm package idempotently
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIST_TAG: ${{ steps.release_policy.outputs.npm_tag }}
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
+          npm_tag="${NPM_DIST_TAG}"
           if npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
             echo "cc-connect-next@${version} is already published"
           else
-            npm publish --access public --tag beta --provenance
+            npm publish --access public --tag "$npm_tag" --provenance
           fi
+          npm dist-tag add "cc-connect-next@${version}" "$npm_tag" --registry=https://registry.npmjs.org
 
       - name: Verify the public npm registry
         working-directory: npm
@@ -201,4 +223,7 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           published="$(npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org)"
+          npm_tag="${{ steps.release_policy.outputs.npm_tag }}"
+          tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org)"
           test "$published" = "$version"
+          test "$tagged" = "$version"

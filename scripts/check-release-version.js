@@ -11,6 +11,14 @@ function fail(message) {
   throw new Error(`[release-version] ${message}`);
 }
 
+function releasePolicyForVersion(npmVersion) {
+  const prerelease = npmVersion.includes("-");
+  return {
+    prerelease,
+    npmTag: prerelease ? "beta" : "latest",
+  };
+}
+
 function readReleaseVersion() {
   const packageJSON = JSON.parse(
     fs.readFileSync(path.join(root, "npm", "package.json"), "utf8")
@@ -34,7 +42,12 @@ function readReleaseVersion() {
   if (!fs.existsSync(notes)) {
     fail(`release notes are missing: changelogs/${tag}.md`);
   }
-  return { npmVersion, tag, notes };
+  return {
+    npmVersion,
+    tag,
+    notes,
+    ...releasePolicyForVersion(npmVersion),
+  };
 }
 
 function main() {
@@ -45,6 +58,20 @@ function main() {
   const expectedTag = String(process.argv[2] || "").trim();
   if (expectedTag && expectedTag !== release.tag) {
     fail(`release tag ${expectedTag} does not match ${release.tag}`);
+  }
+
+  const format = String(process.argv[3] || "").trim();
+  if (format === "--github-output") {
+    process.stdout.write([
+      `tag=${release.tag}`,
+      `prerelease=${release.prerelease}`,
+      `npm_tag=${release.npmTag}`,
+      "",
+    ].join("\n"));
+    return;
+  }
+  if (format) {
+    fail(`unknown output format: ${format}`);
   }
   process.stdout.write(`${release.tag}\n`);
 }
@@ -58,4 +85,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { readReleaseVersion };
+module.exports = { readReleaseVersion, releasePolicyForVersion };
