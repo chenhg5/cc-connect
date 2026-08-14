@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.0-beta.1 (2026-08-15)
+
+First public prerelease of cc-connect-next: an independently installed successor with a privacy-first Feishu Card 2.0 lifecycle, fail-closed migration from official CC Connect, and checksum-verified GitHub/npm distribution. See `changelogs/v0.1.0-beta.1.md` for bilingual release notes and migration guidance.
+
+### Highlights
+
+- One quoted card per Agent turn, immediate non-empty feedback, anonymous reasoning/tool counts, native answer streaming, and explicit Done/error states.
+- No reasoning text, tool details, model/token/context/work-directory metadata, or expandable private payload. Fragmented Agent footers are filtered only after logical-line reconstruction.
+- Explicit migration preserves supported persistent state without modifying official CC Connect, validates both TOML schema and normal startup semantics before writing, and produces verified manifests and recoverable backups.
+- Six checksum-verified platform archives and the `cc-connect-next` npm beta are built from the same tag.
+
 ## v1.4.1 (2026-06-28)
 
 Patch release focused on Kimi CLI compatibility for users on the newer `kimi-code` 0.14.x (which removed the `--print` flag). v1.4.1 probes the Kimi CLI at startup and conditionally passes `--print` only when the installed binary supports it. Older `kimi-cli` 1.48.x users keep working as-is — no config change required either way.

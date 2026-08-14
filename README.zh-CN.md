@@ -69,7 +69,7 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-当前兼容矩阵覆盖官方 v1.4.1 与 v1.5.0-beta.1 至 beta.3 的已知持久化布局。默认 `--source-version auto` 不执行 daemon 元数据中记录的二进制，而是直接校验实际 TOML、当前构建已注册的 Agent/平台和持久化目录；已知版本也可以显式记录。任何无法完整保留行为的新字段或未安装平台都会在写入前失败，详见[迁移兼容矩阵](docs/migration-compatibility.md)。
+当前兼容矩阵覆盖官方 v1.4.1 与 v1.5.0-beta.1 至 beta.3 的已知持久化布局。默认 `--source-version auto` 不执行 daemon 元数据中记录的二进制，而是直接校验实际 TOML schema、正常启动所需的语义、当前构建已注册的 Agent/平台和持久化目录；已知版本也可以显式记录。缺失 Agent/平台、无效展示模式、无法保留行为的新字段或未安装插件都会在写入前失败，详见[迁移兼容矩阵](docs/migration-compatibility.md)。
 
 相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。即使 `--source` 指向单独的配置目录，迁移仍会从官方 `$HOME/.cc-connect/daemon.json` 读取这份元数据，不会信任任意配置目录旁边的同名文件。元数据格式损坏，或其中记录的工作目录已经不存在、无法访问时，预检会直接失败，不会改用另一个目录解析相对路径。如果没有配置 `data_dir`，迁移也会严格沿用 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态；自定义配置根中只复制 `config.toml`。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`；该参数优先级最高。
 

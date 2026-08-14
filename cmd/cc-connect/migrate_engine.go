@@ -226,15 +226,18 @@ func validateMigrationConfigSchema(configBytes []byte) error {
 		return fmt.Errorf("source config is incompatible with this cc-connect-next build: %w", err)
 	}
 	undecoded := metadata.Undecoded()
-	if len(undecoded) == 0 {
-		return nil
+	if len(undecoded) > 0 {
+		keys := make([]string, 0, len(undecoded))
+		for _, key := range undecoded {
+			keys = append(keys, key.String())
+		}
+		sort.Strings(keys)
+		return fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
 	}
-	keys := make([]string, 0, len(undecoded))
-	for _, key := range undecoded {
-		keys = append(keys, key.String())
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("source config is semantically incompatible with this cc-connect-next build: %w; no target was written", err)
 	}
-	sort.Strings(keys)
-	return fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
+	return nil
 }
 
 func stringSet(values []string) map[string]struct{} {

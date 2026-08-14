@@ -1000,6 +1000,13 @@ func (c *Config) validate() error {
 	return c.validateInternal(false)
 }
 
+// Validate checks that a decoded configuration can start a normal
+// cc-connect-next runtime. Callers that decode Config directly (rather than
+// using Load) can use this to apply the same semantic checks as startup.
+func (c *Config) Validate() error {
+	return c.validate()
+}
+
 func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err

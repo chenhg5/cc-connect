@@ -105,6 +105,69 @@ type = "future-platform"
 	}
 }
 
+func TestPrepareLegacyMigration_RejectsSemanticallyInvalidConfigBeforeWrites(t *testing.T) {
+	tests := []struct {
+		name       string
+		configText string
+		wantError  string
+	}{
+		{
+			name: "invalid display mode",
+			configText: `[display]
+mode = "verbose"
+[[projects]]
+name = "invalid-display"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`,
+			wantError: "display.mode",
+		},
+		{
+			name: "missing agent type",
+			configText: `[[projects]]
+name = "missing-agent"
+[[projects.platforms]]
+type = "feishu"
+`,
+			wantError: "agent.type is required",
+		},
+		{
+			name: "missing platform",
+			configText: `[[projects]]
+name = "missing-platform"
+[projects.agent]
+type = "codex"
+`,
+			wantError: "needs at least one",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), tt.configText)
+
+			_, err := prepareLegacyMigration(migrationOptions{
+				Source:        source,
+				Target:        target,
+				Home:          root,
+				SourceVersion: "v1.5.0-beta.3",
+				DryRun:        true,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("semantic validation error = %v, want %q", err, tt.wantError)
+			}
+			if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+				t.Fatalf("target was written after semantic validation failure: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestPrepareLegacyMigration_RejectsUnsupportedConfigBehavior(t *testing.T) {
 	for _, setting := range []string{
 		"[[projects]]\nname = \"idle\"\nagent_session_idle_timeout_mins = 10\n[projects.agent]\ntype = \"codex\"\n",
@@ -432,6 +495,10 @@ func TestPrepareLegacyMigrationRefusesCaseOnlyTargetAlias(t *testing.T) {
 	source := filepath.Join(root, ".cc-connect")
 	target := filepath.Join(root, ".CC-CONNECT")
 	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	originalConfig, err := os.ReadFile(filepath.Join(source, "config.toml"))
+	if err != nil {
+		t.Fatalf("read original source config: %v", err)
+	}
 
 	sourceInfo, err := os.Stat(source)
 	if err != nil {
@@ -453,7 +520,7 @@ func TestPrepareLegacyMigrationRefusesCaseOnlyTargetAlias(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "separate directories") {
 		t.Fatalf("prepareLegacyMigration() error = %v, want case-only alias refusal", err)
 	}
-	if got, readErr := os.ReadFile(filepath.Join(source, "config.toml")); readErr != nil || string(got) != "language = \"zh\"\n" {
+	if got, readErr := os.ReadFile(filepath.Join(source, "config.toml")); readErr != nil || !bytes.Equal(got, originalConfig) {
 		t.Fatalf("source config changed during alias preflight: content=%q err=%v", got, readErr)
 	}
 }
@@ -1745,6 +1812,8 @@ name = "a"
 type = "codex"
 [projects.agent.options]
 work_dir = "`+filepath.ToSlash(projectA)+`"
+[[projects.platforms]]
+type = "feishu"
 
 [[projects]]
 name = "b"
@@ -1752,6 +1821,8 @@ name = "b"
 type = "codex"
 [projects.agent.options]
 work_dir = "`+filepath.ToSlash(projectB)+`"
+[[projects.platforms]]
+type = "feishu"
 `)
 	writeMigrationFixture(t, filepath.Join(projectA, ".cc-connect", "attachments", "legacy-a.txt"), "legacy-a")
 	writeMigrationFixture(t, filepath.Join(projectB, ".cc-connect", "attachments", "legacy-b.txt"), "legacy-b")
@@ -1888,6 +1959,43 @@ func TestMigrateLegacyDataTreatsMissingConfiguredDataDirAsEmpty(t *testing.T) {
 }
 
 func writeMigrationFixture(t *testing.T, path, content string) {
+	t.Helper()
+	// Most migration tests exercise inventory, isolation, and rollback rather
+	// than startup validation. Keep their config fixtures runnable so those
+	// tests reach the boundary they intend to cover. Semantic-rejection tests
+	// use writeRawMigrationFixture explicitly.
+	if filepath.Base(path) == "config.toml" {
+		projectCount := strings.Count(content, "[[projects]]")
+		switch projectCount {
+		case 0:
+			content = strings.TrimRight(content, "\n") + `
+
+[[projects]]
+name = "migration-fixture"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`
+		case 1:
+			if !strings.Contains(content, "[projects.agent]") {
+				content = strings.TrimRight(content, "\n") + `
+[projects.agent]
+type = "codex"
+`
+			}
+			if !strings.Contains(content, "[[projects.platforms]]") {
+				content = strings.TrimRight(content, "\n") + `
+[[projects.platforms]]
+type = "feishu"
+`
+			}
+		}
+	}
+	writeRawMigrationFixture(t, path, content)
+}
+
+func writeRawMigrationFixture(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("mkdir fixture: %v", err)

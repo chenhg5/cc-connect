@@ -4722,6 +4722,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		turnRichCardCopy = e.i18n.RichCardCopy()
 	}
 	turnDisplay, turnStreamPreview := e.displayRuntimeSnapshot()
+	agentFooterFilter := newAgentFooterStreamFilter(turnDisplay.HideAgentFooter)
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
@@ -5480,10 +5481,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			content := event.Content
-			if e.display.HideAgentFooter {
-				content = stripAgentFooterLines(content)
-			}
+			content := agentFooterFilter.Push(event.Content)
 			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
@@ -5811,8 +5809,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
-			if e.display.HideAgentFooter {
+			if turnDisplay.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
+				// EventText is transport-framed rather than line-framed. Preserve a
+				// final buffered line only after it is known not to be a complete
+				// private Agent footer; an exact footer is discarded by Flush.
+				if tail := agentFooterFilter.Flush(); tail != "" {
+					textParts = append(textParts, tail)
+				}
 			}
 			// Rich cards always hide tool details regardless of the legacy
 			// ToolMessages setting, so textParts is the authoritative answer across
@@ -5831,7 +5835,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			// A footer can be split across EventText chunks, so filter the fully
 			// assembled response as well as each streaming chunk.
-			if e.display.HideAgentFooter {
+			if turnDisplay.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
 			}
 			if fullResponse == "" {
@@ -6198,6 +6202,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnRichCardCopy = e.i18n.RichCardCopyForText(queued.content)
 				state.setTurnRichCardCopy(queued.messageID, turnRichCardCopy)
 				turnDisplay, turnStreamPreview = e.displayRuntimeSnapshot()
+				agentFooterFilter.Reset(turnDisplay.HideAgentFooter)
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
@@ -17254,7 +17259,7 @@ var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
 // agentFooterLineRe matches a standalone agent-emitted status line only when
 // it contains the characteristic output, input, and context metrics. Requiring
 // all three prevents ordinary prose from being removed.
-var agentFooterLineRe = regexp.MustCompile(`^[ \t]*\*?[A-Za-z0-9][^\n]*\s+·\s+out\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bin\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bctx\s+[0-9]+(?:\.[0-9]+)?%[^\n]*\*?[ \t]*$`)
+var agentFooterLineRe = regexp.MustCompile(`^[ \t]*\*?[A-Za-z0-9][^ \t\n]{0,127}\s+·[^\n]*\bout\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bin\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bctx\s+[0-9]+(?:\.[0-9]+)?%[ \t]*\*?[ \t]*$`)
 
 func stripAgentFooterLines(text string) string {
 	if text == "" {

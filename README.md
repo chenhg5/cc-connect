@@ -4,7 +4,7 @@ Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), 
 
 [中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
 
-> Status: `0.1.0-beta.1` is under active development. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
+> Current release: `0.1.0-beta.1`, the first public prerelease. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
 ## What changes for Feishu
 
@@ -69,7 +69,7 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-The current matrix covers the known persistent layout of official v1.4.1 and v1.5.0-beta.1 through beta.3. Default `--source-version auto` does not execute the binary recorded in daemon metadata; it validates the actual TOML, registered Agent/platform set, and persistent inventory. An exact known release can be recorded explicitly. Any setting or plugin whose behavior cannot be preserved fails before target writes; see the [migration compatibility matrix](docs/migration-compatibility.md).
+The current matrix covers the known persistent layout of official v1.4.1 and v1.5.0-beta.1 through beta.3. Default `--source-version auto` does not execute the binary recorded in daemon metadata; it validates the actual TOML schema, normal startup semantics, registered Agent/platform set, and persistent inventory. An exact known release can be recorded explicitly. A missing Agent/platform, invalid display mode, unsupported setting, or plugin whose behavior cannot be preserved fails before target writes; see the [migration compatibility matrix](docs/migration-compatibility.md).
 
 Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. Migration reads that metadata from the official `$HOME/.cc-connect/daemon.json` even when `--source` points to a separate config directory; a same-named file beside an arbitrary config is not trusted. A malformed metadata file or a recorded working directory that is missing or inaccessible fails preflight instead of silently resolving relative paths against a different directory. If `data_dir` is omitted, migration likewise uses `$HOME/.cc-connect` even when `--source` is a custom config root such as `/etc/cc-connect`; only that root's `config.toml` is copied. If daemon metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly; this override has highest priority.
 

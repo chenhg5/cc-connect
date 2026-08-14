@@ -6,7 +6,7 @@ Chat with your AI dev assistant from anywhere.
 
 ## Install
 
-After the matching beta release is published:
+Install the public beta channel:
 
 ```bash
 npm install -g cc-connect-next@beta

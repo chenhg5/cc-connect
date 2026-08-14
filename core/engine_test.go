@@ -3453,6 +3453,64 @@ func TestProcessInteractiveEvents_RichCardKeepsAnsweringPhaseVisibleBeforeDone(t
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardNeverStreamsFragmentedAgentFooter(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-fragmented-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-fragmented-footer")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-fragmented-footer"}
+	e.interactiveStates[sessionKey] = state
+
+	footer := "*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*"
+	for _, chunk := range []string{"answer\n\n", "*gpt-5.5 · xhigh · out ", "864 · in 177.7k ", "cr 175.5k · ctx 69%*"} {
+		agentSession.events <- Event{Type: EventText, Content: chunk}
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "answer\n\n" + footer, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-fragmented-footer", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	rendered := strings.Join(append(streams, updates...), "\n")
+	for _, private := range []string{"gpt-5.5", "out 864", "ctx 69%"} {
+		if strings.Contains(rendered, private) {
+			t.Fatalf("fragmented Agent footer leaked %q into rich-card payloads: %q", private, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "answer") {
+		t.Fatalf("visible answer was lost while filtering fragmented footer: %q", rendered)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPreservesFooterLikeLineWhenContinuationArrives(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-footer-like-prose"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-footer-like-prose")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-footer-like-prose"}
+	e.interactiveStates[sessionKey] = state
+
+	footerLike := "*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*"
+	continuation := " is a quoted example, not a footer."
+	for _, chunk := range []string{"answer\n\n", footerLike, continuation} {
+		agentSession.events <- Event{Type: EventText, Content: chunk}
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "answer\n\n" + footerLike + continuation, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-footer-like-prose", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	rendered := strings.Join(append(streams, updates...), "\n")
+	if !strings.Contains(rendered, footerLike+continuation) {
+		t.Fatalf("footer-like prose split at a transport boundary was lost: %q", rendered)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardKeepsTableOverflowOnPrimaryCard(t *testing.T) {
 	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	p := &stubRichCardSplitPlatform{stubRichCardSilentPlatform: base}
