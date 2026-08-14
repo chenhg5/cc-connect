@@ -728,8 +728,7 @@ func isLegacyMatrixStateFile(name string) bool {
 }
 
 func isLegacyProjectSessionFile(name, projectName string) bool {
-	projectName = strings.TrimSpace(projectName)
-	if projectName == "" || filepath.Base(projectName) != projectName {
+	if strings.TrimSpace(projectName) == "" || filepath.Base(projectName) != projectName {
 		return false
 	}
 	if name == projectName+".json" || name == projectName+".sessions.json" {
