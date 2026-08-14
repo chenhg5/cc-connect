@@ -259,26 +259,28 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		return nil, err
 	}
 
-	dataDir := source
-	dataDirExists := true
+	dataDirCandidate := filepath.Join(opts.Home, ".cc-connect")
+	customDataDir := false
 	if strings.TrimSpace(legacyCfg.DataDir) != "" {
-		dataDirCandidate, err := resolveLegacyConfigPath(legacyCfg.DataDir, runtimeWorkDir, opts.Home)
+		customDataDir = true
+		dataDirCandidate, err = resolveLegacyConfigPath(legacyCfg.DataDir, runtimeWorkDir, opts.Home)
 		if err != nil {
 			return nil, fmt.Errorf("resolve source data_dir: %w", err)
 		}
-		dataDir, err = canonicalExistingDirectory(dataDirCandidate)
-		if errors.Is(err, os.ErrNotExist) {
-			dataDirExists = false
-			dataDir, err = canonicalDestinationPath(dataDirCandidate)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read source data_dir: %w", err)
-		}
+	}
+	dataDirExists := true
+	dataDir, err := canonicalExistingDirectory(dataDirCandidate)
+	if errors.Is(err, os.ErrNotExist) {
+		dataDirExists = false
+		dataDir, err = canonicalDestinationPath(dataDirCandidate)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read source data_dir: %w", err)
 	}
 	if pathsOverlap(dataDir, target) {
 		return nil, fmt.Errorf("source data_dir and target must be separate directories")
 	}
-	if dataDir != source && pathStrictlyWithin(dataDir, source) {
+	if customDataDir && dataDir != source && pathStrictlyWithin(dataDir, source) {
 		return nil, fmt.Errorf("source data_dir must be dedicated: %s contains the source config directory %s; refusing to inventory unrelated files", dataDir, source)
 	}
 
@@ -302,8 +304,20 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		return nil, fmt.Errorf("inventory source config directory: %w", err)
 	}
 	if dataDir != source && dataDirExists {
-		if err := collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report); err != nil {
-			return nil, fmt.Errorf("inventory source data_dir: %w", err)
+		var collectErr error
+		if customDataDir {
+			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
+		} else {
+			// An omitted data_dir means the official product-owned default
+			// ~/.cc-connect even when config.toml was loaded from elsewhere.
+			var excludedRoots []string
+			if pathStrictlyWithin(dataDir, source) {
+				excludedRoots = append(excludedRoots, source)
+			}
+			collectErr = collectMigrationTreeExcluding(dataDir, "data-dir", true, excludedRoots, mainDestination, &report)
+		}
+		if collectErr != nil {
+			return nil, fmt.Errorf("inventory source data_dir: %w", collectErr)
 		}
 	}
 

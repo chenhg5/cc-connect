@@ -136,6 +136,12 @@ func migrateLegacyData(source, target string, force, dryRun bool) (migrationRepo
 	if err != nil {
 		return migrationReport{DryRun: dryRun}, fmt.Errorf("resolve home directory: %w", err)
 	}
+	if filepath.Base(filepath.Clean(source)) == ".cc-connect" {
+		// Keep this compatibility helper deterministic for callers that pass a
+		// conventional legacy root outside the current process home. The real
+		// CLI supplies os.UserHomeDir directly through migrationOptions.
+		home = filepath.Dir(filepath.Clean(source))
+	}
 	return migrateLegacyDataWithOptions(migrationOptions{
 		Source:             source,
 		Target:             target,

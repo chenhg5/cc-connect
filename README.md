@@ -68,7 +68,7 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If that metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly.
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. If `data_dir` is omitted, migration follows official v1.4.1 and uses `$HOME/.cc-connect` even when `--source` points to a custom config root such as `/etc/cc-connect`. If daemon metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly.
 
 For safety, migration refuses an effective `data_dir` that contains the official configuration root (for example, `data_dir = "~"`). A separate custom `data_dir` is also inventoried only through the persistent paths owned by CC Connect v1.4.1: sessions, project state/model caches, cron/timer state, bindings, heartbeat/history state, MiniMax local config, Weixin state, Agent prompt files, and Matrix encryption state. Any unexpected regular file or directory makes preflight fail, even when the configuration root lives elsewhere, instead of recursively copying a service home, SSH keys, browser profiles, or unrelated datasets. Point the official installation at a dedicated data directory and verify its state before rerunning migration; the command will never silently create a partial target for this case.
 

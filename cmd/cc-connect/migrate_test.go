@@ -713,6 +713,61 @@ func TestPrepareLegacyMigrationRejectsBroadCustomDataDirOutsideSourceTree(t *tes
 	}
 }
 
+func TestMigrateLegacyDataUsesOfficialDefaultDataDirWithCustomConfigRoot(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "service")
+	source := filepath.Join(root, "etc", "cc-connect")
+	dataDir := filepath.Join(home, ".cc-connect")
+	target := filepath.Join(root, "var", "lib", "cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"sessions":{}}`)
+	writeMigrationFixture(t, filepath.Join(dataDir, "backups", "legacy.bin"), "dedicated-default-data")
+
+	report, err := migrateLegacyDataWithOptions(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   home,
+	})
+	if err != nil {
+		t.Fatalf("migrate custom config root with default data_dir: %v", err)
+	}
+	canonicalData, err := canonicalExistingDirectory(dataDir)
+	if err != nil {
+		t.Fatalf("canonical default data_dir: %v", err)
+	}
+	if report.SourceDataDir != canonicalData {
+		t.Fatalf("SourceDataDir = %q, want official default %q", report.SourceDataDir, canonicalData)
+	}
+	for _, rel := range []string{"sessions/demo.json", "backups/legacy.bin"} {
+		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("default data_dir file %s was not migrated: %v", rel, err)
+		}
+	}
+}
+
+func TestMigrateLegacyDataUsesDefaultDataDirContainingCustomConfigRoot(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "service")
+	dataDir := filepath.Join(home, ".cc-connect")
+	source := filepath.Join(dataDir, "configs", "bot")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	writeMigrationFixture(t, filepath.Join(source, "backups", "config.toml.bak"), "config-backup")
+	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"sessions":{}}`)
+
+	if _, err := migrateLegacyDataWithOptions(migrationOptions{Source: source, Target: target, Home: home}); err != nil {
+		t.Fatalf("migrate nested custom config root with default data_dir: %v", err)
+	}
+	for _, rel := range []string{"backups/config.toml.bak", "sessions/demo.json"} {
+		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("nested-default migration lost %s: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "configs", "bot", "backups", "config.toml.bak")); !os.IsNotExist(err) {
+		t.Fatalf("nested config root was duplicated through default data_dir inventory: %v", err)
+	}
+}
+
 func TestKnownLegacyDataDirPathAllowsOnlyOwnedPersistentPaths(t *testing.T) {
 	cfg := legacyMigrationConfig{Projects: []legacyMigrationProject{{Name: "demo"}, {Name: " bot "}, {Name: "team/bot"}}}
 	tests := []struct {
