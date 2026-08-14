@@ -4796,6 +4796,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
+	sendWorkspaceWithContextError := func(ctx context.Context, p Platform, replyCtx any, content string) error {
+		return e.sendWithErrorForWorkspaceContext(ctx, p, replyCtx, content, workspaceDir)
+	}
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
@@ -6013,8 +6016,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// fenced text, avoiding extra unquoted overflow cards.
 				sendAnswerFallback := func() bool {
 					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						if abortIfTerminalDeliveryCanceled() {
+							return false
+						}
+						if err := sendWorkspaceWithContextError(terminalDeliveryCtx, p, replyCtx, chunk); err != nil {
 							slog.Error("failed to send rich card fallback answer", "error", err)
+							return false
+						}
+						if abortIfTerminalDeliveryCanceled() {
 							return false
 						}
 					}
@@ -12177,12 +12186,16 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	e.send(p, replyCtx, sb.String())
 }
 
-// waitOutgoing blocks on the per-platform outgoing rate limiter when enabled.
-func (e *Engine) waitOutgoing(p Platform) error {
+// waitOutgoingWithContext blocks on the per-platform outgoing rate limiter when enabled.
+func (e *Engine) waitOutgoingWithContext(ctx context.Context, p Platform) error {
 	if e.outgoingRL == nil {
 		return nil
 	}
-	return e.outgoingRL.Wait(e.ctx, p.Name())
+	return e.outgoingRL.Wait(ctx, p.Name())
+}
+
+func (e *Engine) waitOutgoing(p Platform) error {
+	return e.waitOutgoingWithContext(e.ctx, p)
 }
 
 func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
@@ -12193,12 +12206,16 @@ func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspac
 }
 
 func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
-	if err := e.waitOutgoing(p); err != nil {
+	return e.sendWithErrorForWorkspaceContext(e.ctx, p, replyCtx, content, workspaceDir)
+}
+
+func (e *Engine) sendWithErrorForWorkspaceContext(ctx context.Context, p Platform, replyCtx any, content, workspaceDir string) error {
+	if err := e.waitOutgoingWithContext(ctx, p); err != nil {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
 	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
-	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+	return e.sendAlreadyRenderedWithErrorContext(ctx, p, replyCtx, content)
 }
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
@@ -12263,8 +12280,12 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 }
 
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
+	return e.sendAlreadyRenderedWithErrorContext(e.ctx, p, replyCtx, content)
+}
+
+func (e *Engine) sendAlreadyRenderedWithErrorContext(ctx context.Context, p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(e.ctx, replyCtx, content); err != nil {
+	if err := p.Send(ctx, replyCtx, content); err != nil {
 		// Check for context_token missing error (common for Weixin platform)
 		if strings.Contains(err.Error(), "missing context_token") {
 			slog.Error("platform send failed: context_token missing",

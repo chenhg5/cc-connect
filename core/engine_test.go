@@ -2064,6 +2064,33 @@ type stubBlockingTerminalRichCardPlatform struct {
 	streamCalls      int
 }
 
+type stubBlockingFallbackRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+	fallbackStarted  chan struct{}
+	fallbackCanceled chan struct{}
+	releaseFallback  chan struct{}
+	startOnce        sync.Once
+	cancelOnce       sync.Once
+}
+
+func (p *stubBlockingFallbackRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if strings.Contains(content, "status=done") {
+		return errors.New("simulated final rich-card update failure")
+	}
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *stubBlockingFallbackRichCardPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	p.startOnce.Do(func() { close(p.fallbackStarted) })
+	select {
+	case <-ctx.Done():
+		p.cancelOnce.Do(func() { close(p.fallbackCanceled) })
+		return ctx.Err()
+	case <-p.releaseFallback:
+		return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+	}
+}
+
 func (p *stubBlockingTerminalRichCardPlatform) waitForTerminalIO(ctx context.Context) error {
 	p.startOnce.Do(func() { close(p.terminalStarted) })
 	select {
@@ -3911,6 +3938,67 @@ func TestProcessInteractiveEvents_RichCardRecallCancelsTerminalIOBeforeFallback(
 				t.Fatalf("recalled turn advanced completion watermark to %d", completedAtMs)
 			}
 		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallCancelsFallbackSend(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubBlockingFallbackRichCardPlatform{
+		stubRichCardSilentPlatform: base,
+		fallbackStarted:            make(chan struct{}),
+		fallbackCanceled:           make(chan struct{}),
+		releaseFallback:            make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+
+	sessionKey := "feishu:user-rich-fallback-recall"
+	msgID := "m-rich-fallback-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-fallback-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-fallback-recall",
+		currentTurnUserMessageTimeMs: 987,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: strings.Repeat("fallback answer ", 400), Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.fallbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not enter rich-card fallback send")
+	}
+	state.cancelTurnSilently(msgID)
+	canceledByContext := false
+	select {
+	case <-p.fallbackCanceled:
+		canceledByContext = true
+	case <-time.After(500 * time.Millisecond):
+		close(p.releaseFallback)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not leave fallback send")
+	}
+
+	if !canceledByContext {
+		t.Error("fallback send did not observe recalled-turn cancellation")
+	}
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("recalled turn emitted fallback chunks: %v", sent)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled fallback persisted an undelivered answer: %v", history)
 	}
 }
 
