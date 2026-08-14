@@ -58,6 +58,10 @@ test("release channel ordering follows SemVer precedence", () => {
 });
 
 test("release reruns preserve newer npm tags and GitHub Latest", () => {
+  assert.match(
+    workflow,
+    /\n  publish:\n[\s\S]*?\n    concurrency:\n      group: release-channel-publication\n      cancel-in-progress: false/
+  );
   assert.match(workflow, /release-channel-policy\.js --relation/);
   assert.match(workflow, /release-channel-policy\.js --max/);
   assert.match(

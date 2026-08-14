@@ -2040,7 +2040,7 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 
 	// Establish a session.
 	env.userSends("g5", "hello")
-	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.waitFor("turn1 final reply", 2*time.Second, func() bool { return env.sentContains("ok") })
 	env.plat.clearSent()
 
 	// On the NEXT user turn, make the agent emit an EventError instead of
@@ -2064,7 +2064,7 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 
 	env.userSends("g5", "run a tool that will fail")
 	env.waitFor("error reply visible", 2*time.Second, func() bool {
-		return len(env.plat.getSent()) >= 1
+		return env.sentContains("permission denied") || env.sentContains("bash tool exited")
 	})
 
 	if !env.sentContains("permission denied") && !env.sentContains("bash tool exited") {

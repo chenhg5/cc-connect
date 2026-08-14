@@ -2051,6 +2051,50 @@ type stubBlockingRichCardResolverPlatform struct {
 	startOnce    sync.Once
 }
 
+type stubBlockingTerminalRichCardPlatform struct {
+	*stubRichCardAnswerDwellPlatform
+	blockStage       string
+	blockText        string
+	terminalStarted  chan struct{}
+	terminalCanceled chan struct{}
+	releaseTerminal  chan struct{}
+	startOnce        sync.Once
+	cancelOnce       sync.Once
+	streamMu         sync.Mutex
+	streamCalls      int
+}
+
+func (p *stubBlockingTerminalRichCardPlatform) waitForTerminalIO(ctx context.Context) error {
+	p.startOnce.Do(func() { close(p.terminalStarted) })
+	select {
+	case <-ctx.Done():
+		p.cancelOnce.Do(func() { close(p.terminalCanceled) })
+		return ctx.Err()
+	case <-p.releaseTerminal:
+		return errors.New("simulated terminal rich-card I/O failure")
+	}
+}
+
+func (p *stubBlockingTerminalRichCardPlatform) StreamRichCardText(ctx context.Context, handle any, fullText string) error {
+	p.streamMu.Lock()
+	p.streamCalls++
+	streamCall := p.streamCalls
+	p.streamMu.Unlock()
+	blockTerminalStream := p.blockText != "" && strings.Contains(fullText, p.blockText)
+	if p.blockStage == "stream" && (blockTerminalStream || (p.blockText == "" && streamCall > 1)) {
+		return p.waitForTerminalIO(ctx)
+	}
+	return p.stubRichCardAnswerDwellPlatform.StreamRichCardText(ctx, handle, fullText)
+}
+
+func (p *stubBlockingTerminalRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	blockTerminalUpdate := p.blockText == "" || strings.Contains(content, p.blockText)
+	if p.blockStage == "update" && blockTerminalUpdate && strings.Contains(content, "status=done") {
+		return p.waitForTerminalIO(ctx)
+	}
+	return p.stubRichCardAnswerDwellPlatform.UpdateMessage(ctx, handle, content)
+}
+
 func (p *stubBlockingRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
 	if !final {
 		return markdown
@@ -3785,6 +3829,174 @@ func TestProcessInteractiveEvents_RichCardRecallDuringFinalResolutionDoesNotComm
 	state.mu.Unlock()
 	if completedAtMs != 0 {
 		t.Fatalf("recalled turn advanced completion watermark to %d", completedAtMs)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallCancelsTerminalIOBeforeFallback(t *testing.T) {
+	for _, blockStage := range []string{"stream", "update"} {
+		t.Run(blockStage, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			dwellPlatform := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: time.Millisecond}
+			p := &stubBlockingTerminalRichCardPlatform{
+				stubRichCardAnswerDwellPlatform: dwellPlatform,
+				blockStage:                      blockStage,
+				terminalStarted:                 make(chan struct{}),
+				terminalCanceled:                make(chan struct{}),
+				releaseTerminal:                 make(chan struct{}),
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+			sessionKey := "feishu:user-rich-terminal-io-recall-" + blockStage
+			msgID := "m-rich-terminal-io-recall-" + blockStage
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			initialHistoryLen := session.HistoryLen()
+			agentSession := newControllableSession("s-rich-terminal-io-recall-" + blockStage)
+			state := &interactiveState{
+				agentSession:                 agentSession,
+				platform:                     p,
+				replyCtx:                     "ctx-rich-terminal-io-recall",
+				currentTurnUserMessageTimeMs: 789,
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventText, Content: "Terminal answer."}
+			agentSession.events <- Event{Type: EventResult, Content: "Terminal answer.", Done: true}
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+				close(done)
+			}()
+
+			select {
+			case <-p.terminalStarted:
+			case <-time.After(time.Second):
+				t.Fatal("turn did not enter terminal rich-card I/O")
+			}
+			state.cancelTurnSilently(msgID)
+
+			canceledByContext := false
+			select {
+			case <-p.terminalCanceled:
+				canceledByContext = true
+			case <-time.After(500 * time.Millisecond):
+				close(p.releaseTerminal)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("recalled turn did not leave terminal rich-card I/O")
+			}
+
+			if !canceledByContext {
+				t.Error("terminal rich-card I/O did not observe recalled-turn cancellation")
+			}
+			_, _, updates, _ := base.snapshot()
+			for _, update := range updates {
+				if strings.Contains(update, "status=done") {
+					t.Fatalf("recalled turn patched the rich card to Done: %v", updates)
+				}
+			}
+			if sent := base.getSent(); len(sent) != 0 {
+				t.Fatalf("recalled turn emitted a fallback answer: %v", sent)
+			}
+			if history := session.GetHistory(0); len(history) != initialHistoryLen {
+				t.Fatalf("recalled turn persisted an undelivered answer: %v", history)
+			}
+			state.mu.Lock()
+			completedAtMs := state.lastCompletedUserMessageTimeMs
+			state.mu.Unlock()
+			if completedAtMs != 0 {
+				t.Fatalf("recalled turn advanced completion watermark to %d", completedAtMs)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_QueuedRichCardRecallUsesFreshTerminalContext(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	dwellPlatform := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: time.Millisecond}
+	p := &stubBlockingTerminalRichCardPlatform{
+		stubRichCardAnswerDwellPlatform: dwellPlatform,
+		blockStage:                      "update",
+		blockText:                       "response2",
+		terminalStarted:                 make(chan struct{}),
+		terminalCanceled:                make(chan struct{}),
+		releaseTerminal:                 make(chan struct{}),
+	}
+	sess := newQueuingSession("qs-rich-terminal-context")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich", Mode: "compact"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	key := "feishu:user-rich-terminal-context"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "initial-msg")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", messageID: "msg-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveStates[key] = state
+
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		for {
+			sess.sendMu.Lock()
+			sent := len(sess.sendCalls)
+			sess.sendMu.Unlock()
+			if sent > 0 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+	}()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-turn1", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+
+	select {
+	case <-p.terminalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued turn did not enter terminal rich-card I/O")
+	}
+	state.cancelTurnSilently("msg-turn2")
+	select {
+	case <-p.terminalCanceled:
+	case <-time.After(time.Second):
+		close(p.releaseTerminal)
+		t.Fatal("queued turn terminal I/O did not observe its own recall signal")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled queued turn did not exit terminal rich-card I/O")
+	}
+
+	_, _, updates, _ := base.snapshot()
+	for _, update := range updates {
+		if strings.Contains(update, "status=done") && strings.Contains(update, "response2") {
+			t.Fatalf("recalled queued turn patched its card to Done: %v", updates)
+		}
+	}
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("recalled queued turn emitted a fallback answer: %v", sent)
+	}
+	for _, entry := range session.GetHistory(0) {
+		if entry.Role == "assistant" && entry.Content == "response2" {
+			t.Fatalf("recalled queued turn persisted an undelivered answer: %v", session.GetHistory(0))
+		}
 	}
 }
 

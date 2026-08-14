@@ -4717,6 +4717,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	silentCancelCh := state.silentTurnCancellationSignal(msgID)
 	stopCh := state.stopSignal()
+	newTerminalDeliveryContexts := func(turnCancel, sessionStop <-chan struct{}) (context.Context, context.CancelFunc, context.Context, context.CancelFunc) {
+		deliveryCtx, cancelDelivery := context.WithCancel(e.ctx)
+		go func() {
+			select {
+			case <-turnCancel:
+				cancelDelivery()
+			case <-deliveryCtx.Done():
+			}
+		}()
+		renderCtx, cancelRender := context.WithCancel(deliveryCtx)
+		go func() {
+			select {
+			case <-sessionStop:
+				cancelRender()
+			case <-renderCtx.Done():
+			}
+		}()
+		return deliveryCtx, cancelDelivery, renderCtx, cancelRender
+	}
+	terminalDeliveryCtx, cancelTerminalDelivery, terminalRenderCtx, cancelTerminalRender := newTerminalDeliveryContexts(silentCancelCh, stopCh)
+	defer func() {
+		cancelTerminalRender()
+		cancelTerminalDelivery()
+	}()
 	turnRichCardCopy, hasTurnRichCardCopy := state.turnRichCardCopy(msgID)
 	if !hasTurnRichCardCopy {
 		turnRichCardCopy = e.i18n.RichCardCopy()
@@ -4811,24 +4835,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// semantics as ordinary Send/Reply before resolving card-only assets.
 		renderCtx := e.ctx
 		if final {
-			// A final remote-image resolution can otherwise outlive Stop's card
-			// finalization window. Cancel rendering as soon as this turn is stopped,
-			// while keeping e.ctx alive for the terminal card update itself.
-			var cancelRender context.CancelFunc
-			renderCtx, cancelRender = context.WithCancel(e.ctx)
-			select {
-			case <-stopCh:
-				cancelRender()
-			default:
-				go func(ctx context.Context, cancel context.CancelFunc) {
-					select {
-					case <-stopCh:
-						cancel()
-					case <-ctx.Done():
-					}
-				}(renderCtx, cancelRender)
-			}
-			defer cancelRender()
+			// Final rendering observes both recall and Stop. Terminal card I/O uses
+			// the sibling delivery context below: recall cancels it too, while Stop
+			// keeps e.ctx alive long enough to publish a terminal card state.
+			renderCtx = terminalRenderCtx
 		}
 		markdown = workspaceRenderer(markdown)
 		if transformer, ok := p.(RichCardMarkdownTransformer); ok && markdown != "" {
@@ -4990,6 +5000,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
 			removeRichCardForFallback(p, cardMessageID)
 		}
+	}
+	abortIfTerminalDeliveryCanceled := func() bool {
+		discardTurn := state.shouldDiscardTurn(msgID)
+		if !discardTurn && terminalDeliveryCtx.Err() == nil {
+			return false
+		}
+		abortRichCardCompletion(discardTurn)
+		return true
 	}
 
 	// Product contract: accepted Feishu turns show a non-empty card before the
@@ -6008,9 +6026,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// Re-check after completion bookkeeping. This window is intentionally
 					// tiny, but an explicit recall must still prevent a final card patch
 					// if it races with footer/log bookkeeping.
-					discardTurn := state.shouldDiscardTurn(msgID)
-					if discardTurn || (richAnswerDwellApplied && (state.isStopped() || e.ctx.Err() != nil)) {
-						abortRichCardCompletion(discardTurn)
+					if abortIfTerminalDeliveryCanceled() {
 						return
 					}
 					// Forced final flush via cardkit-v1 streaming text update before
@@ -6019,25 +6035,37 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// when previews are enabled. ErrNotSupported (no cardID) and any
 					// error are silent — the subsequent UpdateMessage rewrites the body.
 					if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(turnStreamPreview, p.Name()) {
-						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
+						if err := streamer.StreamRichCardText(terminalDeliveryCtx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
 							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
 						}
 					}
+					if abortIfTerminalDeliveryCanceled() {
+						return
+					}
 					if updater, ok := p.(MessageUpdater); ok {
-						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
+						if err := updater.UpdateMessage(terminalDeliveryCtx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
+							if abortIfTerminalDeliveryCanceled() {
+								return
+							}
 							removeRichCardForFallback(p, cardMessageID)
 							if !sendAnswerFallback() {
 								return
 							}
 						}
 					} else {
+						if abortIfTerminalDeliveryCanceled() {
+							return
+						}
 						removeRichCardForFallback(p, cardMessageID)
 						if !sendAnswerFallback() {
 							return
 						}
 					}
 				} else {
+					if abortIfTerminalDeliveryCanceled() {
+						return
+					}
 					if !sendAnswerFallback() {
 						return
 					}
@@ -6093,8 +6121,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// succeeded. In rich mode, this keeps a recall during final image
 			// resolution or the final card update from persisting an answer that the
 			// user never received.
-			if hasRichCard && !isSilent && state.shouldDiscardTurn(msgID) {
-				discardSilentTurn()
+			if hasRichCard && !isSilent && abortIfTerminalDeliveryCanceled() {
 				return
 			}
 			// History records the ORIGINAL baseResponse so the agent retains context
@@ -6260,6 +6287,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
 				silentCancelCh = state.silentTurnCancellationSignal(msgID)
+				cancelTerminalRender()
+				cancelTerminalDelivery()
+				terminalDeliveryCtx, cancelTerminalDelivery, terminalRenderCtx, cancelTerminalRender = newTerminalDeliveryContexts(silentCancelCh, stopCh)
 				textParts = nil
 				segmentStart = 0
 				legacyPermissionDeliveredPrefix = ""
