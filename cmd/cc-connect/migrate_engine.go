@@ -208,6 +208,9 @@ func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 			if _, ok := agents[agentType]; !ok {
 				return fmt.Errorf("source project %q uses agent %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, project.Agent.Type)
 			}
+			if err := core.ValidateAgentOptions(agentType, buildAgentOptions(cfg.DataDir, project)); err != nil {
+				return fmt.Errorf("source project %q uses agent %q with options this cc-connect-next build cannot start: %w; migration did not write the target", projectName, project.Agent.Type, err)
+			}
 		}
 		for _, platform := range project.Platforms {
 			platformType := platform.Type
@@ -216,6 +219,15 @@ func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 			}
 			if _, ok := platforms[platformType]; !ok {
 				return fmt.Errorf("source project %q uses platform %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, platform.Type)
+			}
+			opts := make(map[string]any, len(platform.Options)+2)
+			for key, value := range platform.Options {
+				opts[key] = value
+			}
+			opts["cc_data_dir"] = cfg.DataDir
+			opts["cc_project"] = project.Name
+			if err := core.ValidatePlatformOptions(platformType, opts); err != nil {
+				return fmt.Errorf("source project %q uses platform %q with options this cc-connect-next build cannot start: %w; migration did not write the target", projectName, platform.Type, err)
 			}
 		}
 	}

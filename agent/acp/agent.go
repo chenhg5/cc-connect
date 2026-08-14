@@ -15,6 +15,7 @@ import (
 
 func init() {
 	core.RegisterAgent("acp", New)
+	core.RegisterAgentOptionsValidator("acp", core.RequireAnyStringOption("acp", "agent option \"cmd\", \"cli_path\", or \"command\"", "cmd", "cli_path", "command"))
 }
 
 // Agent runs an ACP (Agent Client Protocol) agent subprocess over stdio JSON-RPC.

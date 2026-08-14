@@ -18,6 +18,12 @@ import (
 
 func init() {
 	core.RegisterPlatform("webex", New)
+	core.RegisterPlatformOptionsValidator("webex", func(opts map[string]any) error {
+		if token, _ := opts["token"].(string); strings.TrimSpace(token) == "" {
+			return fmt.Errorf("webex: token is required")
+		}
+		return nil
+	})
 }
 
 // replyContext carries what Reply/Send need to target a Webex room.

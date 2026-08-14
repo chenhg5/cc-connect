@@ -23,6 +23,7 @@ import (
 
 func init() {
 	core.RegisterPlatform("qqbot", New)
+	core.RegisterPlatformOptionsValidator("qqbot", core.RequireStringOptions("qqbot", "app_id", "app_secret"))
 }
 
 const (

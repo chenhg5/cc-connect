@@ -51,7 +51,7 @@ func (f *agentFooterStreamFilter) Push(chunk string) string {
 		newline := strings.IndexByte(chunk, '\n')
 		if newline < 0 {
 			f.pendingLine += chunk
-			if !couldBeAgentFooterLinePrefix(f.pendingLine) {
+			if !couldBeAgentFooterLinePrefix(agentFooterMatchLine(f.pendingLine)) {
 				output.WriteString(f.pendingLine)
 				f.pendingLine = ""
 				f.passthrough = true
@@ -60,7 +60,7 @@ func (f *agentFooterStreamFilter) Push(chunk string) string {
 		}
 
 		f.pendingLine += chunk[:newline]
-		if !agentFooterLineRe.MatchString(f.pendingLine) {
+		if !agentFooterLineRe.MatchString(agentFooterMatchLine(f.pendingLine)) {
 			output.WriteString(f.pendingLine)
 			output.WriteByte('\n')
 		}
@@ -80,10 +80,16 @@ func (f *agentFooterStreamFilter) Flush() string {
 	line := f.pendingLine
 	f.pendingLine = ""
 	f.passthrough = false
-	if line == "" || agentFooterLineRe.MatchString(line) {
+	if line == "" || agentFooterLineRe.MatchString(agentFooterMatchLine(line)) {
 		return ""
 	}
 	return line
+}
+
+// agentFooterMatchLine normalizes the line terminator only for classification.
+// Non-footer content is still emitted byte-for-byte, including its CRLF.
+func agentFooterMatchLine(line string) string {
+	return strings.TrimSuffix(line, "\r")
 }
 
 func couldBeAgentFooterLinePrefix(line string) bool {

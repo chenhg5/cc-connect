@@ -153,6 +153,7 @@ type reactionRequest struct {
 
 func init() {
 	core.RegisterPlatform("wps-xiezuo", New)
+	core.RegisterPlatformOptionsValidator("wps-xiezuo", core.RequireStringOptions("wps-xiezuo", "app_id", "app_secret"))
 }
 
 // New creates a new WPS Xiezuo platform from config options.

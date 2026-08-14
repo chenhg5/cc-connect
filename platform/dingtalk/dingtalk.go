@@ -25,6 +25,7 @@ import (
 
 func init() {
 	core.RegisterPlatform("dingtalk", New)
+	core.RegisterPlatformOptionsValidator("dingtalk", core.RequireStringOptions("dingtalk", "client_id", "client_secret"))
 }
 
 type replyContext struct {

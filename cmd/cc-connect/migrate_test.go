@@ -106,6 +106,35 @@ type = "future-platform"
 	}
 }
 
+func TestPrepareLegacyMigration_RejectsInvalidPluginOptionsBeforeWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "missing-feishu-credentials"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "only-an-app-id"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "app_id and app_secret are required") {
+		t.Fatalf("invalid plugin options error = %v, want Feishu credential refusal", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after plugin-option failure: %v", statErr)
+	}
+}
+
 func TestPrepareLegacyMigration_RejectsPluginNamesThatRuntimeRegistryWouldReject(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -183,6 +212,9 @@ name = "environment-backed"
 type = "${CC_NEXT_MIGRATION_AGENT_TYPE}"
 [[projects.platforms]]
 type = "${CC_NEXT_MIGRATION_PLATFORM_TYPE}"
+[projects.platforms.options]
+app_id = "environment-app-id"
+app_secret = "environment-app-secret"
 `)
 
 	plan, err := prepareLegacyMigration(migrationOptions{
@@ -217,6 +249,9 @@ name = "${CC_NEXT_MIGRATION_PROJECT_NAME}"
 type = "codex"
 [[projects.platforms]]
 type = "feishu"
+[projects.platforms.options]
+app_id = "resolved-project-app-id"
+app_secret = "resolved-project-app-secret"
 `)
 	writeMigrationFixture(t, filepath.Join(customData, "environment-backed.json"), `{"sessions":{}}`)
 
@@ -1947,6 +1982,9 @@ type = "codex"
 work_dir = "`+filepath.ToSlash(projectA)+`"
 [[projects.platforms]]
 type = "feishu"
+[projects.platforms.options]
+app_id = "project-a-app-id"
+app_secret = "project-a-app-secret"
 
 [[projects]]
 name = "b"
@@ -1956,6 +1994,9 @@ type = "codex"
 work_dir = "`+filepath.ToSlash(projectB)+`"
 [[projects.platforms]]
 type = "feishu"
+[projects.platforms.options]
+app_id = "project-b-app-id"
+app_secret = "project-b-app-secret"
 `)
 	writeMigrationFixture(t, filepath.Join(projectA, ".cc-connect", "attachments", "legacy-a.txt"), "legacy-a")
 	writeMigrationFixture(t, filepath.Join(projectB, ".cc-connect", "attachments", "legacy-b.txt"), "legacy-b")
@@ -2123,6 +2164,13 @@ type = "codex"
 type = "feishu"
 `
 			}
+		}
+		if strings.Count(content, `type = "feishu"`) == 1 && !strings.Contains(content, "[projects.platforms.options]") {
+			content = strings.TrimRight(content, "\n") + `
+[projects.platforms.options]
+app_id = "migration-fixture-app-id"
+app_secret = "migration-fixture-app-secret"
+`
 		}
 	}
 	writeRawMigrationFixture(t, path, content)

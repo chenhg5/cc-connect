@@ -17363,7 +17363,7 @@ func stripAgentFooterLines(text string) string {
 	kept := lines[:0]
 	removed := false
 	for _, line := range lines {
-		if agentFooterLineRe.MatchString(line) {
+		if agentFooterLineRe.MatchString(agentFooterMatchLine(line)) {
 			removed = true
 			continue
 		}
@@ -17372,7 +17372,7 @@ func stripAgentFooterLines(text string) string {
 	if !removed {
 		return text
 	}
-	return strings.TrimRight(strings.Join(kept, "\n"), "\n ")
+	return strings.TrimRight(strings.Join(kept, "\n"), "\r\n ")
 }
 
 // silentReplyRe matches a bare NO_REPLY marker (case-insensitive, optional surrounding whitespace).

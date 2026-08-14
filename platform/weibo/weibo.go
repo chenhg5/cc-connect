@@ -33,6 +33,7 @@ const (
 
 func init() {
 	core.RegisterPlatform("weibo", New)
+	core.RegisterPlatformOptionsValidator("weibo", core.RequireStringOptions("weibo", "app_id", "app_secret"))
 }
 
 type replyContext struct {

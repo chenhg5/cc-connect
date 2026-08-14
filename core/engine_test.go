@@ -17650,4 +17650,9 @@ func TestStripAgentFooterLines(t *testing.T) {
 	if got := stripAgentFooterLines(prose); got != prose {
 		t.Fatalf("stripAgentFooterLines() stripped prose: %q", got)
 	}
+
+	crlf := "answer\r\n\r\n*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*\r\n"
+	if got, want := stripAgentFooterLines(crlf), "answer"; got != want {
+		t.Fatalf("stripAgentFooterLines(CRLF) = %q, want %q", got, want)
+	}
 }

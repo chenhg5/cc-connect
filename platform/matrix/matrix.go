@@ -23,6 +23,19 @@ import (
 
 func init() {
 	core.RegisterPlatform("matrix", New)
+	core.RegisterPlatformOptionsValidator("matrix", validateOptions)
+}
+
+func validateOptions(opts map[string]any) error {
+	if err := core.RequireStringOptions("matrix", "homeserver", "access_token")(opts); err != nil {
+		return err
+	}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		if _, err := url.Parse(proxyURL); err != nil {
+			return fmt.Errorf("matrix: invalid proxy URL %q: %w", proxyURL, err)
+		}
+	}
+	return nil
 }
 
 type replyContext struct {
