@@ -241,7 +241,11 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve target: %w", err)
 	}
-	if pathsOverlap(source, target) {
+	overlaps, err := migrationPathsOverlap(source, target)
+	if err != nil {
+		return nil, fmt.Errorf("compare source and target paths: %w", err)
+	}
+	if overlaps {
 		return nil, fmt.Errorf("source and target must be separate directories")
 	}
 
@@ -277,10 +281,22 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read source data_dir: %w", err)
 	}
-	if pathsOverlap(dataDir, target) {
+	dataDirIsSource, err := migrationExistingPathsSame(dataDir, source)
+	if err != nil {
+		return nil, fmt.Errorf("compare source config and data directories: %w", err)
+	}
+	overlaps, err = migrationPathsOverlap(dataDir, target)
+	if err != nil {
+		return nil, fmt.Errorf("compare source data_dir and target paths: %w", err)
+	}
+	if overlaps {
 		return nil, fmt.Errorf("source data_dir and target must be separate directories")
 	}
-	if customDataDir && dataDir != source && pathStrictlyWithin(dataDir, source) {
+	dataDirContainsSource, err := migrationPathContains(dataDir, source)
+	if err != nil {
+		return nil, fmt.Errorf("compare source data_dir and config paths: %w", err)
+	}
+	if customDataDir && !dataDirIsSource && dataDirContainsSource {
 		return nil, fmt.Errorf("source data_dir must be dedicated: %s contains the source config directory %s; refusing to inventory unrelated files", dataDir, source)
 	}
 
@@ -303,7 +319,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	// effective data_dir; otherwise a project-local config could cause an
 	// entire repository, .env files, or service home to be copied. The config
 	// file itself is added explicitly below.
-	if dataDir == source && dataDirExists {
+	if dataDirIsSource && dataDirExists {
 		var collectErr error
 		if customDataDir {
 			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
@@ -321,7 +337,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 			// An omitted data_dir means the official product-owned default
 			// ~/.cc-connect even when config.toml was loaded from elsewhere.
 			var excludedRoots []string
-			if pathStrictlyWithin(dataDir, source) {
+			if dataDirContainsSource && !dataDirIsSource {
 				excludedRoots = append(excludedRoots, source)
 			}
 			collectErr = collectMigrationTreeExcluding(dataDir, "data-dir", true, excludedRoots, mainDestination, &report)
@@ -385,10 +401,34 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 			// data directory. De-duplicate by source identity regardless of the
 			// custom migration target; otherwise runtime files can enter the
 			// project inventory and an unrequested sibling target can be created.
-			if projectSource == source || projectSource == dataDir {
+			projectIsSource, compareErr := migrationExistingPathsSame(projectSource, source)
+			if compareErr != nil {
+				return nil, fmt.Errorf("compare project and config source paths: %w", compareErr)
+			}
+			projectIsDataDir, compareErr := migrationExistingPathsSame(projectSource, dataDir)
+			if compareErr != nil {
+				return nil, fmt.Errorf("compare project and data source paths: %w", compareErr)
+			}
+			if projectIsSource || projectIsDataDir {
 				continue
 			}
-			if pathsOverlap(projectSource, projectTarget) || pathsOverlap(projectSource, target) || pathsOverlap(source, projectTarget) || pathsOverlap(dataDir, projectTarget) {
+			unsafeOverlap := false
+			for _, pair := range [][2]string{
+				{projectSource, projectTarget},
+				{projectSource, target},
+				{source, projectTarget},
+				{dataDir, projectTarget},
+			} {
+				pairOverlaps, compareErr := migrationPathsOverlap(pair[0], pair[1])
+				if compareErr != nil {
+					return nil, fmt.Errorf("compare project-local migration paths: %w", compareErr)
+				}
+				if pairOverlaps {
+					unsafeOverlap = true
+					break
+				}
+			}
+			if unsafeOverlap {
 				return nil, fmt.Errorf("unsafe overlapping project-local migration path: %s -> %s", projectSource, projectTarget)
 			}
 			destination := &migrationDestination{
@@ -421,7 +461,11 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	destinations := append(append([]*migrationDestination{}, projectDestinations...), mainDestination)
 	for i := 0; i < len(destinations); i++ {
 		for j := i + 1; j < len(destinations); j++ {
-			if pathsOverlap(destinations[i].Target, destinations[j].Target) {
+			destinationsOverlap, compareErr := migrationPathsOverlap(destinations[i].Target, destinations[j].Target)
+			if compareErr != nil {
+				return nil, fmt.Errorf("compare migration destinations: %w", compareErr)
+			}
+			if destinationsOverlap {
 				return nil, fmt.Errorf("migration destinations overlap: %s and %s", destinations[i].Target, destinations[j].Target)
 			}
 		}
@@ -512,6 +556,112 @@ func canonicalDestinationPath(path string) (string, error) {
 	// symlinks are rejected later with Lstat, while every existing symlink in
 	// the parent chain has already been canonicalized for overlap checks.
 	return filepath.Join(resolvedParent, filepath.Base(abs)), nil
+}
+
+type migrationPathAncestor struct {
+	info   fs.FileInfo
+	suffix []string
+}
+
+// migrationPathsOverlap compares topology through filesystem identities, not
+// only path spelling. This rejects case-only aliases on case-insensitive
+// volumes and symlinked ancestors. For missing siblings below the same existing
+// directory it compares components case-insensitively as a conservative safety
+// rule; choosing a distinctly named target is preferable to risking source
+// mutation on a volume whose case semantics cannot be inferred read-only.
+func migrationPathsOverlap(a, b string) (bool, error) {
+	aContainsB, err := migrationPathContains(a, b)
+	if err != nil || aContainsB {
+		return aContainsB, err
+	}
+	return migrationPathContains(b, a)
+}
+
+func migrationPathContains(parent, child string) (bool, error) {
+	rel, err := filepath.Rel(parent, child)
+	if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+		return true, nil
+	}
+	parentAncestors, err := migrationPathAncestors(parent)
+	if err != nil {
+		return false, err
+	}
+	childAncestors, err := migrationPathAncestors(child)
+	if err != nil {
+		return false, err
+	}
+	for _, parentAncestor := range parentAncestors {
+		for _, childAncestor := range childAncestors {
+			if !os.SameFile(parentAncestor.info, childAncestor.info) {
+				continue
+			}
+			if migrationPathComponentsPrefix(parentAncestor.suffix, childAncestor.suffix) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func migrationPathAncestors(path string) ([]migrationPathAncestor, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, err
+	}
+	current := abs
+	suffix := make([]string, 0)
+	ancestors := make([]migrationPathAncestor, 0)
+	for {
+		info, statErr := os.Stat(current)
+		if statErr == nil {
+			ancestors = append(ancestors, migrationPathAncestor{
+				info:   info,
+				suffix: append([]string(nil), suffix...),
+			})
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect path ancestor %s: %w", current, statErr)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		suffix = append([]string{filepath.Base(current)}, suffix...)
+		current = parent
+	}
+	if len(ancestors) == 0 {
+		return nil, fmt.Errorf("no existing ancestor for path %s", path)
+	}
+	return ancestors, nil
+}
+
+func migrationPathComponentsPrefix(parent, child []string) bool {
+	if len(parent) > len(child) {
+		return false
+	}
+	for i := range parent {
+		if !strings.EqualFold(parent[i], child[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func migrationExistingPathsSame(a, b string) (bool, error) {
+	aInfo, err := os.Stat(a)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	bInfo, err := os.Stat(b)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(aInfo, bInfo), nil
 }
 
 func resolvePathThroughExistingAncestor(path string) (string, error) {

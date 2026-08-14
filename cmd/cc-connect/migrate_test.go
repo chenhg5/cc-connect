@@ -310,6 +310,67 @@ func TestPrepareLegacyMigrationRefusesMissingTargetBelowSymlinkIntoSource(t *tes
 	}
 }
 
+func TestPrepareLegacyMigrationRefusesCaseOnlyTargetAlias(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".CC-CONNECT")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil || !os.SameFile(sourceInfo, targetInfo) {
+		t.Skip("test filesystem is case-sensitive")
+	}
+
+	_, err = prepareLegacyMigration(migrationOptions{
+		Source:             source,
+		Target:             target,
+		Home:               root,
+		Force:              true,
+		DryRun:             true,
+		IncludeProjectData: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "separate directories") {
+		t.Fatalf("prepareLegacyMigration() error = %v, want case-only alias refusal", err)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(source, "config.toml")); readErr != nil || string(got) != "language = \"zh\"\n" {
+		t.Fatalf("source config changed during alias preflight: content=%q err=%v", got, readErr)
+	}
+}
+
+func TestMigrationPathsOverlapTreatsCaseOnlyMissingSiblingsAsUnsafe(t *testing.T) {
+	root := t.TempDir()
+	overlaps, err := migrationPathsOverlap(filepath.Join(root, "future-state"), filepath.Join(root, "FUTURE-STATE"))
+	if err != nil {
+		t.Fatalf("migrationPathsOverlap() error = %v", err)
+	}
+	if !overlaps {
+		t.Fatal("case-only missing siblings below the same directory were treated as separate")
+	}
+}
+
+func TestMigrationPathsOverlapAllowsDistinctExistingSiblings(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "alpha")
+	b := filepath.Join(root, "beta")
+	if err := os.Mkdir(a, 0o700); err != nil {
+		t.Fatalf("mkdir alpha: %v", err)
+	}
+	if err := os.Mkdir(b, 0o700); err != nil {
+		t.Fatalf("mkdir beta: %v", err)
+	}
+	overlaps, err := migrationPathsOverlap(a, b)
+	if err != nil {
+		t.Fatalf("migrationPathsOverlap() error = %v", err)
+	}
+	if overlaps {
+		t.Fatal("distinct existing siblings were treated as overlapping")
+	}
+}
+
 func TestMigrateLegacyDataIncludesCustomDataDirAndProjectLocalData(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, ".cc-connect")

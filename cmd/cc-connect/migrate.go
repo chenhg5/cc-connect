@@ -179,17 +179,6 @@ func directoryHasEntries(path string) (bool, error) {
 	return err == nil, err
 }
 
-func pathsOverlap(a, b string) bool {
-	contains := func(parent, child string) bool {
-		rel, err := filepath.Rel(parent, child)
-		if err != nil {
-			return false
-		}
-		return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
-	}
-	return contains(a, b) || contains(b, a)
-}
-
 func rewriteMigratedDataDir(configBytes []byte, target string) ([]byte, error) {
 	configText := string(configBytes)
 	replacement := strconv.Quote(filepath.ToSlash(target))
