@@ -4387,6 +4387,14 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 	return nil
 }
 
+// RichCardAnsweringDwell keeps a one-shot Agent response in the visible
+// answering state long enough for CardKit's native text animation to register
+// before the terminal Done patch. Incrementally streamed answers naturally
+// spend longer than this in the answering state, so the engine adds no delay.
+func (p *Platform) RichCardAnsweringDwell() time.Duration {
+	return 900 * time.Millisecond
+}
+
 // UpdateMessage edits an existing card message identified by previewHandle.
 // Uses the Patch API (HTTP PATCH) which is required for interactive card messages.
 func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {

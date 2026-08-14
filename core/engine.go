@@ -4736,6 +4736,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardMessageID any
 	var partialText string
 	var richAnswerStarted bool
+	var richAnswerStartedAt time.Time
 	triggerAutoCompress := false
 	pendingSend := sendDone
 
@@ -5548,6 +5549,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									} else {
 										cardMessageID = handle
 										richAnswerStarted = true
+										richAnswerStartedAt = time.Now()
 										lastRichCardUpdate = time.Now()
 										lastRichCardInput = previewBody
 										lastRichCardPreview = resolvedPreviewBody
@@ -5574,6 +5576,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								if updater, ok := p.(MessageUpdater); ok {
 									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 										richAnswerStarted = true
+										if richAnswerStartedAt.IsZero() {
+											richAnswerStartedAt = time.Now()
+										}
 										lastRichCardInput = transitionBody
 										lastRichCardPreview = resolvedTransitionBody
 										if !hasStreamer {
@@ -6002,6 +6007,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				finalBody := resolveRichCardMarkdown(fullResponse, true)
 				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
+					// Some Agent backends (notably `codex exec --json`) deliver the
+					// complete answer as one EventText immediately followed by
+					// EventResult. Give Feishu's native streaming renderer a small,
+					// platform-selected window to show the answering/typewriter phase
+					// before the terminal full-card patch replaces it. Naturally
+					// streamed answers have already exceeded this window and do not
+					// incur an extra delay.
+					if dwellProvider, ok := p.(RichCardAnsweringDwellProvider); ok && !richAnswerStartedAt.IsZero() {
+						waitForRichCardAnsweringDwell(e.ctx, richAnswerStartedAt, dwellProvider.RichCardAnsweringDwell())
+					}
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. Configured throttling
 					// may have skipped the last small/recent chunk; this catches it up
@@ -6208,6 +6223,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolSteps = nil
 				partialText = ""
 				richAnswerStarted = false
+				richAnswerStartedAt = time.Time{}
 				lastRichCardUpdate = time.Time{}
 				lastRichCardInput = ""
 				lastRichCardPreview = ""

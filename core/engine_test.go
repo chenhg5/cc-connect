@@ -1935,6 +1935,42 @@ type stubRichCardSilentPlatform struct {
 	nextHandleSeq int
 }
 
+type stubRichCardAnswerDwellPlatform struct {
+	*stubRichCardSilentPlatform
+	dwell         time.Duration
+	mu            sync.Mutex
+	firstStreamAt time.Time
+	completedAt   time.Time
+}
+
+func (p *stubRichCardAnswerDwellPlatform) RichCardAnsweringDwell() time.Duration {
+	return p.dwell
+}
+
+func (p *stubRichCardAnswerDwellPlatform) StreamRichCardText(ctx context.Context, handle any, fullText string) error {
+	p.mu.Lock()
+	if p.firstStreamAt.IsZero() {
+		p.firstStreamAt = time.Now()
+	}
+	p.mu.Unlock()
+	return p.stubRichCardSilentPlatform.StreamRichCardText(ctx, handle, fullText)
+}
+
+func (p *stubRichCardAnswerDwellPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if strings.Contains(content, "status=done") {
+		p.mu.Lock()
+		p.completedAt = time.Now()
+		p.mu.Unlock()
+	}
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *stubRichCardAnswerDwellPlatform) lifecycleTimes() (time.Time, time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.firstStreamAt, p.completedAt
+}
+
 func (p *stubRichCardSilentPlatform) BuildRichCard(status CardStatus, _ string, steps []ToolStep, markdown string, _ bool, _ string) string {
 	return fmt.Sprintf("rich:status=%s steps=%d body=%q", status, len(steps), markdown)
 }
@@ -3387,6 +3423,33 @@ func TestProcessInteractiveEvents_RichCardShortAnswerUsesFirstChunkTypewriter(t 
 	}
 	if !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], "Short answer.") {
 		t.Fatalf("final card is incomplete: %q", updates[len(updates)-1])
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardKeepsAnsweringPhaseVisibleBeforeDone(t *testing.T) {
+	const dwell = 80 * time.Millisecond
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: dwell}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-answer-dwell"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-answer-dwell")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-answer-dwell"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "One-shot answer."}
+	agentSession.events <- Event{Type: EventResult, Content: "One-shot answer.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-answer-dwell", time.Now(), nil, nil, state.replyCtx)
+
+	firstStreamAt, completedAt := p.lifecycleTimes()
+	if firstStreamAt.IsZero() || completedAt.IsZero() {
+		t.Fatalf("missing lifecycle timestamps: first stream=%v completed=%v", firstStreamAt, completedAt)
+	}
+	if elapsed := completedAt.Sub(firstStreamAt); elapsed < dwell-10*time.Millisecond {
+		t.Fatalf("answering phase visible for %s, want approximately %s before Done", elapsed, dwell)
 	}
 }
 

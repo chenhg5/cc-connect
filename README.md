@@ -14,7 +14,7 @@ One agent turn stays in one quoted native card:
 2. Show anonymous progress only: `推理 N 次 · 工具 N 次`.
 3. Switch the same card to `⏳ 正在调用工具…` as tool calls occur.
 4. Replace progress with `✍️ 正在回答` when answer text begins.
-5. Stream the `main_text` element through CardKit when `card_id` is available; fall back to full-card updates safely.
+5. Stream the `main_text` element through CardKit when `card_id` is available; even one-shot Agent answers retain a perceptible answering/typewriter phase before Done, with safe full-card fallback.
 6. Finalize the same card as `✅ Done`, or `⚠️ 未完成` on error.
 
 Privacy is enforced at two layers: the engine stores only anonymous event kinds for rich-card progress, and the Feishu renderer ignores all reasoning/tool names, inputs, results, model, token, context, footer, and work-directory fields. The card payload has no expandable panel.

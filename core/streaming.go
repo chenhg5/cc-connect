@@ -158,6 +158,29 @@ type RichCardTextStreamer interface {
 	StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error
 }
 
+// RichCardAnsweringDwellProvider lets a native card platform keep the
+// answering phase visible for a short minimum interval before the terminal
+// Done patch. This matters when an Agent backend emits its entire answer in a
+// single event: without a dwell, the native typewriter frame and the Done
+// frame can arrive back-to-back and the client never visibly renders the
+// answering state. Platforms that do not need this should omit the interface.
+type RichCardAnsweringDwellProvider interface {
+	RichCardAnsweringDwell() time.Duration
+}
+
+func waitForRichCardAnsweringDwell(ctx context.Context, started time.Time, dwell time.Duration) {
+	remaining := dwell - time.Since(started)
+	if remaining <= 0 {
+		return
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
 // PreviewStarter is an optional interface for platforms that can initiate a
 // streaming preview message and return a handle for subsequent updates.
 type PreviewStarter interface {
