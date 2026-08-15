@@ -1004,6 +1004,11 @@ app_secret = "your-feishu-app-secret"
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
+#                           # Feishu also requires the published sensitive permission
+#                           # `im:message.group_msg`; this option only changes local filtering
+#                           # after an event is delivered and cannot make missing tenant events appear.
+#                           # 飞书还必须申请并发布敏感权限 `im:message.group_msg`；此选项只改变
+#                           # 收到事件后的本地过滤，不能让租户未投递的事件凭空出现。
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)

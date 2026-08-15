@@ -1584,6 +1584,68 @@ func TestEnsureProjectWithFeishuPlatform_CreatesMissingProject(t *testing.T) {
 	}
 }
 
+func TestEnsureProjectWithFeishuPlatform_CreatesProjectFromEmptyConfig(t *testing.T) {
+	configPath := writeConfigFixture(t, "")
+	patchConfigPath(t, configPath)
+
+	result, err := EnsureProjectWithFeishuPlatform(EnsureProjectWithFeishuOptions{
+		ProjectName:  "first-project",
+		PlatformType: "feishu",
+		WorkDir:      "/tmp/first-project",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProjectWithFeishuPlatform returned error: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("result.Created = false, want true")
+	}
+	if result.ProjectIndex != 0 {
+		t.Fatalf("result.ProjectIndex = %d, want 0", result.ProjectIndex)
+	}
+	if result.PlatformAbsIndex != 0 {
+		t.Fatalf("result.PlatformAbsIndex = %d, want 0", result.PlatformAbsIndex)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("len(cfg.Projects) = %d, want 1", len(cfg.Projects))
+	}
+	proj := cfg.Projects[0]
+	if proj.Name != "first-project" {
+		t.Fatalf("proj.Name = %q, want %q", proj.Name, "first-project")
+	}
+	if len(proj.Platforms) != 1 {
+		t.Fatalf("len(proj.Platforms) = %d, want 1", len(proj.Platforms))
+	}
+	if proj.Platforms[0].Type != "feishu" {
+		t.Fatalf("platform type = %q, want %q", proj.Platforms[0].Type, "feishu")
+	}
+	if got := stringMapValue(proj.Agent.Options, "work_dir"); got != "/tmp/first-project" {
+		t.Fatalf("work_dir = %q, want %q", got, "/tmp/first-project")
+	}
+
+	saveResult, err := SaveFeishuPlatformCredentials(FeishuCredentialUpdateOptions{
+		ProjectName: "first-project",
+		AppID:       "cli_first_app",
+		AppSecret:   "sec_first_secret",
+	})
+	if err != nil {
+		t.Fatalf("SaveFeishuPlatformCredentials returned error: %v", err)
+	}
+	if saveResult.ProjectIndex != 0 || saveResult.PlatformAbsIndex != 0 {
+		t.Fatalf("saved credential indices = (%d, %d), want (0, 0)", saveResult.ProjectIndex, saveResult.PlatformAbsIndex)
+	}
+
+	cfg = readConfigFixture(t, configPath)
+	options := cfg.Projects[0].Platforms[0].Options
+	if got := stringMapValue(options, "app_id"); got != "cli_first_app" {
+		t.Fatalf("app_id = %q, want %q", got, "cli_first_app")
+	}
+	if got := stringMapValue(options, "app_secret"); got != "sec_first_secret" {
+		t.Fatalf("app_secret = %q, want %q", got, "sec_first_secret")
+	}
+}
+
 func TestEnsureProjectWithFeishuPlatform_AddsPlatformWhenProjectExistsWithoutFeishu(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
 	patchConfigPath(t, configPath)

@@ -290,6 +290,11 @@ level=INFO msg="cc-connect-next is running" projects=1
 2. 点击群设置 → 「群机器人」
 3. 添加你创建的机器人
 
+如果希望配置 `group_reply_all = true`，还需要在飞书开放平台申请并发布敏感权限
+`im:message.group_msg`（获取群组中所有消息）。这个配置只决定机器人在**已经收到**的
+事件上是否跳过 @ 过滤，不能让应用收到飞书租户没有投递的消息；缺少该权限或未发布新版本
+时，群聊里的普通消息仍可能不会产生 `im.message.receive_v1` 事件，表现为必须先 @ 机器人。
+
 ---
 
 ## 使用示例
@@ -443,6 +448,8 @@ cc-connect-next 内置了自动重连机制，断开后会自动尝试重新连�
 1. cc-connect-next 服务是否正常运行
 2. 长连接是否建立成功（查看日志）
 3. 事件订阅是否配置了 `im.message.receive_v1`
+4. 如果是群聊中未 @ 机器人的消息，确认已申请并发布 `im:message.group_msg`；`group_reply_all = true`
+   只能放宽收到事件后的本地过滤，不能绕过飞书的事件权限和租户投递规则
 
 ### Q: 点击卡片按钮没有反应或报错？
 

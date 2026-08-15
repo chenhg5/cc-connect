@@ -2013,11 +2013,16 @@ func EnsureProjectWithFeishuPlatform(opts EnsureProjectWithFeishuOptions) (*Ensu
 		return nil, err
 	}
 
+	// cfg was parsed before the new project was appended to the raw TOML
+	// document. The new project therefore starts at len(cfg.Projects), and
+	// its first (Feishu/Lark) platform is always at index 0. Using
+	// len(cfg.Projects)-1 here panics when onboarding starts from an empty
+	// config.
 	return &EnsureProjectWithFeishuResult{
 		Created:          true,
 		AddedPlatform:    false,
-		ProjectIndex:     len(cfg.Projects) - 1,
-		PlatformAbsIndex: len(cfg.Projects[len(cfg.Projects)-1].Platforms) - 1,
+		ProjectIndex:     len(cfg.Projects),
+		PlatformAbsIndex: 0,
 		PlatformType:     platformType,
 	}, nil
 }
