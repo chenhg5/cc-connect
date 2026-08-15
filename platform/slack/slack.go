@@ -22,6 +22,7 @@ import (
 
 func init() {
 	core.RegisterPlatform("slack", New)
+	core.RegisterPlatformOptionsValidator("slack", core.RequireStringOptions("slack", "bot_token", "app_token"))
 }
 
 type replyContext struct {

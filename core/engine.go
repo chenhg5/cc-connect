@@ -311,6 +311,7 @@ type DisplayCfg struct {
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -1272,6 +1273,32 @@ var privilegedCommands = map[string]bool{
 	"upgrade": true,
 	"web":     true,
 	"diff":    true,
+}
+
+// isPrivilegedCommandInvocation extends the static privileged command list to
+// subcommands that can install arbitrary shell execution at runtime. Listing
+// and prompt-only command management remain available to ordinary users.
+func isPrivilegedCommandInvocation(cmdID string, args []string) bool {
+	if privilegedCommands[cmdID] {
+		return true
+	}
+	if len(args) == 0 {
+		return false
+	}
+	subcommand := strings.ToLower(args[0])
+	switch cmdID {
+	case "commands":
+		return matchSubCommand(subcommand, []string{
+			"list", "add", "addexec", "del", "delete", "rm", "remove",
+		}) == "addexec"
+	case "cron":
+		return matchSubCommand(subcommand, []string{
+			"add", "addexec", "list", "del", "delete", "rm", "remove",
+			"enable", "disable", "mute", "unmute", "setup",
+		}) == "addexec"
+	default:
+		return false
+	}
 }
 
 // isAdmin checks whether the given user ID is authorized for privileged commands.
@@ -3868,7 +3895,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- as.Send(promptContent, msg.Images, scopeFileAttachments(msg.Files, msg.MessageID))
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -4690,15 +4717,41 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	silentCancelCh := state.silentTurnCancellationSignal(msgID)
 	stopCh := state.stopSignal()
+	newTerminalDeliveryContexts := func(turnCancel, sessionStop <-chan struct{}) (context.Context, context.CancelFunc, context.Context, context.CancelFunc) {
+		deliveryCtx, cancelDelivery := context.WithCancel(e.ctx)
+		go func() {
+			select {
+			case <-turnCancel:
+				cancelDelivery()
+			case <-deliveryCtx.Done():
+			}
+		}()
+		renderCtx, cancelRender := context.WithCancel(deliveryCtx)
+		go func() {
+			select {
+			case <-sessionStop:
+				cancelRender()
+			case <-renderCtx.Done():
+			}
+		}()
+		return deliveryCtx, cancelDelivery, renderCtx, cancelRender
+	}
+	terminalDeliveryCtx, cancelTerminalDelivery, terminalRenderCtx, cancelTerminalRender := newTerminalDeliveryContexts(silentCancelCh, stopCh)
+	defer func() {
+		cancelTerminalRender()
+		cancelTerminalDelivery()
+	}()
 	turnRichCardCopy, hasTurnRichCardCopy := state.turnRichCardCopy(msgID)
 	if !hasTurnRichCardCopy {
 		turnRichCardCopy = e.i18n.RichCardCopy()
 	}
 	turnDisplay, turnStreamPreview := e.displayRuntimeSnapshot()
+	agentFooterFilter := newAgentFooterStreamFilter(turnDisplay.HideAgentFooter)
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	var legacyPermissionDeliveredPrefix string
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -4709,6 +4762,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardMessageID any
 	var partialText string
 	var richAnswerStarted bool
+	var richAnswerStartedAt time.Time
 	triggerAutoCompress := false
 	pendingSend := sendDone
 
@@ -4781,24 +4835,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// semantics as ordinary Send/Reply before resolving card-only assets.
 		renderCtx := e.ctx
 		if final {
-			// A final remote-image resolution can otherwise outlive Stop's card
-			// finalization window. Cancel rendering as soon as this turn is stopped,
-			// while keeping e.ctx alive for the terminal card update itself.
-			var cancelRender context.CancelFunc
-			renderCtx, cancelRender = context.WithCancel(e.ctx)
-			select {
-			case <-stopCh:
-				cancelRender()
-			default:
-				go func(ctx context.Context, cancel context.CancelFunc) {
-					select {
-					case <-stopCh:
-						cancel()
-					case <-ctx.Done():
-					}
-				}(renderCtx, cancelRender)
-			}
-			defer cancelRender()
+			// Final rendering observes both recall and Stop. Terminal card I/O uses
+			// the sibling delivery context below: recall cancels it too, while Stop
+			// keeps e.ctx alive long enough to publish a terminal card state.
+			renderCtx = terminalRenderCtx
 		}
 		markdown = workspaceRenderer(markdown)
 		if transformer, ok := p.(RichCardMarkdownTransformer); ok && markdown != "" {
@@ -4944,6 +4984,31 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 		removeRichCardForFallback(p, cardMessageID)
 	}
+	abortRichCardCompletion := func(discardTurn bool) {
+		if discardTurn {
+			discardSilentTurn()
+			return
+		}
+		sp.discard()
+		discardStreamingCard()
+		state.mu.Lock()
+		if e.ctx.Err() != nil {
+			state.eventsNeedResync = true
+		}
+		p := state.platform
+		state.mu.Unlock()
+		if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+			removeRichCardForFallback(p, cardMessageID)
+		}
+	}
+	abortIfTerminalDeliveryCanceled := func() bool {
+		discardTurn := state.shouldDiscardTurn(msgID)
+		if !discardTurn && terminalDeliveryCtx.Err() == nil {
+			return false
+		}
+		abortRichCardCompletion(discardTurn)
+		return true
+	}
 
 	// Product contract: accepted Feishu turns show a non-empty card before the
 	// first Agent event, including during a long provider/tool startup. A future
@@ -4987,151 +5052,147 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 	events := state.agentSession.Events()
+	var deferredEvent Event
+	hasDeferredEvent := false
+	channelClosedPending := false
+	idleTimeoutPending := false
+	turnDeadlinePending := false
 	for {
+		if channelClosedPending {
+			goto channelClosed
+		}
+		if idleTimeoutPending {
+			goto idleTimedOut
+		}
+		if turnDeadlinePending {
+			goto turnDeadlineExceeded
+		}
 		var event Event
 		var ok bool
+		textAlreadyFiltered := false
 
-		select {
-		case <-silentCancelCh:
-			discardSilentTurn()
-			return
-		case <-stopCh:
-			if state.shouldDiscardTurn(msgID) {
+		if hasDeferredEvent {
+			event = deferredEvent
+			hasDeferredEvent = false
+		} else {
+			select {
+			case <-silentCancelCh:
 				discardSilentTurn()
 				return
-			}
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			p := state.platform
-			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
-				removeRichCardForFallback(p, cardMessageID)
-			}
-			return
-		case event, ok = <-events:
-			if !ok {
-				goto channelClosed
-			}
-		case err := <-pendingSend:
-			pendingSend = nil
-			if err != nil {
-				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+			case <-stopCh:
+				if state.shouldDiscardTurn(msgID) {
+					discardSilentTurn()
+					return
+				}
 				sp.discard()
 				discardStreamingCard()
-				if stopTyping != nil {
-					stopTyping()
-					stopTyping = nil
-				}
-				e.notifyDroppedQueuedMessages(state, err)
-				if state.agentSession == nil || !state.agentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
-				}
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				safePartial := persistVisibleRichPartial(p)
-				if !markRichCardFailed(p, cardMessageID, safePartial) {
-					if usesRichCard(p) {
-						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-					} else {
-						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-					}
+				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+					removeRichCardForFallback(p, cardMessageID)
 				}
 				return
-			}
-			continue
-		case <-idleCh:
-			slog.Error("agent session idle timeout: no events for too long, killing session",
-				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			state.eventsNeedResync = true
-			p := state.platform
-			state.mu.Unlock()
-			safePartial := persistVisibleRichPartial(p)
-			if !markRichCardFailed(p, cardMessageID, safePartial) {
-				if usesRichCard(p) {
-					sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-				} else {
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-				}
-			}
-			e.cleanupInteractiveState(sessionKey, state)
-			return
-		case <-turnDeadlineCh:
-			elapsed := time.Since(turnStart)
-			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
-				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
-			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			p := state.platform
-			state.mu.Unlock()
-			safePartial := persistVisibleRichPartial(p)
-			if !markRichCardFailed(p, cardMessageID, safePartial) {
-				if usesRichCard(p) {
-					sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
-				} else {
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-						fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
-				}
-			}
-
-			// Two-phase shutdown: first try a graceful stop so the agent can
-			// write its final state before dying (preserves --resume ability).
-			// If it doesn't exit within a short grace window, force-kill.
-			state.markStopped()
-			gracePeriod := 10 * time.Second
-			graceTimer := time.NewTimer(gracePeriod)
-		graceLoop:
-			for {
-				select {
-				case evt, ok := <-state.agentSession.Events():
-					if !ok || (ok && evt.Done) {
-						// Agent exited cleanly; state is intact, resume will work.
-						slog.Info("agent exited gracefully after max_turn_time stop signal",
-							"session_key", sessionKey, "elapsed", time.Since(turnStart))
-						graceTimer.Stop()
-						state.mu.Lock()
-						state.eventsNeedResync = false
-						state.mu.Unlock()
-						break graceLoop
+			case event, ok = <-events:
+				if !ok {
+					// A closed transport is also a semantic assistant boundary.
+					// Route any safe buffered candidate through the ordinary text
+					// path before abnormal-exit handling so it is rendered and can
+					// become the confirmed partial; an exact private footer remains
+					// omitted by Flush.
+					if turnDisplay.HideAgentFooter {
+						if tail := agentFooterFilter.Flush(); tail != "" {
+							event = Event{Type: EventText, Content: tail}
+							textAlreadyFiltered = true
+							channelClosedPending = true
+							break
+						}
 					}
-				case <-graceTimer.C:
-					// Agent did not stop within grace period — force-kill.
-					slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
-						"session_key", sessionKey, "grace_period", gracePeriod)
-					graceTimer.Stop()
+					goto channelClosed
+				}
+			case err := <-pendingSend:
+				pendingSend = nil
+				if err != nil {
+					slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+					sp.discard()
+					discardStreamingCard()
+					if stopTyping != nil {
+						stopTyping()
+						stopTyping = nil
+					}
+					e.notifyDroppedQueuedMessages(state, err)
+					if state.agentSession == nil || !state.agentSession.Alive() {
+						e.cleanupInteractiveState(sessionKey, state)
+					}
 					state.mu.Lock()
-					state.eventsNeedResync = true
+					p := state.platform
 					state.mu.Unlock()
-					e.cleanupInteractiveState(sessionKey, state)
+					safePartial := persistVisibleRichPartial(p)
+					if !markRichCardFailed(p, cardMessageID, safePartial) {
+						if usesRichCard(p) {
+							sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+						} else {
+							e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+						}
+					}
 					return
 				}
-			}
-			// Graceful exit path: cleanupInteractiveState closes the session,
-			// but eventsNeedResync=false so the next --resume works correctly.
-			e.cleanupInteractiveState(sessionKey, state)
-			return
-		case <-e.ctx.Done():
-			if state.shouldDiscardTurn(msgID) {
-				discardSilentTurn()
+				continue
+			case <-idleCh:
+				// An idle timeout is also a semantic assistant boundary. Render any
+				// safe buffered candidate through the ordinary text path before the
+				// failure state; an exact private footer remains omitted by Flush.
+				if turnDisplay.HideAgentFooter {
+					if tail := agentFooterFilter.Flush(); tail != "" {
+						event = Event{Type: EventText, Content: tail}
+						textAlreadyFiltered = true
+						idleTimeoutPending = true
+						break
+					}
+				}
+				goto idleTimedOut
+			case <-turnDeadlineCh:
+				// The absolute turn deadline is a semantic assistant boundary too.
+				// Render a safe buffered candidate before entering the failure and
+				// shutdown path; exact private footers are still dropped by Flush.
+				if turnDisplay.HideAgentFooter {
+					if tail := agentFooterFilter.Flush(); tail != "" {
+						event = Event{Type: EventText, Content: tail}
+						textAlreadyFiltered = true
+						turnDeadlinePending = true
+						break
+					}
+				}
+				goto turnDeadlineExceeded
+			case <-e.ctx.Done():
+				if state.shouldDiscardTurn(msgID) {
+					discardSilentTurn()
+					return
+				}
+				sp.discard()
+				discardStreamingCard()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				p := state.platform
+				state.mu.Unlock()
+				if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
+					removeRichCardForFallback(p, cardMessageID)
+				}
 				return
 			}
-			sp.discard()
-			discardStreamingCard()
-			state.mu.Lock()
-			state.eventsNeedResync = true
-			p := state.platform
-			state.mu.Unlock()
-			if !markRichCardFailed(p, cardMessageID, persistVisibleRichPartial(p)) && usesRichCard(p) {
-				removeRichCardForFallback(p, cardMessageID)
+		}
+
+		if event.Type != EventText && turnDisplay.HideAgentFooter {
+			// Agent events delimit semantic assistant segments even though
+			// EventText transport chunks do not. Resolve any possible footer line
+			// before the tool/thinking/permission/result event is processed, then
+			// resume the original event on the next loop iteration.
+			if tail := agentFooterFilter.Flush(); tail != "" {
+				deferredEvent = event
+				hasDeferredEvent = true
+				event = Event{Type: EventText, Content: tail}
+				textAlreadyFiltered = true
 			}
-			return
 		}
 
 		if state.shouldDiscardTurn(msgID) {
@@ -5452,7 +5513,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			if event.Content != "" && !isEllipsisOnly(event.Content) {
+			content := event.Content
+			if !textAlreadyFiltered {
+				content = agentFooterFilter.Push(content)
+			}
+			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
 				// end-of-stream when the text resolves to bare NO_REPLY (Lark
@@ -5460,19 +5525,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// paths share this single transition; couldBeSilentPrefix is
 				// monotonically decreasing as segments grow, so the transition
 				// is held → released at most once per segment.
-				peekSegment := strings.Join(textParts[segmentStart:], "") + event.Content
+				peekSegment := strings.Join(textParts[segmentStart:], "") + content
 				prevHold := silentHold
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
 
 				handledByStreamCard := false
 				if streamCard != nil && !streamCard.Failed() {
-					textParts = append(textParts, event.Content) // always accumulate for history
+					textParts = append(textParts, content) // always accumulate for history
 					if !silentHold {
 						if releasedNow {
 							cardAnswerText.WriteString(peekSegment)
 						} else {
-							cardAnswerText.WriteString(event.Content)
+							cardAnswerText.WriteString(content)
 						}
 						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					}
@@ -5498,8 +5563,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							sp.setStatus(CardStatusWorking)
 						}
 					}
-					textParts = append(textParts, event.Content)
-					partialText += event.Content
+					textParts = append(textParts, content)
+					partialText += content
 					if hasRichCard {
 						if !silentHold && richCardPreviewEnabled {
 							previewBody := truncateStreamPreviewText(partialText, turnStreamPreview.MaxChars)
@@ -5517,6 +5582,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									} else {
 										cardMessageID = handle
 										richAnswerStarted = true
+										richAnswerStartedAt = time.Now()
 										lastRichCardUpdate = time.Now()
 										lastRichCardInput = previewBody
 										lastRichCardPreview = resolvedPreviewBody
@@ -5543,6 +5609,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								if updater, ok := p.(MessageUpdater); ok {
 									if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 										richAnswerStarted = true
+										if richAnswerStartedAt.IsZero() {
+											richAnswerStartedAt = time.Now()
+										}
 										lastRichCardInput = transitionBody
 										lastRichCardPreview = resolvedTransitionBody
 										if !hasStreamer {
@@ -5595,7 +5664,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							if releasedNow {
 								sp.appendText(peekSegment) // flush all held chunks at once
 							} else {
-								sp.appendText(event.Content)
+								sp.appendText(content)
 							}
 						}
 					}
@@ -5647,6 +5716,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					segmentStart = len(textParts)
 					silentHold = false
+				}
+				if segmentStart > 0 {
+					legacyPermissionDeliveredPrefix = strings.Join(textParts[:segmentStart], "")
 				}
 				sp.freeze()
 				if previewActive {
@@ -5724,6 +5796,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				return
 			}
+			if !hasRichCard {
+				sp.unfreeze()
+			}
 
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
@@ -5772,6 +5847,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
+			if turnDisplay.HideAgentFooter {
+				fullResponse = stripAgentFooterLines(fullResponse)
+			}
 			// Rich cards always hide tool details regardless of the legacy
 			// ToolMessages setting, so textParts is the authoritative answer across
 			// every tool boundary. EventResult.Content may contain only the final
@@ -5787,6 +5865,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			// A footer can be split across EventText chunks, so filter the fully
+			// assembled response as well as each streaming chunk.
+			if turnDisplay.HideAgentFooter {
+				fullResponse = stripAgentFooterLines(fullResponse)
+			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
@@ -5799,8 +5882,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
+			historyResponse := baseResponse
 
-			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
+			// Treat the platform-selected answering dwell as a delivery commit gate.
+			// Until it completes, a recalled trigger (or stopped engine/session) must
+			// not persist an answer, emit message.sent, or advance the completed-turn
+			// watermark for a card that will never reach its terminal state.
+			richAnswerDwellApplied := false
+			if hasRichCard && cardMessageID != nil && !isSilentReply(baseResponse) {
+				dwellCompleted := true
+				if dwellProvider, ok := p.(RichCardAnsweringDwellProvider); ok && !richAnswerStartedAt.IsZero() {
+					richAnswerDwellApplied = true
+					dwellCompleted = waitForRichCardAnsweringDwell(e.ctx, richAnswerStartedAt, dwellProvider.RichCardAnsweringDwell(), silentCancelCh, stopCh)
+				}
+				discardTurn := state.shouldDiscardTurn(msgID)
+				if !dwellCompleted || discardTurn || (richAnswerDwellApplied && (state.isStopped() || e.ctx.Err() != nil)) {
+					abortRichCardCompletion(discardTurn)
+					return
+				}
+			}
+
+			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), historyResponse)
+			autoCompressTokenEstimate := 0
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).
@@ -5812,9 +5915,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Unlock()
 				if estimate >= e.autoCompressMaxTokens && (last.IsZero() || now.Sub(last) >= e.autoCompressMinGap) {
 					triggerAutoCompress = true
-					state.mu.Lock()
-					state.lastAutoCompressTokens = estimate
-					state.mu.Unlock()
+					autoCompressTokenEstimate = estimate
 				}
 			}
 
@@ -5823,11 +5924,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   1. bare marker (isSilentReply)               → fully silent
 			//   2. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
 			//   3. trailing marker with empty strip result   → fully silent
-			// History records the ORIGINAL baseResponse so the agent retains context of its own
-			// decision; only the outbound platform text gets rewritten/suppressed.
-			session.AddHistory("assistant", baseResponse)
-			sessions.Save()
-
 			isSilent := isSilentReply(baseResponse)
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
@@ -5838,15 +5934,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						cleanResponse = stripped
 					}
 				}
-			}
-
-			if !isSilent {
-				e.hooks.Emit(HookEvent{
-					Event:      HookEventMessageSent,
-					SessionKey: sessionKey,
-					Platform:   p.Name(),
-					Content:    baseResponse,
-				})
 			}
 
 			// statusFooter holds the structured CCD-style footer separately so
@@ -5873,30 +5960,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			fullResponse = cleanResponse
-
-			turnDuration := time.Since(turnStart)
-			slog.Info("turn complete",
-				"session", session.ID,
-				"agent_session", session.GetAgentSessionID(),
-				"msg_id", msgID,
-				"tools", toolCount,
-				"response_len", len(fullResponse),
-				"turn_duration", turnDuration,
-				"input_tokens", event.InputTokens,
-				"output_tokens", event.OutputTokens,
-				"silent", isSilent,
-			)
-			// DEBUG: full assistant response for in-depth debugging.
-			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
-				slog.Debug("turn response",
-					"session", session.ID,
-					"agent_session", session.GetAgentSessionID(),
-					"history_len", session.HistoryLen(),
-					"response", previewText(fullResponse, 500),
-				)
-			}
-
-			e.noteUserTurnCompleted(state)
 
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
@@ -5948,43 +6011,88 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Keep the entire answer on the one quoted lifecycle card. Feishu's
 				// renderer converts tables beyond its per-card component budget to
 				// fenced text, avoiding extra unquoted overflow cards.
+				finalBody := resolveRichCardMarkdown(fullResponse, true)
+				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				sendAnswerFallback := func() bool {
-					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							slog.Error("failed to send rich card fallback answer", "error", err)
+					if abortIfTerminalDeliveryCanceled() {
+						return false
+					}
+					starter, canStart := p.(PreviewStarter)
+					_, canDelete := p.(PreviewCleaner)
+					if !canStart || !canDelete {
+						slog.Error("rich card: cannot deliver a recall-safe fallback card", "platform", p.Name(), "can_start", canStart, "can_delete", canDelete)
+						abortRichCardCompletion(false)
+						return false
+					}
+					if err := e.waitOutgoingWithContext(terminalDeliveryCtx, p); err != nil {
+						slog.Debug("rich card: fallback card rate-limit wait canceled", "platform", p.Name(), "error", err)
+						abortIfTerminalDeliveryCanceled()
+						return false
+					}
+					previousHandle := cardMessageID
+					replacementHandle, err := starter.SendPreviewStart(terminalDeliveryCtx, replyCtx, finalCard)
+					if err != nil || replacementHandle == nil {
+						if abortIfTerminalDeliveryCanceled() {
 							return false
 						}
+						slog.Error("rich card: failed to send recall-safe fallback card", "platform", p.Name(), "error", err, "handle_nil", replacementHandle == nil)
+						abortRichCardCompletion(false)
+						return false
+					}
+					// Track the replacement before any further work. If recall won the
+					// API race and the platform still created the message, the next
+					// cancellation check can now delete that exact card as well.
+					cardMessageID = replacementHandle
+					if previousHandle != nil {
+						removeRichCardForFallback(p, previousHandle)
+					}
+					if abortIfTerminalDeliveryCanceled() {
+						return false
 					}
 					return true
 				}
-				finalBody := resolveRichCardMarkdown(fullResponse, true)
-				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
 				if cardMessageID != nil {
+					// Re-check after completion bookkeeping. This window is intentionally
+					// tiny, but an explicit recall must still prevent a final card patch
+					// if it races with footer/log bookkeeping.
+					if abortIfTerminalDeliveryCanceled() {
+						return
+					}
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. Configured throttling
 					// may have skipped the last small/recent chunk; this catches it up
 					// when previews are enabled. ErrNotSupported (no cardID) and any
 					// error are silent — the subsequent UpdateMessage rewrites the body.
 					if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(turnStreamPreview, p.Name()) {
-						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
+						if err := streamer.StreamRichCardText(terminalDeliveryCtx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
 							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
 						}
 					}
+					if abortIfTerminalDeliveryCanceled() {
+						return
+					}
 					if updater, ok := p.(MessageUpdater); ok {
-						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
-							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
-							removeRichCardForFallback(p, cardMessageID)
+						if err := updater.UpdateMessage(terminalDeliveryCtx, cardMessageID, finalCard); err != nil {
+							slog.Debug("rich card: final update failed, falling back to a replacement card", "platform", p.Name(), "error", err)
+							if abortIfTerminalDeliveryCanceled() {
+								return
+							}
 							if !sendAnswerFallback() {
 								return
 							}
 						}
 					} else {
-						removeRichCardForFallback(p, cardMessageID)
+						if abortIfTerminalDeliveryCanceled() {
+							return
+						}
 						if !sendAnswerFallback() {
 							return
 						}
 					}
 				} else {
+					if abortIfTerminalDeliveryCanceled() {
+						return
+					}
 					if !sendAnswerFallback() {
 						return
 					}
@@ -6011,6 +6119,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+			} else if finalSegment, ok := postPermissionPreviewSegment(fullResponse, legacyPermissionDeliveredPrefix, strings.Join(textParts[segmentStart:], "")); ok {
+				// A legacy permission prompt permanently leaves the current preview
+				// visible. Some Agents report the aggregate turn in EventResult, so
+				// finalize the newly un-frozen preview with only the suffix that has
+				// not already been delivered before the permission boundary.
+				if finalSegment == "" {
+					sp.discard()
+				} else if sp.finish(finalSegment, statusFooter) {
+					slog.Debug("EventResult: finalized post-permission stream preview", "response_len", len(finalSegment), "footer_len", len(statusFooter))
+				} else if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, finalSegment, statusFooter, sendWorkspaceWithError) {
+					return
+				}
 			} else if sp.finish(fullResponse, statusFooter) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse), "footer_len", len(statusFooter))
 			} else {
@@ -6022,6 +6142,54 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+
+			// Commit conversational state only after the terminal delivery path has
+			// succeeded. In rich mode, this keeps a recall during final image
+			// resolution or the final card update from persisting an answer that the
+			// user never received.
+			if hasRichCard && !isSilent && abortIfTerminalDeliveryCanceled() {
+				return
+			}
+			// History records the ORIGINAL baseResponse so the agent retains context
+			// of its own NO_REPLY decision; only outbound text is rewritten/suppressed.
+			session.AddHistory("assistant", historyResponse)
+			sessions.Save()
+			if triggerAutoCompress {
+				state.mu.Lock()
+				state.lastAutoCompressTokens = autoCompressTokenEstimate
+				state.mu.Unlock()
+			}
+			if !isSilent {
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventMessageSent,
+					SessionKey: sessionKey,
+					Platform:   p.Name(),
+					Content:    baseResponse,
+				})
+			}
+			e.noteUserTurnCompleted(state)
+
+			turnDuration := time.Since(turnStart)
+			slog.Info("turn complete",
+				"session", session.ID,
+				"agent_session", session.GetAgentSessionID(),
+				"msg_id", msgID,
+				"tools", toolCount,
+				"response_len", len(fullResponse),
+				"turn_duration", turnDuration,
+				"input_tokens", event.InputTokens,
+				"output_tokens", event.OutputTokens,
+				"silent", isSilent,
+			)
+			// DEBUG: full assistant response for in-depth debugging.
+			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
+				slog.Debug("turn response",
+					"session", session.ID,
+					"agent_session", session.GetAgentSessionID(),
+					"history_len", session.HistoryLen(),
+					"response", previewText(fullResponse, 500),
+				)
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
@@ -6141,12 +6309,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnRichCardCopy = e.i18n.RichCardCopyForText(queued.content)
 				state.setTurnRichCardCopy(queued.messageID, turnRichCardCopy)
 				turnDisplay, turnStreamPreview = e.displayRuntimeSnapshot()
+				agentFooterFilter.Reset(turnDisplay.HideAgentFooter)
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
 				silentCancelCh = state.silentTurnCancellationSignal(msgID)
+				cancelTerminalRender()
+				cancelTerminalDelivery()
+				terminalDeliveryCtx, cancelTerminalDelivery, terminalRenderCtx, cancelTerminalRender = newTerminalDeliveryContexts(silentCancelCh, stopCh)
 				textParts = nil
 				segmentStart = 0
+				legacyPermissionDeliveredPrefix = ""
 				toolCount = 0
 				turnStart = time.Now()
 				firstEventLogged = false
@@ -6166,6 +6339,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolSteps = nil
 				partialText = ""
 				richAnswerStarted = false
+				richAnswerStartedAt = time.Time{}
 				lastRichCardUpdate = time.Time{}
 				lastRichCardInput = ""
 				lastRichCardPreview = ""
@@ -6284,6 +6458,88 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			return
 		}
+	}
+
+idleTimedOut:
+	{
+		slog.Error("agent session idle timeout: no events for too long, killing session",
+			"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
+		cp.Finalize(ProgressCardStateFailed)
+		sp.discard()
+		discardStreamingCard()
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		timedOutPlatform := state.platform
+		state.mu.Unlock()
+		safePartial := persistVisibleRichPartial(timedOutPlatform)
+		if !markRichCardFailed(timedOutPlatform, cardMessageID, safePartial) {
+			if usesRichCard(timedOutPlatform) {
+				sendGenericRichFailure(timedOutPlatform, replyCtx, cardMessageID, safePartial)
+			} else {
+				e.send(timedOutPlatform, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			}
+		}
+		e.cleanupInteractiveState(sessionKey, state)
+		return
+	}
+
+turnDeadlineExceeded:
+	{
+		elapsed := time.Since(turnStart)
+		slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
+			"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
+		cp.Finalize(ProgressCardStateFailed)
+		sp.discard()
+		discardStreamingCard()
+		state.mu.Lock()
+		deadlinePlatform := state.platform
+		state.mu.Unlock()
+		safePartial := persistVisibleRichPartial(deadlinePlatform)
+		if !markRichCardFailed(deadlinePlatform, cardMessageID, safePartial) {
+			if usesRichCard(deadlinePlatform) {
+				sendGenericRichFailure(deadlinePlatform, replyCtx, cardMessageID, safePartial)
+			} else {
+				e.send(deadlinePlatform, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+					fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			}
+		}
+
+		// Two-phase shutdown: first try a graceful stop so the agent can
+		// write its final state before dying (preserves --resume ability).
+		// If it doesn't exit within a short grace window, force-kill.
+		state.markStopped()
+		gracePeriod := 10 * time.Second
+		graceTimer := time.NewTimer(gracePeriod)
+	graceLoop:
+		for {
+			select {
+			case evt, ok := <-state.agentSession.Events():
+				if !ok || (ok && evt.Done) {
+					// Agent exited cleanly; state is intact, resume will work.
+					slog.Info("agent exited gracefully after max_turn_time stop signal",
+						"session_key", sessionKey, "elapsed", time.Since(turnStart))
+					graceTimer.Stop()
+					state.mu.Lock()
+					state.eventsNeedResync = false
+					state.mu.Unlock()
+					break graceLoop
+				}
+			case <-graceTimer.C:
+				// Agent did not stop within grace period — force-kill.
+				slog.Error("agent did not stop within grace period after max_turn_time; force-killing",
+					"session_key", sessionKey, "grace_period", gracePeriod)
+				graceTimer.Stop()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			}
+		}
+		// Graceful exit path: cleanupInteractiveState closes the session,
+		// but eventsNeedResync=false so the next --resume works correctly.
+		e.cleanupInteractiveState(sessionKey, state)
+		return
 	}
 
 channelClosed:
@@ -6722,7 +6978,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	}
 
-	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+	if cmdID != "" && isPrivilegedCommandInvocation(cmdID, args) && !e.isAdmin(msg.UserID) {
 		slog.Info("audit: command_blocked",
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
@@ -7924,6 +8180,37 @@ func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, b
 		}
 	}
 	return true
+}
+
+// postPermissionPreviewSegment removes a previously delivered legacy-preview
+// prefix when exact equality or streamed suffix evidence proves EventResult
+// contains the aggregate turn. A final-only result can coincidentally start
+// with the same bytes as the earlier prefix; retaining it is safer than
+// truncating user-visible content.
+func postPermissionPreviewSegment(fullResponse, deliveredPrefix, streamedSuffix string) (string, bool) {
+	if deliveredPrefix == "" {
+		return fullResponse, false
+	}
+	if streamedSuffix == "" {
+		// Terminal response cleanup trims trailing whitespace before this helper,
+		// while the already-visible preview retains it. Treat that canonical form
+		// as the same aggregate prefix, not as a new assistant message.
+		if fullResponse == deliveredPrefix || fullResponse == strings.TrimRight(deliveredPrefix, "\n ") {
+			return "", true
+		}
+		return fullResponse, false
+	}
+	if fullResponse == streamedSuffix {
+		return fullResponse, false
+	}
+	if !strings.HasPrefix(fullResponse, deliveredPrefix) {
+		return fullResponse, false
+	}
+	finalSegment := strings.TrimPrefix(fullResponse, deliveredPrefix)
+	if !strings.HasPrefix(finalSegment, streamedSuffix) {
+		return fullResponse, false
+	}
+	return finalSegment, true
 }
 
 func appendReplyFooter(content, footer string) string {
@@ -11917,12 +12204,16 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	e.send(p, replyCtx, sb.String())
 }
 
-// waitOutgoing blocks on the per-platform outgoing rate limiter when enabled.
-func (e *Engine) waitOutgoing(p Platform) error {
+// waitOutgoingWithContext blocks on the per-platform outgoing rate limiter when enabled.
+func (e *Engine) waitOutgoingWithContext(ctx context.Context, p Platform) error {
 	if e.outgoingRL == nil {
 		return nil
 	}
-	return e.outgoingRL.Wait(e.ctx, p.Name())
+	return e.outgoingRL.Wait(ctx, p.Name())
+}
+
+func (e *Engine) waitOutgoing(p Platform) error {
+	return e.waitOutgoingWithContext(e.ctx, p)
 }
 
 func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
@@ -17192,6 +17483,31 @@ func contextIndicatorText(inputTokens int) string {
 // Used to strip such markers from delivered text — the ctx indicator is now
 // rendered exclusively in the reply footer.
 var ctxSelfReportRe = regexp.MustCompile(`(?m)\n?\[ctx: ~\d+%\]`)
+
+// agentFooterLineRe matches a standalone agent-emitted status line only when
+// it contains the characteristic output, input, and context metrics. Requiring
+// all three prevents ordinary prose from being removed.
+var agentFooterLineRe = regexp.MustCompile(`^[ \t]*\*?[A-Za-z0-9][^ \t\n]{0,127}\s+·[^\n]*\bout\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bin\s+[0-9][0-9A-Za-z.]*\b[^\n]*\bctx\s+[0-9]+(?:\.[0-9]+)?%[ \t]*\*?[ \t]*$`)
+
+func stripAgentFooterLines(text string) string {
+	if text == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	removed := false
+	for _, line := range lines {
+		if agentFooterLineRe.MatchString(agentFooterMatchLine(line)) {
+			removed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !removed {
+		return text
+	}
+	return strings.TrimRight(strings.Join(kept, "\n"), "\r\n ")
+}
 
 // silentReplyRe matches a bare NO_REPLY marker (case-insensitive, optional surrounding whitespace).
 // When the agent emits exactly this as its full response, the platform send is suppressed

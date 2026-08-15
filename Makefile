@@ -163,7 +163,7 @@ release-all: web clean
 			*)     tar czf "$$f.tar.gz" "$$f" ;; \
 		esac; \
 	done
-	@cd $(DIST) && sha256sum * > checksums.txt
+	@cd $(DIST) && sha256sum *.tar.gz *.zip > checksums.txt
 	@echo "Done. Binaries and archives in $(DIST)/"
 
 release:

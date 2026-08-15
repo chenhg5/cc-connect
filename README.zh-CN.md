@@ -2,7 +2,7 @@
 
 这是 [CC Connect](https://github.com/chenhg5/cc-connect) 的独立后继项目，第一阶段重点是彻底完善飞书原生 Card 2.0 的回答体验。
 
-[English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md) · [回答卡片契约](docs/feishu-card-contract.md)
+[English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md) · [回答卡片契约](docs/feishu-card-contract.md) · [迁移兼容矩阵](docs/migration-compatibility.md) · [上游 beta.3 审计](docs/upstream-v1.5.0-beta.3-audit.md)
 
 > 当前版本：`0.1.0-beta.1`。它不是 MCP、代理、伴生插件或消息快照方案，也不要求官方 CC Connect 做任何修改；它拥有自己的仓库、命令、数据目录、daemon 和 npm 包。
 
@@ -14,7 +14,7 @@
 2. 只展示匿名进度：`推理 N 次 · 工具 N 次`。
 3. 工具执行阶段切换为 `⏳ 正在调用工具…`。
 4. 答案开始生成时，同一张卡片立即切换为 `✍️ 正在回答`，此前进度随即消失。
-5. 有 `card_id` 时通过 CardKit 高频更新 `main_text`，实现更自然的打字机效果；不可用时安全退化为整卡更新。
+5. 有 `card_id` 时通过 CardKit 高频更新 `main_text`；即使 Agent 一次性返回整段答案，也会先保留可感知的“正在回答”与打字机阶段再完成，不可用时安全退化为整卡更新。
 6. 完成后原卡变为 `✅ 已完成`；异常时变为 `⚠️ 未完成`。
 
 隐私不是“默认折叠但还能展开”：引擎只记录匿名事件类型，飞书渲染器还会再次丢弃推理文本、工具名称、参数、结果、模型、token、上下文、工作目录和 footer。卡片 JSON 中不存在 `collapsible_panel`。
@@ -23,14 +23,14 @@
 
 ### npm Beta
 
-首个 Beta 发布后：
+安装公开 Beta 渠道：
 
 ```bash
 npm install -g cc-connect-next@beta
 cc-connect-next --version
 ```
 
-npm 包与 GitHub Release 使用相同版本，安装脚本下载对应平台的原生二进制。
+npm 包与 GitHub Release 使用相同版本。安装脚本先下载同一 Release 的 `checksums.txt`，精确匹配当前平台归档并验证 SHA-256，校验通过后才解压和原子替换二进制。
 
 ### 从当前源码构建
 
@@ -65,12 +65,15 @@ cc-connect-next --config ~/.cc-connect-next/config.toml
 cc-connect-next migrate \
   --source /path/to/official-data \
   --target /path/to/next-data \
+  --source-version v1.5.0-beta.3 \
   --dry-run
 ```
 
-相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。即使 `--source` 指向单独的配置目录，迁移仍会从官方 v1.4.1 的 `$HOME/.cc-connect/daemon.json` 读取这份元数据，不会信任任意配置目录旁边的同名文件。元数据格式损坏，或其中记录的工作目录已经不存在、无法访问时，预检会直接失败，不会改用另一个目录解析相对路径。如果没有配置 `data_dir`，迁移也会严格沿用 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态；自定义配置根中只复制 `config.toml`。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`；该参数优先级最高。
+当前兼容矩阵覆盖官方 v1.4.1 与 v1.5.0-beta.1 至 beta.3 的已知持久化布局。默认 `--source-version auto` 不执行 daemon 元数据中记录的二进制，而是直接校验实际 TOML schema、正常启动所需的语义、当前构建已注册的 Agent/平台和持久化目录；已知版本也可以显式记录。缺失 Agent/平台、无效展示模式、无法保留行为的新字段或未安装插件都会在写入前失败，详见[迁移兼容矩阵](docs/migration-compatibility.md)。
 
-出于安全考虑，如果实际生效的 `data_dir` 包含官方配置根目录（例如 `data_dir = "~"`），迁移会直接拒绝执行。即使自定义 `data_dir` 与配置根完全分离，也只会按 CC Connect v1.4.1 明确拥有的持久路径清点：会话、项目状态与模型缓存、cron/timer、绑定、heartbeat/目录历史、MiniMax 本地配置、微信状态、Agent prompt 和 Matrix 加密状态。只要出现意外的普通文件或目录，预检就会直接失败；因此配置放在 `/etc`、数据却误指向整个 service home 时，也不会把 SSH 密钥、浏览器资料或其他无关数据递归带走。请先把官方安装指向专用数据目录并确认状态，再重新迁移；命令不会静默生成不完整目标。
+相对形式的 `data_dir`、`work_dir` 和 `base_dir` 会优先按官方 daemon 记录的工作目录解析。即使 `--source` 指向单独的配置目录，迁移仍会从官方 `$HOME/.cc-connect/daemon.json` 读取这份元数据，不会信任任意配置目录旁边的同名文件。元数据格式损坏，或其中记录的工作目录已经不存在、无法访问时，预检会直接失败，不会改用另一个目录解析相对路径。如果没有配置 `data_dir`，迁移也会严格沿用 `$HOME/.cc-connect` 默认值，即使 `--source` 指向 `/etc/cc-connect` 等自定义配置根也不会漏掉真实状态；自定义配置根中只复制 `config.toml`。若 daemon 元数据已过期，或官方版本一直由手工命令启动，请显式传入 `--runtime-work-dir /原运行目录的绝对路径`；该参数优先级最高。
+
+出于安全考虑，如果实际生效的 `data_dir` 包含官方配置根目录（例如 `data_dir = "~"`），迁移会直接拒绝执行。即使自定义 `data_dir` 与配置根完全分离，也只会按当前支持的官方版本明确拥有的持久路径清点：会话、项目状态与模型缓存、cron/timer、绑定、heartbeat/目录历史、MiniMax 本地配置、微信状态、Agent prompt 和 Matrix 加密状态。只要出现意外的普通文件或目录，预检就会直接失败；因此配置放在 `/etc`、数据却误指向整个 service home 时，也不会把 SSH 密钥、浏览器资料或其他无关数据递归带走。请先把官方安装指向专用数据目录并确认状态，再重新迁移；命令不会静默生成不完整目标。
 
 配置路径中的环境变量沿用官方 CC Connect 的 `${NAME}` 占位符语法，但迁移进程必须实际拥有每个被引用的变量；变量未设置时会安全拒绝，而不会用空字符串误选其他目录。配置了但尚未创建的 `data_dir` 会按空目录处理，已有配置文件仍能正常迁移。如果可选的项目内数据无法读取，或项目状态 / binding 元数据已损坏，全局迁移仍会继续，且这些元数据文件仍会原样复制；每个跳过的发现来源都会输出并写入 `migration-manifest.json`。授权或修复元数据后应重新迁移，确认项目内数据完整。
 
@@ -86,6 +89,7 @@ thinking_messages = false
 tool_messages = false
 show_context_indicator = false
 reply_footer = false
+hide_agent_footer = true
 
 [[projects]]
 name = "my-project"

@@ -1,0 +1,278 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a tagged main commit
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Verify release version and npm installer
+        run: |
+          set -euo pipefail
+          node scripts/check-release-version.js "${GITHUB_REF_NAME}"
+          node --test scripts/*.test.js
+          npm --prefix npm test
+          node --check npm/install.js
+          node --check npm/run.js
+          (cd npm && npm pack --dry-run)
+
+      - name: Build web assets
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify and test Go code
+        run: |
+          set -euo pipefail
+          go mod download
+          go mod verify
+          go build ./...
+          go test -race ./...
+          go test -tags=smoke ./tests/e2e/...
+          go test -tags=regression ./tests/e2e/...
+          go test ./tests/release_local/...
+          go test -bench=. -benchmem -tags=performance ./tests/performance/...
+
+  build-assets:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and verify six release archives
+        run: |
+          set -euo pipefail
+          node scripts/check-release-version.js "${GITHUB_REF_NAME}"
+          make release-all
+          node scripts/check-release-assets.js dist
+
+      - name: Upload verified release archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build-assets
+    concurrency:
+      group: release-channel-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js for npm provenance
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+
+      - name: Use a provenance-capable npm client
+        run: npm install --global npm@11
+
+      - name: Download verified build output
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+
+      - name: Revalidate downloaded artifacts
+        run: |
+          set -euo pipefail
+          node scripts/check-release-version.js "${GITHUB_REF_NAME}"
+          node scripts/check-release-assets.js dist
+
+      - name: Select release channels
+        id: release_policy
+        run: node scripts/check-release-version.js "${GITHUB_REF_NAME}" --github-output >> "$GITHUB_OUTPUT"
+
+      - name: Publish or reuse the immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes="changelogs/${tag}.md"
+          prerelease="${{ steps.release_policy.outputs.prerelease }}"
+          if [ "$prerelease" = "true" ]; then
+            latest_flag="--latest=false"
+          else
+            stable_tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
+            newest_stable="$(printf '%s\n' "$stable_tags" | node scripts/release-channel-policy.js --max)"
+            latest_relation="$(node scripts/release-channel-policy.js --relation "${tag#v}" "$newest_stable")"
+            case "$latest_relation" in
+              newer|equal|missing) latest_flag="--latest" ;;
+              older) latest_flag="--latest=false" ;;
+              *) echo "Unexpected stable release relation: $latest_relation" >&2; exit 1 ;;
+            esac
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            published_dir="$(mktemp -d)"
+            trap 'rm -rf "$published_dir"' EXIT
+            gh release download "$tag" --dir "$published_dir"
+            node scripts/check-release-assets.js "$published_dir"
+            gh release edit "$tag" \
+              --title "cc-connect-next ${tag}" \
+              --notes-file "$notes" \
+              --prerelease="$prerelease" \
+              "$latest_flag"
+          else
+            gh release create "$tag" dist/*.tar.gz dist/*.zip dist/checksums.txt \
+              --verify-tag \
+              --title "cc-connect-next ${tag}" \
+              --notes-file "$notes" \
+              --prerelease="$prerelease" \
+              "$latest_flag"
+          fi
+          if [ "$prerelease" = "false" ]; then
+            actual_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+            if [ "$latest_relation" = "older" ]; then
+              test "${actual_latest#v}" = "$newest_stable"
+            else
+              test "${actual_latest#v}" = "${tag#v}"
+            fi
+          fi
+
+      - name: Verify public GitHub release downloads
+        run: |
+          set -euo pipefail
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir"' EXIT
+          for asset in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+            filename="$(basename "$asset")"
+            curl --fail --location --retry 6 --retry-delay 5 \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${filename}" \
+              --output "${verify_dir}/${filename}"
+          done
+          node scripts/check-release-assets.js "$verify_dir"
+
+      - name: Publish npm package idempotently
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIST_TAG: ${{ steps.release_policy.outputs.npm_tag }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          npm_tag="${NPM_DIST_TAG}"
+          safe_version="$(printf '%s' "$version" | tr -c '[:alnum:]-' '-')"
+          staging_tag="release-${safe_version}-${GITHUB_RUN_ID}"
+          current_tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"
+          publish_tag="$npm_tag"
+          if [ "$tag_relation" = "older" ]; then
+            publish_tag="$staging_tag"
+          fi
+          if npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "cc-connect-next@${version} is already published"
+          else
+            npm publish --access public --tag "$publish_tag" --provenance
+          fi
+          staging_tagged="$(
+            npm view cc-connect-next dist-tags --json --registry=https://registry.npmjs.org |
+              node -e 'const fs = require("node:fs"); const tags = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(tags[process.argv[1]] || "");' "$staging_tag"
+          )"
+          if [ -n "$staging_tagged" ]; then
+            test "$staging_tagged" = "$version"
+            npm dist-tag rm cc-connect-next "$staging_tag" --registry=https://registry.npmjs.org
+          fi
+          current_tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"
+          case "$tag_relation" in
+            newer|missing)
+              npm dist-tag add "cc-connect-next@${version}" "$npm_tag" --registry=https://registry.npmjs.org
+              ;;
+            equal|older)
+              echo "Preserving ${npm_tag} at ${current_tagged}"
+              ;;
+            *) echo "Unexpected npm tag relation: $tag_relation" >&2; exit 1 ;;
+          esac
+
+      - name: Verify the public npm registry
+        working-directory: npm
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          published="$(npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org)"
+          npm_tag="${{ steps.release_policy.outputs.npm_tag }}"
+          tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org)"
+          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$tagged")"
+          test "$published" = "$version"
+          case "$tag_relation" in
+            equal|older) ;;
+            *) echo "${npm_tag} is behind ${version}: ${tagged}" >&2; exit 1 ;;
+          esac

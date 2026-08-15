@@ -158,6 +158,55 @@ type RichCardTextStreamer interface {
 	StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error
 }
 
+// RichCardAnsweringDwellProvider lets a native card platform keep the
+// answering phase visible for a short minimum interval before the terminal
+// Done patch. This matters when an Agent backend emits its entire answer in a
+// single event: without a dwell, the native typewriter frame and the Done
+// frame can arrive back-to-back and the client never visibly renders the
+// answering state. Platforms that do not need this should omit the interface.
+type RichCardAnsweringDwellProvider interface {
+	RichCardAnsweringDwell() time.Duration
+}
+
+// waitForRichCardAnsweringDwell returns true only when the display interval
+// completes without the engine or current turn being canceled.
+func waitForRichCardAnsweringDwell(ctx context.Context, started time.Time, dwell time.Duration, silentCancelCh, stopCh <-chan struct{}) bool {
+	canceled := func() bool {
+		select {
+		case <-ctx.Done():
+			return true
+		case <-silentCancelCh:
+			return true
+		case <-stopCh:
+			return true
+		default:
+			return false
+		}
+	}
+	if canceled() {
+		return false
+	}
+
+	remaining := dwell - time.Since(started)
+	if remaining <= 0 {
+		return true
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		// If the timer and a cancellation become ready together, cancellation
+		// wins before the caller is allowed to apply the terminal card patch.
+		return !canceled()
+	case <-ctx.Done():
+		return false
+	case <-silentCancelCh:
+		return false
+	case <-stopCh:
+		return false
+	}
+}
+
 // PreviewStarter is an optional interface for platforms that can initiate a
 // streaming preview message and return a handle for subsequent updates.
 type PreviewStarter interface {
@@ -357,6 +406,23 @@ func (sp *streamPreview) freeze() {
 	}
 
 	sp.degraded = true
+}
+
+// unfreeze resumes a legacy stream after an interrupting permission prompt.
+// The frozen preview remains as the pre-permission segment; the next text
+// event starts a new preview rather than being buffered until turn completion.
+func (sp *streamPreview) unfreeze() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+	sp.lastSentAt = time.Time{}
+	sp.fullText = ""
+	sp.lastSentText = ""
+	sp.lastSentViaUpdate = false
+	sp.previewMsgID = nil
+	sp.pendingStatus = ""
+	sp.degraded = false
 }
 
 // discard removes the preview message when possible and disables further

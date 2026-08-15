@@ -85,6 +85,22 @@ cc-connect-next migrate --dry-run
 cc-connect-next migrate
 ```
 
+The default `--source-version auto` validates the actual configuration and
+persistent layout without executing any binary recorded by the official daemon.
+The current compatibility matrix covers official v1.4.1 and v1.5.0-beta.1
+through beta.3. When provenance is known, record it explicitly on both the dry
+run and real migration, for example:
+
+```bash
+cc-connect-next migrate --source-version v1.5.0-beta.3 --dry-run
+cc-connect-next migrate --source-version v1.5.0-beta.3
+```
+
+Unknown configuration fields and unavailable Agent/platform implementations
+fail before target writes instead of being silently discarded. See the
+[migration compatibility matrix](docs/migration-compatibility.md) for the exact
+version-specific boundary.
+
 The defaults are:
 
 ```text
@@ -105,7 +121,7 @@ cc-connect-next migrate \
   --dry-run
 ```
 
-Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. That metadata is read from official v1.4.1's `$HOME/.cc-connect/daemon.json` even when `--source` is a separate config directory; a same-named config sibling is not trusted. Malformed metadata, or a recorded working directory that is missing or inaccessible, fails preflight instead of silently changing the base for relative paths. An omitted `data_dir` still means `$HOME/.cc-connect`, and only the custom config root's `config.toml` is copied. A separate custom `data_dir` is accepted only when every regular path matches known CC Connect persistent state; unexpected files or directories fail preflight instead of being copied from a broad service home. If daemon metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`; the explicit override wins.
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. That metadata is read from the official `$HOME/.cc-connect/daemon.json` even when `--source` is a separate config directory; a same-named config sibling is not trusted. Malformed metadata, or a recorded working directory that is missing or inaccessible, fails preflight instead of silently changing the base for relative paths. An omitted `data_dir` still means `$HOME/.cc-connect`, and only the custom config root's `config.toml` is copied. A separate custom `data_dir` is accepted only when every regular path matches known CC Connect persistent state; unexpected files or directories fail preflight instead of being copied from a broad service home. If daemon metadata is stale or the official process was launched manually from another directory, add `--runtime-work-dir /absolute/original/cwd`; the explicit override wins.
 
 Configuration paths follow official CC Connect's `${NAME}` placeholder semantics. A configured `data_dir` that does not exist yet is treated as empty, so the valid configuration file still migrates. Unreadable optional project data or malformed project state/binding metadata does not discard the global migration, and the metadata file itself is still copied verbatim; each skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
@@ -121,6 +137,7 @@ thinking_messages = false
 tool_messages = false
 show_context_indicator = false
 reply_footer = false
+hide_agent_footer = true
 
 [[projects]]
 name = "my-project"

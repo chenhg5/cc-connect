@@ -299,7 +299,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -412,7 +412,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
@@ -3383,5 +3383,22 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 	refs2 := cfg.Projects[1].Agent.ProviderRefs
 	if len(refs2) != 0 {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
+	}
+}
+
+func TestEffectiveDisplay_HideAgentFooterPrecedence(t *testing.T) {
+	global := true
+	project := false
+	cfg := Config{Display: DisplayConfig{HideAgentFooter: &global}}
+	proj := ProjectConfig{Display: &DisplayConfig{HideAgentFooter: &project}}
+
+	_, _, _, _, _, _, _, got := EffectiveDisplay(&cfg, &proj)
+	if got {
+		t.Fatal("project hide_agent_footer=false did not override global true")
+	}
+	proj.Display.HideAgentFooter = nil
+	_, _, _, _, _, _, _, got = EffectiveDisplay(&cfg, &proj)
+	if !got {
+		t.Fatal("global hide_agent_footer=true was not applied")
 	}
 }

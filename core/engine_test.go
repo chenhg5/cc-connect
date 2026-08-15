@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1931,8 +1933,45 @@ type stubRichCardSilentPlatform struct {
 	startContexts []any
 	streamTexts   []string
 	updates       []string
+	calls         []string
 	deleteCount   int
 	nextHandleSeq int
+}
+
+type stubRichCardAnswerDwellPlatform struct {
+	*stubRichCardSilentPlatform
+	dwell         time.Duration
+	mu            sync.Mutex
+	firstStreamAt time.Time
+	completedAt   time.Time
+}
+
+func (p *stubRichCardAnswerDwellPlatform) RichCardAnsweringDwell() time.Duration {
+	return p.dwell
+}
+
+func (p *stubRichCardAnswerDwellPlatform) StreamRichCardText(ctx context.Context, handle any, fullText string) error {
+	p.mu.Lock()
+	if p.firstStreamAt.IsZero() {
+		p.firstStreamAt = time.Now()
+	}
+	p.mu.Unlock()
+	return p.stubRichCardSilentPlatform.StreamRichCardText(ctx, handle, fullText)
+}
+
+func (p *stubRichCardAnswerDwellPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if strings.Contains(content, "status=done") {
+		p.mu.Lock()
+		p.completedAt = time.Now()
+		p.mu.Unlock()
+	}
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *stubRichCardAnswerDwellPlatform) lifecycleTimes() (time.Time, time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.firstStreamAt, p.completedAt
 }
 
 func (p *stubRichCardSilentPlatform) BuildRichCard(status CardStatus, _ string, steps []ToolStep, markdown string, _ bool, _ string) string {
@@ -1943,6 +1982,7 @@ func (p *stubRichCardSilentPlatform) SendPreviewStart(_ context.Context, replyCt
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.previewStarts = append(p.previewStarts, content)
+	p.calls = append(p.calls, "start:"+content)
 	p.startContexts = append(p.startContexts, replyCtx)
 	p.nextHandleSeq++
 	return fmt.Sprintf("handle-%d", p.nextHandleSeq), nil
@@ -1958,6 +1998,7 @@ func (p *stubRichCardSilentPlatform) UpdateMessage(_ context.Context, _ any, con
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.updates = append(p.updates, content)
+	p.calls = append(p.calls, "update:"+content)
 	return nil
 }
 
@@ -1965,6 +2006,7 @@ func (p *stubRichCardSilentPlatform) StreamRichCardText(_ context.Context, _ any
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.streamTexts = append(p.streamTexts, fullText)
+	p.calls = append(p.calls, "stream:"+fullText)
 	return nil
 }
 
@@ -1985,6 +2027,12 @@ func (p *stubRichCardSilentPlatform) snapshot() (starts, streams, updates []stri
 	return
 }
 
+func (p *stubRichCardSilentPlatform) callSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
+}
+
 type stubRichCardResolverPlatform struct {
 	*stubRichCardSilentPlatform
 	resolverMu sync.Mutex
@@ -1994,6 +2042,146 @@ type stubRichCardResolverPlatform struct {
 type stubDelayedRichCardResolverPlatform struct {
 	*stubRichCardSilentPlatform
 	imageMarkdown string
+}
+
+type stubBlockingRichCardResolverPlatform struct {
+	*stubRichCardAnswerDwellPlatform
+	finalStarted chan struct{}
+	releaseFinal chan struct{}
+	startOnce    sync.Once
+}
+
+type stubBlockingTerminalRichCardPlatform struct {
+	*stubRichCardAnswerDwellPlatform
+	blockStage       string
+	blockText        string
+	terminalStarted  chan struct{}
+	terminalCanceled chan struct{}
+	releaseTerminal  chan struct{}
+	startOnce        sync.Once
+	cancelOnce       sync.Once
+	streamMu         sync.Mutex
+	streamCalls      int
+}
+
+type stubBlockingFallbackRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+	fallbackStarted  chan struct{}
+	fallbackCanceled chan struct{}
+	releaseFallback  chan struct{}
+	startOnce        sync.Once
+	cancelOnce       sync.Once
+}
+
+func (p *stubBlockingFallbackRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if strings.Contains(content, "status=done") {
+		return errors.New("simulated final rich-card update failure")
+	}
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *stubBlockingFallbackRichCardPlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
+	starts, _, _, _ := p.snapshot()
+	if len(starts) == 0 {
+		return p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
+	}
+	p.startOnce.Do(func() { close(p.fallbackStarted) })
+	select {
+	case <-ctx.Done():
+		p.cancelOnce.Do(func() { close(p.fallbackCanceled) })
+		return nil, ctx.Err()
+	case <-p.releaseFallback:
+		return p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
+	}
+}
+
+type stubDeliveredFallbackRichCardPlatform struct {
+	*stubRichCardSilentPlatform
+	initialStartFails bool
+	replacementSent   chan struct{}
+	releaseReturn     chan struct{}
+	startOnce         sync.Once
+	attemptMu         sync.Mutex
+	startAttempts     int
+	deleteMu          sync.Mutex
+	deletedHandles    []any
+}
+
+func (p *stubDeliveredFallbackRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if strings.Contains(content, "status=done") {
+		return errors.New("simulated final rich-card update failure")
+	}
+	return p.stubRichCardSilentPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *stubDeliveredFallbackRichCardPlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
+	p.attemptMu.Lock()
+	p.startAttempts++
+	attempt := p.startAttempts
+	p.attemptMu.Unlock()
+	if attempt == 1 && p.initialStartFails {
+		return nil, errors.New("simulated initial rich-card start failure")
+	}
+	if attempt == 1 {
+		return p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
+	}
+	handle, err := p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
+	p.startOnce.Do(func() { close(p.replacementSent) })
+	<-p.releaseReturn
+	return handle, err
+}
+
+func (p *stubDeliveredFallbackRichCardPlatform) DeletePreviewMessage(_ context.Context, handle any) error {
+	p.deleteMu.Lock()
+	p.deletedHandles = append(p.deletedHandles, handle)
+	p.deleteMu.Unlock()
+	return nil
+}
+
+func (p *stubDeliveredFallbackRichCardPlatform) deleted() []any {
+	p.deleteMu.Lock()
+	defer p.deleteMu.Unlock()
+	return append([]any(nil), p.deletedHandles...)
+}
+
+func (p *stubBlockingTerminalRichCardPlatform) waitForTerminalIO(ctx context.Context) error {
+	p.startOnce.Do(func() { close(p.terminalStarted) })
+	select {
+	case <-ctx.Done():
+		p.cancelOnce.Do(func() { close(p.terminalCanceled) })
+		return ctx.Err()
+	case <-p.releaseTerminal:
+		return errors.New("simulated terminal rich-card I/O failure")
+	}
+}
+
+func (p *stubBlockingTerminalRichCardPlatform) StreamRichCardText(ctx context.Context, handle any, fullText string) error {
+	p.streamMu.Lock()
+	p.streamCalls++
+	streamCall := p.streamCalls
+	p.streamMu.Unlock()
+	blockTerminalStream := p.blockText != "" && strings.Contains(fullText, p.blockText)
+	if p.blockStage == "stream" && (blockTerminalStream || (p.blockText == "" && streamCall > 1)) {
+		return p.waitForTerminalIO(ctx)
+	}
+	return p.stubRichCardAnswerDwellPlatform.StreamRichCardText(ctx, handle, fullText)
+}
+
+func (p *stubBlockingTerminalRichCardPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	blockTerminalUpdate := p.blockText == "" || strings.Contains(content, p.blockText)
+	if p.blockStage == "update" && blockTerminalUpdate && strings.Contains(content, "status=done") {
+		return p.waitForTerminalIO(ctx)
+	}
+	return p.stubRichCardAnswerDwellPlatform.UpdateMessage(ctx, handle, content)
+}
+
+func (p *stubBlockingRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
+	if !final {
+		return markdown
+	}
+	p.startOnce.Do(func() { close(p.finalStarted) })
+	<-p.releaseFinal
+	return markdown
 }
 
 func (p *stubDelayedRichCardResolverPlatform) ResolveRichCardMarkdown(_ context.Context, markdown string, final bool) string {
@@ -2028,10 +2216,27 @@ type stubRichCardSplitPlatform struct {
 
 type stubRichCardStartFailurePlatform struct {
 	*stubRichCardSilentPlatform
+	startMu       sync.Mutex
+	startAttempts int
 }
 
-func (p *stubRichCardStartFailurePlatform) SendPreviewStart(context.Context, any, string) (any, error) {
-	return nil, errors.New("simulated rich-card start failure")
+type stubRichCardPermanentStartFailurePlatform struct {
+	*stubRichCardSilentPlatform
+}
+
+func (p *stubRichCardStartFailurePlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
+	p.startMu.Lock()
+	p.startAttempts++
+	attempt := p.startAttempts
+	p.startMu.Unlock()
+	if attempt == 1 {
+		return nil, errors.New("simulated initial rich-card start failure")
+	}
+	return p.stubRichCardSilentPlatform.SendPreviewStart(ctx, replyCtx, content)
+}
+
+func (p *stubRichCardPermanentStartFailurePlatform) SendPreviewStart(context.Context, any, string) (any, error) {
+	return nil, errors.New("simulated permanent rich-card start failure")
 }
 
 type stubRichCardUpdateFailurePlatform struct {
@@ -2862,6 +3067,124 @@ func TestProcessInteractiveEvents_RichCardChannelClosePersistsAndShowsPartialAns
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardChannelCloseFlushesBufferedFooterCandidate(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-buffered-close"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-buffered-close")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-buffered-close"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Done"}
+	if err := agentSession.Close(); err != nil {
+		t.Fatalf("close agent session: %v", err)
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-buffered-close", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	if len(streams) == 0 || streams[len(streams)-1] != "Done" {
+		t.Fatalf("buffered partial was not streamed before channel-close handling: %v", streams)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") || !strings.Contains(updates[len(updates)-1], "Done") {
+		t.Fatalf("failed rich card lost the buffered partial: %v", updates)
+	}
+	if strings.Contains(strings.Join(updates, "\n"), "status=done") {
+		t.Fatalf("abnormal channel close was rendered as a completed answer: %v", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != "Done" {
+		t.Fatalf("buffered partial was not preserved in history: %+v", history)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardIdleTimeoutFlushesBufferedFooterCandidate(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+	e.SetEventIdleTimeout(50 * time.Millisecond)
+
+	sessionKey := "feishu:user-rich-buffered-timeout"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-buffered-timeout")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-buffered-timeout"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Done"}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-buffered-timeout", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	if len(streams) == 0 || streams[len(streams)-1] != "Done" {
+		t.Fatalf("buffered partial was not streamed before idle-timeout handling: %v", streams)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") || !strings.Contains(updates[len(updates)-1], "Done") {
+		t.Fatalf("failed rich card lost the buffered partial: %v", updates)
+	}
+	if strings.Contains(strings.Join(updates, "\n"), "status=done") {
+		t.Fatalf("idle timeout was rendered as a completed answer: %v", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != "Done" {
+		t.Fatalf("buffered partial was not preserved in history: %+v", history)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardTurnDeadlineFlushesBufferedFooterCandidate(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+	e.SetEventIdleTimeout(0)
+	e.SetMaxTurnTime(50 * time.Millisecond)
+
+	sessionKey := "feishu:user-rich-buffered-deadline"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-buffered-deadline")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-buffered-deadline"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventText, Content: "Done"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-buffered-deadline", time.Now(), nil, nil, state.replyCtx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for !state.isStopped() {
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not enter max-turn-time shutdown")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := agentSession.Close(); err != nil {
+		t.Fatalf("close agent session: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadline cleanup did not finish")
+	}
+
+	_, streams, updates, _ := p.snapshot()
+	if len(streams) == 0 || streams[len(streams)-1] != "Done" {
+		t.Fatalf("buffered partial was not streamed before turn-deadline handling: %v", streams)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=error") || !strings.Contains(updates[len(updates)-1], "Done") {
+		t.Fatalf("failed rich card lost the buffered partial: %v", updates)
+	}
+	if strings.Contains(strings.Join(updates, "\n"), "status=done") {
+		t.Fatalf("turn deadline was rendered as a completed answer: %v", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != "Done" {
+		t.Fatalf("buffered partial was not preserved in history: %+v", history)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardChannelCloseOmitsUnrenderedPartialAnswer(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -3079,24 +3402,36 @@ func TestProcessInteractiveEvents_FailedRichCardRendersWorkspaceReferences(t *te
 	}
 }
 
-func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *testing.T) {
+func TestProcessInteractiveEvents_RichCardFallbackKeepsAnswerReadable(t *testing.T) {
 	tests := []struct {
-		name        string
-		platform    func(*stubRichCardSilentPlatform) Platform
-		wantDeletes int
+		name             string
+		platform         func(*stubRichCardSilentPlatform) Platform
+		wantStarts       int
+		wantDeletes      int
+		wantHistoryDelta int
 	}{
 		{
-			name: "start failure",
+			name: "initial start failure",
 			platform: func(base *stubRichCardSilentPlatform) Platform {
 				return &stubRichCardStartFailurePlatform{stubRichCardSilentPlatform: base}
 			},
+			wantStarts:       1,
+			wantHistoryDelta: 1,
 		},
 		{
 			name: "update failure",
 			platform: func(base *stubRichCardSilentPlatform) Platform {
 				return &stubRichCardUpdateFailurePlatform{stubRichCardSilentPlatform: base}
 			},
-			wantDeletes: 1,
+			wantStarts:       2,
+			wantDeletes:      1,
+			wantHistoryDelta: 1,
+		},
+		{
+			name: "permanent start failure",
+			platform: func(base *stubRichCardSilentPlatform) Platform {
+				return &stubRichCardPermanentStartFailurePlatform{stubRichCardSilentPlatform: base}
+			},
 		},
 	}
 
@@ -3108,6 +3443,7 @@ func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *test
 			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
 			sessionKey := "feishu:user-rich-fallback-" + tt.name
 			session := e.sessions.GetOrCreateActive(sessionKey)
+			initialHistoryLen := session.HistoryLen()
 			agentSession := newControllableSession("s-rich-fallback-" + tt.name)
 			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-fallback"}
 			e.interactiveStates[sessionKey] = state
@@ -3117,15 +3453,24 @@ func TestProcessInteractiveEvents_RichCardFallbackSendsAnswerNotCardJSON(t *test
 			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-fallback", time.Now(), nil, nil, state.replyCtx)
 
 			sent := base.getSent()
-			if len(sent) != 1 || sent[0] != answer {
-				t.Fatalf("fallback sent = %q, want only the assistant answer", sent)
+			if len(sent) != 0 {
+				t.Fatalf("fallback sent undeletable ordinary messages: %q", sent)
 			}
-			if strings.Contains(sent[0], "rich:status=") {
-				t.Fatalf("fallback exposed rich-card JSON as message text: %q", sent[0])
+			starts, _, _, deletes := base.snapshot()
+			if len(starts) != tt.wantStarts {
+				t.Fatalf("fallback card starts = %d, want %d: %v", len(starts), tt.wantStarts, starts)
 			}
-			_, _, _, deletes := base.snapshot()
+			if tt.wantStarts > 0 {
+				finalStart := starts[len(starts)-1]
+				if !strings.Contains(finalStart, "status=done") || !strings.Contains(finalStart, answer) {
+					t.Fatalf("replacement fallback card does not contain the completed answer: %q", finalStart)
+				}
+			}
 			if deletes != tt.wantDeletes {
 				t.Fatalf("stale-card deletes = %d, want %d", deletes, tt.wantDeletes)
+			}
+			if got := session.HistoryLen() - initialHistoryLen; got != tt.wantHistoryDelta {
+				t.Fatalf("assistant history delta = %d, want %d", got, tt.wantHistoryDelta)
 			}
 		})
 	}
@@ -3387,6 +3732,665 @@ func TestProcessInteractiveEvents_RichCardShortAnswerUsesFirstChunkTypewriter(t 
 	}
 	if !strings.Contains(updates[len(updates)-1], "status=done") || !strings.Contains(updates[len(updates)-1], "Short answer.") {
 		t.Fatalf("final card is incomplete: %q", updates[len(updates)-1])
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardKeepsAnsweringPhaseVisibleBeforeDone(t *testing.T) {
+	const dwell = 80 * time.Millisecond
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: dwell}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-answer-dwell"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-answer-dwell")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-answer-dwell"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "One-shot answer."}
+	agentSession.events <- Event{Type: EventResult, Content: "One-shot answer.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-answer-dwell", time.Now(), nil, nil, state.replyCtx)
+
+	firstStreamAt, completedAt := p.lifecycleTimes()
+	if firstStreamAt.IsZero() || completedAt.IsZero() {
+		t.Fatalf("missing lifecycle timestamps: first stream=%v completed=%v", firstStreamAt, completedAt)
+	}
+	if elapsed := completedAt.Sub(firstStreamAt); elapsed < dwell-10*time.Millisecond {
+		t.Fatalf("answering phase visible for %s, want approximately %s before Done", elapsed, dwell)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardAnsweringDwellHonorsTurnCancellation(t *testing.T) {
+	tests := []struct {
+		name          string
+		discardAnswer bool
+		cancel        func(*interactiveState, string)
+	}{
+		{
+			name:          "recalled trigger",
+			discardAnswer: true,
+			cancel: func(state *interactiveState, msgID string) {
+				state.cancelTurnSilently(msgID)
+			},
+		},
+		{
+			name: "stopped turn",
+			cancel: func(state *interactiveState, _ string) {
+				state.markStopped()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			p := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: 200 * time.Millisecond}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			var sentHooks atomic.Int32
+			hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Hook-Event") == string(HookEventMessageSent) {
+					sentHooks.Add(1)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer hookServer.Close()
+			synchronous := false
+			e.hooks = NewHookManager("test", []HookConfig{{
+				Event: string(HookEventMessageSent),
+				Type:  string(HookHandlerHTTP),
+				URL:   hookServer.URL,
+				Async: &synchronous,
+			}}, "", "", "")
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+			sessionKey := "feishu:user-rich-answer-dwell-cancel-" + tt.name
+			msgID := "m-rich-answer-dwell-cancel-" + tt.name
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			initialHistoryLen := session.HistoryLen()
+			agentSession := newControllableSession("s-rich-answer-dwell-cancel-" + tt.name)
+			state := &interactiveState{
+				agentSession:                 agentSession,
+				platform:                     p,
+				replyCtx:                     "ctx-rich-answer-dwell-cancel",
+				currentTurnUserMessageTimeMs: 123,
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventText, Content: "One-shot answer."}
+			agentSession.events <- Event{Type: EventResult, Content: "One-shot answer.", Done: true}
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+				close(done)
+			}()
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				firstStreamAt, _ := p.lifecycleTimes()
+				if !firstStreamAt.IsZero() {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("answering phase did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			tt.cancel(state, msgID)
+
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("turn cancellation did not interrupt the answering dwell")
+			}
+
+			_, completedAt := p.lifecycleTimes()
+			if !completedAt.IsZero() {
+				t.Fatal("canceled turn still patched the rich card to Done")
+			}
+			if sent := base.getSent(); len(sent) != 0 {
+				t.Fatalf("canceled turn emitted a fallback answer: %v", sent)
+			}
+			if history := session.GetHistory(0); tt.discardAnswer && len(history) != initialHistoryLen {
+				t.Fatalf("recalled turn persisted an undelivered answer: %v", history)
+			}
+			if tt.discardAnswer && sentHooks.Load() != 0 {
+				t.Fatalf("recalled turn emitted %d message.sent hooks", sentHooks.Load())
+			}
+			state.mu.Lock()
+			completedAtMs := state.lastCompletedUserMessageTimeMs
+			state.mu.Unlock()
+			if completedAtMs != 0 {
+				t.Fatalf("canceled turn advanced completion watermark to %d", completedAtMs)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallDuringFinalResolutionDoesNotCommitAnswer(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	dwellPlatform := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: 20 * time.Millisecond}
+	p := &stubBlockingRichCardResolverPlatform{
+		stubRichCardAnswerDwellPlatform: dwellPlatform,
+		finalStarted:                    make(chan struct{}),
+		releaseFinal:                    make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	var sentHooks atomic.Int32
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hook-Event") == string(HookEventMessageSent) {
+			sentHooks.Add(1)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hookServer.Close()
+	synchronous := false
+	e.hooks = NewHookManager("test", []HookConfig{{
+		Event: string(HookEventMessageSent),
+		Type:  string(HookHandlerHTTP),
+		URL:   hookServer.URL,
+		Async: &synchronous,
+	}}, "", "", "")
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-final-resolution-recall"
+	msgID := "m-rich-final-resolution-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-final-resolution-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-final-resolution-recall",
+		currentTurnUserMessageTimeMs: 456,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Answer with image."}
+	agentSession.events <- Event{Type: EventResult, Content: "Answer with image.", Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.finalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not enter final rich-card resolution after the answering dwell")
+	}
+	state.cancelTurnSilently(msgID)
+	close(p.releaseFinal)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not leave final rich-card resolution")
+	}
+
+	_, _, updates, _ := base.snapshot()
+	if len(updates) > 0 && strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("recalled turn patched the rich card to Done: %v", updates)
+	}
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("recalled turn emitted a fallback answer: %v", sent)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled turn persisted an undelivered answer: %v", history)
+	}
+	if sentHooks.Load() != 0 {
+		t.Fatalf("recalled turn emitted %d message.sent hooks", sentHooks.Load())
+	}
+	state.mu.Lock()
+	completedAtMs := state.lastCompletedUserMessageTimeMs
+	state.mu.Unlock()
+	if completedAtMs != 0 {
+		t.Fatalf("recalled turn advanced completion watermark to %d", completedAtMs)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallCancelsTerminalIOBeforeFallback(t *testing.T) {
+	for _, blockStage := range []string{"stream", "update"} {
+		t.Run(blockStage, func(t *testing.T) {
+			base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+			dwellPlatform := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: time.Millisecond}
+			p := &stubBlockingTerminalRichCardPlatform{
+				stubRichCardAnswerDwellPlatform: dwellPlatform,
+				blockStage:                      blockStage,
+				terminalStarted:                 make(chan struct{}),
+				terminalCanceled:                make(chan struct{}),
+				releaseTerminal:                 make(chan struct{}),
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+			sessionKey := "feishu:user-rich-terminal-io-recall-" + blockStage
+			msgID := "m-rich-terminal-io-recall-" + blockStage
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			initialHistoryLen := session.HistoryLen()
+			agentSession := newControllableSession("s-rich-terminal-io-recall-" + blockStage)
+			state := &interactiveState{
+				agentSession:                 agentSession,
+				platform:                     p,
+				replyCtx:                     "ctx-rich-terminal-io-recall",
+				currentTurnUserMessageTimeMs: 789,
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventText, Content: "Terminal answer."}
+			agentSession.events <- Event{Type: EventResult, Content: "Terminal answer.", Done: true}
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+				close(done)
+			}()
+
+			select {
+			case <-p.terminalStarted:
+			case <-time.After(time.Second):
+				t.Fatal("turn did not enter terminal rich-card I/O")
+			}
+			state.cancelTurnSilently(msgID)
+
+			canceledByContext := false
+			select {
+			case <-p.terminalCanceled:
+				canceledByContext = true
+			case <-time.After(500 * time.Millisecond):
+				close(p.releaseTerminal)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("recalled turn did not leave terminal rich-card I/O")
+			}
+
+			if !canceledByContext {
+				t.Error("terminal rich-card I/O did not observe recalled-turn cancellation")
+			}
+			_, _, updates, _ := base.snapshot()
+			for _, update := range updates {
+				if strings.Contains(update, "status=done") {
+					t.Fatalf("recalled turn patched the rich card to Done: %v", updates)
+				}
+			}
+			if sent := base.getSent(); len(sent) != 0 {
+				t.Fatalf("recalled turn emitted a fallback answer: %v", sent)
+			}
+			if history := session.GetHistory(0); len(history) != initialHistoryLen {
+				t.Fatalf("recalled turn persisted an undelivered answer: %v", history)
+			}
+			state.mu.Lock()
+			completedAtMs := state.lastCompletedUserMessageTimeMs
+			state.mu.Unlock()
+			if completedAtMs != 0 {
+				t.Fatalf("recalled turn advanced completion watermark to %d", completedAtMs)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallCancelsFallbackSend(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubBlockingFallbackRichCardPlatform{
+		stubRichCardSilentPlatform: base,
+		fallbackStarted:            make(chan struct{}),
+		fallbackCanceled:           make(chan struct{}),
+		releaseFallback:            make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+
+	sessionKey := "feishu:user-rich-fallback-recall"
+	msgID := "m-rich-fallback-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-fallback-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-fallback-recall",
+		currentTurnUserMessageTimeMs: 987,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: strings.Repeat("fallback answer ", 400), Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.fallbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not enter rich-card fallback send")
+	}
+	state.cancelTurnSilently(msgID)
+	canceledByContext := false
+	select {
+	case <-p.fallbackCanceled:
+		canceledByContext = true
+	case <-time.After(500 * time.Millisecond):
+		close(p.releaseFallback)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not leave fallback send")
+	}
+
+	if !canceledByContext {
+		t.Error("fallback card send did not observe recalled-turn cancellation")
+	}
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("recalled turn emitted ordinary fallback messages: %v", sent)
+	}
+	if starts, _, _, _ := base.snapshot(); len(starts) != 1 {
+		t.Fatalf("recalled turn created a replacement fallback card: %v", starts)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled fallback persisted an undelivered answer: %v", history)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallRemovesDeliveredFallbackReplacement(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubDeliveredFallbackRichCardPlatform{
+		stubRichCardSilentPlatform: base,
+		replacementSent:            make(chan struct{}),
+		releaseReturn:              make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+
+	sessionKey := "feishu:user-rich-fallback-delivered-recall"
+	msgID := "m-rich-fallback-delivered-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-fallback-delivered-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-fallback-delivered-recall",
+		currentTurnUserMessageTimeMs: 988,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: strings.Repeat("fallback answer ", 400), Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.replacementSent:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not deliver a tracked rich-card fallback replacement")
+	}
+	state.cancelTurnSilently(msgID)
+	close(p.releaseReturn)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not clean up its delivered fallback replacement")
+	}
+
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("rich-card fallback emitted undeletable ordinary messages: %v", sent)
+	}
+	starts, _, _, _ := base.snapshot()
+	if len(starts) != 2 || !strings.Contains(starts[1], "status=done") {
+		t.Fatalf("fallback starts = %v, want initial card plus one completed replacement", starts)
+	}
+	deleted := p.deleted()
+	if len(deleted) != 2 || deleted[0] != "handle-1" || deleted[1] != "handle-2" {
+		t.Fatalf("deleted handles = %v, want original and replacement cards", deleted)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled replacement persisted an undelivered answer: %v", history)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardRecallRemovesDeliveredCardlessFallbackReplacement(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	p := &stubDeliveredFallbackRichCardPlatform{
+		stubRichCardSilentPlatform: base,
+		initialStartFails:          true,
+		replacementSent:            make(chan struct{}),
+		releaseReturn:              make(chan struct{}),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+
+	sessionKey := "feishu:user-rich-cardless-fallback-recall"
+	msgID := "m-rich-cardless-fallback-recall"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	initialHistoryLen := session.HistoryLen()
+	agentSession := newControllableSession("s-rich-cardless-fallback-recall")
+	state := &interactiveState{
+		agentSession:                 agentSession,
+		platform:                     p,
+		replyCtx:                     "ctx-rich-cardless-fallback-recall",
+		currentTurnUserMessageTimeMs: 989,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: strings.Repeat("cardless fallback answer ", 400), Done: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, msgID, time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+
+	select {
+	case <-p.replacementSent:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not retry cardless delivery through a tracked replacement")
+	}
+	state.cancelTurnSilently(msgID)
+	close(p.releaseReturn)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled turn did not clean up its cardless fallback replacement")
+	}
+
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("cardless fallback emitted undeletable ordinary messages: %v", sent)
+	}
+	starts, _, _, _ := base.snapshot()
+	if len(starts) != 1 || !strings.Contains(starts[0], "status=done") {
+		t.Fatalf("fallback starts = %v, want one completed tracked replacement", starts)
+	}
+	deleted := p.deleted()
+	if len(deleted) != 1 || deleted[0] != "handle-1" {
+		t.Fatalf("deleted handles = %v, want the cardless replacement handle", deleted)
+	}
+	if history := session.GetHistory(0); len(history) != initialHistoryLen {
+		t.Fatalf("recalled cardless replacement persisted an undelivered answer: %v", history)
+	}
+}
+
+func TestProcessInteractiveEvents_QueuedRichCardRecallUsesFreshTerminalContext(t *testing.T) {
+	base := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	dwellPlatform := &stubRichCardAnswerDwellPlatform{stubRichCardSilentPlatform: base, dwell: time.Millisecond}
+	p := &stubBlockingTerminalRichCardPlatform{
+		stubRichCardAnswerDwellPlatform: dwellPlatform,
+		blockStage:                      "update",
+		blockText:                       "response2",
+		terminalStarted:                 make(chan struct{}),
+		terminalCanceled:                make(chan struct{}),
+		releaseTerminal:                 make(chan struct{}),
+	}
+	sess := newQueuingSession("qs-rich-terminal-context")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CardMode: "rich", Mode: "compact"})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	key := "feishu:user-rich-terminal-context"
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "initial-msg")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", messageID: "msg-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveStates[key] = state
+
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		for {
+			sess.sendMu.Lock()
+			sent := len(sess.sendCalls)
+			sess.sendMu.Unlock()
+			if sent > 0 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+	}()
+
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg-turn1", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+
+	select {
+	case <-p.terminalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued turn did not enter terminal rich-card I/O")
+	}
+	state.cancelTurnSilently("msg-turn2")
+	select {
+	case <-p.terminalCanceled:
+	case <-time.After(time.Second):
+		close(p.releaseTerminal)
+		t.Fatal("queued turn terminal I/O did not observe its own recall signal")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recalled queued turn did not exit terminal rich-card I/O")
+	}
+
+	_, _, updates, _ := base.snapshot()
+	for _, update := range updates {
+		if strings.Contains(update, "status=done") && strings.Contains(update, "response2") {
+			t.Fatalf("recalled queued turn patched its card to Done: %v", updates)
+		}
+	}
+	if sent := base.getSent(); len(sent) != 0 {
+		t.Fatalf("recalled queued turn emitted a fallback answer: %v", sent)
+	}
+	for _, entry := range session.GetHistory(0) {
+		if entry.Role == "assistant" && entry.Content == "response2" {
+			t.Fatalf("recalled queued turn persisted an undelivered answer: %v", session.GetHistory(0))
+		}
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardNeverStreamsFragmentedAgentFooter(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-fragmented-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-fragmented-footer")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-fragmented-footer"}
+	e.interactiveStates[sessionKey] = state
+
+	footer := "*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*"
+	for _, chunk := range []string{"answer\n\n", "*gpt-5.5 · xhigh · out ", "864 · in 177.7k ", "cr 175.5k · ctx 69%*"} {
+		agentSession.events <- Event{Type: EventText, Content: chunk}
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "answer\n\n" + footer, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-fragmented-footer", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	rendered := strings.Join(append(streams, updates...), "\n")
+	for _, private := range []string{"gpt-5.5", "out 864", "ctx 69%"} {
+		if strings.Contains(rendered, private) {
+			t.Fatalf("fragmented Agent footer leaked %q into rich-card payloads: %q", private, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "answer") {
+		t.Fatalf("visible answer was lost while filtering fragmented footer: %q", rendered)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardPreservesFooterLikeLineWhenContinuationArrives(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-footer-like-prose"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-footer-like-prose")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-footer-like-prose"}
+	e.interactiveStates[sessionKey] = state
+
+	footerLike := "*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*"
+	continuation := " is a quoted example, not a footer."
+	for _, chunk := range []string{"answer\n\n", footerLike, continuation} {
+		agentSession.events <- Event{Type: EventText, Content: chunk}
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "answer\n\n" + footerLike + continuation, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-footer-like-prose", time.Now(), nil, nil, state.replyCtx)
+
+	_, streams, updates, _ := p.snapshot()
+	rendered := strings.Join(append(streams, updates...), "\n")
+	if !strings.Contains(rendered, footerLike+continuation) {
+		t.Fatalf("footer-like prose split at a transport boundary was lost: %q", rendered)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardFlushesFooterCandidateBeforeToolBoundary(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich", HideAgentFooter: true})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1})
+
+	sessionKey := "feishu:user-rich-footer-boundary"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-footer-boundary")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-footer-boundary"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Searching..."}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "private-tool"}
+	agentSession.events <- Event{Type: EventText, Content: " Found it."}
+	agentSession.events <- Event{Type: EventResult, Content: "Searching... Found it.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-footer-boundary", time.Now(), nil, nil, state.replyCtx)
+
+	calls := p.callSnapshot()
+	searchingStream := -1
+	toolProgress := -1
+	for i, call := range calls {
+		if call == "stream:Searching..." {
+			searchingStream = i
+		}
+		if strings.HasPrefix(call, "update:") && strings.Contains(call, "steps=1") && toolProgress < 0 {
+			toolProgress = i
+		}
+	}
+	if searchingStream < 0 || toolProgress < 0 || searchingStream >= toolProgress {
+		t.Fatalf("pre-tool text was not flushed before anonymous tool progress: %v", calls)
 	}
 }
 
@@ -17282,5 +18286,71 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 	// doesn't silently downgrade --audio/--video to --file.
 	if !strings.Contains(prompt, "Do NOT downgrade") {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
+	}
+}
+
+func TestStripAgentFooterLines(t *testing.T) {
+	input := "answer\n\n*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*"
+	if got, want := stripAgentFooterLines(input), "answer"; got != want {
+		t.Fatalf("stripAgentFooterLines() = %q, want %q", got, want)
+	}
+
+	prose := "The words out 10, in 20, and ctx 30% can appear in prose."
+	if got := stripAgentFooterLines(prose); got != prose {
+		t.Fatalf("stripAgentFooterLines() stripped prose: %q", got)
+	}
+
+	crlf := "answer\r\n\r\n*gpt-5.5 · xhigh · out 864 · in 177.7k cr 175.5k · ctx 69%*\r\n"
+	if got, want := stripAgentFooterLines(crlf), "answer"; got != want {
+		t.Fatalf("stripAgentFooterLines(CRLF) = %q, want %q", got, want)
+	}
+}
+
+func TestPostPermissionPreviewSegmentRequiresAggregateEvidence(t *testing.T) {
+	tests := []struct {
+		name           string
+		fullResponse   string
+		delivered      string
+		streamedSuffix string
+		want           string
+		wantTrimmed    bool
+	}{
+		{
+			name:           "aggregate turn",
+			fullResponse:   "Before permission. After permission.",
+			delivered:      "Before permission. ",
+			streamedSuffix: "After permission.",
+			want:           "After permission.",
+			wantTrimmed:    true,
+		},
+		{
+			name:           "final-only suffix shares prefix",
+			fullResponse:   "okay",
+			delivered:      "ok",
+			streamedSuffix: "okay",
+			want:           "okay",
+		},
+		{
+			name:         "no streamed suffix evidence",
+			fullResponse: "Before permission. After permission.",
+			delivered:    "Before permission. ",
+			want:         "Before permission. After permission.",
+		},
+		{
+			name:         "permission ends the turn",
+			fullResponse: "Before permission.",
+			delivered:    "Before permission. ",
+			want:         "",
+			wantTrimmed:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, trimmed := postPermissionPreviewSegment(tt.fullResponse, tt.delivered, tt.streamedSuffix)
+			if got != tt.want || trimmed != tt.wantTrimmed {
+				t.Fatalf("postPermissionPreviewSegment() = (%q, %v), want (%q, %v)", got, trimmed, tt.want, tt.wantTrimmed)
+			}
+		})
 	}
 }

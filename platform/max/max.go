@@ -20,6 +20,19 @@ import (
 
 func init() {
 	core.RegisterPlatform("max", New)
+	core.RegisterPlatformOptionsValidator("max", validateOptions)
+}
+
+func validateOptions(opts map[string]any) error {
+	if err := core.RequireStringOptions("max", "token")(opts); err != nil {
+		return err
+	}
+	if raw, ok := opts["webhook_resubscribe_interval"].(string); ok && raw != "" {
+		if _, err := time.ParseDuration(raw); err != nil {
+			return fmt.Errorf("max: webhook_resubscribe_interval: %w", err)
+		}
+	}
+	return nil
 }
 
 const (

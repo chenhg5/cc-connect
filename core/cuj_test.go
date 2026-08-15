@@ -189,6 +189,11 @@ func newCUJEnv(t *testing.T) *cujEnv {
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
 	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop CUJ engine: %v", err)
+		}
+	})
 	return &cujEnv{
 		t:       t,
 		engine:  e,
@@ -984,6 +989,24 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 	}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop reconnect CUJ engine: %v", err)
+		}
+	})
+	waitForFinalReply := func(reason string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			for _, sent := range plat.getSent() {
+				if strings.Contains(sent, "ok") {
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%s did not produce a final reply. Got: %v", reason, plat.getSent())
+	}
 
 	// 1. Initial connect.
 	e.OnPlatformReady(plat)
@@ -998,15 +1021,7 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 		Content: "before disconnect", ReplyCtx: "ctx-karen",
 	}
 	e.ReceiveMessage(plat, msg1)
-	deadline := time.After(2 * time.Second)
-	for len(plat.getSent()) < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("first message did not produce a reply")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	waitForFinalReply("first message")
 	plat.clearSent()
 
 	// 3. Simulate WS drop.
@@ -1025,15 +1040,7 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 		Content: "after reconnect", ReplyCtx: "ctx-karen",
 	}
 	e.ReceiveMessage(plat, msg2)
-	deadline = time.After(2 * time.Second)
-	for len(plat.getSent()) < 1 {
-		select {
-		case <-deadline:
-			t.Fatalf("post-reconnect message did not produce a reply (engine wedged?). Got: %v", plat.getSent())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	waitForFinalReply("post-reconnect message")
 }
 
 // errSimDisconnect is a sentinel used by CUJ-G3 to simulate a transient
@@ -1061,10 +1068,18 @@ func TestCUJ_A1_FirstMessageGetsReply(t *testing.T) {
 // prompts. Asserts the history-injection contract end-to-end.
 func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	env := newCUJEnv(t)
+	promptCount := func() int {
+		env.agent.mu.Lock()
+		defer env.agent.mu.Unlock()
+		if len(env.agent.sessions) == 0 {
+			return 0
+		}
+		return len(env.agent.sessions[0].getSentPrompts())
+	}
 	env.userSends("alex", "my name is alex")
-	env.waitFor("turn1 reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.waitFor("turn1 agent prompt", 2*time.Second, func() bool { return promptCount() >= 1 })
 	env.userSends("alex", "what is my name")
-	env.waitFor("turn2 reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 2 })
+	env.waitFor("turn2 agent prompt", 2*time.Second, func() bool { return promptCount() >= 2 })
 
 	// Verify the agent has stored at least 2 user prompts; this guards
 	// against any regression that drops history from the agent's input.
@@ -1421,6 +1436,198 @@ func TestCUJ_C6_ModeSwitchAcknowledged(t *testing.T) {
 	// User must get SOME feedback that the mode change registered.
 	if env.lastSent() == "" {
 		t.Fatal("/mode yolo got no user-visible feedback")
+	}
+}
+
+// cujPermissionPreviewSession reproduces an Agent that reports the entire turn
+// in EventResult after streaming text on both sides of a permission prompt.
+type cujPermissionPreviewSession struct {
+	events             chan Event
+	permissionResolved chan struct{}
+	permissionOnce     sync.Once
+	postPermissionText string
+}
+
+func newCUJPermissionPreviewSession(postPermissionText string) *cujPermissionPreviewSession {
+	return &cujPermissionPreviewSession{
+		events:             make(chan Event, 8),
+		permissionResolved: make(chan struct{}),
+		postPermissionText: postPermissionText,
+	}
+}
+
+func (s *cujPermissionPreviewSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventText, Content: "Before permission. "}
+		s.events <- Event{
+			Type:         EventPermissionRequest,
+			RequestID:    "cuj-preview-permission",
+			ToolName:     "write_file",
+			ToolInput:    "demo.txt",
+			ToolInputRaw: map[string]any{"path": "demo.txt"},
+		}
+		<-s.permissionResolved
+		if s.postPermissionText != "" {
+			s.events <- Event{Type: EventText, Content: s.postPermissionText}
+		}
+		s.events <- Event{Type: EventResult, Content: "Before permission. " + s.postPermissionText, Done: true}
+	}()
+	return nil
+}
+
+func (s *cujPermissionPreviewSession) RespondPermission(_ string, _ PermissionResult) error {
+	s.permissionOnce.Do(func() { close(s.permissionResolved) })
+	return nil
+}
+func (s *cujPermissionPreviewSession) Events() <-chan Event     { return s.events }
+func (s *cujPermissionPreviewSession) CurrentSessionID() string { return "cuj-preview-session" }
+func (s *cujPermissionPreviewSession) Alive() bool              { return true }
+func (s *cujPermissionPreviewSession) Close() error             { return nil }
+
+type cujPermissionPreviewAgent struct {
+	session *cujPermissionPreviewSession
+}
+
+func (a *cujPermissionPreviewAgent) Name() string { return "cuj-permission-preview" }
+func (a *cujPermissionPreviewAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.session, nil
+}
+func (a *cujPermissionPreviewAgent) ListSessions(context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *cujPermissionPreviewAgent) Stop() error { return nil }
+
+// cujEditablePreviewPlatform records the content of each distinct editable
+// message exactly as a user would see it after all updates.
+type cujEditablePreviewPlatform struct {
+	stubPlatformEngine
+	previewMu sync.Mutex
+	nextID    int
+	order     []string
+	visible   map[string]string
+}
+
+func (p *cujEditablePreviewPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	p.nextID++
+	handle := fmt.Sprintf("preview-%d", p.nextID)
+	p.order = append(p.order, handle)
+	p.visible[handle] = content
+	return handle, nil
+}
+
+func (p *cujEditablePreviewPlatform) UpdateMessage(_ context.Context, handle any, content string) error {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	p.visible[fmt.Sprint(handle)] = content
+	return nil
+}
+
+func (p *cujEditablePreviewPlatform) visiblePreviews() []string {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	result := make([]string, 0, len(p.order))
+	for _, handle := range p.order {
+		result = append(result, p.visible[handle])
+	}
+	return result
+}
+
+// CUJ-C7 · A permission prompt permanently closes the current editable
+// preview. After approval, the next preview must contain only the new suffix,
+// or no new preview at all when permission ends the turn. An Agent's aggregate
+// EventResult must not duplicate the earlier message in either case.
+func TestCUJ_C7_PermissionPreviewDoesNotDuplicateEarlierText(t *testing.T) {
+	tests := []struct {
+		name               string
+		postPermissionText string
+		wantPreviews       []string
+	}{
+		{
+			name:               "post-permission suffix",
+			postPermissionText: "After permission.",
+			wantPreviews:       []string{"Before permission. ", "After permission."},
+		},
+		{
+			name:         "permission ends turn",
+			wantPreviews: []string{"Before permission. "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := newCUJPermissionPreviewSession(tt.postPermissionText)
+			agent := &cujPermissionPreviewAgent{session: session}
+			platform := &cujEditablePreviewPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "telegram"},
+				visible:            make(map[string]string),
+			}
+			engine := NewEngine("test", agent, []Platform{platform}, t.TempDir()+"/sessions.json", LangEnglish)
+			engine.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "legacy"})
+			engine.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 1, MaxChars: 500})
+			engine.SetReplyFooterEnabled(false)
+
+			waitFor := func(reason string, condition func() bool) {
+				t.Helper()
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					if condition() {
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				t.Fatalf("timed out waiting for %s; previews=%q sent=%q", reason, platform.visiblePreviews(), platform.getSent())
+			}
+
+			sessionKey := "telegram:cuj-preview-user-" + tt.name
+			engine.ReceiveMessage(platform, &Message{
+				SessionKey: sessionKey,
+				Platform:   "telegram",
+				MessageID:  "cuj-preview-question",
+				UserID:     "cuj-preview-user",
+				Content:    "Please update demo.txt",
+				ReplyCtx:   "cuj-preview-chat",
+			})
+			waitFor("permission prompt and first preview", func() bool {
+				return len(platform.getSent()) > 0 && len(platform.visiblePreviews()) == 1
+			})
+
+			engine.ReceiveMessage(platform, &Message{
+				SessionKey: sessionKey,
+				Platform:   "telegram",
+				MessageID:  "cuj-preview-allow",
+				UserID:     "cuj-preview-user",
+				Content:    "allow",
+				ReplyCtx:   "cuj-preview-chat",
+			})
+
+			aggregate := strings.TrimRight("Before permission. "+tt.postPermissionText, "\n ")
+			waitFor("aggregate assistant history", func() bool {
+				history := engine.sessions.GetOrCreateActive(sessionKey).GetHistory(0)
+				for _, entry := range history {
+					if entry.Role == "assistant" && entry.Content == aggregate {
+						return true
+					}
+				}
+				return false
+			})
+
+			previews := platform.visiblePreviews()
+			if len(previews) != len(tt.wantPreviews) {
+				t.Fatalf("visible previews = %q, want %q", previews, tt.wantPreviews)
+			}
+			for i, want := range tt.wantPreviews {
+				if previews[i] != want {
+					t.Fatalf("visible preview %d = %q, want %q", i, previews[i], want)
+				}
+			}
+			for _, sent := range platform.getSent() {
+				if strings.Contains(sent, aggregate) {
+					t.Fatalf("aggregate response was duplicated as a side message: %q", sent)
+				}
+			}
+		})
 	}
 }
 
@@ -1833,7 +2040,7 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 
 	// Establish a session.
 	env.userSends("g5", "hello")
-	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.waitFor("turn1 final reply", 2*time.Second, func() bool { return env.sentContains("ok") })
 	env.plat.clearSent()
 
 	// On the NEXT user turn, make the agent emit an EventError instead of
@@ -1857,7 +2064,7 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 
 	env.userSends("g5", "run a tool that will fail")
 	env.waitFor("error reply visible", 2*time.Second, func() bool {
-		return len(env.plat.getSent()) >= 1
+		return env.sentContains("permission denied") || env.sentContains("bash tool exited")
 	})
 
 	if !env.sentContains("permission denied") && !env.sentContains("bash tool exited") {

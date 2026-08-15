@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { execFileSync, execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
@@ -60,7 +60,7 @@ function needsReinstall() {
 if (needsReinstall()) {
   console.log(`[cc-connect-next] Binary missing or outdated, installing v${EXPECTED_VER}...`);
   try {
-    execSync("node " + JSON.stringify(path.join(__dirname, "install.js")), {
+    execFileSync(process.execPath, [path.join(__dirname, "install.js")], {
       stdio: "inherit",
       cwd: __dirname,
     });

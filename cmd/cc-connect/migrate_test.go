@@ -11,7 +11,355 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	ccconfig "github.com/timmyagentic/cc-connect-next/config"
 )
+
+func TestNormalizeMigrationSourceVersion(t *testing.T) {
+	for _, version := range []string{
+		"v1.4.1",
+		"1.4.1",
+		"v1.5.0-beta.1",
+		"v1.5.0-beta.2",
+		"v1.5.0-beta.3",
+	} {
+		got, err := normalizeMigrationSourceVersion(version)
+		if err != nil {
+			t.Fatalf("normalizeMigrationSourceVersion(%q): %v", version, err)
+		}
+		if !strings.HasPrefix(got, "v") {
+			t.Fatalf("normalizeMigrationSourceVersion(%q) = %q, want canonical v prefix", version, got)
+		}
+	}
+
+	if got, err := normalizeMigrationSourceVersion("auto"); err != nil || got != automaticMigrationSourceVersion {
+		t.Fatalf("auto source version = %q, %v", got, err)
+	}
+	if _, err := normalizeMigrationSourceVersion("v1.5.0-beta.4"); err == nil {
+		t.Fatal("unknown future source release was accepted")
+	}
+}
+
+func TestPrepareLegacyMigration_KnownSourceReleaseMatrix(t *testing.T) {
+	for _, version := range []string{
+		"v1.4.1",
+		"v1.5.0-beta.1",
+		"v1.5.0-beta.2",
+		"v1.5.0-beta.3",
+	} {
+		t.Run(version, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			configText := `[[projects]]
+name = "known-release"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`
+			if version == "v1.5.0-beta.3" {
+				configText = "[display]\nhide_agent_footer = true\n" + configText
+			}
+			writeMigrationFixture(t, filepath.Join(source, "config.toml"), configText)
+
+			plan, err := prepareLegacyMigration(migrationOptions{
+				Source:        source,
+				Target:        target,
+				Home:          root,
+				SourceVersion: version,
+				DryRun:        true,
+			})
+			if err != nil {
+				t.Fatalf("prepare %s migration: %v", version, err)
+			}
+			if plan.SourceVersion != version || plan.Report.SourceVersion != version {
+				t.Fatalf("source version provenance = plan %q report %q, want %q", plan.SourceVersion, plan.Report.SourceVersion, version)
+			}
+		})
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsUnavailableConfiguredPlugin(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "future-project"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "future-platform"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not provide") {
+		t.Fatalf("unsupported configured plugin error = %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after compatibility failure: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsInvalidPluginOptionsBeforeWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "missing-feishu-credentials"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "only-an-app-id"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "app_id and app_secret are required") {
+		t.Fatalf("invalid plugin options error = %v, want Feishu credential refusal", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after plugin-option failure: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsPluginNamesThatRuntimeRegistryWouldReject(t *testing.T) {
+	tests := []struct {
+		name       string
+		configText string
+	}{
+		{
+			name: "agent casing",
+			configText: `[[projects]]
+name = "agent-casing"
+[projects.agent]
+type = "Codex"
+[[projects.platforms]]
+type = "feishu"
+`,
+		},
+		{
+			name: "platform casing",
+			configText: `[[projects]]
+name = "platform-casing"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "Feishu"
+`,
+		},
+		{
+			name: "agent whitespace",
+			configText: `[[projects]]
+name = "agent-whitespace"
+[projects.agent]
+type = " codex "
+[[projects.platforms]]
+type = "feishu"
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), tt.configText)
+
+			_, err := prepareLegacyMigration(migrationOptions{
+				Source:        source,
+				Target:        target,
+				Home:          root,
+				SourceVersion: "v1.5.0-beta.3",
+				DryRun:        true,
+			})
+			if err == nil || !strings.Contains(err.Error(), "does not provide") {
+				t.Fatalf("registry-semantics error = %v, want unavailable-plugin refusal", err)
+			}
+			if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+				t.Fatalf("target was written after registry-semantics failure: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestPrepareLegacyMigration_ResolvesEnvironmentBeforeSemanticAndRegistryValidation(t *testing.T) {
+	t.Setenv("CC_NEXT_MIGRATION_DISPLAY_MODE", "compact")
+	t.Setenv("CC_NEXT_MIGRATION_AGENT_TYPE", "codex")
+	t.Setenv("CC_NEXT_MIGRATION_PLATFORM_TYPE", "feishu")
+
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[display]
+mode = "${CC_NEXT_MIGRATION_DISPLAY_MODE}"
+[[projects]]
+name = "environment-backed"
+[projects.agent]
+type = "${CC_NEXT_MIGRATION_AGENT_TYPE}"
+[[projects.platforms]]
+type = "${CC_NEXT_MIGRATION_PLATFORM_TYPE}"
+[projects.platforms.options]
+app_id = "environment-app-id"
+app_secret = "environment-app-secret"
+`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err != nil {
+		t.Fatalf("environment-backed config was rejected before migration: %v", err)
+	}
+	if plan == nil {
+		t.Fatal("environment-backed config produced no migration plan")
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run wrote target state: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_UsesResolvedProjectNamesForCustomDataInventory(t *testing.T) {
+	t.Setenv("CC_NEXT_MIGRATION_PROJECT_NAME", "environment-backed")
+
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	customData := filepath.Join(root, "official-state")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(customData)+`"
+[[projects]]
+name = "${CC_NEXT_MIGRATION_PROJECT_NAME}"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "resolved-project-app-id"
+app_secret = "resolved-project-app-secret"
+`)
+	writeMigrationFixture(t, filepath.Join(customData, "environment-backed.json"), `{"sessions":{}}`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err != nil {
+		t.Fatalf("resolved project session inventory was rejected: %v", err)
+	}
+	if _, ok := plan.Main.Files["environment-backed.json"]; !ok {
+		t.Fatalf("resolved project session file is missing from the migration plan: %v", plan.Main.Files)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run wrote target state: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsSemanticallyInvalidConfigBeforeWrites(t *testing.T) {
+	tests := []struct {
+		name       string
+		configText string
+		wantError  string
+	}{
+		{
+			name: "invalid display mode",
+			configText: `[display]
+mode = "verbose"
+[[projects]]
+name = "invalid-display"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`,
+			wantError: "display.mode",
+		},
+		{
+			name: "missing agent type",
+			configText: `[[projects]]
+name = "missing-agent"
+[[projects.platforms]]
+type = "feishu"
+`,
+			wantError: "agent.type is required",
+		},
+		{
+			name: "missing platform",
+			configText: `[[projects]]
+name = "missing-platform"
+[projects.agent]
+type = "codex"
+`,
+			wantError: "needs at least one",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, ".cc-connect")
+			target := filepath.Join(root, ".cc-connect-next")
+			writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), tt.configText)
+
+			_, err := prepareLegacyMigration(migrationOptions{
+				Source:        source,
+				Target:        target,
+				Home:          root,
+				SourceVersion: "v1.5.0-beta.3",
+				DryRun:        true,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("semantic validation error = %v, want %q", err, tt.wantError)
+			}
+			if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+				t.Fatalf("target was written after semantic validation failure: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsUnsupportedConfigBehavior(t *testing.T) {
+	for _, setting := range []string{
+		"[[projects]]\nname = \"idle\"\nagent_session_idle_timeout_mins = 10\n[projects.agent]\ntype = \"codex\"\n",
+	} {
+		root := t.TempDir()
+		source := filepath.Join(root, ".cc-connect")
+		target := filepath.Join(root, ".cc-connect-next")
+		writeMigrationFixture(t, filepath.Join(source, "config.toml"), setting)
+
+		_, err := prepareLegacyMigration(migrationOptions{
+			Source:        source,
+			Target:        target,
+			Home:          root,
+			SourceVersion: "v1.5.0-beta.3",
+			DryRun:        true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "preserve bytes but not behavior") {
+			t.Fatalf("unsupported source setting error = %v", err)
+		}
+		if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+			t.Fatalf("target was written after schema failure: %v", statErr)
+		}
+	}
+}
 
 func TestRunMigrateCommandReturnsFailureForMissingSource(t *testing.T) {
 	root := t.TempDir()
@@ -155,7 +503,7 @@ func TestMigrateLegacyDataRewritesAllTOMLStringForms(t *testing.T) {
 		{name: "escaped quoted key", config: `"data\u005fdir" = """$SOURCE"""` + "\n"},
 		{
 			name: "ignore assignment text inside preceding multiline value",
-			config: "note = \"\"\"\n" +
+			config: "provider_presets_url = \"\"\"\n" +
 				`data_dir = "/must-not-match"` + "\n\"\"\"\n" +
 				`data_dir = """$SOURCE"""` + "\n",
 		},
@@ -315,6 +663,10 @@ func TestPrepareLegacyMigrationRefusesCaseOnlyTargetAlias(t *testing.T) {
 	source := filepath.Join(root, ".cc-connect")
 	target := filepath.Join(root, ".CC-CONNECT")
 	writeMigrationFixture(t, filepath.Join(source, "config.toml"), "language = \"zh\"\n")
+	originalConfig, err := os.ReadFile(filepath.Join(source, "config.toml"))
+	if err != nil {
+		t.Fatalf("read original source config: %v", err)
+	}
 
 	sourceInfo, err := os.Stat(source)
 	if err != nil {
@@ -336,7 +688,7 @@ func TestPrepareLegacyMigrationRefusesCaseOnlyTargetAlias(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "separate directories") {
 		t.Fatalf("prepareLegacyMigration() error = %v, want case-only alias refusal", err)
 	}
-	if got, readErr := os.ReadFile(filepath.Join(source, "config.toml")); readErr != nil || string(got) != "language = \"zh\"\n" {
+	if got, readErr := os.ReadFile(filepath.Join(source, "config.toml")); readErr != nil || !bytes.Equal(got, originalConfig) {
 		t.Fatalf("source config changed during alias preflight: content=%q err=%v", got, readErr)
 	}
 }
@@ -437,6 +789,9 @@ work_dir = "`+filepath.ToSlash(workDir)+`"
 	var manifest migrationManifest
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatalf("parse migration manifest: %v", err)
+	}
+	if manifest.Version != 2 || manifest.SourceVersion != automaticMigrationSourceVersion {
+		t.Fatalf("manifest compatibility metadata = version %d source %q, want 2 and %q", manifest.Version, manifest.SourceVersion, automaticMigrationSourceVersion)
 	}
 	if manifest.SourceDataDir != canonicalData || len(manifest.Files) != 6 {
 		t.Fatalf("manifest does not inventory the complete migration: %+v", manifest)
@@ -858,7 +1213,7 @@ func TestMigrateLegacyDataUsesDefaultDataDirContainingCustomConfigRoot(t *testin
 }
 
 func TestKnownLegacyDataDirPathAllowsOnlyOwnedPersistentPaths(t *testing.T) {
-	cfg := legacyMigrationConfig{Projects: []legacyMigrationProject{{Name: "demo"}, {Name: " bot "}, {Name: "team/bot"}}}
+	cfg := &ccconfig.Config{Projects: []ccconfig.ProjectConfig{{Name: "demo"}, {Name: " bot "}, {Name: "team/bot"}}}
 	tests := []struct {
 		rel   string
 		isDir bool
@@ -1625,6 +1980,11 @@ name = "a"
 type = "codex"
 [projects.agent.options]
 work_dir = "`+filepath.ToSlash(projectA)+`"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "project-a-app-id"
+app_secret = "project-a-app-secret"
 
 [[projects]]
 name = "b"
@@ -1632,6 +1992,11 @@ name = "b"
 type = "codex"
 [projects.agent.options]
 work_dir = "`+filepath.ToSlash(projectB)+`"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "project-b-app-id"
+app_secret = "project-b-app-secret"
 `)
 	writeMigrationFixture(t, filepath.Join(projectA, ".cc-connect", "attachments", "legacy-a.txt"), "legacy-a")
 	writeMigrationFixture(t, filepath.Join(projectB, ".cc-connect", "attachments", "legacy-b.txt"), "legacy-b")
@@ -1768,6 +2133,50 @@ func TestMigrateLegacyDataTreatsMissingConfiguredDataDirAsEmpty(t *testing.T) {
 }
 
 func writeMigrationFixture(t *testing.T, path, content string) {
+	t.Helper()
+	// Most migration tests exercise inventory, isolation, and rollback rather
+	// than startup validation. Keep their config fixtures runnable so those
+	// tests reach the boundary they intend to cover. Semantic-rejection tests
+	// use writeRawMigrationFixture explicitly.
+	if filepath.Base(path) == "config.toml" {
+		projectCount := strings.Count(content, "[[projects]]")
+		switch projectCount {
+		case 0:
+			content = strings.TrimRight(content, "\n") + `
+
+[[projects]]
+name = "migration-fixture"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+`
+		case 1:
+			if !strings.Contains(content, "[projects.agent]") {
+				content = strings.TrimRight(content, "\n") + `
+[projects.agent]
+type = "codex"
+`
+			}
+			if !strings.Contains(content, "[[projects.platforms]]") {
+				content = strings.TrimRight(content, "\n") + `
+[[projects.platforms]]
+type = "feishu"
+`
+			}
+		}
+		if strings.Count(content, `type = "feishu"`) == 1 && !strings.Contains(content, "[projects.platforms.options]") {
+			content = strings.TrimRight(content, "\n") + `
+[projects.platforms.options]
+app_id = "migration-fixture-app-id"
+app_secret = "migration-fixture-app-secret"
+`
+		}
+	}
+	writeRawMigrationFixture(t, path, content)
+}
+
+func writeRawMigrationFixture(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("mkdir fixture: %v", err)

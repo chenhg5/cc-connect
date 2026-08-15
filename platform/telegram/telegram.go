@@ -26,6 +26,26 @@ var telegramConvertAudioToOpus = core.ConvertAudioToOpus
 
 func init() {
 	core.RegisterPlatform("telegram", New)
+	core.RegisterPlatformOptionsValidator("telegram", validateOptions)
+}
+
+func validateOptions(opts map[string]any) error {
+	if err := core.RequireStringOptions("telegram", "token")(opts); err != nil {
+		return err
+	}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		if _, err := url.Parse(proxyURL); err != nil {
+			return fmt.Errorf("telegram: invalid proxy URL %q: %w", proxyURL, err)
+		}
+	}
+	if style, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(style)) {
+		case "", "legacy", "compact", "card":
+		default:
+			return fmt.Errorf("telegram: invalid progress_style %q (want legacy, compact, or card)", style)
+		}
+	}
+	return nil
 }
 
 type replyContext struct {

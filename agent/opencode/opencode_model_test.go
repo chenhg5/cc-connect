@@ -756,6 +756,11 @@ func TestAvailableModels_BackgroundRefreshUpdatesDiskCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	a := agent.(*Agent)
+	// The final AvailableModels assertion starts a second background refresh.
+	// Wait for it before t.TempDir cleanup so AtomicWriteFile cannot recreate a
+	// cache entry while the test framework removes the directory.
+	t.Cleanup(func() { a.refreshWg.Wait() })
 	switcher, ok := agent.(core.ModelSwitcher)
 	if !ok {
 		t.Fatalf("New() agent does not implement core.ModelSwitcher")

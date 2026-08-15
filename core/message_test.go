@@ -106,3 +106,52 @@ func TestSaveFilesToDisk_RejectsPathTraversal(t *testing.T) {
 		t.Errorf("legitimate ok.txt not saved: %v", err)
 	}
 }
+
+func TestSaveFilesToDisk_ScopesDuplicateNamesByMessage(t *testing.T) {
+	workDir := t.TempDir()
+	first := SaveFilesToDisk(workDir, []FileAttachment{{
+		MessageID: "message-one",
+		FileName:  "report.txt",
+		Data:      []byte("first"),
+	}})
+	second := SaveFilesToDisk(workDir, []FileAttachment{{
+		MessageID: "message-two",
+		FileName:  "report.txt",
+		Data:      []byte("second"),
+	}})
+
+	if len(first) != 1 || len(second) != 1 || first[0] == second[0] {
+		t.Fatalf("message-scoped paths = %v and %v", first, second)
+	}
+	for path, want := range map[string]string{first[0]: "first", second[0]: "second"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("read %s = %q, %v; want %q", path, got, err, want)
+		}
+	}
+}
+
+func TestSaveFilesToDisk_DuplicateNamesWithinMessageAreUnique(t *testing.T) {
+	workDir := t.TempDir()
+	paths := SaveFilesToDisk(workDir, []FileAttachment{
+		{MessageID: "message", FileName: "same.txt", Data: []byte("one")},
+		{MessageID: "message", FileName: "same.txt", Data: []byte("two")},
+	})
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Fatalf("duplicate attachment paths = %v", paths)
+	}
+	if got := filepath.Base(paths[1]); got != "same_1.txt" {
+		t.Fatalf("second duplicate basename = %q, want same_1.txt", got)
+	}
+}
+
+func TestScopeFileAttachmentsUsesTriggerMessageWithoutMutatingInput(t *testing.T) {
+	input := []FileAttachment{{FileName: "report.txt"}}
+	got := scopeFileAttachments(input, "trigger-message")
+	if got[0].MessageID != "trigger-message" {
+		t.Fatalf("scoped message id = %q", got[0].MessageID)
+	}
+	if input[0].MessageID != "" {
+		t.Fatalf("input was mutated: %#v", input)
+	}
+}

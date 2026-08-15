@@ -16,6 +16,7 @@ import (
 
 func init() {
 	core.RegisterAgent("tmux", New)
+	core.RegisterAgentOptionsValidator("tmux", core.RequireStringOptions("tmux", "session"))
 }
 
 // Agent drives a persistent tmux pane as an interactive shell agent.

@@ -2,9 +2,9 @@
 
 Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), with a native Feishu Card 2.0 response lifecycle.
 
-[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md)
+[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
 
-> Status: `0.1.0-beta.1` is under active development. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
+> Current release: `0.1.0-beta.1`, the first public prerelease. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
 ## What changes for Feishu
 
@@ -14,23 +14,23 @@ One agent turn stays in one quoted native card:
 2. Show anonymous progress only: `推理 N 次 · 工具 N 次`.
 3. Switch the same card to `⏳ 正在调用工具…` as tool calls occur.
 4. Replace progress with `✍️ 正在回答` when answer text begins.
-5. Stream the `main_text` element through CardKit when `card_id` is available; fall back to full-card updates safely.
+5. Stream the `main_text` element through CardKit when `card_id` is available; even one-shot Agent answers retain a perceptible answering/typewriter phase before Done, with safe full-card fallback.
 6. Finalize the same card as `✅ Done`, or `⚠️ 未完成` on error.
 
 Privacy is enforced at two layers: the engine stores only anonymous event kinds for rich-card progress, and the Feishu renderer ignores all reasoning/tool names, inputs, results, model, token, context, footer, and work-directory fields. The card payload has no expandable panel.
 
 ## Install
 
-### npm release build
+### npm beta
 
-After the first beta is published:
+Install the published beta channel:
 
 ```bash
 npm install -g cc-connect-next@beta
 cc-connect-next --version
 ```
 
-The npm package and GitHub release use the same version and download the matching native binary.
+The npm package and GitHub release use the same version. The installer fetches that release's `checksums.txt`, selects the exact platform archive, verifies SHA-256, and only then extracts and atomically replaces the binary.
 
 ### Build the current source
 
@@ -65,12 +65,15 @@ Custom locations are supported:
 cc-connect-next migrate \
   --source /path/to/official-data \
   --target /path/to/next-data \
+  --source-version v1.5.0-beta.3 \
   --dry-run
 ```
 
-Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. Migration reads that metadata from official v1.4.1's `$HOME/.cc-connect/daemon.json` even when `--source` points to a separate config directory; a same-named file beside an arbitrary config is not trusted. A malformed metadata file or a recorded working directory that is missing or inaccessible fails preflight instead of silently resolving relative paths against a different directory. If `data_dir` is omitted, migration likewise uses `$HOME/.cc-connect` even when `--source` is a custom config root such as `/etc/cc-connect`; only that root's `config.toml` is copied. If daemon metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly; this override has highest priority.
+The current matrix covers the known persistent layout of official v1.4.1 and v1.5.0-beta.1 through beta.3. Default `--source-version auto` does not execute the binary recorded in daemon metadata; it validates the actual TOML schema, normal startup semantics, registered Agent/platform set, and persistent inventory. An exact known release can be recorded explicitly. A missing Agent/platform, invalid display mode, unsupported setting, or plugin whose behavior cannot be preserved fails before target writes; see the [migration compatibility matrix](docs/migration-compatibility.md).
 
-For safety, migration refuses an effective `data_dir` that contains the official configuration root (for example, `data_dir = "~"`). A separate custom `data_dir` is also inventoried only through the persistent paths owned by CC Connect v1.4.1: sessions, project state/model caches, cron/timer state, bindings, heartbeat/history state, MiniMax local config, Weixin state, Agent prompt files, and Matrix encryption state. Any unexpected regular file or directory makes preflight fail, even when the configuration root lives elsewhere, instead of recursively copying a service home, SSH keys, browser profiles, or unrelated datasets. Point the official installation at a dedicated data directory and verify its state before rerunning migration; the command will never silently create a partial target for this case.
+Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the official daemon's recorded working directory when available. Migration reads that metadata from the official `$HOME/.cc-connect/daemon.json` even when `--source` points to a separate config directory; a same-named file beside an arbitrary config is not trusted. A malformed metadata file or a recorded working directory that is missing or inaccessible fails preflight instead of silently resolving relative paths against a different directory. If `data_dir` is omitted, migration likewise uses `$HOME/.cc-connect` even when `--source` is a custom config root such as `/etc/cc-connect`; only that root's `config.toml` is copied. If daemon metadata is stale or the official instance was only run manually, pass `--runtime-work-dir /absolute/original/cwd` explicitly; this override has highest priority.
+
+For safety, migration refuses an effective `data_dir` that contains the official configuration root (for example, `data_dir = "~"`). A separate custom `data_dir` is also inventoried only through the persistent paths owned by the supported official releases: sessions, project state/model caches, cron/timer state, bindings, heartbeat/history state, MiniMax local config, Weixin state, Agent prompt files, and Matrix encryption state. Any unexpected regular file or directory makes preflight fail, even when the configuration root lives elsewhere, instead of recursively copying a service home, SSH keys, browser profiles, or unrelated datasets. Point the official installation at a dedicated data directory and verify its state before rerunning migration; the command will never silently create a partial target for this case.
 
 Configuration paths use the same `${NAME}` placeholder syntax as official CC Connect. Every referenced variable must also be present in the migration process; an unset variable fails closed instead of being replaced with an empty string that could select the wrong directory. A configured `data_dir` that has not been created yet is treated as empty, so the valid configuration file still migrates. If optional project data cannot be read, or project state/binding metadata is malformed, the global migration continues and still copies that metadata verbatim; every skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
@@ -86,6 +89,7 @@ thinking_messages = false
 tool_messages = false
 show_context_indicator = false
 reply_footer = false
+hide_agent_footer = true
 
 [[projects]]
 name = "my-project"

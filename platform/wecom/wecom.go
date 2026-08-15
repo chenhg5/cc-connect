@@ -29,6 +29,48 @@ import (
 
 func init() {
 	core.RegisterPlatform("wecom", New)
+	core.RegisterPlatformOptionsValidator("wecom", validateOptions)
+}
+
+func validateOptions(opts map[string]any) error {
+	mode, _ := opts["mode"].(string)
+	if mode == "websocket" {
+		botID, _ := opts["bot_id"].(string)
+		secret, _ := opts["bot_secret"].(string)
+		if botID == "" || secret == "" {
+			return fmt.Errorf("wecom-ws: bot_id and bot_secret are required for websocket mode")
+		}
+		return nil
+	}
+
+	corpID, _ := opts["corp_id"].(string)
+	corpSecret, _ := opts["corp_secret"].(string)
+	agentID, _ := opts["agent_id"].(string)
+	callbackToken, _ := opts["callback_token"].(string)
+	callbackAESKey, _ := opts["callback_aes_key"].(string)
+	if corpID == "" || corpSecret == "" || agentID == "" {
+		return fmt.Errorf("wecom: corp_id, corp_secret, and agent_id are required")
+	}
+	if callbackToken == "" || callbackAESKey == "" {
+		return fmt.Errorf("wecom: callback_token and callback_aes_key are required")
+	}
+	if _, err := decodeAESKey(callbackAESKey); err != nil {
+		return fmt.Errorf("wecom: invalid callback_aes_key: %w", err)
+	}
+	apiBaseURL, _ := opts["api_base_url"].(string)
+	apiBaseURL = strings.TrimRight(strings.TrimSpace(apiBaseURL), "/")
+	if apiBaseURL != "" {
+		parsed, err := url.Parse(apiBaseURL)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return fmt.Errorf("wecom: invalid api_base_url %q: must be a valid http(s) URL", apiBaseURL)
+		}
+	}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		if _, err := url.Parse(proxyURL); err != nil {
+			return fmt.Errorf("wecom: invalid proxy URL %q: %w", proxyURL, err)
+		}
+	}
+	return nil
 }
 
 // Incoming XML envelope from WeChat Work callback.

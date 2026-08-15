@@ -21,6 +21,19 @@ import (
 
 func init() {
 	core.RegisterPlatform("weixin", New)
+	core.RegisterPlatformOptionsValidator("weixin", validateOptions)
+}
+
+func validateOptions(opts map[string]any) error {
+	if token, _ := opts["token"].(string); strings.TrimSpace(token) == "" {
+		return fmt.Errorf("weixin: token is required (ilink bot Bearer token)")
+	}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		if _, err := url.Parse(proxyURL); err != nil {
+			return fmt.Errorf("weixin: invalid proxy URL %q: %w", proxyURL, err)
+		}
+	}
+	return nil
 }
 
 const (

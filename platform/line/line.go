@@ -18,6 +18,7 @@ import (
 
 func init() {
 	core.RegisterPlatform("line", New)
+	core.RegisterPlatformOptionsValidator("line", core.RequireStringOptions("line", "channel_secret", "channel_token"))
 }
 
 // replyContext stores the user/group ID for push messages.

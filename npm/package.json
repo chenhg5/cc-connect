@@ -26,7 +26,8 @@
     "cc-connect-next": "run.js"
   },
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "test": "node --test install.test.js"
   },
   "files": [
     "install.js",

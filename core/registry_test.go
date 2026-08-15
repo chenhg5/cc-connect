@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -31,6 +32,30 @@ func TestCreatePlatform_Unknown(t *testing.T) {
 	_, err := CreatePlatform("nonexistent-xyz", nil)
 	if err == nil {
 		t.Error("expected error for unknown platform")
+	}
+}
+
+func TestValidatePlatformOptions_DoesNotConstructPlugin(t *testing.T) {
+	constructed := 0
+	RegisterPlatform("test-validated-plat", func(opts map[string]any) (Platform, error) {
+		constructed++
+		return &stubPlatform{n: "test-validated-plat"}, nil
+	})
+	RegisterPlatformOptionsValidator("test-validated-plat", func(opts map[string]any) error {
+		return errors.New("invalid test options")
+	})
+
+	if err := ValidatePlatformOptions("test-validated-plat", map[string]any{"invalid": true}); err == nil {
+		t.Fatal("ValidatePlatformOptions() accepted invalid options")
+	}
+	if constructed != 0 {
+		t.Fatalf("side-effect-free validation constructed plugin %d times", constructed)
+	}
+	if _, err := CreatePlatform("test-validated-plat", map[string]any{"invalid": true}); err == nil {
+		t.Fatal("CreatePlatform() bypassed the registered option validator")
+	}
+	if constructed != 0 {
+		t.Fatalf("CreatePlatform() constructed plugin after validation failure %d times", constructed)
 	}
 }
 

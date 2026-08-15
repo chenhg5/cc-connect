@@ -6,11 +6,13 @@ Chat with your AI dev assistant from anywhere.
 
 ## Install
 
-After the matching beta release is published:
+Install the public beta channel:
 
 ```bash
 npm install -g cc-connect-next@beta
 ```
+
+The installer verifies the matching GitHub Release archive against `checksums.txt` before extraction.
 
 ## Usage
 
@@ -20,7 +22,7 @@ cc-connect-next --version
 
 # Edit config.toml, then run
 cc-connect-next
-cc-connect-next -config /path/to/config.toml
+cc-connect-next --config /path/to/config.toml
 ```
 
 ## Documentation

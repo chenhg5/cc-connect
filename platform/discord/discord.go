@@ -20,6 +20,26 @@ import (
 
 func init() {
 	core.RegisterPlatform("discord", New)
+	core.RegisterPlatformOptionsValidator("discord", validateOptions)
+}
+
+func validateOptions(opts map[string]any) error {
+	if err := core.RequireStringOptions("discord", "token")(opts); err != nil {
+		return err
+	}
+	if style, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(style)) {
+		case "", "legacy", "compact", "card":
+		default:
+			return fmt.Errorf("discord: invalid progress_style %q (want legacy, compact, or card)", style)
+		}
+	}
+	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
+		if _, err := url.Parse(proxyURL); err != nil {
+			return fmt.Errorf("discord: invalid proxy URL %q: %w", proxyURL, err)
+		}
+	}
+	return nil
 }
 
 const maxDiscordLen = 1900

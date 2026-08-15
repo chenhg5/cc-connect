@@ -102,9 +102,46 @@ func init() {
 	core.RegisterPlatform("feishu", func(opts map[string]any) (core.Platform, error) {
 		return newPlatform("feishu", lark.FeishuBaseUrl, opts)
 	})
+	core.RegisterPlatformOptionsValidator("feishu", validatePlatformOptions("feishu"))
 	core.RegisterPlatform("lark", func(opts map[string]any) (core.Platform, error) {
 		return newPlatform("lark", lark.LarkBaseUrl, opts)
 	})
+	core.RegisterPlatformOptionsValidator("lark", validatePlatformOptions("lark"))
+}
+
+func validatePlatformOptions(name string) core.OptionsValidator {
+	return func(opts map[string]any) error {
+		appID, _ := opts["app_id"].(string)
+		appSecret, _ := opts["app_secret"].(string)
+		if appID == "" || appSecret == "" {
+			return fmt.Errorf("%s: app_id and app_secret are required", name)
+		}
+		if domain, ok := opts["domain"].(string); ok {
+			domain = strings.TrimSpace(domain)
+			if domain != "" {
+				if _, err := url.ParseRequestURI(domain); err != nil {
+					return fmt.Errorf("%s: invalid domain %q: %w", name, domain, err)
+				}
+			}
+		}
+		if style, ok := opts["progress_style"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(style)) {
+			case "", "legacy", "compact", "card":
+			default:
+				return fmt.Errorf("%s: invalid progress_style %q (want legacy, compact, or card)", name, style)
+			}
+		}
+		if raw, ok := opts["image_batch_window_ms"]; ok {
+			milliseconds, err := coerceMilliseconds(raw)
+			if err != nil {
+				return fmt.Errorf("%s: invalid image_batch_window_ms %v: %w", name, raw, err)
+			}
+			if milliseconds < 0 {
+				return fmt.Errorf("%s: image_batch_window_ms must be >= 0, got %d", name, milliseconds)
+			}
+		}
+		return nil
+	}
 }
 
 type replyContext struct {
@@ -4385,6 +4422,14 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 		return fmt.Errorf("%s: %w", p.tag(), err)
 	}
 	return nil
+}
+
+// RichCardAnsweringDwell keeps a one-shot Agent response in the visible
+// answering state long enough for CardKit's native text animation to register
+// before the terminal Done patch. Incrementally streamed answers naturally
+// spend longer than this in the answering state, so the engine adds no delay.
+func (p *Platform) RichCardAnsweringDwell() time.Duration {
+	return 900 * time.Millisecond
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.

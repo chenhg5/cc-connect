@@ -220,6 +220,33 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	}
 }
 
+func TestStreamPreview_UnfreezeStartsFreshPreview(t *testing.T) {
+	preview := &streamPreview{
+		fullText:          "before permission",
+		lastSentText:      "before permission",
+		lastSentAt:        time.Now(),
+		lastSentViaUpdate: true,
+		previewMsgID:      "stale-preview",
+		degraded:          true,
+		pendingStatus:     CardStatusWorking,
+	}
+
+	preview.unfreeze()
+
+	if preview.degraded {
+		t.Fatal("preview remained degraded after permission resolution")
+	}
+	if preview.fullText != "" || preview.lastSentText != "" || !preview.lastSentAt.IsZero() {
+		t.Fatalf("preview accumulation was not reset: %#v", preview)
+	}
+	if preview.lastSentViaUpdate || preview.pendingStatus != "" {
+		t.Fatalf("preview delivery state was not reset: %#v", preview)
+	}
+	if preview.previewMsgID != nil {
+		t.Fatalf("preview retained stale pre-permission handle: %#v", preview.previewMsgID)
+	}
+}
+
 func TestStreamPreview_NonUpdaterPlatform(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	cfg := DefaultStreamPreviewCfg()

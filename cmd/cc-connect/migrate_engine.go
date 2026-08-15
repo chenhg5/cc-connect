@@ -16,15 +16,27 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	ccconfig "github.com/timmyagentic/cc-connect-next/config"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 const migrationManifestFilename = "migration-manifest.json"
+
+const automaticMigrationSourceVersion = "auto-layout-v1"
+
+var supportedMigrationSourceVersions = map[string]struct{}{
+	"v1.4.1":        {},
+	"v1.5.0-beta.1": {},
+	"v1.5.0-beta.2": {},
+	"v1.5.0-beta.3": {},
+}
 
 type migrationOptions struct {
 	Source             string
 	Target             string
 	Home               string
 	RuntimeWorkDir     string
+	SourceVersion      string
 	Force              bool
 	DryRun             bool
 	IncludeProjectData bool
@@ -32,6 +44,7 @@ type migrationOptions struct {
 
 type migrationManifest struct {
 	Version            int                             `json:"version"`
+	SourceVersion      string                          `json:"source_version"`
 	CreatedAt          string                          `json:"created_at"`
 	SourceRoot         string                          `json:"source_root"`
 	SourceWorkDir      string                          `json:"source_work_dir"`
@@ -79,8 +92,14 @@ type legacyMigrationProject struct {
 	Mode    string `toml:"mode"`
 	BaseDir string `toml:"base_dir"`
 	Agent   struct {
+		Type    string         `toml:"type"`
 		Options map[string]any `toml:"options"`
 	} `toml:"agent"`
+	Platforms []legacyMigrationPlatform `toml:"platforms"`
+}
+
+type legacyMigrationPlatform struct {
+	Type string `toml:"type"`
 }
 
 type plannedMigrationFile struct {
@@ -139,6 +158,7 @@ type migrationHooks struct {
 }
 
 type preparedMigration struct {
+	SourceVersion string
 	SourceRoot    string
 	SourceWorkDir string
 	SourceDataDir string
@@ -146,6 +166,107 @@ type preparedMigration struct {
 	Projects      []*migrationDestination
 	Report        migrationReport
 	CreatedAt     time.Time
+}
+
+// normalizeMigrationSourceVersion records exact provenance when the caller
+// knows it. Auto mode intentionally validates the on-disk layout and every
+// configured plugin instead of executing a binary named by daemon metadata.
+// This keeps the default one-command migration safe for installed, stopped,
+// and already-uninstalled official instances alike.
+func normalizeMigrationSourceVersion(raw string) (string, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" || value == "auto" {
+		return automaticMigrationSourceVersion, nil
+	}
+	if !strings.HasPrefix(value, "v") {
+		value = "v" + value
+	}
+	if _, ok := supportedMigrationSourceVersions[value]; !ok {
+		versions := make([]string, 0, len(supportedMigrationSourceVersions))
+		for version := range supportedMigrationSourceVersions {
+			versions = append(versions, version)
+		}
+		sort.Strings(versions)
+		return "", fmt.Errorf("unsupported official CC Connect source release %q; supported releases: %s, or use auto for strict layout validation", raw, strings.Join(versions, ", "))
+	}
+	return value, nil
+}
+
+func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
+	agents := stringSet(core.ListRegisteredAgents())
+	platforms := stringSet(core.ListRegisteredPlatforms())
+	for _, project := range cfg.Projects {
+		projectName := strings.TrimSpace(project.Name)
+		if projectName == "" {
+			projectName = "<unnamed>"
+		}
+		// Runtime registry lookups are exact and case-sensitive. Preflight must
+		// use identical semantics so it cannot approve a config that startup
+		// later rejects (for example, "Codex" or " codex ").
+		agentType := project.Agent.Type
+		if agentType != "" {
+			if _, ok := agents[agentType]; !ok {
+				return fmt.Errorf("source project %q uses agent %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, project.Agent.Type)
+			}
+			if err := core.ValidateAgentOptions(agentType, buildAgentOptions(cfg.DataDir, project)); err != nil {
+				return fmt.Errorf("source project %q uses agent %q with options this cc-connect-next build cannot start: %w; migration did not write the target", projectName, project.Agent.Type, err)
+			}
+		}
+		for _, platform := range project.Platforms {
+			platformType := platform.Type
+			if platformType == "" {
+				continue
+			}
+			if _, ok := platforms[platformType]; !ok {
+				return fmt.Errorf("source project %q uses platform %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, platform.Type)
+			}
+			opts := make(map[string]any, len(platform.Options)+2)
+			for key, value := range platform.Options {
+				opts[key] = value
+			}
+			opts["cc_data_dir"] = cfg.DataDir
+			opts["cc_project"] = project.Name
+			if err := core.ValidatePlatformOptions(platformType, opts); err != nil {
+				return fmt.Errorf("source project %q uses platform %q with options this cc-connect-next build cannot start: %w; migration did not write the target", projectName, platform.Type, err)
+			}
+		}
+	}
+	return nil
+}
+
+func decodeAndValidateMigrationConfig(configBytes []byte) (*ccconfig.Config, error) {
+	var cfg ccconfig.Config
+	metadata, err := toml.Decode(string(configBytes), &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("source config is incompatible with this cc-connect-next build: %w", err)
+	}
+	undecoded := metadata.Undecoded()
+	if len(undecoded) > 0 {
+		keys := make([]string, 0, len(undecoded))
+		for _, key := range undecoded {
+			keys = append(keys, key.String())
+		}
+		sort.Strings(keys)
+		return nil, fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
+	}
+	// Load resolves environment placeholders and provider references before
+	// semantic validation. Migration preserves the original TOML bytes, but its
+	// preflight must evaluate them with the same process environment and runtime
+	// semantics as the successor that will later read those bytes.
+	cfg.ResolveEnvironment()
+	cfg.ResolveProviderRefs()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("source config is semantically incompatible with this cc-connect-next build: %w; no target was written", err)
+	}
+	return &cfg, nil
+}
+
+func stringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
 }
 
 func migrateLegacyDataWithOptions(opts migrationOptions) (migrationReport, error) {
@@ -258,6 +379,21 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if _, err := toml.Decode(string(configBytes), &legacyCfg); err != nil {
 		return nil, fmt.Errorf("source config is invalid TOML: %w", err)
 	}
+	// Keep raw path fields for the migration-specific fail-closed resolver,
+	// which rejects unset environment placeholders instead of turning them into
+	// empty paths. Use validatedCfg for runtime identities such as project names
+	// so inventory matches the configuration that startup will actually use.
+	validatedCfg, err := decodeAndValidateMigrationConfig(configBytes)
+	if err != nil {
+		return nil, err
+	}
+	sourceVersion, err := normalizeMigrationSourceVersion(opts.SourceVersion)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateMigrationProjectPlugins(validatedCfg); err != nil {
+		return nil, err
+	}
 	runtimeWorkDir, err := resolveLegacyRuntimeWorkDir(opts.RuntimeWorkDir, source, opts.Home)
 	if err != nil {
 		return nil, err
@@ -312,6 +448,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 		SourceDataDir: dataDir,
 		SourceWorkDir: runtimeWorkDir,
 		ManifestPath:  filepath.Join(target, migrationManifestFilename),
+		SourceVersion: sourceVersion,
 	}
 
 	// --source is the directory containing config.toml, not necessarily a
@@ -322,7 +459,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if dataDirIsSource && dataDirExists {
 		var collectErr error
 		if customDataDir {
-			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
+			collectErr = collectLegacyDataDir(dataDir, validatedCfg, mainDestination, &report)
 		} else {
 			collectErr = collectMigrationTree(dataDir, "data-dir", true, mainDestination, &report)
 		}
@@ -332,7 +469,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	} else if dataDirExists {
 		var collectErr error
 		if customDataDir {
-			collectErr = collectLegacyDataDir(dataDir, legacyCfg, mainDestination, &report)
+			collectErr = collectLegacyDataDir(dataDir, validatedCfg, mainDestination, &report)
 		} else {
 			// An omitted data_dir means the official product-owned default
 			// ~/.cc-connect even when config.toml was loaded from elsewhere.
@@ -513,6 +650,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	}
 
 	return &preparedMigration{
+		SourceVersion: sourceVersion,
 		SourceRoot:    source,
 		SourceWorkDir: runtimeWorkDir,
 		SourceDataDir: dataDir,
@@ -811,7 +949,7 @@ var legacyPersistentRootFiles = map[string]struct{}{
 	"workspace_bindings.json": {},
 }
 
-func collectLegacyDataDir(root string, cfg legacyMigrationConfig, destination *migrationDestination, report *migrationReport) error {
+func collectLegacyDataDir(root string, cfg *ccconfig.Config, destination *migrationDestination, report *migrationReport) error {
 	policy := func(rel string, entry fs.DirEntry) error {
 		if isKnownLegacyDataDirPath(rel, entry.IsDir(), cfg) {
 			return nil
@@ -821,7 +959,7 @@ func collectLegacyDataDir(root string, cfg legacyMigrationConfig, destination *m
 	return collectMigrationTreeExcludingWithPolicy(root, "data-dir", true, nil, policy, destination, report)
 }
 
-func isKnownLegacyDataDirPath(rel string, isDir bool, cfg legacyMigrationConfig) bool {
+func isKnownLegacyDataDirPath(rel string, isDir bool, cfg *ccconfig.Config) bool {
 	rel = filepath.Clean(rel)
 	for _, project := range cfg.Projects {
 		if isLegacyProjectSessionPath(rel, isDir, project.Name) {
@@ -1982,7 +2120,8 @@ func cleanupMigrationStages(destinations []*migrationDestination) {
 
 func buildMigrationManifest(plan *preparedMigration) migrationManifest {
 	manifest := migrationManifest{
-		Version:         1,
+		Version:         2,
+		SourceVersion:   plan.SourceVersion,
 		CreatedAt:       plan.CreatedAt.Format(time.RFC3339Nano),
 		SourceRoot:      plan.SourceRoot,
 		SourceWorkDir:   plan.SourceWorkDir,
