@@ -348,6 +348,35 @@ func TestHandleAssistantStringContent(t *testing.T) {
 	assert.Equal(t, "OK", ks.pendingMsgs[0])
 }
 
+// TestHandleAssistantStringContentWithToolCalls pins the Kimi Code CLI shape
+// where an assistant message carries plain-string content AND tool_calls in
+// the same event (#1561): the text must surface as a thinking event (via
+// flushPendingAsThinking) before the tool-use event, not be silently dropped.
+// Ported from #1586.
+func TestHandleAssistantStringContentWithToolCalls(t *testing.T) {
+	ctx := context.Background()
+	ks, _ := newKimiSession(ctx, "kimi", nil, "/tmp", "", "default", "", nil, 0, kimiFlagSupport{})
+	defer func() { _ = ks.Close() }()
+
+	ks.handleEvent(map[string]any{
+		"role":    "assistant",
+		"content": "Let me check",
+		"tool_calls": []any{
+			map[string]any{
+				"id":       "tool_1",
+				"function": map[string]any{"name": "Shell", "arguments": `{"command":"ls"}`},
+			},
+		},
+	})
+
+	events := drainEvents(ks.events, 2)
+	require.Len(t, events, 2)
+	assert.Equal(t, core.EventThinking, events[0].Type)
+	assert.Equal(t, "Let me check", events[0].Content)
+	assert.Equal(t, core.EventToolUse, events[1].Type)
+	assert.Equal(t, "Shell", events[1].ToolName)
+}
+
 // TestHandleToolStringContent covers the plain-string content shape for tool
 // results on the Kimi Code CLI (#1561).
 func TestHandleToolStringContent(t *testing.T) {

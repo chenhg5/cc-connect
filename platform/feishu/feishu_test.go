@@ -304,6 +304,131 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 	}
 }
 
+// TestOnMessageThreadIsolationBootstrapsExistingThreadContext covers the case
+// where a thread root was posted without mentioning the bot. The root is not
+// dispatched, so the first later @bot reply must fetch the parent/root once
+// instead of assuming the new thread session already contains that context.
+func TestOnMessageThreadIsolationBootstrapsExistingThreadContext(t *testing.T) {
+	const (
+		appID        = "cli_thread_bootstrap"
+		appSecret    = "secret-thread-bootstrap"
+		botOpenID    = "ou_bot"
+		userOpenID   = "ou_user"
+		chatID       = "oc_chat"
+		rootMsgID    = "om_root"
+		triggerMsgID = "om_trigger"
+	)
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+rootMsgID:
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"msg_type":  "post",
+							"parent_id": "",
+							"sender": map[string]any{
+								"id":          "ou_root_author",
+								"sender_type": "user",
+							},
+							"body": map[string]any{
+								"content": `{"title":"环境信息","content":[[{"tag":"text","text":"审核 PBS: yingshi_video_i2v_input-text-cn"}]]}`,
+							},
+						},
+					},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		botOpenID:       botOpenID,
+		threadIsolation: true,
+		dedup:           &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	chatType := "group"
+	senderType := "user"
+	msgType := "text"
+	content := `{"text":"@_user_1 看看这个"}`
+	createTime := strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)
+	threadID := "omt_thread"
+
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: strPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   strPtr(triggerMsgID),
+				RootId:      strPtr(rootMsgID),
+				ThreadId:    &threadID,
+				ChatId:      strPtr(chatID),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+				Mentions: []*larkim.MentionEvent{
+					{
+						Key:  strPtr("@_user_1"),
+						Id:   &larkim.UserId{OpenId: strPtr(botOpenID)},
+						Name: strPtr("Bot"),
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-got:
+		if msg.SessionKey != "feishu:"+chatID+":root:"+rootMsgID {
+			t.Fatalf("SessionKey = %q, want thread root session", msg.SessionKey)
+		}
+		if msg.Content != "看看这个" {
+			t.Fatalf("Content = %q, want trigger text", msg.Content)
+		}
+		if !strings.Contains(msg.ExtraContent, "审核 PBS: yingshi_video_i2v_input-text-cn") {
+			t.Fatalf("ExtraContent = %q, want existing thread root content", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for bootstrapped thread message")
+	}
+}
+
 func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 	const appID = "cli_unauthorized"
 	const appSecret = "secret-unauthorized"
@@ -1036,7 +1161,9 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 
 	t.Run("thread isolation disabled is no-op", func(t *testing.T) {
 		p := &Platform{threadIsolation: false}
-		p.markThreadSessionActive(threadKey)
+		if p.markThreadSessionActive(threadKey) {
+			t.Fatal("disabled thread isolation must not report activation")
+		}
 		if p.isActiveThreadSession(threadKey) {
 			t.Fatal("expected no-op when thread_isolation is off")
 		}
@@ -1044,7 +1171,9 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 
 	t.Run("non-thread sessionKey is ignored", func(t *testing.T) {
 		p := &Platform{threadIsolation: true}
-		p.markThreadSessionActive(directKey)
+		if p.markThreadSessionActive(directKey) {
+			t.Fatal("non-thread session must not report activation")
+		}
 		if p.isActiveThreadSession(directKey) {
 			t.Fatal("expected non-thread sessionKey to be ignored")
 		}
@@ -1055,9 +1184,14 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 		if p.isActiveThreadSession(threadKey) {
 			t.Fatal("thread should not be active before mark")
 		}
-		p.markThreadSessionActive(threadKey)
+		if !p.markThreadSessionActive(threadKey) {
+			t.Fatal("first mark should report activation")
+		}
 		if !p.isActiveThreadSession(threadKey) {
 			t.Fatal("thread should be active after mark")
+		}
+		if p.markThreadSessionActive(threadKey) {
+			t.Fatal("subsequent mark must not report a second activation")
 		}
 	})
 }

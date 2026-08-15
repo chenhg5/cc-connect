@@ -34,6 +34,29 @@ func MergeEnv(base, extra []string) []string {
 	return append(merged, extra...)
 }
 
+// InjectedAgentEnv returns the env vars cc-connect injects into a spawned
+// agent process so in-process extensions can learn cc-connect's runtime state.
+// The CC_ prefix marks these vars as cc-connect's public extension contract,
+// alongside CC_PROJECT / CC_SESSION_KEY / CC_DATA_DIR that the engine injects
+// as session env.
+//
+// Currently only the permission mode is exposed:
+//
+//	CC_PERMISSION_MODE — the session's permission mode ("default" | "yolo").
+//	    Extensions such as the pi permission-gate read it to auto-approve tool
+//	    calls in yolo mode. An empty mode returns nil, so non-yolo sessions see
+//	    no injected var.
+//
+// Kept as a single core helper so every agent opts into the same convention
+// instead of hardcoding the variable name; extending the contract (e.g.
+// CC_MODEL, CC_THINKING) only means extending this function.
+func InjectedAgentEnv(mode string) []string {
+	if mode == "" {
+		return nil
+	}
+	return []string{"CC_PERMISSION_MODE=" + mode}
+}
+
 // CheckAllowFrom logs a security warning at startup when allow_from is not
 // configured (defaults to permit-all). Platforms should call this during init.
 func CheckAllowFrom(platform, allowFrom string) {

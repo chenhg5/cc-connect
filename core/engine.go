@@ -1207,6 +1207,42 @@ var privilegedCommands = map[string]bool{
 	"diff":    true,
 }
 
+// isPrivilegedCommandInvocation extends the privilegedCommands map to
+// also gate specific destructive subcommands. Currently:
+//
+//   - /commands addexec ...    — registers a custom shell-exec command
+//   - /cron    addexec ...     — schedules a recurring shell-exec
+//
+// Both effectively create new admin-only commands at runtime; if a
+// non-admin can call addexec, they can install arbitrary shell commands
+// for any future user to trigger. Sibling subcommands (list, add, del,
+// etc.) remain non-privileged.
+//
+// Returns true when the cmdID itself is in privilegedCommands, or when
+// the (cmdID, args[0]) pair matches one of the explicitly-gated
+// subcommands above.
+func isPrivilegedCommandInvocation(cmdID string, args []string) bool {
+	if privilegedCommands[cmdID] {
+		return true
+	}
+	if len(args) == 0 {
+		return false
+	}
+	sub := strings.ToLower(args[0])
+	switch cmdID {
+	case "commands":
+		return matchSubCommand(sub, []string{
+			"list", "add", "addexec", "del", "delete", "rm", "remove",
+		}) == "addexec"
+	case "cron":
+		return matchSubCommand(sub, []string{
+			"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
+		}) == "addexec"
+	default:
+		return false
+	}
+}
+
 // isAdmin checks whether the given user ID is authorized for privileged commands.
 // Unlike AllowList, empty adminFrom means deny-all (fail-closed).
 func (e *Engine) isAdmin(userID string) bool {
@@ -4582,7 +4618,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 
 				if fullResponse != "" {
-					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -4981,7 +5017,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5004,7 +5040,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if !previewActive {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5068,7 +5104,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5112,7 +5148,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if !previewActive {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5142,7 +5178,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
-				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
+				// Truncate the tool input that goes into the progress card payload so
+				// tool_max_len applies uniformly to progress_style=card, matching
+				// the rich-card path. event.ToolInput itself is left untouched.
+				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
+				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 						sendWorkspace(p, replyCtx, chunk)
 					}
@@ -5360,7 +5400,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !previewActive {
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
 							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
@@ -5625,7 +5665,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// Fallback: send the response as a normal message — but never
 					// for a silent reply, which has no deliverable content.
 					if !isSilent {
-						for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
 							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
@@ -6048,7 +6088,7 @@ channelClosed:
 			if segmentStart < len(textParts) {
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
-					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
+					for _, chunk := range SplitMessageCodeFenceAware(unsent, maxPlatformMessageLen) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
@@ -6058,7 +6098,7 @@ channelClosed:
 		} else if sp.finish(fullResponse, "") {
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
-			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+			for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
 				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 					return
 				}
@@ -6393,7 +6433,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	}
 
-	if cmdID != "" && privilegedCommands[cmdID] && !e.isAdmin(msg.UserID) {
+	if cmdID != "" && isPrivilegedCommandInvocation(cmdID, args) && !e.isAdmin(msg.UserID) {
 		slog.Info("audit: command_blocked",
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
@@ -7577,7 +7617,7 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 // which case caller should bail). sendFn is the workspace-aware send closure
 // (so the helper picks up workspace transforms like path remapping).
 func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, body, statusFooter string, sendFn func(Platform, any, string) error) bool {
-	chunks := splitMessage(body, maxPlatformMessageLen)
+	chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
 	for i, chunk := range chunks {
 		isLast := i == len(chunks)-1
 		if isLast && statusFooter != "" {
@@ -11678,7 +11718,7 @@ func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content 
 				"platform", p.Name(),
 				"error", err,
 				"content_len", len(content),
-				"hint", "user needs to send a new message to refresh context_token")
+				"hint", "user needs to send a message to the bot first so a context_token can be captured")
 		} else {
 			slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		}
