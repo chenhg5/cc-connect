@@ -2,7 +2,7 @@
 
 Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), with a native Feishu Card 2.0 response lifecycle.
 
-[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
+[中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream Feishu parity](docs/upstream-feishu-parity-2026-08-15.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
 
 > Current release: `0.1.0-beta.1`, the first public prerelease. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
@@ -18,6 +18,8 @@ One agent turn stays in one quoted native card:
 6. Finalize the same card as `✅ Done`, or `⚠️ 未完成` on error.
 
 Privacy is enforced at two layers: the engine stores only anonymous event kinds for rich-card progress, and the Feishu renderer ignores all reasoning/tool names, inputs, results, model, token, context, footer, and work-directory fields. The card payload has no expandable panel.
+
+The successor also carries the Feishu functionality merged by official CC Connect after the original fork point: topic-scoped workspace bindings, first-mention topic context bootstrap, privacy-gated quoted-file retrieval, topic-local relay visibility, and explicit bot-to-bot `mention_map`. These were adapted around Next's protected Card 2.0 and migration contracts instead of merging upstream wholesale. A resolved native @ is the deliberate exception to the one-card terminal shape: Feishu does not emit bot mention events from cards, so Next sends a tracked quoted text answer and removes the lifecycle card; answers without a native mention stay on CardKit.
 
 ## Install
 
@@ -115,6 +117,8 @@ app_id = "${FEISHU_APP_ID}"
 app_secret = "${FEISHU_APP_SECRET}"
 reply_to_trigger = true
 done_emoji = "Done"
+# resolve_mentions = true
+# mention_map = { Reviewer-Bot = "ou_reviewer_bot_open_id" }
 ```
 
 Set `card_mode = "legacy"` to opt out and use the inherited CC Connect message rendering.

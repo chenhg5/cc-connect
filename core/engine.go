@@ -2986,6 +2986,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsAgent Agent
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
+	if e.multiWorkspace {
+		e.migrateLegacyWorkspaceBindings(msg)
+	}
 	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
 		e.bindSendWorkDir(msg.SessionKey, forcedWorkDir)
 		var err error
@@ -6011,69 +6014,118 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Keep the entire answer on the one quoted lifecycle card. Feishu's
 				// renderer converts tables beyond its per-card component budget to
 				// fenced text, avoiding extra unquoted overflow cards.
-				finalBody := resolveRichCardMarkdown(fullResponse, true)
-				finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
-				sendAnswerFallback := func() bool {
-					if abortIfTerminalDeliveryCanceled() {
-						return false
+				terminalTextDelivered := false
+				if fallback, ok := p.(RichCardTerminalTextFallback); ok {
+					prepared, required, err := fallback.PrepareRichCardTerminalText(
+						terminalRenderCtx,
+						replyCtx,
+						workspaceRenderer(fullResponse),
+					)
+					if err != nil {
+						slog.Warn("rich card: terminal text fallback preparation failed; retaining card delivery", "platform", p.Name(), "error", err)
+					} else if required {
+						if abortIfTerminalDeliveryCanceled() {
+							return
+						}
+						if err := e.waitOutgoingWithContext(terminalDeliveryCtx, p); err != nil {
+							slog.Debug("rich card: terminal text fallback rate-limit wait canceled", "platform", p.Name(), "error", err)
+							abortIfTerminalDeliveryCanceled()
+							return
+						}
+						previousHandle := cardMessageID
+						replacementHandle, err := fallback.SendRichCardTerminalText(terminalDeliveryCtx, replyCtx, prepared)
+						if err != nil || replacementHandle == nil {
+							if abortIfTerminalDeliveryCanceled() {
+								return
+							}
+							slog.Warn("rich card: terminal text fallback failed; retaining card delivery", "platform", p.Name(), "error", err, "handle_nil", replacementHandle == nil)
+						} else {
+							// Track the text message before deleting the old card. If the
+							// triggering message is recalled during this window, the common
+							// recall path can delete this exact replacement handle.
+							cardMessageID = replacementHandle
+							if previousHandle != nil {
+								removeRichCardForFallback(p, previousHandle)
+							}
+							if abortIfTerminalDeliveryCanceled() {
+								return
+							}
+							terminalTextDelivered = true
+						}
 					}
-					starter, canStart := p.(PreviewStarter)
-					_, canDelete := p.(PreviewCleaner)
-					if !canStart || !canDelete {
-						slog.Error("rich card: cannot deliver a recall-safe fallback card", "platform", p.Name(), "can_start", canStart, "can_delete", canDelete)
-						abortRichCardCompletion(false)
-						return false
-					}
-					if err := e.waitOutgoingWithContext(terminalDeliveryCtx, p); err != nil {
-						slog.Debug("rich card: fallback card rate-limit wait canceled", "platform", p.Name(), "error", err)
-						abortIfTerminalDeliveryCanceled()
-						return false
-					}
-					previousHandle := cardMessageID
-					replacementHandle, err := starter.SendPreviewStart(terminalDeliveryCtx, replyCtx, finalCard)
-					if err != nil || replacementHandle == nil {
+				}
+				if !terminalTextDelivered {
+					finalBody := resolveRichCardMarkdown(fullResponse, true)
+					finalCard := buildRichCard(p, richCardSupporter, CardStatusDone, "done", toolSteps, finalBody, false, "")
+					sendAnswerFallback := func() bool {
 						if abortIfTerminalDeliveryCanceled() {
 							return false
 						}
-						slog.Error("rich card: failed to send recall-safe fallback card", "platform", p.Name(), "error", err, "handle_nil", replacementHandle == nil)
-						abortRichCardCompletion(false)
-						return false
-					}
-					// Track the replacement before any further work. If recall won the
-					// API race and the platform still created the message, the next
-					// cancellation check can now delete that exact card as well.
-					cardMessageID = replacementHandle
-					if previousHandle != nil {
-						removeRichCardForFallback(p, previousHandle)
-					}
-					if abortIfTerminalDeliveryCanceled() {
-						return false
-					}
-					return true
-				}
-				if cardMessageID != nil {
-					// Re-check after completion bookkeeping. This window is intentionally
-					// tiny, but an explicit recall must still prevent a final card patch
-					// if it races with footer/log bookkeeping.
-					if abortIfTerminalDeliveryCanceled() {
-						return
-					}
-					// Forced final flush via cardkit-v1 streaming text update before
-					// flipping status to Done via full-card Patch. Configured throttling
-					// may have skipped the last small/recent chunk; this catches it up
-					// when previews are enabled. ErrNotSupported (no cardID) and any
-					// error are silent — the subsequent UpdateMessage rewrites the body.
-					if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(turnStreamPreview, p.Name()) {
-						if err := streamer.StreamRichCardText(terminalDeliveryCtx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
-							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
+						starter, canStart := p.(PreviewStarter)
+						_, canDelete := p.(PreviewCleaner)
+						if !canStart || !canDelete {
+							slog.Error("rich card: cannot deliver a recall-safe fallback card", "platform", p.Name(), "can_start", canStart, "can_delete", canDelete)
+							abortRichCardCompletion(false)
+							return false
 						}
+						if err := e.waitOutgoingWithContext(terminalDeliveryCtx, p); err != nil {
+							slog.Debug("rich card: fallback card rate-limit wait canceled", "platform", p.Name(), "error", err)
+							abortIfTerminalDeliveryCanceled()
+							return false
+						}
+						previousHandle := cardMessageID
+						replacementHandle, err := starter.SendPreviewStart(terminalDeliveryCtx, replyCtx, finalCard)
+						if err != nil || replacementHandle == nil {
+							if abortIfTerminalDeliveryCanceled() {
+								return false
+							}
+							slog.Error("rich card: failed to send recall-safe fallback card", "platform", p.Name(), "error", err, "handle_nil", replacementHandle == nil)
+							abortRichCardCompletion(false)
+							return false
+						}
+						// Track the replacement before any further work. If recall won the
+						// API race and the platform still created the message, the next
+						// cancellation check can now delete that exact card as well.
+						cardMessageID = replacementHandle
+						if previousHandle != nil {
+							removeRichCardForFallback(p, previousHandle)
+						}
+						if abortIfTerminalDeliveryCanceled() {
+							return false
+						}
+						return true
 					}
-					if abortIfTerminalDeliveryCanceled() {
-						return
-					}
-					if updater, ok := p.(MessageUpdater); ok {
-						if err := updater.UpdateMessage(terminalDeliveryCtx, cardMessageID, finalCard); err != nil {
-							slog.Debug("rich card: final update failed, falling back to a replacement card", "platform", p.Name(), "error", err)
+					if cardMessageID != nil {
+						// Re-check after completion bookkeeping. This window is intentionally
+						// tiny, but an explicit recall must still prevent a final card patch
+						// if it races with footer/log bookkeeping.
+						if abortIfTerminalDeliveryCanceled() {
+							return
+						}
+						// Forced final flush via cardkit-v1 streaming text update before
+						// flipping status to Done via full-card Patch. Configured throttling
+						// may have skipped the last small/recent chunk; this catches it up
+						// when previews are enabled. ErrNotSupported (no cardID) and any
+						// error are silent — the subsequent UpdateMessage rewrites the body.
+						if streamer, ok := p.(RichCardTextStreamer); ok && streamPreviewEnabledForPlatform(turnStreamPreview, p.Name()) {
+							if err := streamer.StreamRichCardText(terminalDeliveryCtx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
+								slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
+							}
+						}
+						if abortIfTerminalDeliveryCanceled() {
+							return
+						}
+						if updater, ok := p.(MessageUpdater); ok {
+							if err := updater.UpdateMessage(terminalDeliveryCtx, cardMessageID, finalCard); err != nil {
+								slog.Debug("rich card: final update failed, falling back to a replacement card", "platform", p.Name(), "error", err)
+								if abortIfTerminalDeliveryCanceled() {
+									return
+								}
+								if !sendAnswerFallback() {
+									return
+								}
+							}
+						} else {
 							if abortIfTerminalDeliveryCanceled() {
 								return
 							}
@@ -6088,13 +6140,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						if !sendAnswerFallback() {
 							return
 						}
-					}
-				} else {
-					if abortIfTerminalDeliveryCanceled() {
-						return
-					}
-					if !sendAnswerFallback() {
-						return
 					}
 				}
 			} else if toolCount > 0 && segmentStart > 0 {
@@ -16892,6 +16937,29 @@ func effectiveWorkspaceChannelKey(msg *Message) string {
 		return workspaceChannelKey(msg.Platform, msg.ChannelKey)
 	}
 	return extractWorkspaceChannelKey(msg.SessionKey)
+}
+
+// migrateLegacyWorkspaceBindings lets a platform narrow its workspace scope
+// without losing a previously configured channel default. The identifiers are
+// opaque to core; only the normal platform prefix is added here.
+func (e *Engine) migrateLegacyWorkspaceBindings(msg *Message) {
+	if e.workspaceBindings == nil || msg == nil || msg.ChannelKey == "" || msg.LegacyChannelKey == "" {
+		return
+	}
+	oldChannelKey := workspaceChannelKey(msg.Platform, msg.LegacyChannelKey)
+	newChannelKey := workspaceChannelKey(msg.Platform, msg.ChannelKey)
+	if oldChannelKey == "" || newChannelKey == "" || oldChannelKey == newChannelKey {
+		return
+	}
+
+	for _, projectKey := range []string{"project:" + e.name, sharedWorkspaceBindingsKey} {
+		if e.workspaceBindings.MigrateChannelKey(projectKey, oldChannelKey, newChannelKey) {
+			slog.Info("workspace binding inherited",
+				"project", projectKey,
+				"old_channel_key", oldChannelKey,
+				"new_channel_key", newChannelKey)
+		}
+	}
 }
 
 // commandContext resolves the appropriate agent, session manager, and interactive key

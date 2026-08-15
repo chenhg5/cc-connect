@@ -21,6 +21,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/timmyagentic/cc-connect-next/core"
@@ -140,14 +141,76 @@ func validatePlatformOptions(name string) core.OptionsValidator {
 				return fmt.Errorf("%s: image_batch_window_ms must be >= 0, got %d", name, milliseconds)
 			}
 		}
+		mentionMap, err := parseMentionMap(opts["mention_map"])
+		if err != nil {
+			return fmt.Errorf("%s: invalid mention_map: %w", name, err)
+		}
+		resolveMentions, _ := opts["resolve_mentions"].(bool)
+		if len(mentionMap) > 0 && !resolveMentions {
+			return fmt.Errorf("%s: mention_map requires resolve_mentions = true", name)
+		}
 		return nil
 	}
 }
 
+func parseMentionMap(raw any) (map[string]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	values := make(map[string]any)
+	switch typed := raw.(type) {
+	case map[string]any:
+		for name, value := range typed {
+			values[name] = value
+		}
+	case map[string]string:
+		for name, value := range typed {
+			values[name] = value
+		}
+	default:
+		return nil, fmt.Errorf("must be a string-to-string table, got %T", raw)
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make(map[string]string, len(values))
+	for _, rawName := range names {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			return nil, fmt.Errorf("name must not be empty")
+		}
+		if strings.HasPrefix(name, "@") {
+			return nil, fmt.Errorf("name %q must not include the leading @", rawName)
+		}
+		openID, ok := values[rawName].(string)
+		if !ok {
+			return nil, fmt.Errorf("open_id for %q must be a string, got %T", name, values[rawName])
+		}
+		openID = strings.TrimSpace(openID)
+		if !strings.HasPrefix(openID, "ou_") || len(openID) <= len("ou_") {
+			return nil, fmt.Errorf("open_id for %q must be a bot open_id starting with ou_", name)
+		}
+		if _, exists := result[name]; exists {
+			return nil, fmt.Errorf("duplicate name %q after trimming", name)
+		}
+		result[name] = openID
+	}
+	return result, nil
+}
+
 type replyContext struct {
-	messageID  string
-	chatID     string
-	sessionKey string
+	messageID       string
+	chatID          string
+	sessionKey      string
+	bootstrapThread bool
+	bootstrapQueued bool
+	bootstrapWait   <-chan struct{}
+	bootstrapDone   chan struct{}
 }
 
 type Platform struct {
@@ -181,6 +244,7 @@ type Platform struct {
 	dedup            *core.MessageDedup
 	botOpenID        string
 	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap       map[string]string // friendly bot name -> open_id, for outbound native @ notifications
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
@@ -205,6 +269,12 @@ type Platform struct {
 	// without requiring another @bot mention. Value is the last-seen time so
 	// stale entries can be expired by a future TTL sweep if needed.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+	// threadBootstrapStates tracks both one-time root-message bootstrap state
+	// and the short FIFO used while that bootstrap is in flight. Keeping it
+	// separate from activeThreadSessions lets attachment admission remain active
+	// while a transient root fetch failure becomes retryable.
+	threadBootstrapMu     sync.Mutex
+	threadBootstrapStates map[string]*threadBootstrapEntry // sessionKey -> state + FIFO tail
 
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
@@ -288,6 +358,9 @@ type imageBatchEntry struct {
 	timer        *time.Timer
 }
 
+var _ core.RelayGroupVisibilityTarget = (*Platform)(nil)
+var _ core.RelayGroupVisibilitySender = (*Platform)(nil)
+
 type interactivePlatform struct {
 	*Platform
 }
@@ -359,6 +432,13 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 			}
 		}
 	}
+	mentionMap, err := parseMentionMap(opts["mention_map"])
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid mention_map: %w", name, err)
+	}
+	if len(mentionMap) > 0 && !resolveMentionsOpt {
+		return nil, fmt.Errorf("%s: mention_map requires resolve_mentions = true", name)
+	}
 
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
@@ -429,6 +509,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
 		peerBots:                   peerBots,
+		mentionMap:                 mentionMap,
 		imageBatch:                 make(map[string]*imageBatchEntry),
 		imageBatchWindow:           imageBatchWindow,
 	}
@@ -802,8 +883,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		h := p.getHandler()
-		go h(p.dispatchPlatform(), &core.Message{
+		go p.dispatchCoreMessage(&core.Message{
 			SessionKey:           sessionKey,
 			Platform:             p.platformName,
 			UserID:               userID,
@@ -835,8 +915,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		h := p.getHandler()
-		go h(p.dispatchPlatform(), &core.Message{
+		go p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
@@ -871,8 +950,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		h := p.getHandler()
-		go h(p.dispatchPlatform(), &core.Message{
+		go p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
@@ -1105,16 +1183,45 @@ func isMessageWithdrawnError(err error) bool {
 	return isMessageWithdrawnCode(0, err.Error())
 }
 
-func (p *Platform) dispatchCoreMessage(msg *core.Message) {
+func (p *Platform) dispatchCoreMessage(msg *core.Message) bool {
 	h := p.getHandler()
 	if msg == nil || h == nil {
-		return
+		return false
 	}
+	p.populateWorkspaceChannelKeys(msg)
 	if p.isMessageRecalled(msg.MessageID) {
 		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
-		return
+		return false
 	}
 	h(p.dispatchPlatform(), msg)
+	return true
+}
+
+// populateWorkspaceChannelKeys aligns multi-workspace binding scope with the
+// Feishu/Lark session scope. A chat-level binding remains the default that a
+// topic inherits on first use.
+func (p *Platform) populateWorkspaceChannelKeys(msg *core.Message) {
+	if msg == nil || msg.ChannelKey != "" {
+		return
+	}
+	rctx, ok := msg.ReplyCtx.(replyContext)
+	if !ok || rctx.chatID == "" {
+		return
+	}
+	msg.ChannelKey = rctx.chatID
+	if !p.threadIsolation {
+		return
+	}
+	parts := strings.SplitN(rctx.sessionKey, ":", 3)
+	if len(parts) != 3 || parts[0] != p.platformName || parts[1] != rctx.chatID {
+		return
+	}
+	rootID, ok := parseThreadRootID(parts[2])
+	if !ok {
+		return
+	}
+	msg.ChannelKey = rctx.chatID + ":topic:" + rootID
+	msg.LegacyChannelKey = rctx.chatID
 }
 
 // bufferImage adds a freshly-downloaded image to the per-session batch buffer.
@@ -1404,8 +1511,13 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	)
 
 	// Mark this thread as bot-engaged so subsequent attachment-only messages
-	// in the same thread can pass through without re-mentioning the bot.
-	p.markThreadSessionActive(sessionKey)
+	// can pass through. The first accepted mention in a pre-existing topic also
+	// bootstraps the isolated agent session from the root message once.
+	rctx.bootstrapThread, rctx.bootstrapQueued, rctx.bootstrapWait, rctx.bootstrapDone =
+		p.prepareThreadBootstrapDispatch(sessionKey)
+	if (rctx.bootstrapThread || rctx.bootstrapQueued) && parentID == "" {
+		parentID = stringValue(msg.RootId)
+	}
 
 	// Dispatch message handling asynchronously so the SDK event loop is not
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
@@ -1429,6 +1541,23 @@ func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContex
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
 func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64) {
+	if rctx.bootstrapWait != nil {
+		<-rctx.bootstrapWait
+	}
+	if rctx.bootstrapQueued {
+		rctx.bootstrapThread = p.claimThreadBootstrapRetry(sessionKey)
+	}
+	bootstrapContextReady := false
+	messageDispatched := false
+	defer func() {
+		if rctx.bootstrapThread {
+			p.finishThreadBootstrap(sessionKey, bootstrapContextReady && messageDispatched)
+		}
+		if rctx.bootstrapDone != nil {
+			p.releaseThreadBootstrapDispatch(sessionKey, rctx.bootstrapDone)
+		}
+	}()
+
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -1443,12 +1572,43 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
-	// Skip quote injection when thread_isolation is enabled and the message is
-	// inside a thread — the thread already provides conversational context, and
-	// long quoted prefixes can drown out the user's actual text (issue #764).
+	// Skip repeated quote injection inside an already-engaged isolated topic.
+	// The first accepted mention is the exception because earlier unmentioned
+	// root content never reached the new agent session.
 	var quoted quotedMessage
-	if parentID != "" && !(p.threadIsolation && isThreadSessionKey(sessionKey)) {
-		quoted = p.fetchQuotedMessage(ctx, parentID)
+	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
+		var fetched bool
+		quoted, fetched = p.fetchQuotedMessageWithStatus(ctx, parentID)
+		if rctx.bootstrapThread {
+			bootstrapContextReady = fetched
+		}
+	} else if rctx.bootstrapThread {
+		// A newly-created topic can have no earlier root message to recover.
+		// Treat that as a completed (empty) bootstrap instead of retrying forever.
+		bootstrapContextReady = true
+	}
+	approvedQuotedFiles := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
+	quotedFiles := p.downloadQuotedFiles(ctx, approvedQuotedFiles)
+	dispatchToCore := func(msg *core.Message) {
+		if msg == nil {
+			return
+		}
+		if msg.ExtraContent == "" {
+			msg.ExtraContent = quoted.text
+		}
+		if len(quoted.images) > 0 {
+			images := make([]core.ImageAttachment, 0, len(quoted.images)+len(msg.Images))
+			images = append(images, quoted.images...)
+			msg.Images = append(images, msg.Images...)
+		}
+		if len(quotedFiles) > 0 {
+			files := make([]core.FileAttachment, 0, len(quotedFiles)+len(msg.Files))
+			files = append(files, quotedFiles...)
+			msg.Files = append(files, msg.Files...)
+		}
+		if p.dispatchCoreMessage(msg) {
+			messageDispatched = true
+		}
 	}
 
 	switch msgType {
@@ -1461,7 +1621,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			return
 		}
 		text := stripMentions(textBody.Text, mentions, p.getBotOpenID())
-		if text == "" && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -1469,11 +1629,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			Content: text, ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -1500,7 +1660,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		// watermark (PR #1168) to drop the oldest image (issue #1395).
 		// We only coalesce plain image messages (no quoted context) because
 		// quoted images are usually a single image replying to a prior text.
-		if parentID == "" {
+		if parentID == "" && !rctx.bootstrapThread {
 			p.bufferImage(sessionKey, &imageBatchEntry{
 				sessionKey:   sessionKey,
 				userID:       userID,
@@ -1514,13 +1674,13 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content:           "",
 			ExtraContent:      quoted.text,
-			Images:            append(quoted.images, core.ImageAttachment{MimeType: mimeType, Data: imgData}),
+			Images:            []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -1543,7 +1703,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			}
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1560,14 +1720,14 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
+			Content: text, Images: images,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -1592,7 +1752,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1621,7 +1781,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		}
-		p.dispatchCoreMessage(coreMsg)
+		dispatchToCore(coreMsg)
 
 	case "sticker":
 		var stickerBody struct {
@@ -1635,7 +1795,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
 		if err != nil {
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
-			p.dispatchCoreMessage(&core.Message{
+			dispatchToCore(&core.Message{
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1644,7 +1804,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1681,7 +1841,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchToCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1859,49 +2019,579 @@ func (p *Platform) getChatMembers(ctx context.Context, chatID string) map[string
 }
 
 // resolveMentionsInContent replaces @name with Feishu at tags in raw content
-// (before JSON serialization). Reverse-matches against the chat member list,
-// longest name first. Uses the correct at syntax based on predicted message type.
+// (before JSON serialization). Explicit mention_map entries override group
+// members with the same display name. Ordinary sends always use MsgTypeText at
+// syntax because Feishu renders card mentions but does not emit the native
+// mention event needed to notify another bot.
 func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content string) string {
-	return p.resolveMentionsWithFormat(ctx, chatID, content, predictMsgType(content) == larkim.MsgTypeInteractive)
+	return p.resolveMentionsWithFormat(ctx, chatID, content, false)
+}
+
+func (p *Platform) prepareOutboundMentions(ctx context.Context, chatID, content string) (string, bool) {
+	// Never combine model-supplied native tags with resolver-produced tags in a
+	// MsgTypeText payload. A card remains the fail-closed transport for the
+	// entire answer, even if it also contains a configured alias.
+	if hasNativeTextMention(content) {
+		return content, false
+	}
+	return p.resolveMentionsWithFormatResult(ctx, chatID, content, false)
 }
 
 func (p *Platform) resolveMentionsWithFormat(ctx context.Context, chatID, content string, useCardFormat bool) string {
+	resolved, _ := p.resolveMentionsWithFormatResult(ctx, chatID, content, useCardFormat)
+	return resolved
+}
+
+func (p *Platform) resolveMentionsWithFormatResult(ctx context.Context, chatID, content string, useCardFormat bool) (string, bool) {
 	if !p.resolveMentions || chatID == "" || !strings.Contains(content, "@") {
-		return content
+		return content, false
 	}
+	merged := make(map[string]string)
 	members := p.getChatMembers(ctx, chatID)
-	if len(members) == 0 {
-		return content
+	for name, openID := range members {
+		if openID != "" {
+			merged[name] = openID
+		}
 	}
+	p.mu.RLock()
+	for name, openID := range p.mentionMap {
+		if openID != "" {
+			merged[name] = openID
+		}
+	}
+	p.mu.RUnlock()
+	if len(merged) == 0 {
+		return content, false
+	}
+
 	// Sort names longest-first to avoid partial matches.
-	names := make([]string, 0, len(members))
-	for name := range members {
+	names := make([]string, 0, len(merged))
+	for name := range merged {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
 
-	result := content
-	for _, name := range names {
-		pattern := "@" + name
-		if !strings.Contains(result, pattern) {
+	var result strings.Builder
+	result.Grow(len(content) + 32)
+	resolvedMention := false
+	for offset := 0; offset < len(content); {
+		if end, ok := markdownIndentedCodeLineEnd(content, offset); ok {
+			result.WriteString(content[offset:end])
+			offset = end
 			continue
 		}
-		openID := members[name]
-		if openID == "" {
-			slog.Debug(p.tag()+": skipping ambiguous mention", "name", name)
+		if end, ok := markdownCodeRegionEnd(content, offset); ok {
+			result.WriteString(content[offset:end])
+			offset = end
 			continue
 		}
-		var atTag string
-		if useCardFormat {
-			atTag = fmt.Sprintf(`<at id=%s></at>`, openID)
-		} else {
-			escapedName := html.EscapeString(name)
-			atTag = fmt.Sprintf(`<at user_id="%s">%s</at>`, openID, escapedName)
+		if end, ok := markdownNonProseRegionEnd(content, offset); ok {
+			result.WriteString(content[offset:end])
+			offset = end
+			continue
 		}
-		slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
-		result = strings.ReplaceAll(result, pattern, atTag)
+
+		matched := false
+		if content[offset] == '@' && !isMarkdownEscaped(content, offset) {
+			for _, name := range names {
+				pattern := "@" + name
+				if !strings.HasPrefix(content[offset:], pattern) ||
+					!isMentionTokenStart(content, offset) ||
+					!isMentionTokenEnd(content, offset+len(pattern)) {
+					continue
+				}
+				openID := merged[name]
+				if useCardFormat {
+					fmt.Fprintf(&result, `<at id=%s></at>`, openID)
+				} else {
+					fmt.Fprintf(&result, `<at user_id="%s">%s</at>`, openID, html.EscapeString(name))
+				}
+				slog.Debug(p.tag()+": mention resolved", "name", name, "card_format", useCardFormat)
+				offset += len(pattern)
+				resolvedMention = true
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		result.WriteByte(content[offset])
+		offset++
 	}
-	return result
+	return result.String(), resolvedMention
+}
+
+func isMentionTokenEnd(content string, end int) bool {
+	if end >= len(content) {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(content[end:])
+	// Preserve the established CJK behavior where natural-language text often
+	// follows a display name without whitespace (for example, @张三请查看), while
+	// preventing an ASCII alias from matching a longer identifier.
+	return !isASCIIMentionContinuation(next)
+}
+
+func isMentionTokenStart(content string, start int) bool {
+	if start == 0 {
+		return true
+	}
+	previous, _ := utf8.DecodeLastRuneInString(content[:start])
+	return !isASCIIMentionContinuation(previous)
+}
+
+func isASCIIMentionContinuation(value rune) bool {
+	switch {
+	case value >= 'a' && value <= 'z':
+		return true
+	case value >= 'A' && value <= 'Z':
+		return true
+	case value >= '0' && value <= '9', value == '_', value == '-':
+		return true
+	default:
+		return false
+	}
+}
+
+func isMarkdownEscaped(content string, offset int) bool {
+	backslashes := 0
+	for i := offset - 1; i >= 0 && content[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
+}
+
+// markdownNonProseRegionEnd reports Markdown regions where an @ is metadata,
+// code, or address data rather than visible prose. Link labels remain outside
+// these regions so [@Reviewer](...) can still notify the configured target.
+func markdownNonProseRegionEnd(content string, offset int) (int, bool) {
+	if offset >= len(content) {
+		return 0, false
+	}
+	if end, ok := markdownReferenceDefinitionEnd(content, offset); ok {
+		return end, true
+	}
+	if end, ok := markdownImageRegionEnd(content, offset); ok {
+		return end, true
+	}
+	if content[offset] == '[' && offset+1 < len(content) && content[offset+1] == '^' {
+		if end, ok := markdownBracketedEnd(content, offset); ok {
+			return end, true
+		}
+	}
+
+	// Inline link destination: ](...). Preserve balanced parentheses and
+	// backslash escapes so an @ anywhere in the destination remains literal.
+	if content[offset] == ']' && offset+1 < len(content) && content[offset+1] == '(' {
+		if end, ok := markdownParenthesizedEnd(content, offset+1); ok {
+			return end, true
+		}
+	}
+	// In a full reference link, the first bracket is visible text while the
+	// immediately adjacent second bracket is a hidden reference identifier.
+	if content[offset] == ']' && offset+1 < len(content) && content[offset+1] == '[' {
+		if end, ok := markdownBracketedEnd(content, offset+1); ok {
+			return end, true
+		}
+	}
+
+	// CommonMark autolinks: <https://...>, <mailto:...>, and <user@example>.
+	if content[offset] == '<' {
+		if relativeEnd := strings.IndexByte(content[offset+1:], '>'); relativeEnd >= 0 {
+			end := offset + 1 + relativeEnd
+			inner := content[offset+1 : end]
+			lower := strings.ToLower(inner)
+			isAddress := strings.HasPrefix(lower, "http://") ||
+				strings.HasPrefix(lower, "https://") ||
+				strings.HasPrefix(lower, "mailto:") ||
+				(strings.Contains(inner, "@") && !strings.ContainsAny(inner, " \t\r\n<>"))
+			if isAddress {
+				return end + 1, true
+			}
+		}
+		if end, ok := markdownHTMLTagEnd(content, offset); ok {
+			return end, true
+		}
+	}
+
+	for _, scheme := range []string{"https://", "http://", "mailto:"} {
+		if len(content)-offset < len(scheme) ||
+			!strings.EqualFold(content[offset:offset+len(scheme)], scheme) ||
+			!isMarkdownURLStart(content, offset) {
+			continue
+		}
+		cursor := offset + len(scheme)
+		for cursor < len(content) {
+			r, size := utf8.DecodeRuneInString(content[cursor:])
+			if unicode.IsSpace(r) || strings.ContainsRune("<>\"'", r) {
+				break
+			}
+			cursor += size
+		}
+		return cursor, true
+	}
+
+	return 0, false
+}
+
+func markdownImageRegionEnd(content string, offset int) (int, bool) {
+	if offset+1 >= len(content) || content[offset] != '!' || content[offset+1] != '[' {
+		return 0, false
+	}
+	labelEnd, ok := markdownBracketedEnd(content, offset+1)
+	if !ok {
+		return 0, false
+	}
+	end := labelEnd
+	if end < len(content) && content[end] == '(' {
+		if destinationEnd, ok := markdownParenthesizedEnd(content, end); ok {
+			end = destinationEnd
+		}
+	} else if end < len(content) && content[end] == '[' {
+		if identifierEnd, ok := markdownBracketedEnd(content, end); ok {
+			end = identifierEnd
+		}
+	}
+	return end, true
+}
+
+func markdownBracketedEnd(content string, offset int) (int, bool) {
+	if offset >= len(content) || content[offset] != '[' {
+		return 0, false
+	}
+	depth := 0
+	for cursor := offset; cursor < len(content); cursor++ {
+		if content[cursor] == '\\' && cursor+1 < len(content) {
+			cursor++
+			continue
+		}
+		switch content[cursor] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return cursor + 1, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func markdownParenthesizedEnd(content string, offset int) (int, bool) {
+	if offset >= len(content) || content[offset] != '(' {
+		return 0, false
+	}
+	depth := 0
+	var quote byte
+	for cursor := offset; cursor < len(content); cursor++ {
+		if content[cursor] == '\\' && cursor+1 < len(content) {
+			cursor++
+			continue
+		}
+		if quote != 0 {
+			if content[cursor] == quote {
+				quote = 0
+			}
+			continue
+		}
+		if (content[cursor] == '"' || content[cursor] == '\'') && cursor > offset && isASCIISpace(content[cursor-1]) {
+			quote = content[cursor]
+			continue
+		}
+		switch content[cursor] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return cursor + 1, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func markdownHTMLTagEnd(content string, offset int) (int, bool) {
+	if offset+1 >= len(content) || content[offset] != '<' {
+		return 0, false
+	}
+	if strings.HasPrefix(content[offset:], "<!--") {
+		if relativeEnd := strings.Index(content[offset+4:], "-->"); relativeEnd >= 0 {
+			return offset + 4 + relativeEnd + len("-->"), true
+		}
+		return len(content), true
+	}
+
+	first := content[offset+1]
+	isTag := isASCIIAlpha(first) || first == '!' || first == '?'
+	if first == '/' && offset+2 < len(content) {
+		isTag = isASCIIAlpha(content[offset+2])
+	}
+	if !isTag {
+		return 0, false
+	}
+	closingTag := first == '/'
+	nameStart := offset + 1
+	if closingTag {
+		nameStart++
+	}
+	nameEnd := nameStart
+	for nameEnd < len(content) && (isASCIIAlpha(content[nameEnd]) || content[nameEnd] >= '0' && content[nameEnd] <= '9' || content[nameEnd] == '-') {
+		nameEnd++
+	}
+	tagName := strings.ToLower(content[nameStart:nameEnd])
+
+	var quote byte
+	tagEnd := len(content)
+	for cursor := offset + 1; cursor < len(content); cursor++ {
+		current := content[cursor]
+		if quote != 0 {
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		if current == '"' || current == '\'' {
+			quote = current
+			continue
+		}
+		if current == '>' {
+			tagEnd = cursor + 1
+			break
+		}
+	}
+	if !closingTag && isMarkdownHiddenHTMLContentTag(tagName) && tagEnd < len(content) && !strings.HasSuffix(strings.TrimSpace(content[offset:tagEnd]), "/>") {
+		closing := "</" + tagName + ">"
+		if relativeEnd := strings.Index(strings.ToLower(content[tagEnd:]), closing); relativeEnd >= 0 {
+			return tagEnd + relativeEnd + len(closing), true
+		}
+		return len(content), true
+	}
+	return tagEnd, true
+}
+
+func isASCIIAlpha(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+}
+
+func isASCIISpace(value byte) bool {
+	switch value {
+	case ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
+}
+
+func isMarkdownHiddenHTMLContentTag(tagName string) bool {
+	switch tagName {
+	case "code", "pre", "script", "style", "textarea":
+		return true
+	default:
+		return false
+	}
+}
+
+// markdownReferenceDefinitionEnd protects hidden reference definitions such as
+// [profile]: /users/@Reviewer. Unlike inline destinations, their URL is not
+// adjacent to a closing bracket, and relative paths have no scheme to detect.
+func markdownReferenceDefinitionEnd(content string, offset int) (int, bool) {
+	if offset > 0 && content[offset-1] != '\n' {
+		return 0, false
+	}
+	cursor := offset
+	for cursor < len(content) && cursor-offset < 3 && content[cursor] == ' ' {
+		cursor++
+	}
+	if cursor >= len(content) || content[cursor] != '[' {
+		return 0, false
+	}
+
+	labelStart := cursor + 1
+	closingBracket := -1
+	for cursor = labelStart; cursor < len(content) && content[cursor] != '\n'; cursor++ {
+		if content[cursor] == '\\' && cursor+1 < len(content) {
+			cursor++
+			continue
+		}
+		if content[cursor] == ']' {
+			closingBracket = cursor
+			break
+		}
+	}
+	if closingBracket == labelStart || closingBracket < 0 || closingBracket+1 >= len(content) || content[closingBracket+1] != ':' {
+		return 0, false
+	}
+
+	lineEnd := markdownLineEnd(content, closingBracket+2)
+	hasDestination := strings.TrimSpace(content[closingBracket+2:lineEnd]) != ""
+	if !hasDestination && lineEnd < len(content) {
+		// CommonMark permits the destination on the following line. Extend only
+		// for URL-like prefixes so an incomplete definition cannot hide ordinary
+		// visible prose from mention resolution.
+		nextStart := lineEnd + 1
+		nextEnd := markdownLineEnd(content, nextStart)
+		if isLikelyMarkdownReferenceDestination(strings.TrimSpace(content[nextStart:nextEnd])) {
+			lineEnd = nextEnd
+			hasDestination = true
+		}
+	}
+	if hasDestination && lineEnd < len(content) {
+		// An optional title may occupy the following line and is hidden along
+		// with the destination, so mention-like text in it is not user prose.
+		nextStart := lineEnd + 1
+		nextEnd := markdownLineEnd(content, nextStart)
+		if isMarkdownReferenceTitle(strings.TrimSpace(content[nextStart:nextEnd])) {
+			lineEnd = nextEnd
+		}
+	}
+	if lineEnd < len(content) {
+		lineEnd++
+	}
+	return lineEnd, true
+}
+
+func markdownLineEnd(content string, offset int) int {
+	if relative := strings.IndexByte(content[offset:], '\n'); relative >= 0 {
+		return offset + relative
+	}
+	return len(content)
+}
+
+func isLikelyMarkdownReferenceDestination(line string) bool {
+	lower := strings.ToLower(line)
+	for _, prefix := range []string{"<", "/", "./", "../", "#", "http://", "https://", "mailto:"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return line != "" && !strings.ContainsAny(line, " \t") && !isMarkdownReferenceTitle(line)
+}
+
+func isMarkdownReferenceTitle(line string) bool {
+	if len(line) < 2 {
+		return false
+	}
+	switch line[0] {
+	case '"':
+		return line[len(line)-1] == '"'
+	case '\'':
+		return line[len(line)-1] == '\''
+	case '(':
+		return line[len(line)-1] == ')'
+	default:
+		return false
+	}
+}
+
+func isMarkdownURLStart(content string, offset int) bool {
+	if offset == 0 {
+		return true
+	}
+	previous, _ := utf8.DecodeLastRuneInString(content[:offset])
+	return !unicode.IsLetter(previous) && !unicode.IsNumber(previous) && previous != '_'
+}
+
+// markdownCodeRegionEnd reports a fenced or inline Markdown code region that
+// starts at offset. Mention-like examples inside these regions must remain
+// literal and must never trigger a native Feishu notification.
+func markdownCodeRegionEnd(content string, offset int) (int, bool) {
+	if offset >= len(content) {
+		return 0, false
+	}
+	marker := content[offset]
+	if marker != '`' && marker != '~' {
+		return 0, false
+	}
+	run := countByteRun(content, offset, marker)
+	if run >= 3 && isMarkdownFenceStart(content, offset) {
+		return findMarkdownFenceEnd(content, offset+run, marker, run), true
+	}
+	if marker != '`' {
+		return 0, false
+	}
+	for cursor := offset + run; cursor < len(content); {
+		next := strings.IndexByte(content[cursor:], '`')
+		if next < 0 {
+			return 0, false
+		}
+		next += cursor
+		closingRun := countByteRun(content, next, '`')
+		if closingRun == run {
+			return next + closingRun, true
+		}
+		cursor = next + closingRun
+	}
+	return 0, false
+}
+
+func countByteRun(content string, offset int, marker byte) int {
+	end := offset
+	for end < len(content) && content[end] == marker {
+		end++
+	}
+	return end - offset
+}
+
+func isMarkdownFenceStart(content string, offset int) bool {
+	lineStart := strings.LastIndexByte(content[:offset], '\n') + 1
+	if offset-lineStart > 3 {
+		return false
+	}
+	for i := lineStart; i < offset; i++ {
+		if content[i] != ' ' {
+			return false
+		}
+	}
+	return true
+}
+
+func findMarkdownFenceEnd(content string, afterOpening int, marker byte, minimumRun int) int {
+	cursor := afterOpening
+	for cursor < len(content) {
+		lineBreak := strings.IndexByte(content[cursor:], '\n')
+		if lineBreak < 0 {
+			return len(content)
+		}
+		lineStart := cursor + lineBreak + 1
+		candidate := lineStart
+		for candidate < len(content) && candidate-lineStart < 4 && content[candidate] == ' ' {
+			candidate++
+		}
+		if candidate-lineStart <= 3 && candidate < len(content) && content[candidate] == marker {
+			run := countByteRun(content, candidate, marker)
+			if run >= minimumRun {
+				lineEnd := candidate + run
+				for lineEnd < len(content) && content[lineEnd] != '\n' && (content[lineEnd] == ' ' || content[lineEnd] == '\t') {
+					lineEnd++
+				}
+				if lineEnd == len(content) || content[lineEnd] == '\n' {
+					return lineEnd
+				}
+			}
+		}
+		cursor = lineStart
+	}
+	return len(content)
+}
+
+func markdownIndentedCodeLineEnd(content string, offset int) (int, bool) {
+	if offset != 0 && content[offset-1] != '\n' {
+		return 0, false
+	}
+	if content[offset] != '\t' && !strings.HasPrefix(content[offset:], "    ") {
+		return 0, false
+	}
+	if end := strings.IndexByte(content[offset:], '\n'); end >= 0 {
+		return offset + end + 1, true
+	}
+	return len(content), true
+}
+
+func hasNativeTextMention(content string) bool {
+	return strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`)
 }
 
 // TransformRichCardMarkdown preserves resolve_mentions semantics when the
@@ -1917,18 +2607,84 @@ func (p *interactivePlatform) TransformRichCardMarkdown(ctx context.Context, rct
 	return p.resolveMentionsWithFormat(ctx, rc.chatID, markdown, true)
 }
 
+// PrepareRichCardTerminalText requests a transport switch only when the final
+// answer contains a mention that can be resolved to a native target. Card 2.0
+// remains the default for every other answer.
+func (p *interactivePlatform) PrepareRichCardTerminalText(ctx context.Context, rctx any, markdown string) (string, bool, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return markdown, false, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	// Fail closed if the model supplied native markup itself. Even when the
+	// same answer also contains a configured alias, switching the entire answer
+	// to MsgTypeText would activate every raw tag, including unvalidated ones.
+	if hasNativeTextMention(markdown) {
+		return markdown, false, nil
+	}
+	resolved, resolvedMention := p.resolveMentionsWithFormatResult(ctx, rc.chatID, markdown, false)
+	return resolved, resolvedMention, nil
+}
+
+// SendRichCardTerminalText delivers a prepared mention answer as MsgTypeText
+// and returns its message ID in the standard preview handle. The engine uses
+// that handle to delete the exact replacement if the triggering message is
+// recalled concurrently.
+func (p *interactivePlatform) SendRichCardTerminalText(ctx context.Context, rctx any, content string) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	msgType, body := buildReplyContentWithResolvedMention(content, true)
+	if msgType != larkim.MsgTypeText || !hasNativeTextMention(content) {
+		return nil, fmt.Errorf("%s: terminal text fallback requires a resolved native mention", p.tag())
+	}
+
+	var (
+		messageID string
+		err       error
+	)
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		messageID, err = p.replyMessageWithID(ctx, rc, msgType, body)
+	} else {
+		if rc.chatID == "" {
+			return nil, fmt.Errorf("%s: chatID is empty, cannot send terminal text", p.tag())
+		}
+		messageID, err = p.createMessageWithID(ctx, rc.chatID, msgType, body, "send terminal mention text")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if messageID == "" {
+		return nil, fmt.Errorf("%s: terminal mention text returned no message ID", p.tag())
+	}
+	return &feishuPreviewHandle{messageID: messageID, chatID: rc.chatID}, nil
+}
+
 // chainMessage holds extracted data from one message in a reply chain.
 type chainMessage struct {
 	senderName string
 	senderType string // "user" or "app"
+	senderID   string // open_id for users or app_id for bots
 	text       string
 	images     []core.ImageAttachment
+	files      []quotedFileMeta
 	parentID   string
+}
+
+// quotedFileMeta carries only enough information to decide whether a quoted
+// file may be fetched. Binary data is deliberately deferred until the current
+// message explicitly mentions the bot and the uploader is the same IM user.
+type quotedFileMeta struct {
+	fileKey   string
+	fileName  string
+	messageID string
+	senderID  string
 }
 
 type quotedMessage struct {
 	text   string
 	images []core.ImageAttachment
+	files  []quotedFileMeta
 }
 
 // maxReplyChainDepth is the maximum number of parent messages to traverse
@@ -1939,14 +2695,28 @@ const maxReplyChainDepth = 5
 // is replying to, and returns formatted context plus downloaded attachments.
 // For multi-level reply chains, it traces parent_id links up to maxReplyChainDepth
 // levels and returns the full conversation chain.
-// Returns empty content on any failure (graceful degradation — the user's own
-// message is still delivered without the quote).
+// Returns every successfully recovered message. A failure before the first
+// message yields empty content; an ancestor failure yields a partial chain so
+// the user's current message still reaches the Agent while bootstrap remains
+// retryable through fetchQuotedMessageWithStatus.
 func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) quotedMessage {
-	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
+	quoted, _ := p.fetchQuotedMessageWithStatus(ctx, parentID)
+	return quoted
+}
+
+// fetchQuotedMessageWithStatus also reports whether traversal is terminal.
+// False with non-empty content means an ancestor fetch failed after a partial
+// chain was recovered and topic bootstrap should try again on the next turn.
+func (p *Platform) fetchQuotedMessageWithStatus(ctx context.Context, parentID string) (quotedMessage, bool) {
+	chain, complete := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
 	if len(chain) == 0 {
-		return quotedMessage{}
+		return quotedMessage{}, false
 	}
-	return quotedMessage{text: formatReplyChain(chain), images: collectReplyChainImages(chain)}
+	return quotedMessage{
+		text:   formatReplyChain(chain),
+		images: collectReplyChainImages(chain),
+		files:  collectReplyChainFiles(chain),
+	}, complete
 }
 
 // resolveBotSenderName returns a display name for a bot sender in a quoted
@@ -2004,6 +2774,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 	// Extract plain text based on message type.
 	var text string
 	var images []core.ImageAttachment
+	var files []quotedFileMeta
 	switch item.MsgType {
 	case "text":
 		var textBody struct {
@@ -2031,6 +2802,20 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			} else {
 				images = append(images, core.ImageAttachment{MimeType: mimeType, Data: imgData})
 			}
+		}
+	case "file", "media":
+		text = "[" + item.MsgType + "]"
+		var fileBody struct {
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
+		}
+		if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
+			files = append(files, quotedFileMeta{
+				fileKey:   fileBody.FileKey,
+				fileName:  fileBody.FileName,
+				messageID: messageID,
+				senderID:  item.Sender.ID,
+			})
 		}
 	case "interactive":
 		text = extractInteractiveCardText(content)
@@ -2060,8 +2845,10 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 	return &chainMessage{
 		senderName: senderName,
 		senderType: item.Sender.SenderType,
+		senderID:   item.Sender.ID,
 		text:       text,
 		images:     images,
+		files:      files,
 		parentID:   item.ParentID,
 	}
 }
@@ -2074,17 +2861,28 @@ func collectReplyChainImages(chain []chainMessage) []core.ImageAttachment {
 	return images
 }
 
+func collectReplyChainFiles(chain []chainMessage) []quotedFileMeta {
+	var files []quotedFileMeta
+	for _, msg := range chain {
+		files = append(files, msg.files...)
+	}
+	return files
+}
+
 // fetchReplyChain iteratively traverses parent_id links to build a reply chain.
-// Returns messages in chronological order (oldest first). Stops on any failure,
-// circular reference, or when maxDepth is reached.
-func (p *Platform) fetchReplyChain(ctx context.Context, parentID string, maxDepth int) []chainMessage {
+// Returns messages in chronological order (oldest first) plus whether traversal
+// is terminal (root reached, cycle detected, or maxDepth reached). A fetch
+// failure is non-terminal so topic bootstrap can retry on the next message.
+func (p *Platform) fetchReplyChain(ctx context.Context, parentID string, maxDepth int) ([]chainMessage, bool) {
 	var chain []chainMessage
 	visited := make(map[string]struct{})
 	currentID := parentID
+	terminal := false
 
 	for currentID != "" && len(chain) < maxDepth {
 		if _, seen := visited[currentID]; seen {
 			slog.Debug(p.tag()+": reply chain: circular reference detected", "message_id", currentID)
+			terminal = true
 			break
 		}
 		visited[currentID] = struct{}{}
@@ -2096,12 +2894,17 @@ func (p *Platform) fetchReplyChain(ctx context.Context, parentID string, maxDept
 		chain = append(chain, *msg)
 		currentID = msg.parentID
 	}
+	if currentID == "" || (maxDepth > 0 && len(chain) >= maxDepth) {
+		// Reaching the root is complete. A cycle or the configured safety bound
+		// is also terminal because retrying the same traversal cannot improve it.
+		terminal = true
+	}
 
 	// Reverse to chronological order (oldest first).
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
-	return chain
+	return chain, terminal
 }
 
 // formatReplyChain formats a slice of chain messages into a readable string.
@@ -2655,8 +3458,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	content, resolvedMention := p.prepareOutboundMentions(ctx, rc.chatID, content)
+	msgType, msgBody := buildReplyContentWithResolvedMention(content, resolvedMention)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -2677,24 +3480,31 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return p.Reply(ctx, rctx, content)
 	}
 
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	content, resolvedMention := p.prepareOutboundMentions(ctx, rc.chatID, content)
+	msgType, msgBody := buildReplyContentWithResolvedMention(content, resolvedMention)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
 // SendWithStatusFooter implements core.StatusFooterSender: send a reply with
-// the body content followed by a small/dim status-footer block. Always uses
-// the interactive card path so the footer can render with text_size:
-// "notation". Falls back to plain Send when the footer is empty.
+// the body content followed by a small/dim status-footer block. A resolved
+// mention falls back to MsgTypeText because card at-tags render visually but
+// do not emit the native notification event.
 func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, footer string) error {
-	if strings.TrimSpace(footer) == "" {
-		return p.Send(ctx, rctx, content)
-	}
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
+	content, resolvedMention := p.prepareOutboundMentions(ctx, rc.chatID, content)
+	if strings.TrimSpace(footer) == "" || resolvedMention {
+		if strings.TrimSpace(footer) != "" {
+			content += "\n\n" + footer
+		}
+		msgType, msgBody := buildReplyContentWithResolvedMention(content, resolvedMention)
+		if p.shouldUseThreadOrReplyAPI(rc) {
+			return p.replyMessage(ctx, rc, msgType, msgBody)
+		}
+		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+	}
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
 	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
@@ -2883,7 +3693,11 @@ func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, er
 }
 
 func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
+	return p.downloadResourceContext(context.Background(), messageID, fileKey, resType)
+}
+
+func (p *Platform) downloadResourceContext(ctx context.Context, messageID, fileKey, resType string) ([]byte, error) {
+	resp, err := p.client.Im.MessageResource.Get(ctx,
 		larkim.NewGetMessageResourceReqBuilder().
 			MessageId(messageID).
 			FileKey(fileKey).
@@ -2924,21 +3738,16 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
-// predictMsgType returns the message type that buildReplyContent will choose,
-// without actually building the content. Used to select the correct at syntax
-// before building.
-func predictMsgType(content string) string {
-	if !containsMarkdown(content) {
-		return larkim.MsgTypeText
-	}
-	if countMarkdownTables(content) <= maxCardTables {
-		return larkim.MsgTypeInteractive
-	}
-	return larkim.MsgTypePost
+func buildReplyContent(content string) (msgType string, body string) {
+	return buildReplyContentWithResolvedMention(content, false)
 }
 
-func buildReplyContent(content string) (msgType string, body string) {
-	if !containsMarkdown(content) {
+func buildReplyContentWithResolvedMention(content string, resolvedMention bool) (msgType string, body string) {
+	// Feishu only generates a native mention event for MsgTypeText. A card or
+	// post at-tag can look correct while silently failing to notify the target.
+	// Only a tag produced by this resolver may force native text; literal model
+	// output stays on a non-notifying card/post transport.
+	if resolvedMention || (!containsMarkdown(content) && !hasNativeTextMention(content)) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
@@ -3308,6 +4117,53 @@ func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
 	return false
 }
 
+// filterQuotedFilesForUser applies the privacy and demand gates without doing
+// network I/O. Quoted binaries are available only when this turn explicitly
+// mentions the bot and the triggering user uploaded the file.
+func (p *Platform) filterQuotedFilesForUser(metas []quotedFileMeta, mentions []*larkim.MentionEvent, userID string) []quotedFileMeta {
+	if len(metas) == 0 || userID == "" || !isBotMentioned(mentions, p.getBotOpenID()) {
+		return nil
+	}
+	kept := make([]quotedFileMeta, 0, len(metas))
+	for _, meta := range metas {
+		if meta.senderID != userID {
+			slog.Debug(p.tag()+": quoted file rejected by same-user gate",
+				"message_id", meta.messageID,
+				"file_sender", meta.senderID,
+				"current_user", userID)
+			continue
+		}
+		kept = append(kept, meta)
+	}
+	return kept
+}
+
+func (p *Platform) downloadQuotedFiles(ctx context.Context, metas []quotedFileMeta) []core.FileAttachment {
+	if len(metas) == 0 {
+		return nil
+	}
+	files := make([]core.FileAttachment, 0, len(metas))
+	for _, meta := range metas {
+		if meta.fileKey == "" || meta.messageID == "" {
+			continue
+		}
+		data, err := p.downloadResourceContext(ctx, meta.messageID, meta.fileKey, "file")
+		if err != nil {
+			slog.Warn(p.tag()+": quoted file download failed",
+				"error", err,
+				"message_id", meta.messageID,
+				"file_key", meta.fileKey)
+			continue
+		}
+		files = append(files, core.FileAttachment{
+			MimeType: http.DetectContentType(data),
+			Data:     data,
+			FileName: meta.fileName,
+		})
+	}
+	return files
+}
+
 // isAttachmentMsgType reports whether a Feishu message type carries only an
 // attachment payload (no free-form text the user could use to address another
 // human). These are the message types we are willing to admit into an
@@ -3320,14 +4176,114 @@ func isAttachmentMsgType(msgType string) bool {
 	return false
 }
 
+type threadBootstrapState uint8
+
+const (
+	threadBootstrapPending threadBootstrapState = iota
+	threadBootstrapInFlight
+	threadBootstrapComplete
+)
+
+type threadBootstrapEntry struct {
+	state threadBootstrapState
+	tail  chan struct{}
+}
+
 // markThreadSessionActive records that a thread sessionKey has been engaged
-// by an @bot message, enabling attachment-only follow-ups inside the thread.
-// No-op when thread isolation is disabled or sessionKey is not a thread key.
-func (p *Platform) markThreadSessionActive(sessionKey string) {
+// and reports whether this caller reserved its one-time bootstrap. A failed
+// bootstrap can release the reservation without revoking attachment admission.
+func (p *Platform) markThreadSessionActive(sessionKey string) bool {
 	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
-		return
+		return false
 	}
 	p.activeThreadSessions.Store(sessionKey, time.Now())
+	p.threadBootstrapMu.Lock()
+	defer p.threadBootstrapMu.Unlock()
+	if p.threadBootstrapStates == nil {
+		p.threadBootstrapStates = make(map[string]*threadBootstrapEntry)
+	}
+	entry := p.threadBootstrapStates[sessionKey]
+	if entry == nil {
+		p.threadBootstrapStates[sessionKey] = &threadBootstrapEntry{state: threadBootstrapInFlight}
+		return true
+	}
+	if entry.state == threadBootstrapPending && entry.tail == nil {
+		entry.state = threadBootstrapInFlight
+		return true
+	}
+	return false
+}
+
+func (p *Platform) prepareThreadBootstrapDispatch(sessionKey string) (bootstrap, queued bool, wait <-chan struct{}, done chan struct{}) {
+	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+		return false, false, nil, nil
+	}
+	p.activeThreadSessions.Store(sessionKey, time.Now())
+	p.threadBootstrapMu.Lock()
+	defer p.threadBootstrapMu.Unlock()
+	if p.threadBootstrapStates == nil {
+		p.threadBootstrapStates = make(map[string]*threadBootstrapEntry)
+	}
+	entry := p.threadBootstrapStates[sessionKey]
+	if entry == nil {
+		entry = &threadBootstrapEntry{state: threadBootstrapInFlight}
+		p.threadBootstrapStates[sessionKey] = entry
+		bootstrap = true
+	} else if entry.tail != nil {
+		queued = true
+	} else if entry.state == threadBootstrapPending {
+		entry.state = threadBootstrapInFlight
+		bootstrap = true
+	} else if entry.state == threadBootstrapComplete {
+		return false, false, nil, nil
+	} else {
+		queued = true
+	}
+
+	wait = entry.tail
+	done = make(chan struct{})
+	entry.tail = done
+	return bootstrap, queued, wait, done
+}
+
+func (p *Platform) claimThreadBootstrapRetry(sessionKey string) bool {
+	p.threadBootstrapMu.Lock()
+	defer p.threadBootstrapMu.Unlock()
+	entry := p.threadBootstrapStates[sessionKey]
+	if entry == nil || entry.state != threadBootstrapPending {
+		return false
+	}
+	entry.state = threadBootstrapInFlight
+	return true
+}
+
+func (p *Platform) finishThreadBootstrap(sessionKey string, success bool) {
+	if sessionKey == "" {
+		return
+	}
+	p.threadBootstrapMu.Lock()
+	defer p.threadBootstrapMu.Unlock()
+	entry := p.threadBootstrapStates[sessionKey]
+	if entry == nil {
+		return
+	}
+	if success {
+		entry.state = threadBootstrapComplete
+		return
+	}
+	if entry.state == threadBootstrapInFlight {
+		entry.state = threadBootstrapPending
+	}
+}
+
+func (p *Platform) releaseThreadBootstrapDispatch(sessionKey string, done chan struct{}) {
+	close(done)
+	p.threadBootstrapMu.Lock()
+	defer p.threadBootstrapMu.Unlock()
+	entry := p.threadBootstrapStates[sessionKey]
+	if entry != nil && entry.tail == done {
+		entry.tail = nil
+	}
 }
 
 // isActiveThreadSession reports whether the given sessionKey corresponds to a
@@ -3425,13 +4381,34 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
-	req := larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+	_, err := p.replyMessageWithID(ctx, rc, msgType, content)
+	return err
+}
+
+func (p *Platform) replyMessageWithID(ctx context.Context, rc replyContext, msgType, content string) (string, error) {
+	return p.replyMessageWithBody(ctx, rc.messageID, p.buildReplyMessageReqBody(rc, msgType, content))
+}
+
+func (p *Platform) replyMessageInThread(ctx context.Context, rc replyContext, msgType, content string) error {
+	body := larkim.NewReplyMessageReqBodyBuilder().
+		MsgType(msgType).
+		Content(content).
+		ReplyInThread(true).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	_, err := p.replyMessageWithBody(ctx, rc.messageID, body)
+	return err
+}
+
+func (p *Platform) replyMessageWithBody(ctx context.Context, messageID string, body *larkim.ReplyMessageReqBody) (string, error) {
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+	var resp *larkim.ReplyMessageResp
+	if err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Reply(ctx, req, options...)
+			var err error
+			resp, err = client.Im.Message.Reply(ctx, req, options...)
 			if err != nil {
 				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
 			}
@@ -3440,10 +4417,21 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			}
 			return nil
 		})
-	})
+	}); err != nil {
+		return "", err
+	}
+	if resp == nil || resp.Data == nil || resp.Data.MessageId == nil {
+		return "", nil
+	}
+	return *resp.Data.MessageId, nil
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	_, err := p.createMessageWithID(ctx, chatID, msgType, content, op)
+	return err
+}
+
+func (p *Platform) createMessageWithID(ctx context.Context, chatID, msgType, content, op string) (string, error) {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -3452,9 +4440,11 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			Content(content).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, op, func() error {
+	var resp *larkim.CreateMessageResp
+	if err := p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Create(ctx, req, options...)
+			var err error
+			resp, err = client.Im.Message.Create(ctx, req, options...)
 			if err != nil {
 				return fmt.Errorf("%s: %s api call: %w", p.tag(), op, err)
 			}
@@ -3463,7 +4453,13 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			}
 			return nil
 		})
-	})
+	}); err != nil {
+		return "", err
+	}
+	if resp == nil || resp.Data == nil || resp.Data.MessageId == nil {
+		return "", nil
+	}
+	return *resp.Data.MessageId, nil
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
@@ -3631,6 +4627,40 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		}
 	}
 	return rc, nil
+}
+
+// RelayGroupVisibilityKey keeps relay visibility echoes in the Feishu/Lark
+// topic that initiated the relay. Non-thread session keys deliberately fall
+// back to the channel-level relay target in core.
+func (p *Platform) RelayGroupVisibilityKey(callerSessionKey string) (string, bool) {
+	parts := strings.SplitN(callerSessionKey, ":", 3)
+	if len(parts) != 3 || parts[0] != p.platformName || parts[1] == "" {
+		return "", false
+	}
+	if _, ok := parseThreadRootID(parts[2]); !ok {
+		return "", false
+	}
+	return callerSessionKey, true
+}
+
+// SendRelayGroupVisibility keeps topic-scoped relay echoes in their original
+// topic even when reply_to_trigger is disabled for ordinary bot responses.
+// Channel-level relay targets retain the legacy standalone-send behavior.
+func (p *Platform) SendRelayGroupVisibility(ctx context.Context, sessionKey, content string) error {
+	rctx, err := p.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return err
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reconstructed relay context type %T", p.tag(), rctx)
+	}
+	content, resolvedMention := p.prepareOutboundMentions(ctx, rc.chatID, content)
+	msgType, body := buildReplyContentWithResolvedMention(content, resolvedMention)
+	if isThreadSessionKey(sessionKey) && rc.messageID != "" {
+		return p.replyMessageInThread(ctx, rc, msgType, body)
+	}
+	return p.sendNewMessageToChat(ctx, rc, msgType, body)
 }
 
 func parseThreadRootID(sessionTail string) (string, bool) {

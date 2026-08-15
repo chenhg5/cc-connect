@@ -240,14 +240,44 @@ func decodeAndValidateMigrationConfig(configBytes []byte) (*ccconfig.Config, err
 	if err != nil {
 		return nil, fmt.Errorf("source config is incompatible with this cc-connect-next build: %w", err)
 	}
+	allowMentionMapLeaves := false
+	mentionMapPlatformSafe := true
+	for _, project := range cfg.Projects {
+		for _, platform := range project.Platforms {
+			if _, exists := platform.Options["mention_map"]; !exists {
+				continue
+			}
+			allowMentionMapLeaves = true
+			if platform.Type != "feishu" && platform.Type != "lark" {
+				mentionMapPlatformSafe = false
+			}
+		}
+	}
+	allowMentionMapLeaves = allowMentionMapLeaves && mentionMapPlatformSafe
 	undecoded := metadata.Undecoded()
 	if len(undecoded) > 0 {
 		keys := make([]string, 0, len(undecoded))
 		for _, key := range undecoded {
+			// BurntSushi/toml decodes map-valued entries inside the dynamic
+			// platform options map, but still reports each nested leaf as
+			// undecoded metadata. mention_map is an explicitly supported dynamic
+			// table whose types and values are checked by the Feishu platform
+			// validator immediately below, so it must not be mistaken for an
+			// unknown top-level setting here.
+			parts := []string(key)
+			if allowMentionMapLeaves && len(parts) >= 5 &&
+				parts[0] == "projects" &&
+				parts[1] == "platforms" &&
+				parts[2] == "options" &&
+				parts[3] == "mention_map" {
+				continue
+			}
 			keys = append(keys, key.String())
 		}
 		sort.Strings(keys)
-		return nil, fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
+		if len(keys) > 0 {
+			return nil, fmt.Errorf("source config uses unsupported settings (%s); migration would preserve bytes but not behavior, so no target was written", strings.Join(keys, ", "))
+		}
 	}
 	// Load resolves environment placeholders and provider references before
 	// semantic validation. Migration preserves the original TOML bytes, but its

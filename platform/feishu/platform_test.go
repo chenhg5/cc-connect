@@ -1732,17 +1732,19 @@ func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 	}
 }
 
-func TestResolveMentions_CardFormat(t *testing.T) {
+func TestResolveMentions_MarkdownStillUsesNativeNotificationFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
 		members:   map[string]string{"张三": "ou_zhangsan"},
 		fetchedAt: time.Now(),
 	})
-	// Content with complex markdown triggers card format
+	// Ordinary delivery must stay MsgTypeText even when the source includes
+	// markdown; otherwise Feishu renders the at-tag without emitting a native
+	// mention notification.
 	input := "# 巡检报告\n\n@张三 请查看\n\n```\nstatus: ok\n```"
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
-	if !strings.Contains(result, "<at id=ou_zhangsan></at>") {
-		t.Fatalf("card format should use <at id=...>, got %q", result)
+	if !strings.Contains(result, `<at user_id="ou_zhangsan">张三</at>`) {
+		t.Fatalf("markdown mention should use native notification syntax, got %q", result)
 	}
 }
 

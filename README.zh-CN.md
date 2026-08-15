@@ -2,7 +2,7 @@
 
 这是 [CC Connect](https://github.com/chenhg5/cc-connect) 的独立后继项目，第一阶段重点是彻底完善飞书原生 Card 2.0 的回答体验。
 
-[English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md) · [回答卡片契约](docs/feishu-card-contract.md) · [迁移兼容矩阵](docs/migration-compatibility.md) · [上游 beta.3 审计](docs/upstream-v1.5.0-beta.3-audit.md)
+[English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md) · [回答卡片契约](docs/feishu-card-contract.md) · [迁移兼容矩阵](docs/migration-compatibility.md) · [上游飞书能力对齐](docs/upstream-feishu-parity-2026-08-15.md) · [上游 beta.3 审计](docs/upstream-v1.5.0-beta.3-audit.md)
 
 > 当前版本：`0.1.0-beta.1`。它不是 MCP、代理、伴生插件或消息快照方案，也不要求官方 CC Connect 做任何修改；它拥有自己的仓库、命令、数据目录、daemon 和 npm 包。
 
@@ -18,6 +18,8 @@
 6. 完成后原卡变为 `✅ 已完成`；异常时变为 `⚠️ 未完成`。
 
 隐私不是“默认折叠但还能展开”：引擎只记录匿名事件类型，飞书渲染器还会再次丢弃推理文本、工具名称、参数、结果、模型、token、上下文、工作目录和 footer。卡片 JSON 中不存在 `collapsible_panel`。
+
+项目也已经补入官方 CC Connect 在原始分叉点之后合并的飞书能力：话题级工作区绑定、首次 @ 时补入已有话题根上下文、带隐私门禁的引用文件按需下载、Relay 可见消息留在原话题，以及机器人间 `mention_map`。这些能力围绕 Next 已有的 Card 2.0 与迁移安全边界重新适配，并不是整段合并上游。真正解析成功的原生 @ 是“一回合一张卡片”的有意例外：飞书不会从卡片触发机器人 @ 事件，所以 Next 会发送一条可追踪、保留引用关系的文本答案，再删除过程卡；不含原生 @ 的回答仍保持 CardKit 卡片。
 
 ## 安装
 
@@ -115,6 +117,8 @@ app_id = "${FEISHU_APP_ID}"
 app_secret = "${FEISHU_APP_SECRET}"
 reply_to_trigger = true
 done_emoji = "Done"
+# resolve_mentions = true
+# mention_map = { Reviewer-Bot = "ou_reviewer_bot_open_id" }
 ```
 
 需要恢复继承自上游的旧消息展示时，可以显式设置 `card_mode = "legacy"`。

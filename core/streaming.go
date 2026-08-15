@@ -135,6 +135,21 @@ type RichCardMarkdownTransformer interface {
 	TransformRichCardMarkdown(ctx context.Context, replyCtx any, markdown string) string
 }
 
+// RichCardTerminalTextFallback lets a rich-card platform preserve native
+// semantics that its card transport cannot provide. The platform first
+// prepares the final markdown and reports whether an ordinary text message is
+// required. When required, the engine sends that text before removing the
+// lifecycle card and keeps the returned handle so a concurrent trigger recall
+// can delete the replacement precisely.
+//
+// Feishu uses this for real @ notifications: Card 2.0 renders an at-tag but
+// does not emit the mention event needed to wake another bot, while MsgTypeText
+// does.
+type RichCardTerminalTextFallback interface {
+	PrepareRichCardTerminalText(ctx context.Context, replyCtx any, markdown string) (content string, required bool, err error)
+	SendRichCardTerminalText(ctx context.Context, replyCtx any, content string) (previewHandle any, err error)
+}
+
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Feishu upstream parity bundle:** topic-scoped workspace bindings with non-destructive inheritance from the chat default, first-mention root-context bootstrap for existing topics, privacy-gated on-demand quoted-file download, and topic-local relay visibility.
+- **Native bot-to-bot mentions:** `mention_map` gives explicit bot aliases priority over group-member names. A resolved mention uses tracked `MsgTypeText` terminal delivery so Feishu emits the real notification event; the Rich Card lifecycle remains unchanged for ordinary answers.
+
+### Safety
+
+- `mention_map` now fails startup/migration validation unless `resolve_mentions = true`, every alias is valid, and every target is a bot `open_id` beginning with `ou_`.
+- Quoted files are downloaded only after the user explicitly mentions this bot and only when the quoted file was uploaded by that same user.
+- Native mentions resolve only in visible prose; code, hidden URL/reference metadata, image alt text, footnote identifiers, and HTML attributes/raw code cannot notify a bot. Topic follow-ups remain FIFO while first-mention context bootstrap is in flight, and a partially fetched reply chain stays retryable after a transient ancestor failure. Topic-local relay echoes remain in-thread even when ordinary trigger replies are disabled, and failed visibility delivery emits an operator warning.
+
 ## v0.1.0-beta.1 (2026-08-15)
 
 First public prerelease of cc-connect-next: an independently installed successor with a privacy-first Feishu Card 2.0 lifecycle, fail-closed migration from official CC Connect, and checksum-verified GitHub/npm distribution. See `changelogs/v0.1.0-beta.1.md` for bilingual release notes and migration guidance.

@@ -4,7 +4,7 @@ This document is the implementation contract for cc-connect-next's default `card
 
 ## One turn, one quoted card
 
-Every accepted interactive turn gets its own Card 2.0 message. The card is created as a reply to that turn's triggering Feishu message, including queued turns; later updates target the same card rather than creating progress messages.
+Every accepted interactive turn starts with its own Card 2.0 message. The card is created as a reply to that turn's triggering Feishu message, including queued turns; later updates target the same card rather than creating progress messages. The only successful terminal exception is an answer containing a resolved native @ mention: Feishu cards do not emit the bot mention event, so a tracked quoted `MsgTypeText` answer replaces the lifecycle card.
 
 | Agent state | Visible status | Visible body |
 |---|---|---|
@@ -17,6 +17,7 @@ Every accepted interactive turn gets its own Card 2.0 message. The card is creat
 | Failed after partial answer | Localized failure | The already-visible safe partial answer |
 | Bare `NO_REPLY` | The optimistic card is recalled; no answer or Done state remains | No answer body; Feishu may show its own recall notice |
 | Triggering message recalled | The lifecycle card is deleted silently | No partial answer is persisted to assistant history |
+| Completed with a resolved native @ | The process card is replaced by one tracked quoted text answer | Native Feishu mention event plus final answer; no stale card |
 
 The initial card is non-empty and is sent before waiting for reasoning, tools, or answer text. A queued turn uses its own stored reply context, so it never quotes an earlier question by accident.
 
@@ -34,7 +35,7 @@ If CardKit creation or element streaming is unavailable, cc-connect-next safely 
 
 If the terminal full-card update itself fails, cc-connect-next creates one completed replacement card with a deletable message handle, then removes the stale lifecycle card. If initial lifecycle-card creation failed, final delivery retries through that same tracked replacement-card path. Answer delivery never degrades into untracked multi-part replies: a recall racing the replacement cleans up every created card handle and prevents history commit. If the platform cannot create the tracked replacement either, the turn fails closed without sending an undeletable answer or committing it to history. If a turn fails earlier or its Agent event channel closes unexpectedly, only the last body confirmed by a successful Feishu create/update call may be retained on the failure card or in assistant history. Text held back by disabled previews, throttling, or a failed update is never treated as visible. If the failure-state update also fails, the fallback reply contains only that confirmed safe partial plus localized static failure copy; raw provider/process errors are never substituted into chat-visible text.
 
-When `resolve_mentions = true`, every streaming, completed, and safe-partial failure body resolves `@DisplayName` against the triggering chat before it enters Card 2.0. This preserves the native Feishu mention and notification behavior even though the lifecycle card is updated directly rather than sent through the ordinary `Send`/`Reply` path.
+When `resolve_mentions = true`, streaming and safe-partial card bodies resolve `@DisplayName` against the triggering chat for correct visual rendering. Explicit `mention_map` entries override same-name group members and are validated as bot `ou_` open IDs. A completed answer with any successfully resolved native mention does not pretend that Card 2.0 can notify the target: cc-connect-next prepares the `MsgTypeText` at-tag, sends a tracked quoted text replacement, then removes the lifecycle card. If that send fails, the existing card completion path remains available so the user is not left without an answer. A recall racing a successful replacement deletes its exact message handle before history is committed.
 
 Remote markdown images are uploaded once and reused by URL. A failed fetch or Feishu upload enters a one-minute backoff instead of a permanent denylist; after that window the next card that references the URL retries it. This avoids per-frame retry storms while allowing transient timeouts, rate limits, and network failures to recover without restarting the process.
 
@@ -78,4 +79,4 @@ go test ./core -run 'TestProcessInteractiveEvents_CapturesRichCardLocalePerTurn|
 go test ./core -run TestCUJ -count=1
 ```
 
-These tests cover payload privacy, all supported locales, per-turn locale isolation, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, configured mention resolution, partial-answer failure handling, shutdown finalization, recalled-trigger cleanup, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering and platform permissions are external to the repository.
+These tests cover payload privacy, all supported locales, per-turn locale isolation, CardKit creation and monotonic updates, exact quoted replies, queued-turn isolation, configured mention resolution and tracked terminal text replacement, partial-answer failure handling, shutdown finalization, recalled-trigger cleanup, stale-card cleanup and generic failure fallback, and removal of the lasting `NO_REPLY` answer card. A real Feishu client check is still required before a release is described as visually verified, because client rendering, mention events, file permissions, and platform permissions are external to the repository.

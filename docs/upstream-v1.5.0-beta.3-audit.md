@@ -2,6 +2,8 @@
 
 Audit date: 2026-08-14
 
+Historical note: this table records the `v0.1.0-beta.1` release-gate decision. The previously deferred Feishu bundle was implemented in the 2026-08-15 follow-up; see [Upstream Feishu parity](upstream-feishu-parity-2026-08-15.md). The original decisions below remain unchanged so the release history is auditable.
+
 cc-connect-next forked from official CC Connect v1.4.1 (`7fcad099`). Official v1.5.0-beta.3 is `ad196294`; the histories have diverged by 82 upstream commits, 23 successor commits, 190 changed files, and more than 26,000 added lines. The beta is therefore a patch source, not a safe merge target: importing it wholesale would replace independently reviewed migration and Feishu card-lifecycle code.
 
 ## Release-candidate decisions

@@ -7,7 +7,7 @@
 | v1.4.1 | Covered | Covered | Supported |
 | v1.5.0-beta.1 | Same known layout | Covered when every configured plugin exists in the Next build | Supported with preflight |
 | v1.5.0-beta.2 | Same known layout | Covered when every configured plugin exists in the Next build | Supported with preflight |
-| v1.5.0-beta.3 | Same known layout | `hide_agent_footer` is supported. Yuanbao and `agent_session_idle_timeout_mins` are rejected until implemented. | Supported with preflight |
+| v1.5.0-beta.3 | Same known layout | `hide_agent_footer`, Feishu `mention_map`, topic workspace isolation, quoted-file retrieval, topic bootstrap, and relay visibility are supported. Yuanbao and `agent_session_idle_timeout_mins` are rejected until implemented. | Supported with preflight |
 
 Compatibility is deliberately configuration-specific. A release row does not mean an unavailable platform is silently removed or a new setting is ignored. If source TOML contains a field the current build cannot honor, fails normal startup validation (for example, an invalid display mode or a missing Agent/platform), or names a plugin unavailable in the current build, migration reports the exact incompatibility and writes nothing.
 

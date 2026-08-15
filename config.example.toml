@@ -1014,6 +1014,11 @@ app_secret = "your-feishu-app-secret"
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
+# mention_map = { Reviewer-Bot = "ou_reviewer_bot_open_id" }
+#                           # Explicit bot-name -> open_id map for real outbound bot-to-bot @ notifications.
+#                           # Takes priority over group-member names and requires resolve_mentions = true.
+#                           # 机器人名称 -> open_id 的显式映射，用于真正触发机器人间 @ 通知；
+#                           # 优先级高于群成员同名匹配，并且必须同时开启 resolve_mentions。
 # image_batch_window_ms = 500  # Coalesce window for consecutive images from the same session (default: 500ms).
 #                              # When the Feishu mobile client sends multiple images, each arrives as a separate
 #                              # event; cc-connect-next buffers them and dispatches a single multi-image message once

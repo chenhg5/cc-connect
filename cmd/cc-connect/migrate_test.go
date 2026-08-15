@@ -135,6 +135,102 @@ app_id = "only-an-app-id"
 	}
 }
 
+func TestPrepareLegacyMigration_AcceptsFeishuMentionMap(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "feishu-mention-map"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_test"
+app_secret = "secret"
+resolve_mentions = true
+mention_map = { Reviewer-Bot = "ou_reviewer_bot" }
+`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err != nil {
+		t.Fatalf("mention_map migration preflight failed: %v", err)
+	}
+	if plan == nil {
+		t.Fatal("mention_map migration produced no plan")
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run wrote target state: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsInactiveFeishuMentionMapBeforeWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "inactive-feishu-mention-map"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_test"
+app_secret = "secret"
+mention_map = { Reviewer-Bot = "ou_reviewer_bot" }
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "mention_map requires resolve_mentions = true") {
+		t.Fatalf("inactive mention_map error = %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after mention_map compatibility failure: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_DoesNotAllowMentionMapOnOtherPlatforms(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "telegram-with-feishu-option"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "test-token"
+mention_map = { Reviewer-Bot = "ou_reviewer_bot" }
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported settings") {
+		t.Fatalf("foreign mention_map error = %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after foreign mention_map failure: %v", statErr)
+	}
+}
+
 func TestPrepareLegacyMigration_RejectsPluginNamesThatRuntimeRegistryWouldReject(t *testing.T) {
 	tests := []struct {
 		name       string
