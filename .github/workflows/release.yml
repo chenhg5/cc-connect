@@ -288,7 +288,12 @@ jobs:
               ""|*-*)
                 latest_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_latest")"
                 if [ "$latest_relation" = "newer" ] || [ "$latest_relation" = "missing" ]; then
-                  retry_npm npm dist-tag add "cc-connect-next@${version}" latest --registry=https://registry.npmjs.org
+                  # Best-effort: a token that authenticates reads can still be
+                  # OTP-challenged on writes (2FA-gated publish tokens). The
+                  # release itself must not fail over the convenience tag.
+                  if ! retry_npm npm dist-tag add "cc-connect-next@${version}" latest --registry=https://registry.npmjs.org; then
+                    echo "::warning::Could not move the latest dist-tag to ${version} (token rejected or OTP-gated). Use an automation token that bypasses 2FA as NPM_TOKEN, then dispatch the Registry Maintenance workflow."
+                  fi
                 fi
                 ;;
               *)
