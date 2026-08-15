@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +123,43 @@ func TestAgentListSessions_UsesSessionIndexThreadName(t *testing.T) {
 	}
 	if sessions[0].Summary != "设计简易基础管理模块" {
 		t.Fatalf("ListSessions()[0].Summary = %q, want Codex thread name", sessions[0].Summary)
+	}
+}
+
+func TestAgentListSessions_LongThreadNameTruncated(t *testing.T) {
+	workDir := t.TempDir()
+	codexHome := t.TempDir()
+	sessionsDir := filepath.Join(codexHome, "sessions", "2026", "08", "15")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("create sessions directory: %v", err)
+	}
+
+	workDirJSON, err := json.Marshal(workDir)
+	if err != nil {
+		t.Fatalf("encode work directory: %v", err)
+	}
+	const sessionID = "019fc636-3567-76e3-a4d6-b223545f7e72"
+	rollout := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":` + string(workDirJSON) + `,"source":"vscode"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(sessionsDir, "rollout-session.jsonl"), []byte(rollout), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	longTitle := strings.Repeat("会", 61)
+	indexEntry := `{"id":"` + sessionID + `","thread_name":"` + longTitle + `","updated_at":"2026-08-15T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(codexHome, "session_index.jsonl"), []byte(indexEntry), 0o644); err != nil {
+		t.Fatalf("write session index: %v", err)
+	}
+
+	agent := &Agent{workDir: workDir, codexHome: codexHome}
+	sessions, err := agent.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListSessions() error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("ListSessions() returned %d sessions, want 1", len(sessions))
+	}
+	want := strings.Repeat("会", 60) + "..."
+	if sessions[0].Summary != want {
+		t.Fatalf("ListSessions()[0].Summary = %q, want %q", sessions[0].Summary, want)
 	}
 }

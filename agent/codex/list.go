@@ -62,6 +62,9 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 		info := parseCodexSessionFile(f, absWorkDir)
 		if info != nil {
 			if title := sessionTitles[info.ID]; title != "" {
+				if titleRunes := []rune(title); len(titleRunes) > 60 {
+					title = string(titleRunes[:60]) + "..."
+				}
 				info.Summary = title
 			}
 			patchSessionSource(info.ID, codexHome)
