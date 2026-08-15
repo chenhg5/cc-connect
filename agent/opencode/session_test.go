@@ -3,12 +3,15 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -170,7 +173,7 @@ func TestHandleStepStopSendsEventResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
-	s.handleStepFinish(raw)
+	s.handleStepFinish(raw, s.turnGen.Load())
 
 	select {
 	case evt := <-s.events:
@@ -199,7 +202,7 @@ func TestHandleStepToolCallsNoEventResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
-	s.handleStepFinish(raw)
+	s.handleStepFinish(raw, s.turnGen.Load())
 
 	select {
 	case evt := <-s.events:
@@ -227,8 +230,8 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 		resultSent: atomic.Bool{},
 	}
 
-	s.handleStepFinish(raw)
-	s.handleStepFinish(raw)
+	s.handleStepFinish(raw, s.turnGen.Load())
+	s.handleStepFinish(raw, s.turnGen.Load())
 
 	count := 0
 	for len(s.events) > 0 {
@@ -331,6 +334,151 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 		if evt.Type == core.EventText {
 			t.Errorf("unexpected EventText for error with no message: %q", evt.Content)
 		}
+	}
+}
+
+// TestStaleFallbackEventResultSuppressed reproduces the "(empty response)"
+// bug for the first message dequeued from a busy-session queue.
+//
+// Sequence (as observed in production):
+//  1. Turn 1's process emits step_finish reason=stop → EventResult. The
+//     engine consumes it and immediately dequeues the next queued message.
+//  2. The engine calls Send() for turn 2, which resets resultSent and spawns
+//     a new process. Turn 1's process is still alive — its readLoop lingers
+//     until the process exits, typically hundreds of milliseconds later.
+//  3. Turn 1's process exits. Its readLoop's EOF fallback calls
+//     sendEventResult. Because resultSent was reset by turn 2's Send, the
+//     old guard let a stale EventResult through, terminating turn 2 before
+//     any of its output arrived → "(空响应)" placeholder.
+//
+// With the turn-generation guard, step 3 must emit nothing.
+func TestStaleFallbackEventResultSuppressed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+
+	// Turn 1 begins (mimic Send's per-turn reset).
+	s.resultSent.Store(false)
+	gen1 := s.turnGen.Add(1)
+
+	// Turn 1's process emits step_finish reason=stop.
+	s.sendEventResult(gen1)
+	evt := <-s.events
+	if evt.Type != core.EventResult {
+		t.Fatalf("turn 1: event type = %q, want EventResult", evt.Type)
+	}
+
+	// Engine dequeues the queued message and calls Send for turn 2.
+	s.resultSent.Store(false)
+	gen2 := s.turnGen.Add(1)
+
+	// Turn 1's process exits now; its readLoop EOF fallback fires with gen1.
+	s.sendEventResult(gen1)
+	select {
+	case evt := <-s.events:
+		t.Fatalf("stale EventResult from turn 1's process leaked into turn 2: %+v", evt)
+	default:
+	}
+
+	// Turn 2's own completion must still go through.
+	s.sendEventResult(gen2)
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventResult {
+			t.Fatalf("turn 2: event type = %q, want EventResult", evt.Type)
+		}
+	default:
+		t.Fatal("turn 2's own EventResult was not sent")
+	}
+}
+
+// TestQueuedTurnNotTerminatedByLingeringPreviousProcess is an integration
+// repro of the same bug through the real Send/readLoop path, using this test
+// binary as a fake agent CLI (see TestHelperProcess).
+//
+// Turn 1's fake process emits its final event, then lingers 400ms before
+// exiting — like the real CLI, which flushes/tears down after printing the
+// result. Turn 2 is sent as soon as turn 1's EventResult is consumed
+// (exactly what the engine's queue-drain path does), and its fake process
+// takes 700ms to produce output. Without the fix, turn 1's exit produces a
+// stale EventResult at ~400ms and turn 2 completes "empty".
+func TestQueuedTurnNotTerminatedByLingeringPreviousProcess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s, err := newOpencodeSession(ctx, os.Args[0],
+		[]string{"-test.run=TestHelperProcess", "--"},
+		t.TempDir(), "", "default", "", "", []string{"GO_OC_HELPER=1"})
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send("turn1", "msg1", nil, nil); err != nil {
+		t.Fatalf("Send turn1: %v", err)
+	}
+	waitForResult(t, s, "turn 1", nil)
+
+	// Engine behavior after EventResult: dequeue and Send immediately,
+	// while turn 1's process is still lingering.
+	if err := s.Send("turn2", "msg2", nil, nil); err != nil {
+		t.Fatalf("Send turn2: %v", err)
+	}
+	var texts []string
+	waitForResult(t, s, "turn 2", &texts)
+
+	joined := strings.Join(texts, "")
+	if !strings.Contains(joined, "reply two") {
+		t.Fatalf("turn 2 completed without its reply text (stale EventResult ended the turn early); got text %q", joined)
+	}
+}
+
+// waitForResult consumes events until EventResult, collecting EventText
+// content into texts if non-nil. Fails the test on EventError or timeout.
+func waitForResult(t *testing.T, s *opencodeSession, label string, texts *[]string) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case evt := <-s.events:
+			switch evt.Type {
+			case core.EventResult:
+				return
+			case core.EventError:
+				t.Fatalf("%s: unexpected EventError: %v", label, evt.Error)
+			case core.EventText:
+				if texts != nil {
+					*texts = append(*texts, evt.Content)
+				}
+			}
+		case <-deadline:
+			t.Fatalf("%s: timed out waiting for EventResult", label)
+		}
+	}
+}
+
+// TestHelperProcess acts as a fake agent CLI for the integration test above.
+// It is only active when GO_OC_HELPER=1; the prompt arrives on stdin.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_OC_HELPER") != "1" {
+		return
+	}
+	defer os.Exit(0)
+	in, _ := io.ReadAll(os.Stdin)
+	prompt := string(in)
+	switch {
+	case strings.Contains(prompt, "turn1"):
+		fmt.Println(`{"type":"step_start","sessionID":"ses_helper"}`)
+		fmt.Println(`{"type":"text","part":{"text":"reply one"}}`)
+		fmt.Println(`{"type":"step_finish","part":{"reason":"stop"}}`)
+		_ = os.Stdout.Sync()
+		// Linger after the final event, like the real CLI's teardown.
+		time.Sleep(400 * time.Millisecond)
+	case strings.Contains(prompt, "turn2"):
+		// Simulate LLM latency before any output.
+		time.Sleep(700 * time.Millisecond)
+		fmt.Println(`{"type":"text","part":{"text":"reply two"}}`)
+		fmt.Println(`{"type":"step_finish","part":{"reason":"stop"}}`)
 	}
 }
 
