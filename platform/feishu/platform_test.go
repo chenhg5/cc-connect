@@ -1688,6 +1688,81 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 	}
 }
 
+func TestGroupReplyAllChats_OnlyConfiguredChatsBypassMention(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_xxx",
+		"app_secret":            "secret",
+		"enable_feishu_card":    true,
+		"group_reply_all":       true,
+		"group_reply_all_chats": "oc_allowed",
+		"allow_chat":            "*",
+	})
+	if err != nil {
+		t.Fatalf("newPlatform() error = %v", err)
+	}
+	ip := p.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+	// Keep this routing test independent of the Contact/IM APIs. Without
+	// cached names, dispatchMessage performs real SDK lookups against the
+	// intentionally fake credentials, making the short admission assertion
+	// timing-sensitive under coverage.
+	ip.userNameCache.Store("ou_user", "Test User")
+	ip.chatNameCache.Store("oc_allowed", "Allowed")
+	ip.chatNameCache.Store("oc_other", "Other")
+	var eventSequence int64
+
+	dispatches := func(chatID string, mentions []*larkim.MentionEvent) bool {
+		received := make(chan *core.Message, 1)
+		ip.handler = func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		}
+		messageID := "om_" + strings.ReplaceAll(chatID, "_", "") + "_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		chatType := "group"
+		messageType := "text"
+		senderType := "user"
+		userID := "ou_user"
+		content := `{"text":"hello"}`
+		createTime := strconv.FormatInt(time.Now().UnixMilli()+atomic.AddInt64(&eventSequence, 1), 10)
+		if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+			Event: &larkim.P2MessageReceiveV1Data{
+				Sender: &larkim.EventSender{
+					SenderId:   &larkim.UserId{OpenId: &userID},
+					SenderType: &senderType,
+				},
+				Message: &larkim.EventMessage{
+					MessageId:   &messageID,
+					ChatId:      &chatID,
+					ChatType:    &chatType,
+					MessageType: &messageType,
+					Content:     &content,
+					CreateTime:  &createTime,
+					Mentions:    mentions,
+				},
+			},
+		}); err != nil {
+			t.Fatalf("onMessage(%s) error = %v", chatID, err)
+		}
+		select {
+		case <-received:
+			return true
+		case <-time.After(500 * time.Millisecond):
+			return false
+		}
+	}
+
+	if !dispatches("oc_allowed", nil) {
+		t.Fatal("configured group should accept an unmentioned message")
+	}
+	if dispatches("oc_other", nil) {
+		t.Fatal("unconfigured group should still require an @mention")
+	}
+	if !dispatches("oc_other", []*larkim.MentionEvent{{
+		Id: &larkim.UserId{OpenId: stringPtr("ou_bot")},
+	}}) {
+		t.Fatal("unconfigured group should accept an explicitly mentioned message")
+	}
+}
+
 // --- Mention resolution tests ---
 
 func TestResolveMentions_ReplacesKnownMember(t *testing.T) {

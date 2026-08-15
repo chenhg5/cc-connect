@@ -128,6 +128,7 @@ done_emoji = "Done"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
+# group_reply_all_chats = "oc_target_chat_id_1,oc_target_chat_id_2" # 可选：仅指定群聊免 @
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # resolve_mentions = true    # 可选：把 @显示名 解析为飞书原生 at
 # mention_map = { Reviewer-Bot = "ou_reviewer_bot_open_id" } # 可选：机器人名称 -> bot open_id
@@ -294,6 +295,10 @@ level=INFO msg="cc-connect-next is running" projects=1
 `im:message.group_msg`（获取群组中所有消息）。这个配置只决定机器人在**已经收到**的
 事件上是否跳过 @ 过滤，不能让应用收到飞书租户没有投递的消息；缺少该权限或未发布新版本
 时，群聊里的普通消息仍可能不会产生 `im.message.receive_v1` 事件，表现为必须先 @ 机器人。
+
+如果只想让部分群聊免 @，不要开启全局 `group_reply_all`，改用
+`group_reply_all_chats = "oc_xxx,oc_yyy"`；未列出的群聊仍然要求 @。该选项也需要
+`im:message.group_msg` 权限。
 
 ---
 

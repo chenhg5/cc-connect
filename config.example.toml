@@ -1009,6 +1009,10 @@ app_secret = "your-feishu-app-secret"
 #                           # after an event is delivered and cannot make missing tenant events appear.
 #                           # 飞书还必须申请并发布敏感权限 `im:message.group_msg`；此选项只改变
 #                           # 收到事件后的本地过滤，不能让租户未投递的事件凭空出现。
+# group_reply_all_chats = "oc_target_chat_id_1,oc_target_chat_id_2"
+#                           # Optional: only these group chats bypass @mention; all other groups
+#                           # still require @. A TOML string array is also accepted.
+#                           # 可选：仅这些群聊无需 @；其他群聊仍需 @。也支持 TOML 字符串数组。
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)

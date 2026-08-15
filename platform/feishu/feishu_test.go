@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/timmyagentic/cc-connect-next/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	"github.com/timmyagentic/cc-connect-next/core"
 )
 
 func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
@@ -1263,6 +1263,38 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 	}
 	if fp.groupReplyAll {
 		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
+	}
+}
+
+func TestNewPlatform_GroupReplyAllChatsAcceptsStringArray(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"group_reply_all_chats": []any{"oc_allowed", " oc_second "},
+	})
+	if err != nil {
+		t.Fatalf("newPlatform() error = %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil {
+		t.Fatal("expected *Platform or *interactivePlatform")
+	}
+	if !fp.groupReplyAllForChat("oc_allowed") || !fp.groupReplyAllForChat("oc_second") {
+		t.Fatalf("configured chats were not normalized: %#v", fp.groupReplyAllChats)
+	}
+	if fp.groupReplyAllForChat("oc_other") {
+		t.Fatal("unconfigured chat should not bypass the mention gate")
+	}
+}
+
+func TestNewPlatform_GroupReplyAllChatsRejectsNonStringArrayEntry(t *testing.T) {
+	_, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                "cli_test",
+		"app_secret":            "secret",
+		"group_reply_all_chats": []any{"oc_allowed", 42},
+	})
+	if err == nil || !strings.Contains(err.Error(), "group_reply_all_chats") {
+		t.Fatalf("newPlatform() error = %v, want group_reply_all_chats validation error", err)
 	}
 }
 
