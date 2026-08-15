@@ -458,3 +458,191 @@ func TestReconstructReplyCtx_MissingToken(t *testing.T) {
 		t.Errorf("error = %q, want it to mention 'no stored context_token'", err.Error())
 	}
 }
+
+// ── send-volume quota (burst_limit / burst_window_secs) ──────
+
+// TestNew_BurstOptionDefaults verifies the quota is always armed with the
+// official CC Connect defaults when the options are absent, so a migrated
+// config keeps the same anti-throttle protection it had on the official build.
+func TestNew_BurstOptionDefaults(t *testing.T) {
+	pf, err := New(map[string]any{"token": "tok"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := pf.(*Platform)
+	if p.sendQuotaLimit != defaultBurstLimit {
+		t.Errorf("sendQuotaLimit = %d, want %d", p.sendQuotaLimit, defaultBurstLimit)
+	}
+	if p.sendQuotaWindow != time.Duration(defaultBurstWindowSecs)*time.Second {
+		t.Errorf("sendQuotaWindow = %v, want %v", p.sendQuotaWindow, time.Duration(defaultBurstWindowSecs)*time.Second)
+	}
+}
+
+func TestNew_BurstOptionsCustom(t *testing.T) {
+	pf, err := New(map[string]any{
+		"token":             "tok",
+		"burst_limit":       int64(7),
+		"burst_window_secs": int64(3600),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := pf.(*Platform)
+	if p.sendQuotaLimit != 7 {
+		t.Errorf("sendQuotaLimit = %d, want 7", p.sendQuotaLimit)
+	}
+	if p.sendQuotaWindow != time.Hour {
+		t.Errorf("sendQuotaWindow = %v, want 1h", p.sendQuotaWindow)
+	}
+}
+
+// TestNew_BurstOptionsNonPositiveFallBackToDefaults mirrors the official
+// behavior: zero and negative values fall back to the defaults instead of
+// disabling the quota, so a migrated config cannot end up less protected on
+// the successor than it was on the official build.
+func TestNew_BurstOptionsNonPositiveFallBackToDefaults(t *testing.T) {
+	for _, value := range []int64{0, -5} {
+		pf, err := New(map[string]any{
+			"token":             "tok",
+			"burst_limit":       value,
+			"burst_window_secs": value,
+		})
+		if err != nil {
+			t.Fatalf("New(burst=%d) error = %v", value, err)
+		}
+		p := pf.(*Platform)
+		if p.sendQuotaLimit != defaultBurstLimit {
+			t.Errorf("burst=%d: sendQuotaLimit = %d, want %d", value, p.sendQuotaLimit, defaultBurstLimit)
+		}
+		if p.sendQuotaWindow != time.Duration(defaultBurstWindowSecs)*time.Second {
+			t.Errorf("burst=%d: sendQuotaWindow = %v, want default", value, p.sendQuotaWindow)
+		}
+	}
+}
+
+// TestCheckSendQuota_AllowsUnderLimit verifies sends under the window limit
+// pass through without error.
+func TestCheckSendQuota_AllowsUnderLimit(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 4, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if err := p.checkSendQuota(ctx); err != nil {
+			t.Fatalf("checkSendQuota(%d) unexpectedly failed: %v", i, err)
+		}
+	}
+}
+
+// TestCheckSendQuota_FailsWhenOverLimit verifies the quota fails fast (no
+// waiting) once the window budget is exhausted.
+func TestCheckSendQuota_FailsWhenOverLimit(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 1, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	if err := p.checkSendQuota(ctx); err != nil {
+		t.Fatalf("first send should pass: %v", err)
+	}
+	start := time.Now()
+	if err := p.checkSendQuota(ctx); err == nil {
+		t.Fatal("second send should fail (budget exhausted)")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("over-budget send should fail fast, took %v", elapsed)
+	}
+}
+
+// TestCheckSendQuota_DisabledWhenZero verifies a zero limit disables the
+// internal check entirely. Config cannot reach this state (New falls back to
+// defaults); it guards direct constructions such as tests and future callers.
+func TestCheckSendQuota_DisabledWhenZero(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 0, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if err := p.checkSendQuota(ctx); err != nil {
+			t.Fatalf("disabled quota should never fail: %v", err)
+		}
+	}
+}
+
+// TestSendChunks_AppliesQuota verifies the budget is enforced end-to-end:
+// under budget the send reaches the API exactly once, over budget it fails
+// before any HTTP attempt (an extra attempt would escalate ilink's penalty),
+// and no incomplete-delivery notice is sent for a quota rejection.
+func TestSendChunks_AppliesQuota(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":0}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		httpClient:      &http.Client{},
+		sendQuotaLimit:  1,
+		sendQuotaWindow: time.Hour,
+	}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "ctx-tok"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := p.sendChunks(ctx, rc, "hello"); err != nil {
+		t.Fatalf("first sendChunks failed: %v", err)
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls after first message = %d, want 1", got)
+	}
+
+	err := p.sendChunks(ctx, rc, "again")
+	if err == nil {
+		t.Fatal("second sendChunks should fail: budget exhausted")
+	}
+	if !containsStr(err.Error(), "send budget exhausted") {
+		t.Errorf("error = %q, want it to mention 'send budget exhausted'", err.Error())
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls after over-budget message = %d, want still 1 (no HTTP attempt, no notice)", got)
+	}
+}
+
+// TestSendSingleItemWithRetry_AppliesQuota verifies media sends draw from the
+// same budget as text sends: one logical media item consumes one slot, and an
+// over-budget item fails before any HTTP attempt.
+func TestSendSingleItemWithRetry_AppliesQuota(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":0}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		httpClient:      &http.Client{},
+		sendQuotaLimit:  1,
+		sendQuotaWindow: time.Hour,
+	}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "ctx-tok"}
+	item := messageItem{Type: messageItemText, TextItem: &textItem{Text: "img-caption"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := p.sendSingleItemWithRetry(ctx, rc, item); err != nil {
+		t.Fatalf("first media send failed: %v", err)
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls after first item = %d, want 1", got)
+	}
+	err := p.sendSingleItemWithRetry(ctx, rc, item)
+	if err == nil {
+		t.Fatal("second media send should fail: budget exhausted")
+	}
+	if !containsStr(err.Error(), "send budget exhausted") {
+		t.Errorf("error = %q, want it to mention 'send budget exhausted'", err.Error())
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls after over-budget item = %d, want still 1", got)
+	}
+}

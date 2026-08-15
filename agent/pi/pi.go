@@ -41,6 +41,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	thinking, _ := opts["thinking"].(string)
 
 	cmd, extraArgs := core.ParseCmdOpts(opts, "pi")
 
@@ -62,6 +63,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:      workDir,
 		model:        model,
 		mode:         mode,
+		thinking:     thinking,
 	}, nil
 }
 

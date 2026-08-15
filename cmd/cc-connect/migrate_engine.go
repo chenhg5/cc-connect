@@ -192,6 +192,35 @@ func normalizeMigrationSourceVersion(raw string) (string, error) {
 	return value, nil
 }
 
+// migrationGatedAgentOptions names official CC Connect agent options whose
+// behavior this build does not implement yet. A config that enables one must
+// fail preflight instead of migrating into silently different behavior.
+// An explicit boolean false is behavior-neutral and passes.
+var migrationGatedAgentOptions = map[string][]string{
+	// Official v1.5.0-beta.x pi gained a persistent RPC transport
+	// (--mode rpc). This build still runs pi one-shot in json mode.
+	"pi": {"rpc"},
+}
+
+// migrationGatedPlatformOptions is the platform-side counterpart of
+// migrationGatedAgentOptions. Currently empty: audit new official releases
+// before extending the supported-source matrix and record gaps here.
+var migrationGatedPlatformOptions = map[string][]string{}
+
+func validateMigrationGatedOptions(projectName, pluginKind, pluginType string, options map[string]any, gated map[string][]string) error {
+	for _, gatedKey := range gated[pluginType] {
+		value, exists := options[gatedKey]
+		if !exists {
+			continue
+		}
+		if flag, ok := value.(bool); ok && !flag {
+			continue
+		}
+		return fmt.Errorf("source project %q uses %s %q option %q, which this cc-connect-next build does not implement; migration would preserve bytes but not behavior, so no target was written (remove the option or keep the official installation for it)", projectName, pluginKind, pluginType, gatedKey)
+	}
+	return nil
+}
+
 func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 	agents := stringSet(core.ListRegisteredAgents())
 	platforms := stringSet(core.ListRegisteredPlatforms())
@@ -208,6 +237,9 @@ func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 			if _, ok := agents[agentType]; !ok {
 				return fmt.Errorf("source project %q uses agent %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, project.Agent.Type)
 			}
+			if err := validateMigrationGatedOptions(projectName, "agent", agentType, project.Agent.Options, migrationGatedAgentOptions); err != nil {
+				return err
+			}
 			if err := core.ValidateAgentOptions(agentType, buildAgentOptions(cfg.DataDir, project)); err != nil {
 				return fmt.Errorf("source project %q uses agent %q with options this cc-connect-next build cannot start: %w; migration did not write the target", projectName, project.Agent.Type, err)
 			}
@@ -219,6 +251,9 @@ func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 			}
 			if _, ok := platforms[platformType]; !ok {
 				return fmt.Errorf("source project %q uses platform %q, which this cc-connect-next build does not provide; migration would create a configuration that cannot start", projectName, platform.Type)
+			}
+			if err := validateMigrationGatedOptions(projectName, "platform", platformType, platform.Options, migrationGatedPlatformOptions); err != nil {
+				return err
 			}
 			opts := make(map[string]any, len(platform.Options)+2)
 			for key, value := range platform.Options {
@@ -234,43 +269,110 @@ func validateMigrationProjectPlugins(cfg *ccconfig.Config) error {
 	return nil
 }
 
+// migrationEnvConsumingAgents lists the agent types whose factories read the
+// env option table (directly or via core.ParseConfigEnv). devin and tmux do
+// not spawn a CLI with a caller-controlled environment and ignore env, so an
+// env table configured for them must not migrate as if it kept its behavior.
+var migrationEnvConsumingAgents = map[string]struct{}{
+	"acp":         {},
+	"antigravity": {},
+	"claudecode":  {},
+	"codex":       {},
+	"copilot":     {},
+	"cursor":      {},
+	"gemini":      {},
+	"iflow":       {},
+	"kimi":        {},
+	"opencode":    {},
+	"pi":          {},
+	"qoder":       {},
+}
+
+// migrationAllowedPlatformOptionTables returns the nested platform-option
+// tables whose leaves may be ignored by the undecoded check. A table name is
+// allowed only when every project that defines it uses a platform type that
+// actually consumes it; otherwise the migrated bytes would not preserve
+// behavior and the leaves must surface as unsupported settings.
+func migrationAllowedPlatformOptionTables(cfg *ccconfig.Config) map[string]struct{} {
+	feishuFamily := map[string]struct{}{"feishu": {}, "lark": {}}
+	consumers := map[string]map[string]struct{}{
+		// mention_map and peer_bots power Feishu bot-to-bot mention
+		// resolution and relay; no other platform reads them. Their types
+		// and values are checked by the Feishu validator afterwards.
+		"mention_map": feishuFamily,
+		"peer_bots":   feishuFamily,
+	}
+	allowed := make(map[string]struct{})
+	for table, types := range consumers {
+		present := false
+		safe := true
+		for _, project := range cfg.Projects {
+			for _, platform := range project.Platforms {
+				if _, exists := platform.Options[table]; !exists {
+					continue
+				}
+				present = true
+				if _, ok := types[platform.Type]; !ok {
+					safe = false
+				}
+			}
+		}
+		if present && safe {
+			allowed[table] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+// migrationAllowedAgentOptionTables is the agent-side counterpart: env is the
+// only nested agent-option table any supported official release defines.
+func migrationAllowedAgentOptionTables(cfg *ccconfig.Config) map[string]struct{} {
+	present := false
+	safe := true
+	for _, project := range cfg.Projects {
+		if _, exists := project.Agent.Options["env"]; !exists {
+			continue
+		}
+		present = true
+		if _, ok := migrationEnvConsumingAgents[project.Agent.Type]; !ok {
+			safe = false
+		}
+	}
+	if present && safe {
+		return map[string]struct{}{"env": {}}
+	}
+	return map[string]struct{}{}
+}
+
 func decodeAndValidateMigrationConfig(configBytes []byte) (*ccconfig.Config, error) {
 	var cfg ccconfig.Config
 	metadata, err := toml.Decode(string(configBytes), &cfg)
 	if err != nil {
 		return nil, fmt.Errorf("source config is incompatible with this cc-connect-next build: %w", err)
 	}
-	allowMentionMapLeaves := false
-	mentionMapPlatformSafe := true
-	for _, project := range cfg.Projects {
-		for _, platform := range project.Platforms {
-			if _, exists := platform.Options["mention_map"]; !exists {
-				continue
-			}
-			allowMentionMapLeaves = true
-			if platform.Type != "feishu" && platform.Type != "lark" {
-				mentionMapPlatformSafe = false
-			}
-		}
-	}
-	allowMentionMapLeaves = allowMentionMapLeaves && mentionMapPlatformSafe
+	allowedPlatformTables := migrationAllowedPlatformOptionTables(&cfg)
+	allowedAgentTables := migrationAllowedAgentOptionTables(&cfg)
 	undecoded := metadata.Undecoded()
 	if len(undecoded) > 0 {
 		keys := make([]string, 0, len(undecoded))
 		for _, key := range undecoded {
 			// BurntSushi/toml decodes map-valued entries inside the dynamic
-			// platform options map, but still reports each nested leaf as
-			// undecoded metadata. mention_map is an explicitly supported dynamic
-			// table whose types and values are checked by the Feishu platform
-			// validator immediately below, so it must not be mistaken for an
-			// unknown top-level setting here.
+			// agent/platform options maps, but still reports each nested leaf
+			// as undecoded metadata. Explicitly supported dynamic tables
+			// (env, mention_map, peer_bots) whose values are validated by the
+			// consuming plugin must not be mistaken for unknown settings here.
 			parts := []string(key)
-			if allowMentionMapLeaves && len(parts) >= 5 &&
-				parts[0] == "projects" &&
-				parts[1] == "platforms" &&
-				parts[2] == "options" &&
-				parts[3] == "mention_map" {
-				continue
+			if len(parts) >= 5 && parts[0] == "projects" && parts[2] == "options" {
+				if parts[1] == "platforms" {
+					if _, ok := allowedPlatformTables[parts[3]]; ok {
+						continue
+					}
+				}
+				if parts[1] == "agent" {
+					if _, ok := allowedAgentTables[parts[3]]; ok {
+						continue
+					}
+				}
 			}
 			keys = append(keys, key.String())
 		}

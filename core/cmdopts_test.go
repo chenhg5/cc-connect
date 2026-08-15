@@ -63,7 +63,7 @@ func TestParseCmdOpts_CmdField(t *testing.T) {
 			wantArgs:   nil,
 		},
 		{
-			name:       "cmd field non-string falls through to default",
+			name:       "cmd field non-string non-array falls through to default",
 			opts:       map[string]any{"cmd": 12345},
 			defaultBin: "fallback",
 			wantCmd:    "fallback",
@@ -83,6 +83,66 @@ func TestParseCmdOpts_CmdField(t *testing.T) {
 			wantCmd:    "gemini",
 			wantArgs:   []string{"--model", "pro"},
 		},
+		// Array form: official CC Connect accepts a TOML array for cmd
+		// (e.g. cmd = ["my-cli", "--permission-mode", "bypass"]), so migrated
+		// configs must keep the same argv instead of silently falling back to
+		// the default binary.
+		{
+			name:       "cmd array with no extra args",
+			opts:       map[string]any{"cmd": []any{"qodercli"}},
+			defaultBin: "fallback",
+			wantCmd:    "qodercli",
+			wantArgs:   nil,
+		},
+		{
+			name:       "cmd array with args",
+			opts:       map[string]any{"cmd": []any{"qodercli", "--permission-mode", "bypass_permissions"}},
+			defaultBin: "fallback",
+			wantCmd:    "qodercli",
+			wantArgs:   []string{"--permission-mode", "bypass_permissions"},
+		},
+		{
+			name:       "cmd []string form",
+			opts:       map[string]any{"cmd": []string{"claude", "--add-dir", "/parent"}},
+			defaultBin: "fallback",
+			wantCmd:    "claude",
+			wantArgs:   []string{"--add-dir", "/parent"},
+		},
+		{
+			name:       "cmd empty array falls through to default",
+			opts:       map[string]any{"cmd": []any{}},
+			defaultBin: "fallback",
+			wantCmd:    "fallback",
+			wantArgs:   nil,
+		},
+		{
+			name:       "cmd array of only whitespace falls through to default",
+			opts:       map[string]any{"cmd": []any{"", "  ", ""}},
+			defaultBin: "fallback",
+			wantCmd:    "fallback",
+			wantArgs:   nil,
+		},
+		{
+			name:       "cmd array with mixed empty entries skips them",
+			opts:       map[string]any{"cmd": []any{"qodercli", "", "--flag", "  "}},
+			defaultBin: "fallback",
+			wantCmd:    "qodercli",
+			wantArgs:   []string{"--flag"},
+		},
+		{
+			name:       "cmd array with non-string entry falls through to default",
+			opts:       map[string]any{"cmd": []any{"qodercli", 42, "--flag"}},
+			defaultBin: "fallback",
+			wantCmd:    "fallback",
+			wantArgs:   nil,
+		},
+		{
+			name:       "cmd array preserves order",
+			opts:       map[string]any{"cmd": []any{"qodercli", "-p", "first", "--flag", "second"}},
+			defaultBin: "fallback",
+			wantCmd:    "qodercli",
+			wantArgs:   []string{"-p", "first", "--flag", "second"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,7 +152,7 @@ func TestParseCmdOpts_CmdField(t *testing.T) {
 			if gotCmd != tt.wantCmd {
 				t.Errorf("cmd: got %q, want %q", gotCmd, tt.wantCmd)
 			}
-			if !equalStrings(gotArgs, tt.wantArgs) {
+			if !slicesEqual(gotArgs, tt.wantArgs) {
 				t.Errorf("extraArgs: got %v, want %v", gotArgs, tt.wantArgs)
 			}
 			if buf.Len() != 0 {
@@ -298,6 +358,20 @@ func TestParseConfigEnv_DoesNotMutateInput(t *testing.T) {
 	if !equalStrings(got, []string{"FOO=mutated", "NEW=added"}) {
 		t.Errorf("expected fresh read on each call, got %v", got)
 	}
+}
+
+// slicesEqual compares two string slices in order. Argv position matters, so
+// ParseCmdOpts checks must not use the unordered equalStrings helper.
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // equalStrings compares two string slices for unordered-set equality.

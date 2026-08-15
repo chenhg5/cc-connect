@@ -457,6 +457,189 @@ func TestPrepareLegacyMigration_RejectsUnsupportedConfigBehavior(t *testing.T) {
 	}
 }
 
+func TestPrepareLegacyMigration_RejectsUnimplementedPiRPCOptionBeforeWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "pi-project"
+[projects.agent]
+type = "pi"
+[projects.agent.options]
+rpc = true
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_fixture"
+app_secret = "fixture-secret"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), `option "rpc"`) || !strings.Contains(err.Error(), "preserve bytes but not behavior") {
+		t.Fatalf("unimplemented pi rpc option error = %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after gated-option failure: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_AcceptsAgentEnvOptionTable(t *testing.T) {
+	// The env table decodes into the dynamic agent options map. Its nested
+	// leaves must not be mistaken for unsupported top-level settings.
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "env-project"
+[projects.agent]
+type = "codex"
+[projects.agent.options.env]
+CC_FIXTURE_KEY = "fixture-value"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_fixture"
+app_secret = "fixture-secret"
+`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "auto",
+		DryRun:        true,
+	})
+	if err != nil {
+		t.Fatalf("agent env option table must migrate, got error: %v", err)
+	}
+	if plan == nil || len(plan.Main.Files) == 0 {
+		t.Fatal("expected a migration plan covering the config file")
+	}
+}
+
+func TestPrepareLegacyMigration_AcceptsImplementedWeixinBurstOptions(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "wx-project"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "weixin"
+[projects.platforms.options]
+token = "fixture-token"
+burst_limit = 2
+burst_window_secs = 60
+`)
+
+	if _, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "v1.5.0-beta.3",
+		DryRun:        true,
+	}); err != nil {
+		t.Fatalf("weixin burst options are implemented and must migrate, got error: %v", err)
+	}
+}
+
+func TestPrepareLegacyMigration_RejectsEnvTableForAgentThatIgnoresIt(t *testing.T) {
+	// devin never spawns a CLI with a caller-controlled environment, so an
+	// env table on it would migrate as dead configuration.
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "devin-project"
+[projects.agent]
+type = "devin"
+[projects.agent.options.env]
+CC_FIXTURE_KEY = "fixture-value"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_fixture"
+app_secret = "fixture-secret"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "auto",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "projects.agent.options.env") {
+		t.Fatalf("env table for a non-consuming agent must be rejected, got: %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target was written after schema failure: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigration_AcceptsFeishuPeerBotsTable(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "relay-project"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_fixture"
+app_secret = "fixture-secret"
+[projects.platforms.options.peer_bots]
+helper = "ou_fixture"
+`)
+
+	if _, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "auto",
+		DryRun:        true,
+	}); err != nil {
+		t.Fatalf("feishu peer_bots table must migrate, got error: %v", err)
+	}
+}
+
+func TestPrepareLegacyMigration_DoesNotAllowPeerBotsOnOtherPlatforms(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `[[projects]]
+name = "relay-project"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "telegram"
+[projects.platforms.options]
+token = "fixture-token"
+[projects.platforms.options.peer_bots]
+helper = "ou_fixture"
+`)
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source:        source,
+		Target:        target,
+		Home:          root,
+		SourceVersion: "auto",
+		DryRun:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "peer_bots") {
+		t.Fatalf("peer_bots on a non-Feishu platform must be rejected, got: %v", err)
+	}
+}
+
 func TestRunMigrateCommandReturnsFailureForMissingSource(t *testing.T) {
 	root := t.TempDir()
 	var stdout bytes.Buffer

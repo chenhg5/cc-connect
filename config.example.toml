@@ -1395,6 +1395,8 @@ app_secret = "your-feishu-app-secret"
 # proxy = ""                                   # optional HTTP proxy / 可选代理
 # proxy_username = ""
 # proxy_password = ""
+# burst_limit = 4                              # max separate messages per window; ilink throttles ~5-6/day / 每窗口独立消息上限
+# burst_window_secs = 86400                    # window length in seconds; non-positive falls back to default / 窗口秒数，非正值回落默认
 
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)

@@ -46,6 +46,17 @@ const (
 	weixinSendRetryDelay = 500 * time.Millisecond
 	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
 	weixinChunkSendDelay = 100 * time.Millisecond
+
+	// Send-volume quota that keeps the bot under ilink's burst throttle
+	// (sendMessage ret=-2 "prepare failed"). The gateway throttles the bot
+	// after roughly 5-6 separate messages within a short window, and the
+	// penalty escalates with every send attempt made while it is active.
+	// Separate messages are paced, not chunks: a multi-chunk send is one
+	// logical message. Configurable via the burst_limit / burst_window_secs
+	// platform options (same semantics as official CC Connect).
+	defaultBurstLimit      = 4     // max separate messages per window
+	defaultBurstWindowSecs = 86400 // window length (24h: ilink budgets ~5-6 sends/day)
+
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
@@ -100,6 +111,13 @@ type Platform struct {
 
 	typingMu      sync.RWMutex
 	typingTickets map[string]typingTicketEntry // peerUserID → cached ticket
+
+	// Send-volume quota guarding against ilink's burst throttle (see the
+	// defaultBurstLimit constants).
+	sendQuotaMu     sync.Mutex
+	sendQuotaTimes  []time.Time
+	sendQuotaLimit  int
+	sendQuotaWindow time.Duration
 }
 
 type typingTicketEntry struct {
@@ -148,6 +166,19 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	lp := pickInt(opts["long_poll_timeout_ms"])
 
+	// Send-volume quota (see the defaultBurstLimit constants). Non-positive
+	// and absent values fall back to the defaults — same as official
+	// CC Connect, so a migrated config is never less protected here than it
+	// was on the official build.
+	burstLimit := pickInt(opts["burst_limit"])
+	if burstLimit <= 0 {
+		burstLimit = defaultBurstLimit
+	}
+	burstWindow := pickInt(opts["burst_window_secs"])
+	if burstWindow <= 0 {
+		burstWindow = defaultBurstWindowSecs
+	}
+
 	dataDir, _ := opts["cc_data_dir"].(string)
 	project, _ := opts["cc_project"].(string)
 	stateDir := ""
@@ -194,6 +225,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		tokens:        make(map[string]string),
 		dedup:         make(map[string]time.Time),
 		typingTickets: make(map[string]typingTicketEntry),
+
+		sendQuotaLimit:  burstLimit,
+		sendQuotaWindow: time.Duration(burstWindow) * time.Second,
 	}
 	p.api = newAPIClient(baseURL, token, routeTag, httpClient)
 
@@ -652,6 +686,34 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 	}()
 }
 
+// checkSendQuota enforces the bot's separate-message budget so ilink's burst
+// throttle is never triggered. Chunks of one message do not count: a chunked
+// message is one logical message. The check consumes one slot on success and
+// fails fast (without waiting) once the window budget is exhausted, because
+// every attempt made while the throttle is active escalates the penalty.
+func (p *Platform) checkSendQuota(_ context.Context) error {
+	if p.sendQuotaLimit <= 0 || p.sendQuotaWindow <= 0 {
+		return nil
+	}
+	p.sendQuotaMu.Lock()
+	defer p.sendQuotaMu.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-p.sendQuotaWindow)
+	kept := p.sendQuotaTimes[:0]
+	for _, t := range p.sendQuotaTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	p.sendQuotaTimes = kept
+	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
+		return fmt.Errorf("weixin: send budget exhausted (%d messages in the last %s); "+
+			"ilink throttles the bot after roughly 5-6 sends per window — reduce messages or raise burst_limit deliberately", p.sendQuotaLimit, p.sendQuotaWindow)
+	}
+	p.sendQuotaTimes = append(p.sendQuotaTimes, now)
+	return nil
+}
+
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
@@ -669,6 +731,12 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil
+	}
+	// One logical message consumes one budget slot regardless of chunk count.
+	// A quota rejection happens before any HTTP attempt and must not fall
+	// through to the incomplete-delivery notice: the notice is itself a send.
+	if err := p.checkSendQuota(ctx); err != nil {
+		return err
 	}
 	chunks := splitUTF8(content, maxWeixinChunk)
 	total := len(chunks)

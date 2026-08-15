@@ -133,6 +133,12 @@ func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
 
 // sendSingleItemWithRetry sends a media item with retry mechanism for ret=-2 errors.
 func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
+	// One media item draws one slot from the same send budget as text
+	// messages; token-refresh retries below re-attempt the same logical
+	// message and must not consume additional slots.
+	if err := p.checkSendQuota(ctx); err != nil {
+		return err
+	}
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
 		msg := sendMessageReq{

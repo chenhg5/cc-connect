@@ -79,6 +79,7 @@ func TestNew_CustomOptions(t *testing.T) {
 		"work_dir": "/tmp",
 		"model":    "qwen3.5-plus",
 		"mode":     "yolo",
+		"thinking": "high",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -92,6 +93,9 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 	if a.mode != "yolo" {
 		t.Errorf("mode = %q", a.mode)
+	}
+	if a.thinking != "high" {
+		t.Errorf("thinking = %q, want %q (the thinking option must reach the session args)", a.thinking, "high")
 	}
 }
 
