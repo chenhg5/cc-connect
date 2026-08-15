@@ -131,15 +131,8 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Run tests with race detector and coverage
-        run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
-        if: github.event_name == 'push'
-        with:
-          files: ./coverage.out
-          fail_ci_if_error: false
+      - name: Run tests with race detector
+        run: go test ./... -race
 
   e2e-test:
     runs-on: ubuntu-latest

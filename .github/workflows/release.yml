@@ -277,7 +277,12 @@ jobs:
           # npm pins latest to the first-ever publish and never moves it on
           # --tag publishes. Until a stable release exists, keep latest on the
           # newest prerelease; once a stable owns latest, never move it back.
-          if [ "${{ steps.release_policy.outputs.prerelease }}" = "true" ]; then
+          # Publishing authenticates through npm trusted publishing (OIDC),
+          # which covers only npm publish; dist-tag writes need the NPM_TOKEN
+          # secret and are skipped without it rather than failing the release.
+          if [ "${{ steps.release_policy.outputs.prerelease }}" = "true" ] && [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::warning::NPM_TOKEN is not configured; the latest dist-tag was not reconciled. Configure a granular npm automation token as the NPM_TOKEN repository secret, then dispatch the Registry Maintenance workflow."
+          elif [ "${{ steps.release_policy.outputs.prerelease }}" = "true" ]; then
             current_latest="$(npm view cc-connect-next@latest version --registry=https://registry.npmjs.org 2>/dev/null || true)"
             case "$current_latest" in
               ""|*-*)

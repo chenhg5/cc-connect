@@ -26,6 +26,10 @@ jobs:
           # Same policy as the release publish job: while no stable release
           # exists, latest follows the newest published version; a latest
           # owned by a stable release is never moved.
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is not configured. npm trusted publishing (OIDC) authenticates only npm publish; dist-tag writes need a granular npm automation token stored as the NPM_TOKEN repository secret."
+            exit 1
+          fi
           retry_npm() {
             local attempt
             for attempt in 1 2 3 4 5 6 7 8; do
