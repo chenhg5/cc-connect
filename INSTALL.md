@@ -801,8 +801,9 @@ Logs auto-rotate at the configured max size and keep one backup.
 
 On Windows, `daemon install` creates a native Task Scheduler task named `cc-connect`.
 The task runs at user logon and is also started immediately after installation. The
-installer writes a small PowerShell launcher under `~/.cc-connect` so the scheduled
-task uses the selected config directory, log file, PATH, and proxy environment.
+installer writes a windowless Windows Script Host launcher under `~/.cc-connect` so
+the scheduled task uses the selected config directory, log file, PATH, and proxy
+environment without opening a console window.
 
 ### Uninstall
 
