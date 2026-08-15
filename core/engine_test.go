@@ -445,6 +445,7 @@ type stubModelModeAgent struct {
 	model           string
 	mode            string
 	reasoningEffort string
+	reasoningLevels []string
 	providers       []ProviderConfig
 	active          string
 }
@@ -545,6 +546,9 @@ func (a *stubModelModeAgent) GetReasoningEffort() string {
 }
 
 func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
+	if a.reasoningLevels != nil {
+		return a.reasoningLevels
+	}
 	return []string{"low", "medium", "high", "xhigh"}
 }
 
@@ -5503,6 +5507,22 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
+	}
+}
+
+func TestCmdReasoning_UsageListsOnlyAgentReasoningEfforts(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{reasoningLevels: []string{"off", "minimal", "low", "medium", "high", "xhigh"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdReasoning(p, msg, []string{"unsupported"})
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <off|minimal|low|medium|high|xhigh>") {
+		t.Fatalf("sent = %v, want usage with agent-provided reasoning efforts", p.sent)
+	}
+	if strings.Contains(p.sent[0], "max") {
+		t.Fatalf("sent = %v, usage advertised an unavailable reasoning effort", p.sent)
 	}
 }
 
