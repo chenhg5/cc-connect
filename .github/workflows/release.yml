@@ -16,7 +16,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -27,12 +27,12 @@ jobs:
           git merge-base --is-ancestor HEAD origin/main
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -55,7 +55,7 @@ jobs:
           pnpm build
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -76,17 +76,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -97,7 +97,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -110,7 +110,7 @@ jobs:
           node scripts/check-release-assets.js dist
 
       - name: Upload verified release archives
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.ref_name }}
           if-no-files-found: error
@@ -130,12 +130,12 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Node.js for npm provenance
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           registry-url: https://registry.npmjs.org
@@ -144,7 +144,7 @@ jobs:
         run: npm install --global npm@11
 
       - name: Download verified build output
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-${{ github.ref_name }}
           path: dist
@@ -227,6 +227,19 @@ jobs:
           NPM_DIST_TAG: ${{ steps.release_policy.outputs.npm_tag }}
         run: |
           set -euo pipefail
+          # The npm registry is eventually consistent: reads and dist-tag writes
+          # issued right after a publish can fail on stale replicas.
+          retry_npm() {
+            local attempt
+            for attempt in 1 2 3 4 5 6 7 8; do
+              if "$@"; then
+                return 0
+              fi
+              echo "attempt ${attempt}/8 failed: $*; retrying in 15s" >&2
+              sleep 15
+            done
+            return 1
+          }
           version="$(node -p "require('./package.json').version")"
           npm_tag="${NPM_DIST_TAG}"
           safe_version="$(printf '%s' "$version" | tr -c '[:alnum:]-' '-')"
@@ -254,25 +267,56 @@ jobs:
           tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_tagged")"
           case "$tag_relation" in
             newer|missing)
-              npm dist-tag add "cc-connect-next@${version}" "$npm_tag" --registry=https://registry.npmjs.org
+              retry_npm npm dist-tag add "cc-connect-next@${version}" "$npm_tag" --registry=https://registry.npmjs.org
               ;;
             equal|older)
               echo "Preserving ${npm_tag} at ${current_tagged}"
               ;;
             *) echo "Unexpected npm tag relation: $tag_relation" >&2; exit 1 ;;
           esac
+          # npm pins latest to the first-ever publish and never moves it on
+          # --tag publishes. Until a stable release exists, keep latest on the
+          # newest prerelease; once a stable owns latest, never move it back.
+          if [ "${{ steps.release_policy.outputs.prerelease }}" = "true" ]; then
+            current_latest="$(npm view cc-connect-next@latest version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+            case "$current_latest" in
+              ""|*-*)
+                latest_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$current_latest")"
+                if [ "$latest_relation" = "newer" ] || [ "$latest_relation" = "missing" ]; then
+                  retry_npm npm dist-tag add "cc-connect-next@${version}" latest --registry=https://registry.npmjs.org
+                fi
+                ;;
+              *)
+                echo "Stable ${current_latest} owns latest; not moving it to a prerelease"
+                ;;
+            esac
+          fi
 
       - name: Verify the public npm registry
         working-directory: npm
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          published="$(npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org)"
           npm_tag="${{ steps.release_policy.outputs.npm_tag }}"
-          tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org)"
-          tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$tagged")"
-          test "$published" = "$version"
-          case "$tag_relation" in
-            equal|older) ;;
-            *) echo "${npm_tag} is behind ${version}: ${tagged}" >&2; exit 1 ;;
-          esac
+          # Registry read replicas can lag the publish by minutes; poll instead
+          # of failing on the first stale read.
+          tagged=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            published="$(npm view "cc-connect-next@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+            tagged="$(npm view "cc-connect-next@${npm_tag}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+            if [ "$published" = "$version" ]; then
+              tag_relation="$(node ../scripts/release-channel-policy.js --relation "$version" "$tagged")"
+              case "$tag_relation" in
+                equal|older)
+                  echo "npm registry serves ${version}; ${npm_tag} is at ${tagged}"
+                  exit 0
+                  ;;
+              esac
+            fi
+            echo "attempt ${attempt}/10: version=${published:-missing} ${npm_tag}=${tagged:-missing}; retrying in 15s" >&2
+            if [ "$attempt" -lt 10 ]; then
+              sleep 15
+            fi
+          done
+          echo "npm registry did not converge: want ${version}, ${npm_tag} is at ${tagged:-missing}" >&2
+          exit 1

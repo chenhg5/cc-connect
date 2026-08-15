@@ -18,7 +18,7 @@
   "homepage": "https://github.com/timmyagentic/cc-connect-next",
   "repository": {
     "type": "git",
-    "url": "https://github.com/timmyagentic/cc-connect-next.git"
+    "url": "git+https://github.com/timmyagentic/cc-connect-next.git"
   },
   "license": "MIT",
   "author": "cc-connect-next contributors",

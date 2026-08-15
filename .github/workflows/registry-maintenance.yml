@@ -1,0 +1,59 @@
+name: Registry Maintenance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile-latest-dist-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+
+      - name: Point latest at the newest published version
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Same policy as the release publish job: while no stable release
+          # exists, latest follows the newest published version; a latest
+          # owned by a stable release is never moved.
+          retry_npm() {
+            local attempt
+            for attempt in 1 2 3 4 5 6 7 8; do
+              if "$@"; then
+                return 0
+              fi
+              echo "attempt ${attempt}/8 failed: $*; retrying in 15s" >&2
+              sleep 15
+            done
+            return 1
+          }
+          newest="$(npm view cc-connect-next versions --json --registry=https://registry.npmjs.org |
+            node -e 'const fs = require("node:fs"); const parsed = JSON.parse(fs.readFileSync(0, "utf8")); const list = Array.isArray(parsed) ? parsed : [parsed]; process.stdout.write(list.join("\n"));' |
+            node scripts/release-channel-policy.js --max)"
+          current_latest="$(npm view cc-connect-next@latest version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          echo "newest published: ${newest}; latest currently: ${current_latest:-missing}"
+          case "$current_latest" in
+            ""|*-*)
+              relation="$(node scripts/release-channel-policy.js --relation "$newest" "$current_latest")"
+              if [ "$relation" = "newer" ] || [ "$relation" = "missing" ]; then
+                retry_npm npm dist-tag add "cc-connect-next@${newest}" latest --registry=https://registry.npmjs.org
+              else
+                echo "latest already current; nothing to do"
+              fi
+              ;;
+            *)
+              echo "Stable ${current_latest} owns latest; nothing to do"
+              ;;
+          esac
+          resolved="$(npm view cc-connect-next@latest version --registry=https://registry.npmjs.org)"
+          echo "latest now resolves to ${resolved}"
