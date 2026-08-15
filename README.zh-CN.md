@@ -4,7 +4,7 @@
 
 [English](README.md) · [完整安装文档](INSTALL.md) · [飞书配置](docs/feishu.md) · [回答卡片契约](docs/feishu-card-contract.md) · [迁移兼容矩阵](docs/migration-compatibility.md) · [上游飞书能力对齐](docs/upstream-feishu-parity-2026-08-15.md) · [上游 beta.3 审计](docs/upstream-v1.5.0-beta.3-audit.md)
 
-> 当前版本：`0.1.0-beta.1`。它不是 MCP、代理、伴生插件或消息快照方案，也不要求官方 CC Connect 做任何修改；它拥有自己的仓库、命令、数据目录、daemon 和 npm 包。
+> 当前版本：`0.1.0-beta.2`。它不是 MCP、代理、伴生插件或消息快照方案，也不要求官方 CC Connect 做任何修改；它拥有自己的仓库、命令、数据目录、daemon 和 npm 包。
 
 ## 飞书里会看到什么
 

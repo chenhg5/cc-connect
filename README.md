@@ -4,7 +4,7 @@ Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), 
 
 [中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream Feishu parity](docs/upstream-feishu-parity-2026-08-15.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
 
-> Current release: `0.1.0-beta.1`, the first public prerelease. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
+> Current release: `0.1.0-beta.2`. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
 ## What changes for Feishu
 

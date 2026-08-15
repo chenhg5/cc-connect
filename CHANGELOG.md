@@ -1,11 +1,19 @@
 # Changelog
 
-## Unreleased
+## v0.1.0-beta.2 (2026-08-15)
 
 ### Added
 
 - **Feishu upstream parity bundle:** topic-scoped workspace bindings with non-destructive inheritance from the chat default, first-mention root-context bootstrap for existing topics, privacy-gated on-demand quoted-file download, and topic-local relay visibility.
 - **Native bot-to-bot mentions:** `mention_map` gives explicit bot aliases priority over group-member names. A resolved mention uses tracked `MsgTypeText` terminal delivery so Feishu emits the real notification event; the Rich Card lifecycle remains unchanged for ordinary answers.
+
+### Fixed
+
+- **Feishu onboarding from an empty config:** `feishu new` no longer indexes an empty project list and panics before the first project is created; empty and whitespace-only configuration files now have regression coverage.
+
+### Configurability
+
+- **Per-group no-mention replies:** `group_reply_all_chats` accepts a comma-separated list or TOML string array of Feishu chat IDs. Listed groups accept unmentioned messages while every other group still requires an explicit bot mention; the sensitive `im:message.group_msg` permission remains required for Feishu delivery.
 
 ### Safety
 
