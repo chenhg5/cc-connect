@@ -385,6 +385,7 @@ level = "info" # debug, info, warn, error
 #
 # [bridge]
 # enabled = true
+# bind = "127.0.0.1"                 # Listen interface (default: loopback only; use 0.0.0.0 for remote access) / 监听接口（默认仅本机；远程访问设为 0.0.0.0）
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
 # token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
@@ -400,6 +401,7 @@ level = "info" # debug, info, warn, error
 #
 # [management]
 # enabled = true
+# bind = "127.0.0.1"                   # Listen interface (default: loopback only; use 0.0.0.0 for remote access) / 监听接口（默认仅本机；远程访问设为 0.0.0.0）
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
 # token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
