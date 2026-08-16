@@ -69,7 +69,7 @@ type pendingQuestion struct {
 }
 
 // newDshSession creates or resumes a dsh session and attaches the event stream.
-func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, agentPreset, model string, timeout time.Duration, sessionEnv []string) (*dshSession, error) {
+func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, agentPreset, model, effort string, timeout time.Duration, sessionEnv []string) (*dshSession, error) {
 	// Create (fresh) or resume (preallocated id + same cwd → same session).
 	payload := map[string]any{"cwd": workDir}
 	if sessionID != "" {
@@ -89,10 +89,10 @@ func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, a
 	}
 	slog.Info("dsh: session ready", "session_id", created.SessionID, "cwd", workDir, "resumed", sessionID != "")
 
-	// Apply a configured model override (best effort — the server's stored
-	// selection wins when the model cannot be routed).
-	if model != "" {
-		applyModel(ctx, client, created.SessionID, model)
+	// Apply configured model/effort overrides (best effort — the server's
+	// stored selection wins when the model cannot be routed).
+	if model != "" || effort != "" {
+		applyModel(ctx, client, created.SessionID, model, effort)
 	}
 
 	sessCtx, cancel := context.WithCancel(ctx)
@@ -746,17 +746,28 @@ func truncate(s string, maxRunes int) string {
 }
 
 // applyModel resolves a "provider/model" (or bare model) override against the
-// session's model catalog and applies it via session.selectModel.
-func applyModel(ctx context.Context, client *rpcClient, sessionID, model string) {
+// session's model catalog and applies it via session.selectModel, optionally
+// carrying a reasoning-effort override.
+func applyModel(ctx context.Context, client *rpcClient, sessionID, model, effort string) {
 	var models sessionModels
 	if err := client.call(ctx, "session.models", map[string]any{"sessionId": sessionID}, &models); err != nil {
 		slog.Warn("dsh: cannot fetch model catalog for configured model", "model", model, "error", err)
 		return
 	}
-	provider, modelID := model, ""
-	if i := strings.LastIndex(model, "/"); i >= 0 {
-		provider, modelID = model[:i], model[i+1:]
+
+	// Resolve the target route: the explicit override when given, otherwise
+	// the session's current selection (so a bare effort override still lands).
+	provider, modelID := "", ""
+	if model != "" {
+		provider, modelID = model, ""
+		if i := strings.LastIndex(model, "/"); i >= 0 {
+			provider, modelID = model[:i], model[i+1:]
+		}
+	} else if models.Current.Provider != "" && models.Current.Model != "" {
+		provider, modelID = models.Current.Provider, models.Current.Model
 	}
+
+	found := false
 	for _, g := range models.Groups {
 		if provider != "" && g.ID != provider && g.Name != provider {
 			continue
@@ -765,24 +776,34 @@ func applyModel(ctx context.Context, client *rpcClient, sessionID, model string)
 			if modelID != "" && m.ID != modelID {
 				continue
 			}
+			payload := map[string]any{
+				"sessionId": sessionID,
+				"provider":  g.ID,
+				"model":     m.ID,
+			}
+			if effort != "" {
+				payload["reasoningEffort"] = effort
+			}
 			var selected struct {
 				Selected struct {
 					Provider string `json:"provider"`
 					Model    string `json:"model"`
 				} `json:"selected"`
 			}
-			err := client.call(ctx, "session.selectModel", map[string]any{
-				"sessionId": sessionID,
-				"provider":  g.ID,
-				"model":     m.ID,
-			}, &selected)
+			err := client.call(ctx, "session.selectModel", payload, &selected)
 			if err != nil {
-				slog.Warn("dsh: selectModel failed", "provider", g.ID, "model", m.ID, "error", err)
+				slog.Warn("dsh: selectModel failed", "provider", g.ID, "model", m.ID, "effort", effort, "error", err)
 				return
 			}
-			slog.Info("dsh: model applied", "session_id", sessionID, "provider", g.ID, "model", m.ID)
-			return
+			slog.Info("dsh: model applied", "session_id", sessionID, "provider", g.ID, "model", m.ID, "effort", effort)
+			found = true
+			break
+		}
+		if found {
+			break
 		}
 	}
-	slog.Warn("dsh: configured model not found in catalog", "model", model)
+	if !found && model != "" {
+		slog.Warn("dsh: configured model not found in catalog", "model", model)
+	}
 }

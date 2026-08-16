@@ -177,6 +177,14 @@ type sessionModels struct {
 			ID          string `json:"id"`
 			Name        string `json:"name"`
 			Description string `json:"description,omitempty"`
+			Reasoning   struct {
+				Efforts []struct {
+					ID          string `json:"id"`
+					Name        string `json:"name"`
+					Description string `json:"description,omitempty"`
+				} `json:"efforts"`
+				DefaultEffort string `json:"defaultEffort,omitempty"`
+			} `json:"reasoning,omitempty"`
 		} `json:"models"`
 	} `json:"groups"`
 }

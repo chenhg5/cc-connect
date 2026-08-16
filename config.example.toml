@@ -2119,6 +2119,14 @@ app_secret = "your-feishu-app-secret"
 #                 新会话使用的 dsh agent preset（可选）
 #   model         "provider/model" override applied at session start (optional)
 #                  会话启动时应用的 "provider/model" 模型覆盖（可选）
+#   reasoning_effort  reasoning-effort override ("off"/"high"/"max" or the
+#                   model's advertised efforts), applied at session start
+#                   (optional) / 会话启动时应用的推理强度覆盖（可选）
+#   mode          permission mode: "default" | "yolo" | "plan" (optional)
+#                  权限模式：default（默认）/ yolo（全自动）/ plan（只读规划）
+#                  映射到 dsh 的 /permission 预设（workspace-write /
+#                  danger-full-access / read-only），无命令注册表的 dsh 构建
+#                  降级为 settings.update 默认预设（新会话生效）
 #   timeout_mins  per-turn timeout in minutes (0 = unlimited, default)
 #                  单轮超时分钟数（0 = 不限时，默认）
 #

@@ -32,6 +32,19 @@ type mockDshServer struct {
 	cancels  int
 	responds []mockRespondCall
 
+	// command.execute lines and session.selectModel payloads (for mode/effort tests)
+	commands           []string
+	failCommandExecute bool
+	settingsUpdates    []struct {
+		NS    string         `json:"ns"`
+		Patch map[string]any `json:"patch"`
+	}
+	selectModelCalls []struct {
+		Provider        string `json:"provider"`
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoningEffort"`
+	}
+
 	// failNext prompts the server to return an RPC error for the next N calls
 	failNext map[string]int
 
@@ -147,6 +160,44 @@ func (m *mockDshServer) respondAt(i int) mockRespondCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.responds[i]
+}
+
+func (m *mockDshServer) commandAt(i int) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.commands[i]
+}
+
+func (m *mockDshServer) commandCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.commands)
+}
+
+func (m *mockDshServer) settingsUpdateCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.settingsUpdates)
+}
+
+func (m *mockDshServer) settingsUpdateAt(i int) (ns string, patch map[string]any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.settingsUpdates[i]
+	return u.NS, u.Patch
+}
+
+func (m *mockDshServer) selectModelCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.selectModelCalls)
+}
+
+func (m *mockDshServer) selectModelAt(i int) (provider, model, effort string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.selectModelCalls[i]
+	return c.Provider, c.Model, c.ReasoningEffort
 }
 
 // handler is the HTTP handler for the mock server.
@@ -270,13 +321,56 @@ func (m *mockDshServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 				"id":   "mock",
 				"name": "Mock Provider",
 				"models": []map[string]any{
-					{"id": "mock-1", "name": "Mock One"},
+					{
+						"id": "mock-1", "name": "Mock One",
+						"reasoning": map[string]any{
+							"efforts": []map[string]any{
+								{"id": "low", "name": "Low"},
+								{"id": "high", "name": "High"},
+							},
+							"defaultEffort": "low",
+						},
+					},
 					{"id": "mock-2", "name": "Mock Two"},
 				},
 			}},
 		}
 	case "session.selectModel":
+		m.mu.Lock()
+		var p struct {
+			Provider        string `json:"provider"`
+			Model           string `json:"model"`
+			ReasoningEffort string `json:"reasoningEffort"`
+		}
+		_ = json.Unmarshal(req.Payload, &p)
+		m.selectModelCalls = append(m.selectModelCalls, p)
+		m.mu.Unlock()
 		value = map[string]any{"selected": map[string]any{"provider": "mock", "model": "mock-1"}}
+	case "command.execute":
+		m.mu.Lock()
+		if m.failCommandExecute {
+			m.mu.Unlock()
+			writeServerError(w, req.RPCID, "internal", "command registry is absent")
+			return
+		}
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Line      string `json:"line"`
+		}
+		_ = json.Unmarshal(req.Payload, &p)
+		m.commands = append(m.commands, p.Line)
+		m.mu.Unlock()
+		value = map[string]any{"matched": true, "commandId": "cmd-1"}
+	case "settings.update":
+		m.mu.Lock()
+		var p struct {
+			NS    string         `json:"ns"`
+			Patch map[string]any `json:"patch"`
+		}
+		_ = json.Unmarshal(req.Payload, &p)
+		m.settingsUpdates = append(m.settingsUpdates, p)
+		m.mu.Unlock()
+		value = map[string]any{"ns": "permission", "writable": true}
 	case "session.history":
 		value = map[string]any{"events": []any{}, "hasMore": false}
 	default:

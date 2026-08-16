@@ -785,3 +785,130 @@ func TestOpenMux_OtherSessionNoiseDoesNotStallOwnTurn(t *testing.T) {
 		t.Fatal("turn/end was lost under other-session flood — engine would stay stuck")
 	}
 }
+
+// TestAgent_ModeSwitcher verifies /mode support: normalization, immediate
+// application via the dsh /permission command, and the mode catalog.
+func TestAgent_ModeSwitcher(t *testing.T) {
+	m := newMockDshServer()
+	agent := newTestAgent(t, m, "/tmp/proj")
+
+	// Normalization of aliases.
+	if normalizeMode("bypassPermissions") != "yolo" || normalizeMode("auto") != "yolo" {
+		t.Fatal("yolo aliases must normalize to yolo")
+	}
+	if normalizeMode("plan") != "plan" {
+		t.Fatal("plan must normalize to plan")
+	}
+	if normalizeMode("something-else") != "default" {
+		t.Fatal("unknown modes must fall back to default")
+	}
+
+	modes := agent.PermissionModes()
+	if len(modes) != 3 {
+		t.Fatalf("expected 3 permission modes, got %d", len(modes))
+	}
+
+	// Start a session so the mode change can be applied immediately.
+	s, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer s.Close()
+
+	agent.SetMode("yolo")
+	if agent.GetMode() != "yolo" {
+		t.Fatalf("GetMode mismatch: %q", agent.GetMode())
+	}
+	waitFor(t, 5*time.Second, func() bool { return m.commandCount() >= 1 }, "/permission command")
+	if line := m.commandAt(0); line != "/permission danger-full-access" {
+		t.Fatalf("expected /permission danger-full-access, got %q", line)
+	}
+
+	agent.SetMode("plan")
+	waitFor(t, 5*time.Second, func() bool { return m.commandCount() >= 2 }, "second /permission command")
+	if line := m.commandAt(1); line != "/permission read-only" {
+		t.Fatalf("expected /permission read-only, got %q", line)
+	}
+
+	agent.SetMode("default")
+	waitFor(t, 5*time.Second, func() bool { return m.commandCount() >= 3 }, "third /permission command")
+	if line := m.commandAt(2); line != "/permission workspace-write" {
+		t.Fatalf("expected /permission workspace-write, got %q", line)
+	}
+}
+
+// TestAgent_ReasoningEffort verifies /reasoning support: the effort override
+// is applied through session.selectModel(reasoningEffort) at session start and
+// the available efforts are surfaced from the model catalog.
+func TestAgent_ReasoningEffort(t *testing.T) {
+	m := newMockDshServer()
+	agent := newTestAgent(t, m, "/tmp/proj")
+
+	agent.SetReasoningEffort("high")
+	if agent.GetReasoningEffort() != "high" {
+		t.Fatalf("GetReasoningEffort mismatch: %q", agent.GetReasoningEffort())
+	}
+
+	s, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer s.Close()
+
+	// The effort override must ride the selectModel call.
+	waitFor(t, 5*time.Second, func() bool { return m.selectModelCount() >= 1 }, "selectModel call")
+	provider, model, effort := m.selectModelAt(0)
+	if provider != "mock" || model != "mock-1" || effort != "high" {
+		t.Fatalf("selectModel payload mismatch: provider=%q model=%q effort=%q", provider, model, effort)
+	}
+
+	// The catalog refreshes the available efforts after a session starts.
+	efforts := agent.AvailableReasoningEfforts()
+	if len(efforts) != 2 || efforts[0] != "low" || efforts[1] != "high" {
+		t.Fatalf("unexpected effort catalog: %v", efforts)
+	}
+
+	// A bare effort override (no model) still lands on the current route.
+	agent.SetReasoningEffort("low")
+	s2, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession 2: %v", err)
+	}
+	defer s2.Close()
+	waitFor(t, 5*time.Second, func() bool { return m.selectModelCount() >= 2 }, "second selectModel call")
+	_, _, effort2 := m.selectModelAt(1)
+	if effort2 != "low" {
+		t.Fatalf("bare effort override must still apply, got %q", effort2)
+	}
+}
+
+// TestAgent_ModeSwitcher_SettingsFallback verifies the mode switch degrades
+// to settings.update when the deployment has no command registry (dsh npm
+// builds like rc.6): the permission defaultPreset is written so NEW sessions
+// start on the requested preset.
+func TestAgent_ModeSwitcher_SettingsFallback(t *testing.T) {
+	m := newMockDshServer()
+	m.mu.Lock()
+	m.failCommandExecute = true
+	m.mu.Unlock()
+	agent := newTestAgent(t, m, "/tmp/proj")
+
+	s, err := agent.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer s.Close()
+
+	agent.SetMode("plan")
+	if agent.GetMode() != "plan" {
+		t.Fatalf("GetMode mismatch: %q", agent.GetMode())
+	}
+	waitFor(t, 5*time.Second, func() bool { return m.settingsUpdateCount() >= 1 }, "settings.update fallback")
+	ns, patch := m.settingsUpdateAt(0)
+	if ns != "permission" {
+		t.Fatalf("expected permission namespace, got %q", ns)
+	}
+	if patch["defaultPreset"] != "read-only" {
+		t.Fatalf("expected defaultPreset=read-only, got %v", patch)
+	}
+}
