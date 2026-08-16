@@ -445,6 +445,12 @@ type HistoryProvider interface {
 	GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]HistoryEntry, error)
 }
 
+// WorkdirLister is an optional interface for agents that can enumerate all
+// known session working directories, not just the current one.
+type WorkdirLister interface {
+	ListWorkdirs(ctx context.Context) ([]AgentWorkdirInfo, error)
+}
+
 // ProviderConfig holds API provider settings for an agent.
 type ProviderConfig struct {
 	Name     string
