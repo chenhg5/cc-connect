@@ -185,6 +185,7 @@ const (
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
+	MsgThinkingOnlyResponse      MsgKey = "thinking_only_response"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -834,6 +835,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "(空回應)",
 		LangJapanese:           "（空のレスポンス）",
 		LangSpanish:            "(respuesta vacía)",
+	},
+	MsgThinkingOnlyResponse: {
+		LangEnglish:            "💭 The agent processed your message but produced no visible reply.\n\n**Agent's reasoning:**\n> %s",
+		LangChinese:            "💭 Agent 处理了你的消息，但没有生成可见的回复。\n\n**Agent 的推理过程：**\n> %s",
+		LangTraditionalChinese: "💭 Agent 處理了你的訊息，但沒有產生可見的回覆。\n\n**Agent 的推理過程：**\n> %s",
+		LangJapanese:           "💭 エージェントはメッセージを処理しましたが、表示可能な返信を生成しませんでした。\n\n**エージェントの推論：**\n> %s",
+		LangSpanish:            "💭 El agente procesó tu mensaje pero no produjo una respuesta visible.\n\n**Razonamiento del agente:**\n> %s",
 	},
 	MsgPermissionPrompt: {
 		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
