@@ -1810,3 +1810,50 @@ func TestNewPlatformDoneEmojiDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestNewPlatformReactionOptOutCoversDoneReaction(t *testing.T) {
+	// reaction_emoji = "none" is the documented way to say "do not react to my
+	// messages". The completion reaction has to honour that opt-out, otherwise
+	// the default done_emoji reintroduces exactly the reaction (and its push
+	// notification) the user turned off.
+	tests := []struct {
+		name          string
+		reaction      any
+		done          any
+		wantReaction  string
+		wantDoneEmoji string
+	}{
+		{"opt-out silences both", "none", nil, "", ""},
+		{"opt-out with explicit done keeps done", "none", "Done", "", "Done"},
+		{"opt-out with explicit none keeps both off", "none", "none", "", ""},
+		{"custom reaction keeps the done default", "OK", nil, "OK", "Done"},
+		{"default reaction keeps the done default", nil, nil, "OnIt", "Done"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := map[string]any{
+				"app_id":             "cli_fixture",
+				"app_secret":         "fixture-secret",
+				"enable_feishu_card": false,
+			}
+			if tt.reaction != nil {
+				opts["reaction_emoji"] = tt.reaction
+			}
+			if tt.done != nil {
+				opts["done_emoji"] = tt.done
+			}
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, opts)
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			plat, ok := p.(*Platform)
+			if !ok {
+				t.Fatalf("expected bare *Platform, got %T", p)
+			}
+			if plat.reactionEmoji != tt.wantReaction || plat.doneEmoji != tt.wantDoneEmoji {
+				t.Fatalf("reactionEmoji=%q doneEmoji=%q, want %q/%q",
+					plat.reactionEmoji, plat.doneEmoji, tt.wantReaction, tt.wantDoneEmoji)
+			}
+		})
+	}
+}

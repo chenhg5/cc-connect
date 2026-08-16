@@ -155,6 +155,26 @@ func (i *I18n) SetLang(lang Language) {
 	i.detected = ""
 }
 
+// SetLangAndSave switches the language and persists it through the save func,
+// mirroring how auto-detection writes its result back.
+//
+// SetLang alone only changes the running process, so a chat-issued language
+// change silently reverted on the next restart once the configured language
+// stopped defaulting to auto-detect. Returns the save error, if any; the
+// in-memory switch always takes effect.
+func (i *I18n) SetLangAndSave(lang Language) error {
+	i.mu.Lock()
+	i.lang = lang
+	i.detected = ""
+	saveFunc := i.saveFunc
+	i.mu.Unlock()
+
+	if saveFunc == nil {
+		return nil
+	}
+	return saveFunc(lang)
+}
+
 // Message keys
 type MsgKey string
 

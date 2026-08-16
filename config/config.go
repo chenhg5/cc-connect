@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -185,19 +186,23 @@ type ManagementConfig struct {
 
 // Display mode constants.
 const (
-	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
+	// Setting any of these explicitly also sets the thinking/tool default:
+	// "full" asks for process messages, "compact" and "quiet" hide them. With
+	// no mode configured the resolved mode is "full" but process messages stay
+	// off, so an unconfigured install shows only the final answer.
+	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages
 	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
 	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
 )
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	Mode                 *string `toml:"mode"`                   // "full", "compact", or "quiet"; unset resolves to "full" without turning on process messages
 	CardMode             *string `toml:"card_mode"`              // "rich" (default, Card 2.0 Feishu) or "legacy"
-	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default false (final answer only)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default false unless mode = "full" is spelled out
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default false (final answer only)
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default false unless mode = "full" is spelled out
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default false
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default false
@@ -824,17 +829,27 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 
 	// Resolve mode.
 	mode = DisplayModeFull
+	modeConfigured := false
 	if projDisp != nil && projDisp.Mode != nil {
 		mode = *projDisp.Mode
+		modeConfigured = true
 	} else if cfg.Display.Mode != nil {
 		mode = *cfg.Display.Mode
+		modeConfigured = true
 	} else if projectQuietEffective(cfg, proj) {
 		mode = DisplayModeQuiet
+		modeConfigured = true
 	}
 
-	// Process messages are opt-in in every mode: the default chat surface
-	// carries only the final answer.
+	// Process messages are opt-in: with no display configuration at all the
+	// chat surface carries only the final answer. A spelled-out mode keeps its
+	// official CC Connect meaning — mode is *the* switch for thinking and tool
+	// visibility there, so a migrated config that asked for "full" must not
+	// silently lose its process output. Explicit per-key values still win.
 	thinkingDefault, toolDefault := false, false
+	if modeConfigured && mode == DisplayModeFull {
+		thinkingDefault, toolDefault = true, true
+	}
 
 	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
 		if projVal != nil {
@@ -1014,6 +1029,14 @@ func (c *Config) ResolveEnvironment() {
 func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
+	}
+	if _, known := NormalizeLanguage(c.Language); !known {
+		// Not fatal: official CC Connect also falls back to detection here, and
+		// failing would make such a configuration unmigratable. Say so, though,
+		// because the fallback is no longer the default and looks like a
+		// working setting.
+		slog.Warn("config: unrecognized language; falling back to auto-detection from user messages",
+			"language", c.Language, "supported", `"zh", "en", "zh-TW", "ja", "es", "auto"`)
 	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
@@ -1662,6 +1685,69 @@ func SaveLanguage(lang string) error {
 	return patchTopLevelField("language", lang)
 }
 
+// LanguageAuto is the spelled-out value that keeps detecting the language from
+// user messages. An empty language key means the Chinese default instead.
+const LanguageAuto = "auto"
+
+// languageAliases maps whole configured values that need more than a plain
+// base-tag lookup. Traditional Chinese has to be matched before the regional
+// suffix is trimmed, otherwise zh-TW would collapse into zh.
+var languageAliases = map[string]string{
+	"zh-tw":   "zh-TW",
+	"zhtw":    "zh-TW",
+	"zh-hant": "zh-TW",
+	"zh-hk":   "zh-TW",
+	"zh-mo":   "zh-TW",
+	"繁體":      "zh-TW",
+	"繁体":      "zh-TW",
+}
+
+// languageBases maps a base language tag (region suffix already trimmed) to its
+// canonical code.
+var languageBases = map[string]string{
+	"":         "zh",
+	"zh":       "zh",
+	"cn":       "zh",
+	"chinese":  "zh",
+	"中文":       "zh",
+	"en":       "en",
+	"english":  "en",
+	"ja":       "ja",
+	"jp":       "ja",
+	"japanese": "ja",
+	"日本語":      "ja",
+	"es":       "es",
+	"spanish":  "es",
+	"español":  "es",
+	"espanol":  "es",
+	"auto":     LanguageAuto,
+}
+
+// NormalizeLanguage maps a configured language value to its canonical code
+// ("zh", "en", "zh-TW", "ja", "es", or "auto"), reporting whether any language
+// matched.
+//
+// The canonical codes are also what the runtime persists, so this is the single
+// definition of what the language key accepts. Unrecognized values keep falling
+// back to auto-detection — official CC Connect does the same, so rejecting them
+// would make otherwise working configurations unmigratable — but Validate warns
+// instead of letting the fallback pass unnoticed.
+func NormalizeLanguage(raw string) (string, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	value = strings.ReplaceAll(value, "_", "-")
+	if canonical, ok := languageAliases[value]; ok {
+		return canonical, true
+	}
+	base := value
+	if idx := strings.IndexByte(base, '-'); idx > 0 {
+		base = base[:idx]
+	}
+	if canonical, ok := languageBases[base]; ok {
+		return canonical, true
+	}
+	return LanguageAuto, false
+}
+
 // ListProjects returns project names from the config file.
 func ListProjects() ([]string, error) {
 	if ConfigPath == "" {
@@ -1824,6 +1910,107 @@ func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, too
 		}
 	}
 	return nil
+}
+
+// SaveProjectDisplayConfig persists runtime display changes into the project's
+// own [projects.display] table.
+//
+// Display commands such as /quiet run inside a single project's engine, but the
+// global [display] table is both shared by every other project and shadowed by
+// any project table that spells the same key out. Writing globally therefore
+// leaked the change sideways and silently reverted it on the next restart.
+// projectName "" (or a name absent from the file) falls back to the global
+// table so single-project and generated configs keep working.
+func SaveProjectDisplayConfig(projectName string, mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+	if strings.TrimSpace(projectName) == "" {
+		return SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+	}
+	configMu.Lock()
+	fields := make([][2]string, 0, 5)
+	if mode != nil {
+		fields = append(fields, [2]string{"mode", quoteTomlString(*mode)})
+	}
+	if thinkingMessages != nil {
+		fields = append(fields, [2]string{"thinking_messages", fmt.Sprintf("%t", *thinkingMessages)})
+	}
+	if thinkingMaxLen != nil {
+		fields = append(fields, [2]string{"thinking_max_len", fmt.Sprintf("%d", *thinkingMaxLen)})
+	}
+	if toolMaxLen != nil {
+		fields = append(fields, [2]string{"tool_max_len", fmt.Sprintf("%d", *toolMaxLen)})
+	}
+	if toolMessages != nil {
+		fields = append(fields, [2]string{"tool_messages", fmt.Sprintf("%t", *toolMessages)})
+	}
+	for _, field := range fields {
+		if err := patchProjectDisplayField(projectName, field[0], field[1]); err != nil {
+			configMu.Unlock()
+			if errors.Is(err, errProjectNotInConfig) {
+				return SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+			}
+			return err
+		}
+	}
+	configMu.Unlock()
+	return nil
+}
+
+// errProjectNotInConfig marks a project name that the config file does not
+// spell out, so the caller can fall back to a global write.
+var errProjectNotInConfig = errors.New("project not found in config")
+
+// patchProjectDisplayField does a surgical text-level update of a single key in
+// a project's [projects.display] table, creating the table when absent. The
+// caller must hold configMu.
+func patchProjectDisplayField(projectName, key, tomlValue string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return errProjectNotInConfig
+	}
+
+	lines, hadTrailing := splitConfigLines(string(data))
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return errProjectNotInConfig
+	}
+	projSpan := spans[projectIdx]
+
+	if projSpan.displayStart < 0 {
+		// Insert the table right after the project's own key/value lines so it
+		// lands inside this [[projects]] block and before any sub-table.
+		insertAt := projSpan.end + 1
+		for ln := projSpan.start + 1; ln <= projSpan.end; ln++ {
+			if isAnyTableHeader(lines[ln]) {
+				insertAt = ln
+				break
+			}
+			insertAt = ln + 1
+		}
+		lines = insertLines(lines, insertAt, []string{"", "[projects.display]"})
+		spans = buildRawProjectSpans(lines)
+		projSpan = spans[projectIdx]
+	}
+
+	lines = upsertTomlRawKey(lines, projSpan.displayStart+1, projSpan.displayEnd, key, tomlValue)
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
 }
 
 // SaveTTSMode persists the TTS mode setting to the config file.
@@ -2790,6 +2977,9 @@ type rawProjectSpan struct {
 	agentOptionsStart int // [projects.agent.options] header; -1 if absent
 	agentOptionsEnd   int // last line of agent options section
 	agentProviders    []rawProviderSpan
+
+	displayStart int // [projects.display] header; -1 if absent
+	displayEnd   int // last line of the project display section
 }
 
 type rawProviderSpan struct {
@@ -2850,6 +3040,8 @@ func buildRawProjectSpans(lines []string) []rawProjectSpan {
 			agentEnd:          -1,
 			agentOptionsStart: -1,
 			agentOptionsEnd:   -1,
+			displayStart:      -1,
+			displayEnd:        -1,
 		}
 
 		for ln := start + 1; ln <= end; ln++ {
@@ -2869,6 +3061,16 @@ func buildRawProjectSpans(lines []string) []rawProjectSpan {
 				for j := ln + 1; j <= end; j++ {
 					if isAnyTableHeader(lines[j]) {
 						span.agentOptionsEnd = j - 1
+						break
+					}
+				}
+			}
+			if matchTableHeader(lines[ln], "[projects.display]") {
+				span.displayStart = ln
+				span.displayEnd = end
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						span.displayEnd = j - 1
 						break
 					}
 				}
