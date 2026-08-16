@@ -1204,6 +1204,34 @@ func (p *Platform) flushImageBatchByRef(sessionKey string, ref *imageBatchEntry)
 	p.dispatchImageBatchEntry(current)
 }
 
+// flushImageBatchForSession synchronously dispatches the pending image batch
+// (if any) for the given session key, then returns. Called from non-image
+// dispatchMessage branches (text/audio/file/post/media/...) so an image
+// already buffered for this session is sent to the engine before the new
+// message advances the user-message watermark. Without this flush, the
+// batch timer can fire AFTER the text message has set the watermark, causing
+// core/engine.go to drop the image as stale (see #1686 P1-B and #1395).
+//
+// Safe to call when no batch is buffered for this session — it is a no-op.
+func (p *Platform) flushImageBatchForSession(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	p.imageBatchMu.Lock()
+	entry, ok := p.imageBatch[sessionKey]
+	if !ok {
+		p.imageBatchMu.Unlock()
+		return
+	}
+	if entry.timer != nil {
+		entry.timer.Stop()
+	}
+	delete(p.imageBatch, sessionKey)
+	p.imageBatchMu.Unlock()
+
+	p.dispatchImageBatchEntry(entry)
+}
+
 // flushImageBatches synchronously dispatches any pending image batches.
 // Intended to be called from Stop() so buffered images aren't lost when
 // cc-connect shuts down.
@@ -1493,6 +1521,10 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
+		// Flush any image batch buffered earlier in this session so the image
+		// reaches the engine before the text message advances the user-message
+		// watermark (#1686 P1-B, related #1395).
+		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1567,6 +1599,10 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			}
 			return
 		}
+		// Flush any image batch buffered earlier in this session so the image
+		// reaches the engine before this audio message advances the user-message
+		// watermark (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1587,6 +1623,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1616,6 +1654,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1635,6 +1675,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
 			return
 		}
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1659,6 +1701,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
 		if err != nil {
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
+			// Flush any image batch buffered earlier in this session (#1686 P1-B).
+			p.flushImageBatchForSession(sessionKey)
 			p.dispatchCoreMessage(&core.Message{
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
@@ -1668,6 +1712,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1705,6 +1751,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,

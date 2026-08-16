@@ -13971,6 +13971,86 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_ResetsIdleCloseOnEventResult verifies the P1-C P1-1
+// fix: an unsolicited EventResult must re-arm the per-session idle close
+// timer. Before the fix, the idle timer was only scheduled at the end of
+// the last foreground turn, so a long-running background turn (background
+// task that takes longer than the idle timeout) would be killed mid-flight
+// when the original timer fired.
+func TestUnsolicitedReader_ResetsIdleCloseOnEventResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-idle-reset")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetAgentSessionIdleTimeout(50 * time.Millisecond)
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch_idle:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch_idle:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	// Pretend a previous foreground turn already scheduled an idle close
+	// with token N and a known cancel function. The cancel must be
+	// invoked by the unsolicited reader's EventResult path as part of
+	// re-scheduling.
+	var prevCancelCalled atomic.Int32
+	state.mu.Lock()
+	state.agentSessionIdleCancel = func() { prevCancelCalled.Add(1) }
+	state.agentSessionIdleToken = 42
+	state.mu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// Send an EventResult — this is the trigger for re-scheduling.
+	sess.events <- Event{Type: EventResult, Content: "background step done", Done: true}
+
+	// Wait for the reader to drain the EventResult and reach the schedule
+	// call. The reader sends the relayed content asynchronously; we poll
+	// until either the cancel fires or a generous timeout elapses.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if prevCancelCalled.Load() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if prevCancelCalled.Load() == 0 {
+		t.Fatal("expected EventResult path to call cancelAgentSessionIdleClose before re-scheduling")
+	}
+
+	// After re-scheduling, token must have advanced and a fresh cancel
+	// function must be installed. A stale token would risk the cleanup
+	// path closing the live agent session while the background turn is
+	// still running.
+	state.mu.Lock()
+	newToken := state.agentSessionIdleToken
+	newCancel := state.agentSessionIdleCancel
+	state.mu.Unlock()
+	if newToken == 42 {
+		t.Errorf("expected agentSessionIdleToken to advance after re-schedule, still %d", newToken)
+	}
+	if newCancel == nil {
+		t.Fatal("expected a fresh agentSessionIdleCancel to be installed after EventResult")
+	}
+
+	// Cancel the freshly installed timer so the test does not leak the
+	// background goroutine until idle timeout fires.
+	state.mu.Lock()
+	state.agentSessionIdleCancel = nil
+	state.agentSessionIdleToken = 0
+	state.mu.Unlock()
+}
+
 // TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader
 // cleanly stops the reader goroutine and waits for it to exit.
 func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {

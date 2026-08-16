@@ -190,6 +190,23 @@ func (e *Engine) SetPendingRestartTimeout(d time.Duration) {
 func (e *Engine) runPendingRestartNotify(req *RestartRequest, firedCh chan struct{}) {
 	defer close(firedCh)
 
+	// Recover from any panic inside dispatch (ReconstructReplyCtx / Send) so a
+	// platform-side panic cannot take down the whole cc-connect process.
+	// See #1686 P1-A. Without this defer, a panic in the restart-notify
+	// goroutine kills the daemon because no higher-level recover exists.
+	defer func() {
+		if r := recover(); r != nil {
+			const maxStackBytes = 8192
+			stack := make([]byte, maxStackBytes)
+			n := runtime.Stack(stack, false)
+			slog.Error("restart notify panic",
+				"platform", req.Platform,
+				"session", req.SessionKey,
+				"panic", r,
+				"stack", string(stack[:n]))
+		}
+	}()
+
 	// Wait briefly for the platform to reach ready if it's not already.
 	// Upper bound: matches the typical Telegram 2-3 s connect window
 	// with margin (see defaultPendingRestartTimeout), and short enough
@@ -3810,23 +3827,29 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
-	// Guard against a narrow race: a message may have been queued between
-	// processInteractiveEvents observing an empty queue and returning here
-	// (session is still locked, so handleMessage's TryLock fails and routes
-	// the message to queueMessageForBusySession). Drain any such orphans.
-	if e.drainPendingMessages(state, session, sessions, interactiveKey) {
-		unlocked = true
-	}
-
-	// Start unsolicited reader if the session is still alive and the last
-	// turn ended cleanly. This goroutine will consume agent-initiated events
-	// (e.g. background task completions) and relay them to the platform.
+	// Start unsolicited reader and arm the idle close timer BEFORE draining
+	// queued messages. drainPendingMessages releases the session lock, and
+	// without this ordering the next user message can race in, call
+	// cancelAgentSessionIdleClose (a no-op since nothing was scheduled yet),
+	// and then the late schedule below arms a timer that no subsequent cancel
+	// will catch — closing the live session mid-turn. See #1686 P1-C P1-2.
+	// The schedule's own state checks (agentSession nil, stopped, etc.) and
+	// cleanupInteractiveStateForIdleToken's stale-token guard make it safe to
+	// leave a scheduled timer running across drain.
 	state.mu.Lock()
 	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
 	state.mu.Unlock()
 	if alive {
 		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
 		e.scheduleAgentSessionIdleClose(interactiveKey, state)
+	}
+
+	// Guard against a narrow race: a message may have been queued between
+	// processInteractiveEvents observing an empty queue and returning here
+	// (session is still locked, so handleMessage's TryLock fails and routes
+	// the message to queueMessageForBusySession). Drain any such orphans.
+	if e.drainPendingMessages(state, session, sessions, interactiveKey) {
+		unlocked = true
 	}
 }
 
@@ -4647,6 +4670,14 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				state.mu.Lock()
 				state.eventsNeedResync = false
 				state.mu.Unlock()
+
+				// Reset the per-session idle close timer so a series of
+				// background task completions does not get cut short by the
+				// idle timeout armed at the end of the last foreground turn.
+				// Without this, a long-running background turn (e.g. cron task
+				// that reports progress every minute) can be killed mid-flight
+				// when the original idle timer fires. See #1686 P1-C P1-1.
+				e.scheduleAgentSessionIdleClose(sessionKey, state)
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
