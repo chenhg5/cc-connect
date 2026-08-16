@@ -38,8 +38,22 @@ type grokSessionRecord struct {
 	info core.AgentSessionInfo
 }
 
-func grokModelContextWindow(processEnv []string, workDir, model string) int {
+// canonicalizeGrokModelID maps wire / usage keys onto models_cache.json ids.
+// Grok headless emits message.model="grok-4.6" but modelUsage keys like
+// "grok-4.6-build"; both must resolve to the same cache entry.
+func canonicalizeGrokModelID(model string) string {
 	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if strings.HasSuffix(model, "-build") {
+		return strings.TrimSuffix(model, "-build")
+	}
+	return model
+}
+
+func grokModelContextWindow(processEnv []string, workDir, model string) int {
+	model = canonicalizeGrokModelID(model)
 	if model == "" {
 		return 0
 	}
@@ -57,7 +71,14 @@ func grokModelContextWindow(processEnv []string, workDir, model string) int {
 	if json.Unmarshal(data, &cache) != nil {
 		return 0
 	}
-	return cache.Models[model].Info.ContextWindow
+	if entry, ok := cache.Models[model]; ok {
+		return entry.Info.ContextWindow
+	}
+	// Fall back to build-suffixed key if cache ever stores that form.
+	if entry, ok := cache.Models[model+"-build"]; ok {
+		return entry.Info.ContextWindow
+	}
+	return 0
 }
 
 func grokModelReasoningEfforts(effectiveEnv []string, workDir, model string) []string {
@@ -78,13 +99,16 @@ func grokModelReasoningEfforts(effectiveEnv []string, workDir, model string) []s
 		return nil
 	}
 
-	model = strings.TrimSpace(model)
+	model = canonicalizeGrokModelID(model)
 	if model == "" && len(cache.Models) == 1 {
 		for onlyModel := range cache.Models {
-			model = onlyModel
+			model = canonicalizeGrokModelID(onlyModel)
 		}
 	}
 	entry, ok := cache.Models[model]
+	if !ok {
+		entry, ok = cache.Models[model+"-build"]
+	}
 	if !ok {
 		return nil
 	}

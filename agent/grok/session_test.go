@@ -209,7 +209,7 @@ func TestStreamingMessagesFixture(t *testing.T) {
 	assert.Equal(t, 262144, usage.ContextWindow)
 }
 
-func TestAssistantFallbackEmitsOnlyMissingSuffix(t *testing.T) {
+func TestAssistantCompleteEmitsOnlyMissingBlockSuffix(t *testing.T) {
 	session, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok", workDir: t.TempDir(), mode: "yolo"})
 	require.NoError(t, err)
 	defer func() { _ = session.Close() }()
@@ -233,7 +233,7 @@ func TestAssistantFallbackEmitsOnlyMissingSuffix(t *testing.T) {
 		},
 	})
 	state.handlePartial(session, map[string]any{"type": "content_block_stop", "index": float64(0)})
-	state.handleAssistantFallback(session, map[string]any{
+	state.handleAssistantComplete(session, map[string]any{
 		"message": map[string]any{
 			"content": []any{map[string]any{"type": "text", "text": "DONE"}},
 		},
@@ -242,6 +242,252 @@ func TestAssistantFallbackEmitsOnlyMissingSuffix(t *testing.T) {
 	events := readEvents(t, session.Events(), 2)
 	assert.Equal(t, "DO", events[0].Content)
 	assert.Equal(t, "NE", events[1].Content)
+	assert.Zero(t, len(session.events))
+}
+
+// TestMultiTextBlockAssistantKeepsEachStreamedBlock covers the Grok 4.6 shape
+// where one assistant message has multiple text blocks. The old global
+// streamText reconcile compared each complete block against the concatenation
+// of all text deltas and falsely dropped both.
+func TestMultiTextBlockAssistantKeepsEachStreamedBlock(t *testing.T) {
+	session, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok", workDir: t.TempDir(), mode: "yolo"})
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+	state := newStreamState()
+
+	state.handlePartial(session, map[string]any{"type": "message_start"})
+	// Block 0: short narration (4.6 text-before-tool style).
+	state.handlePartial(session, map[string]any{
+		"type":          "content_block_start",
+		"index":         float64(0),
+		"content_block": map[string]any{"type": "text", "text": ""},
+	})
+	state.handlePartial(session, map[string]any{
+		"type":  "content_block_delta",
+		"index": float64(0),
+		"delta": map[string]any{"type": "text_delta", "text": "先做两步。"},
+	})
+	state.handlePartial(session, map[string]any{"type": "content_block_stop", "index": float64(0)})
+	// Block 1: tool
+	state.handlePartial(session, map[string]any{
+		"type":  "content_block_start",
+		"index": float64(1),
+		"content_block": map[string]any{
+			"type":  "tool_use",
+			"id":    "tool-a",
+			"name":  "Shell",
+			"input": map[string]any{},
+		},
+	})
+	state.handlePartial(session, map[string]any{
+		"type":  "content_block_delta",
+		"index": float64(1),
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": `{"command":"true"}`},
+	})
+	state.handlePartial(session, map[string]any{"type": "content_block_stop", "index": float64(1)})
+	// Block 2: second text in the same message.
+	state.handlePartial(session, map[string]any{
+		"type":          "content_block_start",
+		"index":         float64(2),
+		"content_block": map[string]any{"type": "text", "text": ""},
+	})
+	state.handlePartial(session, map[string]any{
+		"type":  "content_block_delta",
+		"index": float64(2),
+		"delta": map[string]any{"type": "text_delta", "text": "然后继续。"},
+	})
+	state.handlePartial(session, map[string]any{"type": "content_block_stop", "index": float64(2)})
+
+	// Complete frame with the same multi-text layout. Must not re-emit or drop.
+	state.handleAssistantComplete(session, map[string]any{
+		"message": map[string]any{
+			"model": "grok-4.6",
+			"content": []any{
+				map[string]any{"type": "text", "text": "先做两步。"},
+				map[string]any{"type": "tool_use", "id": "tool-a", "name": "Shell", "input": map[string]any{"command": "true"}},
+				map[string]any{"type": "text", "text": "然后继续。"},
+			},
+			"usage": map[string]any{"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 2, "cache_creation_input_tokens": 0},
+		},
+	})
+
+	events := readEvents(t, session.Events(), 3)
+	assert.Equal(t, core.EventText, events[0].Type)
+	assert.Equal(t, "先做两步。", events[0].Content)
+	assert.Equal(t, core.EventToolUse, events[1].Type)
+	assert.Equal(t, "tool-a", events[1].RequestID)
+	assert.Equal(t, core.EventText, events[2].Type)
+	assert.Equal(t, "然后继续。", events[2].Content)
+	assert.Zero(t, len(session.events), "multi-text complete frame must not re-emit streamed blocks")
+	assert.Equal(t, "grok-4.6", state.currentModel)
+	assert.Equal(t, 10, state.lastInputTokens)
+	assert.Equal(t, 2, state.lastCacheRead)
+}
+
+func TestCanonicalizeGrokModelID(t *testing.T) {
+	assert.Equal(t, "grok-4.6", canonicalizeGrokModelID("grok-4.6-build"))
+	assert.Equal(t, "grok-4.5", canonicalizeGrokModelID("grok-4.5"))
+	assert.Equal(t, "grok-4.6", canonicalizeGrokModelID("  grok-4.6-build  "))
+	assert.Empty(t, canonicalizeGrokModelID(""))
+}
+
+func TestGoldenStreamingMessages(t *testing.T) {
+	cases := []struct {
+		name       string
+		file       string
+		wantModel  string
+		wantResult string
+		wantTools  int
+	}{
+		{name: "4.5-simple", file: "grok-4.5.ndjson", wantModel: "grok-4.5", wantResult: "PONG-grok-4.5", wantTools: 0},
+		{name: "4.6-simple", file: "grok-4.6.ndjson", wantModel: "grok-4.6", wantResult: "PONG-grok-4.6", wantTools: 0},
+		{name: "4.5-agentic", file: "agent-grok-4.5.ndjson", wantModel: "grok-4.5", wantResult: "DONE-grok-4.5", wantTools: 2},
+		{name: "4.6-agentic", file: "agent-grok-4.6.ndjson", wantModel: "grok-4.6", wantResult: "DONE-grok-4.6", wantTools: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := os.ReadFile(filepath.Join("testdata", tc.file))
+			require.NoError(t, err)
+
+			session, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok", workDir: t.TempDir(), mode: "yolo"})
+			require.NoError(t, err)
+			defer func() { _ = session.Close() }()
+
+			state := newStreamState()
+			terminal := false
+			for _, line := range strings.Split(strings.TrimSpace(string(payload)), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var raw map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &raw))
+				if session.handleEvent(state, raw) {
+					terminal = true
+				}
+			}
+			require.True(t, terminal, "golden fixture must end with a terminal result")
+			assert.Equal(t, tc.wantModel, state.currentModel)
+
+			events := drainEvents(session)
+			var tools int
+			var texts []string
+			var result string
+			for _, event := range events {
+				switch event.Type {
+				case core.EventToolUse:
+					tools++
+				case core.EventText:
+					if event.Content != "" {
+						texts = append(texts, event.Content)
+					}
+				case core.EventResult:
+					result = event.Content
+				}
+			}
+			assert.Equal(t, tc.wantTools, tools)
+			assert.Equal(t, tc.wantResult, result)
+			require.NotEmpty(t, texts, "expected live text projection")
+			// 4.6 agentic emits narration text before tools; ensure it survived.
+			if tc.name == "4.6-agentic" {
+				joined := strings.Join(texts, "")
+				assert.NotEmpty(t, joined)
+			}
+			assert.Zero(t, len(session.events), "assistant complete must not duplicate streamed events")
+		})
+	}
+}
+
+func drainEvents(session *grokSession) []core.Event {
+	var events []core.Event
+	for {
+		select {
+		case event, ok := <-session.Events():
+			if !ok {
+				return events
+			}
+			events = append(events, event)
+		default:
+			return events
+		}
+	}
+}
+
+func TestClipRepeatedTailStopsVerdientLoop(t *testing.T) {
+	loop := "正常结尾。 " + strings.Repeat(" verdient", 40)
+	clipped, unit, n := clipRepeatedTail(loop)
+	require.GreaterOrEqual(t, n, minRepeatCount)
+	assert.Equal(t, " verdient", unit)
+	assert.NotContains(t, clipped, strings.Repeat(" verdient", minRepeatCount))
+	assert.True(t, strings.HasPrefix(loop, clipped))
+	assert.Less(t, len(clipped), len(loop)/2)
+}
+
+func TestClipRepeatedTailAllowsLongSameCharAndNormalProse(t *testing.T) {
+	clipped, unit, n := clipRepeatedTail(strings.Repeat("x", 320*1024))
+	assert.Equal(t, 0, n)
+	assert.Empty(t, unit)
+	assert.Len(t, clipped, 320*1024)
+
+	prose := "今天加仓，不是在赌周一开盘一定涨。系统买的是未来几天期望还是正的。"
+	clipped, unit, n = clipRepeatedTail(prose)
+	assert.Equal(t, 0, n)
+	assert.Empty(t, unit)
+	assert.Equal(t, prose, clipped)
+}
+
+func TestHandleEventStopsVerdientLoop(t *testing.T) {
+	session, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok", workDir: t.TempDir(), mode: "yolo"})
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	state := newStreamState()
+	require.False(t, session.handleEvent(state, map[string]any{"type": "system", "session_id": "sid-loop"}))
+	require.False(t, session.handleEvent(state, map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"type":          "content_block_start",
+			"index":         float64(0),
+			"content_block": map[string]any{"type": "text", "text": "先说结论。"},
+		},
+	}))
+
+	terminal := false
+	for i := 0; i < 40; i++ {
+		terminal = session.handleEvent(state, map[string]any{
+			"type": "stream_event",
+			"event": map[string]any{
+				"type":  "content_block_delta",
+				"index": float64(0),
+				"delta": map[string]any{"type": "text_delta", "text": " verdient"},
+			},
+		})
+		if terminal {
+			break
+		}
+	}
+	assert.True(t, terminal)
+	assert.NotEmpty(t, state.runaway)
+	assert.Less(t, state.pendingText.Len()+len(state.finalText), 400)
+
+	// Later CLI frames must not keep appending after the trip.
+	assert.True(t, session.handleEvent(state, map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"type":  "content_block_delta",
+			"index": float64(0),
+			"delta": map[string]any{"type": "text_delta", "text": " verdient"},
+		},
+	}))
+
+	events := readEvents(t, session.Events(), 3)
+	assert.Equal(t, core.EventText, events[0].Type)
+	assert.Equal(t, "sid-loop", events[0].SessionID)
+	assert.Equal(t, core.EventText, events[1].Type)
+	assert.Contains(t, events[1].Content, "先说结论。")
+	assert.NotContains(t, events[1].Content, strings.Repeat(" verdient", minRepeatCount))
+	assert.Equal(t, core.EventResult, events[2].Type)
+	assert.True(t, events[2].Done)
+	assert.Contains(t, events[2].Content, "重复输出")
 	assert.Zero(t, len(session.events))
 }
 

@@ -17,15 +17,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
 
 const (
-	maxGrokJSONLine = 16 * 1024 * 1024
-	maxGrokStderr   = 1024 * 1024
-	maxToolPreview  = 4000
+	maxGrokJSONLine    = 16 * 1024 * 1024
+	maxGrokStderr      = 1024 * 1024
+	maxToolPreview     = 4000
+	minRepeatUnitRunes = 4
+	maxRepeatUnitRunes = 32
+	minRepeatCount     = 16
 )
 
 type sessionConfig struct {
@@ -375,6 +379,10 @@ func (gs *grokSession) readLoop(
 			continue
 		}
 		state.terminal = gs.handleEvent(state, raw)
+		if state.terminal && state.runaway != "" {
+			// Stop the CLI before it keeps generating the loop into a full pipe.
+			_ = cleanup.record(killCmd(cmd))
+		}
 	}
 	scanErr := scanner.Err()
 	if scanErr != nil {
@@ -447,17 +455,23 @@ type streamBlock struct {
 	inputSeed string
 	input     strings.Builder
 	value     any
+	// streamed accumulates thinking/text for this content-block index.
+	// Assistant complete frames reconcile against this per-index body, not a
+	// global concatenation (Grok 4.6 emits multiple text blocks per message).
+	streamed strings.Builder
 }
 
 type streamState struct {
-	blocks          map[int]*streamBlock
-	toolNames       map[string]string
-	emittedTools    map[string]bool
-	emittedResults  map[string]bool
+	blocks         map[int]*streamBlock
+	toolNames      map[string]string
+	emittedTools   map[string]bool
+	emittedResults map[string]bool
+	// closedThinking/closedText are completed block bodies in message order.
+	// Used only to align assistant complete frames to already-streamed blocks.
+	closedThinking  []string
+	closedText      []string
 	pendingThinking strings.Builder
 	pendingText     strings.Builder
-	streamThinking  strings.Builder
-	streamText      strings.Builder
 	partialSeen     bool
 	finalText       string
 	terminal        bool
@@ -465,6 +479,7 @@ type streamState struct {
 	lastCacheRead   int
 	lastCacheCreate int
 	currentModel    string
+	runaway         string
 }
 
 func newStreamState() *streamState {
@@ -476,7 +491,19 @@ func newStreamState() *streamState {
 	}
 }
 
+func (state *streamState) resetMessageBlocks() {
+	state.blocks = make(map[int]*streamBlock)
+	state.closedThinking = state.closedThinking[:0]
+	state.closedText = state.closedText[:0]
+	state.partialSeen = false
+	state.pendingThinking.Reset()
+	state.pendingText.Reset()
+}
+
 func (gs *grokSession) handleEvent(state *streamState, raw map[string]any) bool {
+	if state.runaway != "" {
+		return true
+	}
 	gs.captureSessionID(raw)
 	switch strings.ToLower(stringValue(raw["type"])) {
 	case "system":
@@ -487,14 +514,28 @@ func (gs *grokSession) handleEvent(state *streamState, raw map[string]any) bool 
 	case "stream_event":
 		event, _ := raw["event"].(map[string]any)
 		state.handlePartial(gs, event)
+		if state.runaway != "" {
+			return gs.finalizeRunaway(state)
+		}
 		return false
 	case "assistant":
-		state.handleAssistantFallback(gs, raw)
+		state.handleAssistantComplete(gs, raw)
+		if state.runaway != "" {
+			return gs.finalizeRunaway(state)
+		}
 		return false
 	case "user":
 		state.handleToolResults(gs, raw)
 		return false
 	case "result":
+		if content := stringValue(raw["result"]); state.runaway == "" && content != "" {
+			if clipped, unit, n := clipRepeatedTail(content); n > 0 {
+				state.pendingText.Reset()
+				state.pendingText.WriteString(clipped)
+				state.runaway = fmt.Sprintf("repeated %q %d times", strings.TrimSpace(unit), n)
+				return gs.finalizeRunaway(state)
+			}
+		}
 		state.flushThinking(gs)
 		state.flushText(gs)
 		if resultIsError(raw) {
@@ -554,10 +595,10 @@ func (state *streamState) handlePartial(gs *grokSession, event map[string]any) {
 	typeName := strings.ToLower(stringValue(event["type"]))
 	switch typeName {
 	case "message_start":
-		state.blocks = make(map[int]*streamBlock)
-		state.streamThinking.Reset()
-		state.streamText.Reset()
-		state.partialSeen = false
+		// New assistant message: reset per-message block index state only.
+		// toolNames / emittedTools persist for the whole turn (user tool_result
+		// frames need the id→name map from earlier tool_use blocks).
+		state.resetMessageBlocks()
 	case "content_block_start":
 		state.partialSeen = true
 		index := intFromAny(event["index"])
@@ -572,13 +613,11 @@ func (state *streamState) handlePartial(gs *grokSession, event map[string]any) {
 		switch kind {
 		case "thinking":
 			if text := stringValue(content["thinking"]); text != "" {
-				state.pendingThinking.WriteString(text)
-				state.streamThinking.WriteString(text)
+				state.appendThinkingDelta(block, text)
 			}
 		case "text":
 			if text := stringValue(content["text"]); text != "" {
-				state.pendingText.WriteString(text)
-				state.streamText.WriteString(text)
+				state.appendTextDelta(block, text)
 			}
 		case "tool_use", "server_tool_use":
 			if input, ok := content["input"].(map[string]any); ok && len(input) > 0 {
@@ -590,21 +629,19 @@ func (state *streamState) handlePartial(gs *grokSession, event map[string]any) {
 	case "content_block_delta":
 		state.partialSeen = true
 		index := intFromAny(event["index"])
+		block := state.blocks[index]
 		delta, _ := event["delta"].(map[string]any)
 		switch strings.ToLower(stringValue(delta["type"])) {
 		case "thinking_delta":
-			text := stringValue(delta["thinking"])
-			state.pendingThinking.WriteString(text)
-			state.streamThinking.WriteString(text)
+			state.appendThinkingDelta(block, stringValue(delta["thinking"]))
 		case "text_delta":
-			text := stringValue(delta["text"])
-			state.pendingText.WriteString(text)
-			state.streamText.WriteString(text)
+			state.appendTextDelta(block, stringValue(delta["text"]))
 		case "input_json_delta":
-			block := state.blocks[index]
 			if block != nil {
 				block.input.WriteString(stringValue(delta["partial_json"]))
 			}
+		case "signature_delta":
+			// Grok thinking signatures are opaque; ignore for live projection.
 		}
 	case "content_block_stop":
 		index := intFromAny(event["index"])
@@ -615,8 +652,10 @@ func (state *streamState) handlePartial(gs *grokSession, event map[string]any) {
 		switch block.kind {
 		case "thinking":
 			state.flushThinking(gs)
+			state.closedThinking = append(state.closedThinking, block.streamed.String())
 		case "text":
 			state.flushText(gs)
+			state.closedText = append(state.closedText, block.streamed.String())
 		case "tool_use", "server_tool_use":
 			state.flushThinking(gs)
 			state.flushText(gs)
@@ -629,6 +668,12 @@ func (state *streamState) handlePartial(gs *grokSession, event map[string]any) {
 			state.emitWebSearchResult(gs, block)
 		}
 		delete(state.blocks, index)
+	case "message_delta":
+		// Mid-message usage / stop_reason. Capture usage when present so a
+		// later interrupted turn still has the best available counters.
+		if usage, ok := event["usage"].(map[string]any); ok {
+			state.captureUsage(usage)
+		}
 	case "message_stop":
 		state.flushThinking(gs)
 		state.flushText(gs)
@@ -673,32 +718,65 @@ func (state *streamState) emitWebSearchResult(gs *grokSession, block *streamBloc
 	gs.emit(core.Event{Type: core.EventToolResult, ToolName: "web_search", ToolResult: truncate(string(encoded), maxToolPreview)})
 }
 
-func (state *streamState) handleAssistantFallback(gs *grokSession, raw map[string]any) {
+// handleAssistantComplete reconciles the full assistant message against the
+// per-block stream already projected live.
+//
+// Authority:
+//   - Live UI: stream_event deltas (already flushed on content_block_stop)
+//   - Gap fill / no-partial path: assistant complete content[]
+//   - Tools: emit any tool_use not seen in the stream (id-deduped)
+//
+// Grok 4.6 commonly emits [thinking, text, tool_use...] in one message. Each
+// text/thinking block must reconcile against its own closed stream body, not
+// against a global concatenation of every text delta in the message.
+func (state *streamState) handleAssistantComplete(gs *grokSession, raw map[string]any) {
 	message, _ := raw["message"].(map[string]any)
 	if usage, ok := message["usage"].(map[string]any); ok {
-		state.lastInputTokens = intFromAny(usage["input_tokens"])
-		state.lastCacheRead = intFromAny(usage["cache_read_input_tokens"])
-		state.lastCacheCreate = intFromAny(usage["cache_creation_input_tokens"])
+		state.captureUsage(usage)
 	}
 	if model := strings.TrimSpace(stringValue(message["model"])); model != "" {
 		state.currentModel = model
 	}
 	contents, _ := message["content"].([]any)
+	thinkIdx := 0
+	textIdx := 0
 	for _, value := range contents {
 		block, _ := value.(map[string]any)
 		switch strings.ToLower(stringValue(block["type"])) {
 		case "thinking":
 			complete := stringValue(block["thinking"])
-			if suffix := missingSuffix(complete, state.streamThinking.String()); suffix != "" {
+			streamed := ""
+			if thinkIdx < len(state.closedThinking) {
+				streamed = state.closedThinking[thinkIdx]
+				thinkIdx++
+			}
+			if suffix := missingBlockSuffix(complete, streamed); suffix != "" {
 				state.pendingThinking.WriteString(suffix)
 			}
 			state.flushThinking(gs)
+			// If this block only appeared in the complete frame, record it so a
+			// later identical re-delivery does not double-emit.
+			if streamed == "" && complete != "" {
+				state.closedThinking = append(state.closedThinking, complete)
+				thinkIdx = len(state.closedThinking)
+			}
 		case "text":
 			complete := stringValue(block["text"])
-			if suffix := missingSuffix(complete, state.streamText.String()); suffix != "" {
-				state.pendingText.WriteString(suffix)
+			streamed := ""
+			if textIdx < len(state.closedText) {
+				streamed = state.closedText[textIdx]
+				textIdx++
 			}
-			state.flushText(gs)
+			if suffix := missingBlockSuffix(complete, streamed); suffix != "" {
+				state.appendTextDelta(nil, suffix)
+			}
+			if state.runaway == "" {
+				state.flushText(gs)
+			}
+			if streamed == "" && complete != "" {
+				state.closedText = append(state.closedText, complete)
+				textIdx = len(state.closedText)
+			}
 		case "tool_use", "server_tool_use":
 			id := stringValue(block["id"])
 			input, _ := json.Marshal(block["input"])
@@ -709,18 +787,32 @@ func (state *streamState) handleAssistantFallback(gs *grokSession, raw map[strin
 	}
 }
 
-func missingSuffix(complete, streamed string) string {
+func (state *streamState) captureUsage(usage map[string]any) {
+	if usage == nil {
+		return
+	}
+	state.lastInputTokens = intFromAny(usage["input_tokens"])
+	state.lastCacheRead = intFromAny(usage["cache_read_input_tokens"])
+	state.lastCacheCreate = intFromAny(usage["cache_creation_input_tokens"])
+}
+
+// missingBlockSuffix returns the unstreamed suffix of one complete content
+// block relative to that same block's streamed body.
+func missingBlockSuffix(complete, streamed string) string {
 	if complete == "" || complete == streamed {
 		return ""
-	}
-	if strings.HasPrefix(complete, streamed) {
-		return strings.TrimPrefix(complete, streamed)
 	}
 	if streamed == "" {
 		return complete
 	}
-	slog.Warn("grok: complete assistant block differs from partial stream; keeping partial data",
-		"complete_len", len(complete), "partial_len", len(streamed))
+	if strings.HasPrefix(complete, streamed) {
+		return strings.TrimPrefix(complete, streamed)
+	}
+	// Stream already projected a different body for this block index (rare
+	// rewrite / truncation). Keep what was streamed live; do not warn as if
+	// the whole message failed to parse.
+	slog.Debug("grok: assistant complete block differs from streamed block; keeping stream",
+		"complete_len", len(complete), "streamed_len", len(streamed))
 	return ""
 }
 
@@ -858,6 +950,121 @@ func (state *streamState) flushText(gs *grokSession) {
 		state.finalText = text
 		gs.emit(core.Event{Type: core.EventText, Content: text, SessionID: gs.CurrentSessionID()})
 	}
+}
+
+func (state *streamState) appendThinkingDelta(block *streamBlock, text string) {
+	if text == "" || state.runaway != "" {
+		return
+	}
+	if block != nil {
+		block.streamed.WriteString(text)
+	}
+	state.pendingThinking.WriteString(text)
+}
+
+func (state *streamState) appendTextDelta(block *streamBlock, text string) {
+	if text == "" || state.runaway != "" {
+		return
+	}
+	if block != nil {
+		block.streamed.WriteString(text)
+	}
+	state.pendingText.WriteString(text)
+	clipped, unit, n := clipRepeatedTail(state.pendingText.String())
+	if n == 0 {
+		return
+	}
+	// Clip live pending and the open block body so closedText matches emit.
+	state.pendingText.Reset()
+	state.pendingText.WriteString(clipped)
+	if block != nil {
+		blockClipped, _, bn := clipRepeatedTail(block.streamed.String())
+		if bn > 0 {
+			block.streamed.Reset()
+			block.streamed.WriteString(blockClipped)
+		}
+	}
+	state.runaway = fmt.Sprintf("repeated %q %d times", strings.TrimSpace(unit), n)
+	slog.Warn("grok: aborted repeating model output", "unit", unit, "count", n)
+}
+
+func (gs *grokSession) finalizeRunaway(state *streamState) bool {
+	state.flushThinking(gs)
+	state.flushText(gs)
+	note := "\n\n[已停止：模型陷入重复输出]"
+	content := state.finalText + note
+	state.finalText = content
+	return gs.emit(core.Event{
+		Type:      core.EventResult,
+		Content:   content,
+		SessionID: gs.CurrentSessionID(),
+		Done:      true,
+	})
+}
+
+func usefulRepeatUnit(unit []rune) bool {
+	if len(unit) < minRepeatUnitRunes {
+		return false
+	}
+	seen := make(map[rune]struct{}, len(unit))
+	hasLetter := false
+	for _, r := range unit {
+		seen[r] = struct{}{}
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
+	}
+	return hasLetter && len(seen) >= 2
+}
+
+func clipRepeatedTail(text string) (string, string, int) {
+	runes := []rune(text)
+	if len(runes) < minRepeatUnitRunes*minRepeatCount {
+		return text, "", 0
+	}
+	window := minRepeatCount * maxRepeatUnitRunes * 2
+	offset := 0
+	if len(runes) > window {
+		offset = len(runes) - window
+		runes = runes[offset:]
+	}
+	maxUnit := maxRepeatUnitRunes
+	if maxUnit > len(runes)/minRepeatCount {
+		maxUnit = len(runes) / minRepeatCount
+	}
+	for unitLen := minRepeatUnitRunes; unitLen <= maxUnit; unitLen++ {
+		unit := runes[len(runes)-unitLen:]
+		if !usefulRepeatUnit(unit) {
+			continue
+		}
+		count := 1
+		for pos := len(runes) - 2*unitLen; pos >= 0; pos -= unitLen {
+			match := true
+			for i := 0; i < unitLen; i++ {
+				if runes[pos+i] != unit[i] {
+					match = false
+					break
+				}
+			}
+			if !match {
+				break
+			}
+			count++
+		}
+		if count < minRepeatCount {
+			continue
+		}
+		keep := offset + len(runes) - unitLen*(count-2)
+		if keep < 0 {
+			keep = 0
+		}
+		full := []rune(text)
+		if keep > len(full) {
+			keep = len(full)
+		}
+		return string(full[:keep]), string(unit), count
+	}
+	return text, "", 0
 }
 
 func normalizeJSONPreview(value string) string {

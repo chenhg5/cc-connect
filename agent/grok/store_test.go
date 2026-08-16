@@ -84,12 +84,16 @@ func TestResolveGrokHomeUsesEffectiveEnvironmentAndWorkDir(t *testing.T) {
 
 func TestGrokModelContextWindow(t *testing.T) {
 	grokHome := t.TempDir()
-	payload := `{"models":{"grok-4.5":{"info":{"context_window":500000}}}}`
+	payload := `{"models":{"grok-4.5":{"info":{"context_window":500000}},"grok-4.6":{"info":{"context_window":500000}}}}`
 	if err := os.WriteFile(filepath.Join(grokHome, "models_cache.json"), []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, t.TempDir(), "grok-4.5"); got != 500000 {
 		t.Fatalf("grokModelContextWindow() = %d, want 500000", got)
+	}
+	// Headless modelUsage keys use the "-build" suffix; cache uses bare ids.
+	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, t.TempDir(), "grok-4.6-build"); got != 500000 {
+		t.Fatalf("grokModelContextWindow(grok-4.6-build) = %d, want 500000", got)
 	}
 	if got := grokModelContextWindow([]string{"GROK_HOME=" + grokHome}, t.TempDir(), "missing"); got != 0 {
 		t.Fatalf("missing model context window = %d, want 0", got)
