@@ -72,6 +72,8 @@ func RecommendedFeishuProfile(agentType string) []RecommendedFeishuSetting {
 			"keep model, token and context metadata out of the chat"},
 		{feishuProfileTableDisplay, "reply_footer", "false",
 			"keep the per-turn status footer out of the chat"},
+		{feishuProfileTableDisplay, "hide_agent_footer", "true",
+			"strip the equivalent model/token/context lines the agent emits itself"},
 
 		{feishuProfileTableReferences, "normalize_agents", `["` + normalizeAgent + `"]`,
 			"rewrite this agent's file references into a consistent form"},

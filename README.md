@@ -4,7 +4,7 @@ Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), 
 
 [中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream Feishu parity](docs/upstream-feishu-parity-2026-08-15.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
 
-> Current release: `0.1.0-beta.2`. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
+> Current release: `0.1.0-beta.3`. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
 ## What changes for Feishu
 
@@ -43,7 +43,9 @@ make build
 ./cc-connect-next --version
 ```
 
-Run `cc-connect-next` once to create the secure starter config at `~/.cc-connect-next/config.toml`, then add the Feishu app credentials.
+Run `cc-connect-next` once to create the secure starter config at `~/.cc-connect-next/config.toml`. It is rendered from the same recommended Feishu profile `cc-connect-next feishu setup` applies, and every value left for you is marked `REPLACE`. Startup refuses to run while a `REPLACE` value is still in place, naming the key and the step that resolves it, instead of reporting itself healthy and then failing to connect.
+
+`cc-connect-next doctor` checks the configuration, the Agent CLI and its login state, the configured platforms, dependencies, and network without opening a platform connection, so it also works while the instance is down.
 
 ## Migrate from official CC Connect
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.0-beta.3 (2026-08-16)
+
+### Fixed
+
+- **A starter config no longer reports itself running.** Startup refuses a configuration that still carries the placeholders this binary wrote (`work_dir`, Feishu `app_id`/`app_secret`), naming each key and the step that replaces it, before any engine is created. Previously `platform ready`, `engine started` and `cc-connect-next is running` were all printed before Feishu rejected the placeholder credentials, and the process then hung there looking healthy.
+- **A platform that cannot connect is reported.** The long connection is opened after `Start` returns, so a rejected credential surfaced only as a stray SDK error. Feishu now records why the connection ended, and startup logs every platform that is still unusable 30 seconds in, pointing at `doctor`.
+- **A configured `work_dir` that is missing or is not a directory** is reported once at startup instead of failing per turn.
+
+### Added
+
+- **`cc-connect-next doctor`** runs the full health check from the command line: config file and placeholders, work directory, Agent CLI and login state, per-platform configuration validation, dependencies, and network. It never opens a platform connection, so it works while the instance is down — which is when it is needed — and its platform section does not claim `connected`. `--config` and `--project` narrow the run; `doctor` is now listed in `--help`; `doctor user-isolation` is unchanged and the full check also runs on Windows.
+- `core.RunDoctorChecksWithPlatformResults` and `Engine.PlatformStatuses` expose those two capabilities to callers that have no live platform.
+
+### Changed
+
+- **The first-run template is generated from the recommended Feishu profile** instead of being a second copy of it. New installations therefore get project-level `[projects.display]`, no pinned display `mode`, and the `enable_feishu_card`, `thread_isolation`, and `group_reply_all` settings the profile has always included, with the `allow_from`/`allow_chat` scope documented next to `group_reply_all`.
+- **The recommended Feishu profile regains `hide_agent_footer = true`**, matching `config.example.toml`, the Feishu guide, and the answer-card contract.
+- The first-run message points at `cc-connect-next feishu setup` and `cc-connect-next doctor`.
+
 ## v0.1.0-beta.2 (2026-08-15)
 
 ### Added

@@ -27,6 +27,7 @@ func TestRecommendedFeishuProfileCoversTheDeployedShape(t *testing.T) {
 		"display.tool_messages":          "false",
 		"display.show_context_indicator": "false",
 		"display.reply_footer":           "false",
+		"display.hide_agent_footer":      "true",
 		"references.normalize_agents":    `["codex"]`,
 		"references.render_platforms":    `["feishu"]`,
 		"references.display_path":        `"smart"`,

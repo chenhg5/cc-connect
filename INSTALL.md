@@ -74,9 +74,11 @@ Run the binary once. It creates `~/.cc-connect-next/config.toml` with directory 
 cc-connect-next
 ```
 
-Edit that file and add the selected Agent, working directory, and platform credentials. Do not commit the configuration.
+The generated file already carries the [recommended Feishu configuration](#the-recommended-feishu-configuration) — it is rendered from the same definition `feishu setup` applies, so the two cannot drift apart. What it leaves to you is marked `REPLACE`: the working directory and the Feishu credentials. Do not commit the configuration.
 
-For Feishu, `cc-connect-next feishu setup` does this for you and then offers the recommended configuration — see [section 4](#4-configure-feishu).
+Startup refuses to run while any `REPLACE` value is still in place, and names both the key and the step that resolves it. That refusal is deliberate: with placeholder credentials the process would otherwise print `platform ready`, `engine started` and `cc-connect-next is running`, and only then fail to connect.
+
+For Feishu, `cc-connect-next feishu setup` fills the credentials for you and then offers the recommended configuration — see [section 4](#4-configure-feishu).
 
 ### Migrate official CC Connect
 
@@ -148,6 +150,7 @@ thinking_messages = false        # keep reasoning out of the chat
 tool_messages = false            # keep tool calls and their arguments out of the chat
 show_context_indicator = false   # keep model, token and context metadata out of the chat
 reply_footer = false             # keep the per-turn status footer out of the chat
+hide_agent_footer = true         # strip the equivalent lines the agent emits itself
 
 [projects.references]
 normalize_agents = ["codex"]     # the project's own agent; "all" when its syntax is not known
@@ -189,6 +192,15 @@ cc-connect-next --version
 ls -ld ~/.cc-connect-next
 ls -l ~/.cc-connect-next/config.toml
 cc-connect-next migrate --dry-run
+cc-connect-next doctor
+```
+
+`doctor` checks the configuration, the Agent CLI and its login state, every configured platform, local dependencies, and network reachability, then exits non-zero if any check failed. It never opens a platform connection, so it works before the first start and while the instance is down — which is when it is needed. Limit it to one project with `--project <name>`, or point it at another file with `--config <path>`.
+
+If a platform cannot connect after startup, the process stays up and retries, and says so 30 seconds in:
+
+```text
+level=ERROR msg="platform startup incomplete" detail="my-project/feishu (1000040346: app_id is invalid) cannot deliver messages ..."
 ```
 
 For live Feishu testing, use a separate test Feishu app while official CC Connect is running. Two WebSocket consumers using the same app credentials can race or duplicate message handling.

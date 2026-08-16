@@ -52,13 +52,29 @@ type AgentDoctorInfo interface {
 	CLIDisplayName() string // e.g. "Claude", "Codex" (for display in doctor output)
 }
 
-// RunDoctorChecks performs all diagnostic checks.
+// RunDoctorChecks performs all diagnostic checks for a running instance,
+// whose platforms are live.
 func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
+	return runDoctorChecks(ctx, agent, checkPlatforms(platforms))
+}
+
+// RunDoctorChecksWithPlatformResults performs the same checks for a caller
+// that has no live platform connections and therefore describes the platform
+// section itself.
+//
+// The command line is such a caller: it diagnoses an instance that is not
+// running, most often because the platform cannot connect at all, so it must
+// not inherit the running instance's claim that every platform is connected.
+func RunDoctorChecksWithPlatformResults(ctx context.Context, agent Agent, platformResults []DoctorCheckResult) []DoctorCheckResult {
+	return runDoctorChecks(ctx, agent, platformResults)
+}
+
+func runDoctorChecks(ctx context.Context, agent Agent, platformResults []DoctorCheckResult) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
 	results = append(results, checkAgentBinary(ctx, agent)...)
 	results = append(results, checkAgentAuth(ctx, agent)...)
-	results = append(results, checkPlatforms(platforms)...)
+	results = append(results, platformResults...)
 	results = append(results, checkSystem(ctx)...)
 	results = append(results, checkDependencies()...)
 	results = append(results, checkNetwork(ctx)...)
@@ -428,6 +444,7 @@ var checkNameZh = map[string]string{
 	"FFmpeg (voice)":      "FFmpeg (语音)",
 	"HTTPS (Anthropic)":   "HTTPS (Anthropic)",
 	"Data Directory":      "数据目录",
+	"Work Directory":      "工作目录",
 	"Config File":         "配置文件",
 	"Platforms":           "平台",
 }
@@ -440,6 +457,7 @@ var checkNameJa = map[string]string{
 	"Disk Space":          "ディスク容量",
 	"FFmpeg (voice)":      "FFmpeg (音声)",
 	"Data Directory":      "データディレクトリ",
+	"Work Directory":      "作業ディレクトリ",
 	"Config File":         "設定ファイル",
 	"Platforms":           "プラットフォーム",
 }

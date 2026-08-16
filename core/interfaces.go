@@ -377,6 +377,17 @@ type PlatformLifecycleHandler interface {
 	OnPlatformUnavailable(p Platform, err error)
 }
 
+// PlatformHealth is an optional interface for platforms whose connection can
+// fail after Start returned successfully.
+//
+// A long connection is established in the background, so Start succeeding says
+// nothing about whether the platform can deliver a message. Implementations
+// return the error that ended the last connection attempt, or nil while the
+// connection is usable.
+type PlatformHealth interface {
+	ConnectionError() error
+}
+
 // AsyncRecoverablePlatform is an optional interface for platforms that start
 // a background recovery loop and later report readiness or unavailability.
 //

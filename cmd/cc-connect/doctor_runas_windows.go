@@ -2,8 +2,14 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
-func runDoctor(args []string) {
-	fmt.Println("doctor command is not supported on Windows")
+// runDoctorUserIsolation reports that run_as_user isolation does not exist on
+// Windows. The rest of `cc-connect-next doctor` runs normally there.
+func runDoctorUserIsolation(_ []string) {
+	fmt.Fprintln(os.Stderr, "doctor user-isolation: run_as_user is not supported on Windows")
+	os.Exit(1)
 }

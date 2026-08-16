@@ -19,25 +19,6 @@ import (
 	"github.com/timmyagentic/cc-connect-next/core"
 )
 
-// runDoctor dispatches `cc-connect-next doctor ...`. Today the only subcommand
-// is `user-isolation`, but this function is the growth point for future
-// diagnostics.
-func runDoctor(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cc-connect-next doctor <subcommand>")
-		fmt.Fprintln(os.Stderr, "subcommands:")
-		fmt.Fprintln(os.Stderr, "  user-isolation   audit run_as_user projects and emit an isolation report")
-		os.Exit(2)
-	}
-	switch args[0] {
-	case "user-isolation":
-		runDoctorUserIsolation(args[1:])
-	default:
-		fmt.Fprintf(os.Stderr, "unknown doctor subcommand %q\n", args[0])
-		os.Exit(2)
-	}
-}
-
 // runDoctorUserIsolation runs preflight + isolation probe for one or all
 // projects that have run_as_user set, writes a JSON report per project,
 // and exits 0 on full clean, 1 otherwise.

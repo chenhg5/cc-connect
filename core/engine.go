@@ -238,6 +238,48 @@ func (e *Engine) lookupReadyPlatform(platformName string) Platform {
 	return nil
 }
 
+// PlatformStatus is one platform's post-start state.
+type PlatformStatus struct {
+	Name string
+	// Ready is true once the platform reported readiness. Platforms that
+	// connect asynchronously stay false until their recovery loop succeeds.
+	Ready bool
+	// Err is the error that ended the platform's last connection attempt, for
+	// platforms that report it. A platform can be Ready and still carry an
+	// error: Start only launches the connection.
+	Err error
+}
+
+// Usable reports whether this platform can currently deliver a message.
+func (s PlatformStatus) Usable() bool { return s.Ready && s.Err == nil }
+
+// PlatformStatuses returns the state of every platform of this engine, in
+// configuration order.
+//
+// Startup prints "running" as soon as every Start returned, which happens
+// before the first connection attempt finishes. Asking afterwards is the only
+// way to tell a working instance from one that is up but unreachable.
+func (e *Engine) PlatformStatuses() []PlatformStatus {
+	e.platformLifecycleMu.Lock()
+	platforms := make([]Platform, len(e.platforms))
+	copy(platforms, e.platforms)
+	ready := make([]bool, len(platforms))
+	for i, p := range platforms {
+		ready[i] = e.platformReady[p]
+	}
+	e.platformLifecycleMu.Unlock()
+
+	statuses := make([]PlatformStatus, 0, len(platforms))
+	for i, p := range platforms {
+		status := PlatformStatus{Name: p.Name(), Ready: ready[i]}
+		if health, ok := p.(PlatformHealth); ok {
+			status.Err = health.ConnectionError()
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
 // clearPendingRestart removes the queued notify if it is still the same
 // request (avoids clearing a newer notify that replaced this one).
 func (e *Engine) clearPendingRestart(req *RestartRequest) {

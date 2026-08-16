@@ -342,7 +342,9 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Created default config at %s\n", configPath)
-		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect-next again.")
+		fmt.Println("Next: run `cc-connect-next feishu setup` to create the Feishu app, write its credentials,")
+		fmt.Println("and apply the recommended profile — or edit the file yourself and replace every REPLACE value.")
+		fmt.Println("Then run cc-connect-next again; `cc-connect-next doctor` checks the result.")
 		os.Exit(0)
 	}
 
@@ -362,7 +364,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Refuse a config that still carries the placeholders this binary wrote
+	// itself. It must happen before anything reports readiness: an unedited
+	// starter config used to print "platform ready", "engine started" and
+	// "cc-connect-next is running" before the platform rejected the
+	// placeholder credentials, and then hang there looking healthy.
+	if refusal := starterPlaceholderRefusal(configPath, config.FindStarterPlaceholders(cfg)); refusal != "" {
+		fmt.Fprint(os.Stderr, refusal)
+		os.Exit(1)
+	}
+
 	setupLogger(cfg.Log.Level, logWriter)
+
+	// A work_dir that is not there yields per-turn agent failures later. Say
+	// it once at startup instead: unlike a placeholder it can be a mount that
+	// is not up yet, so it warns rather than refuses.
+	for _, problem := range inspectWorkDirs(cfg) {
+		slog.Warn("configured work_dir is unusable", "project", problem.Project, "work_dir", problem.Path, "reason", problem.Reason)
+	}
 
 	// run_as_user preflight + isolation audit. MUST run before any engine
 	// or agent is constructed. If any project fails, abort startup
@@ -1307,6 +1326,16 @@ func main() {
 
 	slog.Info("cc-connect-next is running", "projects", len(engines))
 
+	// "running" is printed before asynchronous platforms have connected. Check
+	// back once so a startup that never reaches a platform says so instead of
+	// staying quiet behind a success line.
+	readiness := make([]projectPlatformReadiness, 0, len(engines))
+	for _, e := range engines {
+		readiness = append(readiness, projectPlatformReadiness{project: e.ProjectName(), engine: e})
+	}
+	readinessTimer := watchPlatformReadiness(readiness, platformReadinessGrace)
+	defer readinessTimer.Stop()
+
 	// After startup, check if we were restarted and queue the success
 	// notification. The engine dispatches it on the first OnPlatformReady
 	// for the target platform (or with a 10s safety timeout), so async
@@ -1501,60 +1530,17 @@ func resolveConfigPath(explicit string) string {
 	return "config.toml"
 }
 
+// bootstrapConfig writes the first-run configuration.
+//
+// The content comes from config.StarterConfigTOML so the file a new user gets
+// is generated from the same recommended Feishu profile `feishu setup` offers,
+// and the placeholders it leaves behind are the ones the startup preflight
+// recognises.
 func bootstrapConfig(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-
-	const tmpl = `# cc-connect-next configuration
-# Docs: https://github.com/timmyagentic/cc-connect-next
-
-[log]
-level = "info"
-
-[display]
-mode = "compact"
-card_mode = "rich"
-thinking_messages = false
-tool_messages = false
-show_context_indicator = false
-reply_footer = false
-hide_agent_footer = true
-
-[[projects]]
-name = "my-project"
-
-[projects.agent]
-type = "claudecode"   # "claudecode", "codex", "cursor", "gemini", "qoder", "opencode", or "iflow"
-
-[projects.agent.options]
-work_dir = "/path/to/your/project"
-mode = "default"
-# model = "claude-sonnet-4-20250514"
-
-[projects.references]
-normalize_agents = ["codex", "claudecode"]
-render_platforms = ["feishu"]
-display_path = "smart"
-marker_style = "emoji"
-enclosure_style = "code"
-
-# --- Choose at least one platform below ---
-
-# Feishu / Lark (WebSocket, no public IP needed)
-[[projects.platforms]]
-type = "feishu"
-
-[projects.platforms.options]
-app_id = "your-feishu-app-id"
-app_secret = "your-feishu-app-secret"
-reply_to_trigger = true
-done_emoji = "Done"
-
-# For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
-# see: https://github.com/timmyagentic/cc-connect-next/blob/main/config.example.toml
-`
-	return os.WriteFile(path, []byte(tmpl), 0o600)
+	return os.WriteFile(path, []byte(config.StarterConfigTOML()), 0o600)
 }
 
 func printUsage() {
@@ -1639,6 +1625,10 @@ Commands:
     format           Format the config file (alias: fmt)
     path             Print the resolved config file path
 
+  doctor             Check config, agent CLI, platforms, dependencies and network
+                     (--config <path>, --project <name>)
+    user-isolation   Audit run_as_user projects and emit an isolation report
+
   update             Check for updates and upgrade the binary (--pre for beta)
   migrate            Copy official CC Connect config/state into ~/.cc-connect-next
   check-update       Check if a newer version is available
@@ -1652,6 +1642,7 @@ Examples:
   cc-connect-next send -m "hello"          Send a message to the active session
   cc-connect-next cron list                List all scheduled tasks
   cc-connect-next feishu setup             Setup Feishu/Lark bot credentials
+  cc-connect-next doctor                   Diagnose the configured setup
   cc-connect-next weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect-next update                   Update to the latest version
   cc-connect-next migrate --dry-run        Preview migration from official CC Connect

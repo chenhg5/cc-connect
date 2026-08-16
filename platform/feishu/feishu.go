@@ -304,6 +304,7 @@ type Platform struct {
 	eventHandler *dispatcher.EventDispatcher
 	sharedGroup  *sharedWSGroup // non-nil when sharing WebSocket with other platforms
 	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
+	connErr      error          // why the long connection ended; nil while it is usable
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
@@ -760,13 +761,42 @@ func (p *Platform) startWebSocketMode() error {
 	p.cancel = cancel
 	p.mu.Unlock()
 
+	p.recordConnectionError(nil)
 	go func() {
 		if err := p.wsClient.Start(ctx); err != nil {
 			slog.Error(p.tag()+": websocket error", "error", err)
+			if ctx.Err() == nil {
+				p.recordConnectionError(err)
+			}
 		}
 	}()
 
 	return nil
+}
+
+// recordConnectionError remembers why the long connection ended.
+//
+// Start returns as soon as the connection attempt is launched, so a rejected
+// app_id surfaces only here. Every platform sharing this WebSocket is marked:
+// they all lost the same connection.
+func (p *Platform) recordConnectionError(err error) {
+	targets := []*Platform{p}
+	if group := p.sharedGroup; group != nil {
+		targets = group.allPlatforms()
+	}
+	for _, target := range targets {
+		target.mu.Lock()
+		target.connErr = err
+		target.mu.Unlock()
+	}
+}
+
+// ConnectionError implements core.PlatformHealth: the error that ended the
+// last connection attempt, or nil while the platform is usable.
+func (p *Platform) ConnectionError() error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.connErr
 }
 
 // startWebhookMode starts the HTTP webhook server mode (for Lark international version)
@@ -784,10 +814,12 @@ func (p *Platform) startWebhookMode() error {
 	p.cancel = cancel
 	p.mu.Unlock()
 
+	p.recordConnectionError(nil)
 	go func() {
 		slog.Info(p.tag()+": webhook server listening", "port", p.port, "path", p.callbackPath)
 		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error(p.tag()+": webhook server error", "error", err)
+			p.recordConnectionError(err)
 		}
 	}()
 

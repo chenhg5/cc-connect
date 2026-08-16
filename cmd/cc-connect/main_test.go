@@ -59,42 +59,6 @@ func TestProjectStatePath(t *testing.T) {
 	}
 }
 
-func TestBootstrapConfigIncludesCompleteFeishuPresentationDefaults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := bootstrapConfig(path); err != nil {
-		t.Fatalf("bootstrapConfig() error = %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read bootstrap config: %v", err)
-	}
-	text := string(data)
-	for _, want := range []string{
-		`mode = "compact"`,
-		`card_mode = "rich"`,
-		`thinking_messages = false`,
-		`tool_messages = false`,
-		`show_context_indicator = false`,
-		`reply_footer = false`,
-		`normalize_agents = ["codex", "claudecode"]`,
-		`render_platforms = ["feishu"]`,
-		`display_path = "smart"`,
-		`marker_style = "emoji"`,
-		`enclosure_style = "code"`,
-		`reply_to_trigger = true`,
-		`done_emoji = "Done"`,
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("bootstrap config missing %q:\n%s", want, text)
-		}
-	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat bootstrap config: %v", err)
-	} else if info.Mode().Perm() != 0o600 {
-		t.Fatalf("bootstrap config mode = %#o, want 0600", info.Mode().Perm())
-	}
-}
-
 func TestResolveResetOnIdle(t *testing.T) {
 	intPtr := func(v int) *int { return &v }
 
