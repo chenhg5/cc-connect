@@ -2980,6 +2980,9 @@ type rawProjectSpan struct {
 
 	displayStart int // [projects.display] header; -1 if absent
 	displayEnd   int // last line of the project display section
+
+	referencesStart int // [projects.references] header; -1 if absent
+	referencesEnd   int // last line of the project references section
 }
 
 type rawProviderSpan struct {
@@ -3042,6 +3045,8 @@ func buildRawProjectSpans(lines []string) []rawProjectSpan {
 			agentOptionsEnd:   -1,
 			displayStart:      -1,
 			displayEnd:        -1,
+			referencesStart:   -1,
+			referencesEnd:     -1,
 		}
 
 		for ln := start + 1; ln <= end; ln++ {
@@ -3071,6 +3076,16 @@ func buildRawProjectSpans(lines []string) []rawProjectSpan {
 				for j := ln + 1; j <= end; j++ {
 					if isAnyTableHeader(lines[j]) {
 						span.displayEnd = j - 1
+						break
+					}
+				}
+			}
+			if matchTableHeader(lines[ln], "[projects.references]") {
+				span.referencesStart = ln
+				span.referencesEnd = end
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						span.referencesEnd = j - 1
 						break
 					}
 				}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -117,8 +118,16 @@ func runFeishuSetup(args []string, requestedMode string) {
 	timeout := fs.Int("timeout", 600, "QR onboarding timeout in seconds")
 	qrImage := fs.String("qr-image", "", "save QR code as PNG image to this path (e.g. qr.png)")
 	setAllowFromEmpty := fs.Bool("set-allow-from-empty", false, "merge owner open_id into allow_from when onboarding returns it (preserves *)")
+	recommended := fs.Bool("recommended", false, "apply the recommended Feishu configuration without asking")
+	noRecommended := fs.Bool("no-recommended", false, "skip the recommended Feishu configuration without asking")
 	debug := fs.Bool("debug", false, "print debug logs for onboarding requests")
 	_ = fs.Parse(args)
+
+	profileDecided, profileApply, err := resolveRecommendedProfileFlags(*recommended, *noRecommended)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	initConfigPath(*configFile)
 
@@ -229,9 +238,130 @@ func runFeishuSetup(args []string, requestedMode string) {
 		printAllowFromGuidance(resolvedAppID, resolvedAppSecret, ownerOpenID, saveResult)
 	}
 
+	applyRecommendedFeishuProfile(
+		os.Stdout,
+		os.Stdin,
+		saveResult.ProjectName,
+		*platformIndex,
+		profileDecided,
+		profileApply,
+		stdinIsInteractive(),
+	)
+
 	printBotMenuGuidance(saveResult.PlatformType)
 
 	fmt.Println("提醒：扫码新建通常会自动预配权限与事件订阅；请在开放平台核验发布状态与可用范围。")
+}
+
+// resolveRecommendedProfileFlags reports whether the command line already
+// decided about the recommended profile, so the prompt is only shown when the
+// user has not answered in advance.
+func resolveRecommendedProfileFlags(yes, no bool) (decided, apply bool, err error) {
+	if yes && no {
+		return false, false, fmt.Errorf("--recommended and --no-recommended cannot be combined")
+	}
+	if yes {
+		return true, true, nil
+	}
+	if no {
+		return true, false, nil
+	}
+	return false, false, nil
+}
+
+// promptYesNo asks a yes/no question. Anything that is not a yes is a no,
+// except an empty answer, which takes the default. A closed or unreadable
+// stdin also takes the default rather than blocking a scripted install.
+func promptYesNo(in io.Reader, out io.Writer, question string, defaultYes bool) bool {
+	suffix := "[y/N]"
+	if defaultYes {
+		suffix = "[Y/n]"
+	}
+	_, _ = fmt.Fprintf(out, "%s %s ", question, suffix)
+
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil && strings.TrimSpace(line) == "" {
+		_, _ = fmt.Fprintln(out)
+		return defaultYes
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "":
+		return defaultYes
+	case "y", "yes", "是", "好":
+		return true
+	default:
+		return false
+	}
+}
+
+// stdinIsInteractive reports whether a prompt would reach a human. A piped or
+// redirected stdin must not turn an unattended install into a hang.
+func stdinIsInteractive() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func printRecommendedFeishuProfile(out io.Writer, projectName string, settings []config.RecommendedFeishuSetting) {
+	_, _ = fmt.Fprintf(out, "📐 推荐飞书配置（project %q，本项目日常运行所用的形态）：\n", projectName)
+	_, _ = fmt.Fprintln(out, "   只发最终答案的引用卡片、可点击的文件引用、群里免 @ 应答。")
+	_, _ = fmt.Fprintln(out)
+
+	lastHeader := ""
+	for _, setting := range settings {
+		if header := setting.TableHeader(); header != lastHeader {
+			if lastHeader != "" {
+				_, _ = fmt.Fprintln(out)
+			}
+			_, _ = fmt.Fprintf(out, "   %s\n", header)
+			lastHeader = header
+		}
+		_, _ = fmt.Fprintf(out, "   %-22s = %-16s # %s\n", setting.Key, setting.Value, setting.Why)
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "   凭据、allow_from、allow_chat、work_dir 等与本机身份相关的设置不会被改动。")
+	_, _ = fmt.Fprintln(out)
+}
+
+// applyRecommendedFeishuProfile runs the post-credential step that offers the
+// recommended profile. Everything it writes is a deliberate answer: the flags
+// when they were given, the prompt when a human is there, and otherwise
+// nothing at all.
+func applyRecommendedFeishuProfile(out io.Writer, in io.Reader, projectName string, platformIndex int, decided, apply, interactive bool) {
+	if decided && !apply {
+		return
+	}
+	settings := config.RecommendedFeishuProfileFor(projectName)
+	if !decided {
+		if !interactive {
+			_, _ = fmt.Fprintln(out, "ℹ️  未套用推荐飞书配置（stdin 非交互）。加 --recommended 套用，或 --no-recommended 静默跳过。")
+			_, _ = fmt.Fprintln(out)
+			return
+		}
+		printRecommendedFeishuProfile(out, projectName, settings)
+		if !promptYesNo(in, out, "是否套用以上推荐配置？", true) {
+			_, _ = fmt.Fprintln(out, "已跳过。稍后可运行 `cc-connect-next feishu setup --recommended` 套用。")
+			_, _ = fmt.Fprintln(out)
+			return
+		}
+	}
+
+	result, err := config.ApplyRecommendedFeishuProfile(config.RecommendedFeishuProfileOptions{
+		ProjectName:   projectName,
+		PlatformIndex: platformIndex,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "⚠️  推荐配置未写入：%v\n", err)
+		_, _ = fmt.Fprintln(out, "   凭据已保存，可手工按上面的清单设置。")
+		_, _ = fmt.Fprintln(out)
+		return
+	}
+	_, _ = fmt.Fprintf(out, "✅ 已套用推荐飞书配置（%d 项）到 project %q。\n", result.Applied, result.ProjectName)
+	_, _ = fmt.Fprintln(out, "   下一步请设置 allow_from / allow_chat 限定可用范围，group_reply_all 才是安全的。")
+	_, _ = fmt.Fprintln(out)
 }
 
 func printAllowFromGuidance(appID, appSecret, ownerOpenID string, result *config.FeishuCredentialUpdateResult) {
@@ -363,7 +493,14 @@ Options:
   --timeout <seconds>         QR onboarding timeout (default: 600)
   --qr-image <path>           Save QR code as PNG image file (e.g. --qr-image qr.png)
   --set-allow-from-empty      Merge owner open_id into allow_from when available (default: false)
+  --recommended               Apply the recommended Feishu configuration without asking
+  --no-recommended            Skip the recommended Feishu configuration without asking
   --debug                     Print onboarding debug logs
+
+After the credentials are saved, setup shows the recommended Feishu
+configuration and asks whether to apply it. Credentials, allow_from, allow_chat,
+and work_dir are never changed by it. With neither --recommended nor
+--no-recommended and a non-interactive stdin, nothing is applied.
 
 Examples:
   # Recommended: one command for both flows
@@ -372,6 +509,9 @@ Examples:
 
   # Equivalent to "setup --app ..."
   cc-connect-next feishu bind --project my-project --app cli_xxx:sec_xxx
+
+  # Unattended install with the recommended configuration
+  cc-connect-next feishu setup --project my-project --app cli_xxx:sec_xxx --recommended
 
   # Use only when you must force QR onboarding
   cc-connect-next feishu new --project my-project --platform-type lark`)

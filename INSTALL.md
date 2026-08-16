@@ -76,6 +76,8 @@ cc-connect-next
 
 Edit that file and add the selected Agent, working directory, and platform credentials. Do not commit the configuration.
 
+For Feishu, `cc-connect-next feishu setup` does this for you and then offers the recommended configuration — see [section 4](#4-configure-feishu).
+
 ### Migrate official CC Connect
 
 Migration is explicit, local, and copy-only. Start with a dry run:
@@ -125,44 +127,51 @@ Relative `data_dir`, `work_dir`, and `base_dir` values are resolved from the off
 
 Configuration paths follow official CC Connect's `${NAME}` placeholder semantics. A configured `data_dir` that does not exist yet is treated as empty, so the valid configuration file still migrates. Unreadable optional project data or malformed project state/binding metadata does not discard the global migration, and the metadata file itself is still copied verbatim; each skipped discovery source is printed and recorded in `migration-manifest.json`. Grant access or repair the metadata, then rerun before treating project-local migration as complete.
 
-## 4. Configure native Feishu cards
+## 4. Configure Feishu
 
-New configs default to privacy-first Rich Card mode. The relevant settings are:
+Connect the bot and let setup offer the recommended configuration:
+
+```bash
+cc-connect-next feishu setup --project my-project --app cli_xxx:sec_xxx
+```
+
+After the credentials are saved, setup prints the recommended Feishu configuration and asks whether to apply it. Answer `--recommended` or `--no-recommended` on the command line to decide in advance; with neither flag and a non-interactive stdin, nothing is applied.
+
+### The recommended Feishu configuration
+
+This is the shape the project is operated with day to day, not a theoretical ideal: a quoted answer card that carries the final answer and nothing else, file references rendered so they can be clicked, and a bot that participates in its group without being @mentioned every time.
 
 ```toml
-[display]
-mode = "compact"
-card_mode = "rich"
-thinking_messages = false
-tool_messages = false
-show_context_indicator = false
-reply_footer = false
-hide_agent_footer = true
-
-[[projects]]
-name = "my-project"
-
-[projects.agent]
-type = "codex"
-
-[projects.agent.options]
-work_dir = "/absolute/path/to/project"
+[projects.display]
+card_mode = "rich"               # Feishu Card 2.0 answer card: counts only, never reasoning text
+thinking_messages = false        # keep reasoning out of the chat
+tool_messages = false            # keep tool calls and their arguments out of the chat
+show_context_indicator = false   # keep model, token and context metadata out of the chat
+reply_footer = false             # keep the per-turn status footer out of the chat
 
 [projects.references]
-normalize_agents = ["codex", "claudecode"]
+normalize_agents = ["codex"]     # the project's own agent; "all" when its syntax is not known
 render_platforms = ["feishu"]
 display_path = "smart"
 marker_style = "emoji"
 enclosure_style = "code"
 
-[[projects.platforms]]
-type = "feishu"
-
 [projects.platforms.options]
-app_id = "${FEISHU_APP_ID}"
-app_secret = "${FEISHU_APP_SECRET}"
-reply_to_trigger = true
-done_emoji = "Done"
+enable_feishu_card = true        # interactive card client instead of plain messages
+reply_to_trigger = true          # reply in a quote of the triggering message
+thread_isolation = false         # one session per chat, not per thread
+done_emoji = "Done"              # react when a turn finishes, so the chat pushes a notification
+group_reply_all = true           # answer every group message without an @mention
+```
+
+Most of these already match the built-in defaults. The profile still spells them out, so a configuration you accepted keeps producing the same chat surface when a future release changes what an unset key means.
+
+Two things it deliberately does not touch, because they are specific to your installation rather than to Feishu: credentials, and the `allow_from` / `allow_chat` scope. **Set that scope before relying on `group_reply_all`** — without it the bot answers every message in every group it belongs to:
+
+```toml
+[projects.platforms.options]
+allow_from = "ou_your_open_id"   # or "*"
+allow_chat = "oc_your_chat_id"   # or "*"
 ```
 
 The card appears immediately, shows only anonymous reasoning/tool counts, streams the answer in the same quoted card, and ends with a localized completion label (`✅ Done` in English, `✅ 已完成` in Chinese) or a localized generic failure label. Reasoning, tool details, model/token/context metadata, working directories, and reply footers are omitted from the card payload.

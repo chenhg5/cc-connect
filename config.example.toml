@@ -987,6 +987,11 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Quick setup via CLI:
 #   cc-connect-next feishu setup --project <project_name>
 # （可通过 CLI 快速配置：cc-connect-next feishu setup --project <project_name>）
+# After saving credentials, setup offers the recommended Feishu configuration
+# (see INSTALL.md section 4). Add --recommended / --no-recommended to answer in
+# advance; credentials, allow_from and allow_chat are never changed by it.
+# 保存凭据后会询问是否套用推荐飞书配置（见 INSTALL.md 第 4 节）；
+# 可用 --recommended / --no-recommended 预先作答，凭据与 allow_from/allow_chat 不会被改动。
 # Note: No WebSocket URL needed — the SDK auto-negotiates the connection.
 # 注意：无需配置 WebSocket URL，SDK 会自动通过凭证建立连接。
 
