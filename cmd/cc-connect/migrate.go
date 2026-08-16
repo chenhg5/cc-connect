@@ -19,6 +19,9 @@ type migrationReport struct {
 	SkippedRuntime     int
 	SkippedSymlinks    int
 	SkippedProjects    []migrationSkippedProjectRecord
+	SkippedDataEntries []string
+	SourceReferences   []string
+	SourceRoot         string
 	SourceDataDir      string
 	SourceWorkDir      string
 	SourceVersion      string
@@ -94,12 +97,44 @@ func runMigrateCommand(args []string, stdout, stderr io.Writer) int {
 	if report.DryRun {
 		verb = "Would migrate"
 	}
-	if !writeOutput("%s %d persistent files from %s to %s.\n", verb, report.CopiedFiles, *source, *target) {
+	// --source names the directory holding config.toml, which is not always
+	// where the state lives: a config that omits data_dir uses the official
+	// default no matter where it was loaded from. Naming one root for both
+	// would misattribute every copied file.
+	sourceRoot := report.SourceRoot
+	if sourceRoot == "" {
+		sourceRoot = *source
+	}
+	if report.SourceDataDir != "" && report.SourceDataDir != sourceRoot {
+		if !writeOutput("%s %d persistent files to %s: config from %s, state from %s.\n", verb, report.CopiedFiles, *target, sourceRoot, report.SourceDataDir) {
+			return 1
+		}
+	} else if !writeOutput("%s %d persistent files from %s to %s.\n", verb, report.CopiedFiles, *source, *target) {
 		return 1
 	}
 	if report.SkippedRuntime > 0 || report.SkippedSymlinks > 0 {
 		if !writeOutput("Skipped %d runtime entries and %d symlinks.\n", report.SkippedRuntime, report.SkippedSymlinks) {
 			return 1
+		}
+	}
+	if len(report.SkippedDataEntries) > 0 {
+		if !writeOutput("Skipped %d entries under the configured data_dir that this build does not recognize as CC Connect state; they were not copied.\n", len(report.SkippedDataEntries)) {
+			return 1
+		}
+		for _, entry := range report.SkippedDataEntries {
+			if !writeOutput("  - %s\n", entry) {
+				return 1
+			}
+		}
+	}
+	if len(report.SourceReferences) > 0 {
+		if !writeOutput("%d configuration values still point at %s. Migration preserves them byte-for-byte, so the migrated installation keeps using the old directory until you update them (the source cannot be removed before you do):\n", len(report.SourceReferences), sourceRoot) {
+			return 1
+		}
+		for _, reference := range report.SourceReferences {
+			if !writeOutput("  - %s\n", reference) {
+				return 1
+			}
 		}
 	}
 	if len(report.SkippedProjects) > 0 {

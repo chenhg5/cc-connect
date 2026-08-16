@@ -1387,7 +1387,10 @@ func TestPrepareLegacyMigrationRejectsAncestorDataDir(t *testing.T) {
 	}
 }
 
-func TestPrepareLegacyMigrationRejectsBroadCustomDataDirOutsideSourceTree(t *testing.T) {
+func TestPrepareLegacyMigrationNeverInventoriesUnrelatedFilesInABroadCustomDataDir(t *testing.T) {
+	// A custom data_dir that also holds a service home's private files must
+	// migrate the CC Connect state and nothing else. The unrelated tree is
+	// skipped and named in the report rather than copied.
 	root := t.TempDir()
 	source := filepath.Join(root, "etc", "cc-connect")
 	dataDir := filepath.Join(root, "home", "service")
@@ -1396,17 +1399,28 @@ func TestPrepareLegacyMigrationRejectsBroadCustomDataDirOutsideSourceTree(t *tes
 	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"sessions":{}}`)
 	writeMigrationFixture(t, filepath.Join(dataDir, ".ssh", "id_private"), "must-not-be-inventoried")
 
-	_, err := prepareLegacyMigration(migrationOptions{
+	plan, err := prepareLegacyMigration(migrationOptions{
 		Source: source,
 		Target: target,
 		Home:   filepath.Join(root, "root-home"),
 		DryRun: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "source data_dir must be dedicated") || !strings.Contains(err.Error(), ".ssh") {
-		t.Fatalf("prepare broad custom data_dir error = %v, want unexpected-entry refusal", err)
+	if err != nil {
+		t.Fatalf("prepareLegacyMigration() error = %v", err)
+	}
+	for rel := range plan.Main.Files {
+		if strings.Contains(filepath.ToSlash(rel), ".ssh") {
+			t.Fatalf("unrelated private file was inventoried: %q", rel)
+		}
+	}
+	if _, ok := plan.Main.Files[filepath.Join("sessions", "demo.json")]; !ok {
+		t.Fatalf("CC Connect state was not inventoried: %+v", plan.Main.Files)
+	}
+	if got := strings.Join(plan.Report.SkippedDataEntries, ","); !strings.Contains(got, ".ssh") {
+		t.Fatalf("skipped entries = %q, want the unrelated tree reported", got)
 	}
 	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
-		t.Fatalf("unsafe custom data_dir created target before refusal: %v", statErr)
+		t.Fatalf("dry run created a target: %v", statErr)
 	}
 }
 
@@ -2462,5 +2476,149 @@ func writeRawMigrationFixture(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+func TestCollectLegacyDataDirSkipsUnrecognizedEntriesInsteadOfFailing(t *testing.T) {
+	// Real official installations accumulate their own extras beside the
+	// product state: onboarding QR images, hand-made backups, third-party
+	// runtimes. Refusing the whole migration for one of them blocked users who
+	// had nothing wrong with their setup, while skipping keeps the actual
+	// protection — an unrecognized entry is still never inventoried.
+	root := t.TempDir()
+	source := filepath.Join(root, "etc", "cc-connect")
+	dataDir := filepath.Join(root, "state", "cc-connect")
+	target := filepath.Join(root, "var", "cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(dataDir)+`"`+"\n")
+	writeMigrationFixture(t, filepath.Join(dataDir, "sessions", "demo.json"), `{"sessions":{}}`)
+	writeMigrationFixture(t, filepath.Join(dataDir, "feishu-setup-qr.png"), "png")
+	writeMigrationFixture(t, filepath.Join(dataDir, "backups", "config.toml.bak"), "old")
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   filepath.Join(root, "root-home"),
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("prepareLegacyMigration() error = %v, want the extras to be skipped", err)
+	}
+	if _, ok := plan.Main.Files[filepath.Join("sessions", "demo.json")]; !ok {
+		t.Fatalf("recognized state was not inventoried: %+v", plan.Main.Files)
+	}
+	for rel := range plan.Main.Files {
+		if strings.HasPrefix(rel, "backups") || strings.Contains(rel, "feishu-setup-qr.png") {
+			t.Fatalf("unrecognized entry %q was inventoried", rel)
+		}
+	}
+	skipped := strings.Join(plan.Report.SkippedDataEntries, ",")
+	if !strings.Contains(skipped, "backups") || !strings.Contains(skipped, "feishu-setup-qr.png") {
+		t.Fatalf("skipped entries = %q, want both extras reported", skipped)
+	}
+}
+
+func TestCollectLegacyDataDirRejectsDataDirWithNoRecognizableState(t *testing.T) {
+	// Skipping must not turn a data_dir that points somewhere else entirely
+	// into a silent, near-empty "success".
+	root := t.TempDir()
+	source := filepath.Join(root, "etc", "cc-connect")
+	dataDir := filepath.Join(root, "home", "service")
+	target := filepath.Join(root, "var", "cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(dataDir)+`"`+"\n")
+	writeMigrationFixture(t, filepath.Join(dataDir, ".ssh", "id_private"), "must-not-be-inventoried")
+	writeMigrationFixture(t, filepath.Join(dataDir, "Documents", "notes.txt"), "unrelated")
+
+	_, err := prepareLegacyMigration(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   filepath.Join(root, "root-home"),
+		DryRun: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "source data_dir must be dedicated") {
+		t.Fatalf("prepare error = %v, want dedicated-directory refusal", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("refusal created a target: %v", statErr)
+	}
+}
+
+func TestPrepareLegacyMigrationReportsConfigValuesPointingAtTheSource(t *testing.T) {
+	// Migration preserves bytes and rewrites only data_dir, so any other
+	// absolute path keeps binding the migrated install to the old directory.
+	// Those values have to be named, otherwise the source cannot be retired.
+	root := t.TempDir()
+	source := filepath.Join(root, ".cc-connect")
+	target := filepath.Join(root, ".cc-connect-next")
+	proxy := filepath.ToSlash(filepath.Join(source, "plus", "proxy.mjs"))
+	writeRawMigrationFixture(t, filepath.Join(source, "config.toml"), `data_dir = "`+filepath.ToSlash(source)+`"
+
+[[projects]]
+name = "demo"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "`+filepath.ToSlash(root)+`"
+cmd = "node `+proxy+`"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "cli_demo"
+app_secret = "demo-secret"
+`)
+	writeMigrationFixture(t, filepath.Join(source, "sessions", "demo.json"), `{"sessions":{}}`)
+
+	plan, err := prepareLegacyMigration(migrationOptions{
+		Source: source,
+		Target: target,
+		Home:   root,
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("prepareLegacyMigration() error = %v", err)
+	}
+	refs := plan.Report.SourceReferences
+	if len(refs) != 1 || refs[0] != "projects[0].agent.options.cmd" {
+		t.Fatalf("source references = %v, want the agent cmd key path only", refs)
+	}
+	for _, ref := range refs {
+		if strings.Contains(ref, "proxy.mjs") {
+			t.Fatalf("reference %q leaks the value; report key paths only", ref)
+		}
+	}
+}
+
+func TestRunMigrateCommandNamesBothRootsWhenDataDirIsElsewhere(t *testing.T) {
+	// --source is the directory holding config.toml. When that config omits
+	// data_dir the official default is the effective state directory, so the
+	// summary must not attribute those files to --source.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	staging := filepath.Join(home, "staging")
+	official := filepath.Join(home, ".cc-connect")
+	target := filepath.Join(home, ".cc-connect-next")
+	writeMigrationFixture(t, filepath.Join(staging, "config.toml"), "language = \"zh\"\n")
+	writeMigrationFixture(t, filepath.Join(official, "sessions", "demo.json"), `{"sessions":{}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := runMigrateCommand([]string{
+		"--dry-run",
+		"--source", staging,
+		"--target", target,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runMigrateCommand() code = %d, stderr = %q", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "config from") || !strings.Contains(out, "state from") {
+		t.Fatalf("summary = %q, want both roots named", out)
+	}
+	if strings.Contains(out, "persistent files from "+staging) {
+		t.Fatalf("summary = %q, still attributes the state to --source", out)
 	}
 }

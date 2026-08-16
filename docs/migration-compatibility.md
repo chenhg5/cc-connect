@@ -17,6 +17,14 @@ Compatibility is deliberately configuration-specific. A release row does not mea
 - **Gated settings implemented upstream but not here**: the `[[projects]]`-level `agent_session_idle_timeout_mins`, and the pi agent option `rpc` (official beta.x pi gained a persistent RPC transport; this build runs pi one-shot in json mode). An explicit `rpc = false` is behavior-neutral and passes.
 - **Dynamic option tables are validated, not waved through**: the agent options `env` table migrates only for agent types that actually consume it (`devin` and `tmux` ignore env, so an env table on them is rejected as dead configuration). Feishu `mention_map` and `peer_bots` tables migrate only on `feishu`/`lark` platforms; `mention_map` additionally requires `resolve_mentions = true` and mention names without a leading `@` in this build, and the Feishu validator reports the exact violation otherwise. (Official CC Connect leaves a `mention_map` dormant when `resolve_mentions` is off; this build treats that as dead configuration and fails preflight with the fix.)
 
+## What the report names
+
+Migration is byte-faithful and rewrites exactly one value, the top-level `data_dir`. Three things that a byte-faithful copy cannot resolve on its own are reported instead, by both `--dry-run` and the real run:
+
+- **Both source roots, when they differ.** `--source` is the directory holding `config.toml`, which is not always where the state lives: a config that omits `data_dir` uses the official default `~/.cc-connect` no matter where it was loaded from. When the effective `data_dir` is elsewhere, the summary names both (`config from … , state from …`) so the copied files are never attributed to the wrong directory.
+- **Configuration values that still point at the source.** Any other absolute path — a wrapper `cmd`, a plugin directory, a `state_dir`, a log file — keeps referring to the official installation after migration. These cannot be rewritten safely because they may belong to third-party tooling with its own layout, so migration lists their key paths (never their values, which can carry credentials) and you update them before retiring the source.
+- **Entries under a custom `data_dir` that are not CC Connect state.** A configured `data_dir` is not always a directory the product owns alone. Unrecognized entries are skipped, never copied, and listed. A `data_dir` holding no recognizable state at all is still refused, because then the setting itself is wrong.
+
 ## Defaults that differ from official CC Connect
 
 A migrated configuration keeps its bytes, so every setting it does not spell out follows this build's defaults. These defaults deliberately differ:
@@ -45,4 +53,6 @@ cc-connect-next migrate --source-version v1.5.0-beta.3 --dry-run
 cc-connect-next migrate --source-version v1.5.0-beta.3
 ```
 
-Before production cutover, stop the official runtime and repeat the same command with `--force` so state written after the earlier rehearsal is included. Official and Next may remain installed together, but must not establish concurrent Feishu connections with the same app credentials.
+Before production cutover, stop the official runtime and repeat the same command with `--force` so state written after the earlier rehearsal is included. `--force` merges: the existing target is copied into the staged tree first, then the source overwrites matching files, and the pre-migration target is retained as a timestamped backup.
+
+Official and Next may remain installed together, but must not establish concurrent Feishu connections with the same app credentials. If the report listed configuration values that still point at the source, update them before removing the official directory — the migrated installation keeps using it until you do.

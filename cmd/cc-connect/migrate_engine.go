@@ -393,6 +393,83 @@ func decodeAndValidateMigrationConfig(configBytes []byte) (*ccconfig.Config, err
 	return &cfg, nil
 }
 
+// collectMigrationSourceReferences returns the config key paths whose string
+// values still name the source directory.
+//
+// Migration is byte-faithful and rewrites only the top-level data_dir, so every
+// other absolute path — a wrapper `cmd`, a plugin directory, a state_dir, a log
+// file — keeps pointing into the official installation after migration. Those
+// values cannot be rewritten safely (they may belong to third-party tooling
+// with its own layout), but leaving them unmentioned makes a migrated setup
+// look self-contained when it is not, and the source impossible to retire
+// safely. Only key paths are reported: values can carry credentials.
+func collectMigrationSourceReferences(parsed map[string]any, roots []string) []string {
+	prefixes := make([]string, 0, len(roots))
+	seenRoot := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		cleaned := strings.TrimSpace(root)
+		if cleaned == "" {
+			continue
+		}
+		cleaned = strings.ToLower(filepath.ToSlash(filepath.Clean(cleaned)))
+		if cleaned == "" || cleaned == "/" || cleaned == "." {
+			continue
+		}
+		if _, ok := seenRoot[cleaned]; ok {
+			continue
+		}
+		seenRoot[cleaned] = struct{}{}
+		prefixes = append(prefixes, cleaned)
+	}
+	if len(prefixes) == 0 {
+		return nil
+	}
+
+	references := make([]string, 0)
+	mentions := func(value string) bool {
+		haystack := strings.ToLower(filepath.ToSlash(value))
+		for _, prefix := range prefixes {
+			if strings.Contains(haystack, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	var walk func(path string, node any)
+	walk = func(path string, node any) {
+		switch typed := node.(type) {
+		case string:
+			// data_dir is the one path migration rewrites for the caller.
+			if path == "data_dir" {
+				return
+			}
+			if mentions(typed) {
+				references = append(references, path)
+			}
+		case []any:
+			for i, child := range typed {
+				walk(fmt.Sprintf("%s[%d]", path, i), child)
+			}
+		case map[string]any:
+			for key, child := range typed {
+				child := child
+				next := key
+				if path != "" {
+					next = path + "." + key
+				}
+				walk(next, child)
+			}
+		case []map[string]any:
+			for i, child := range typed {
+				walk(fmt.Sprintf("%s[%d]", path, i), child)
+			}
+		}
+	}
+	walk("", parsed)
+	sort.Strings(references)
+	return references
+}
+
 func stringSet(values []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -577,6 +654,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	}
 	report := migrationReport{
 		DryRun:        opts.DryRun,
+		SourceRoot:    source,
 		SourceDataDir: dataDir,
 		SourceWorkDir: runtimeWorkDir,
 		ManifestPath:  filepath.Join(target, migrationManifestFilename),
@@ -624,6 +702,7 @@ func prepareLegacyMigration(opts migrationOptions) (*preparedMigration, error) {
 	if _, err := toml.Decode(string(migratedConfig), &parsed); err != nil {
 		return nil, fmt.Errorf("rewritten config is invalid TOML: %w", err)
 	}
+	report.SourceReferences = collectMigrationSourceReferences(parsed, []string{source, opts.Source, expandMigrationPath(opts.Source, opts.Home)})
 	addPlannedMigrationFile(mainDestination, plannedMigrationFile{
 		Scope:        "config",
 		Source:       configPath,
@@ -1028,6 +1107,9 @@ func collectMigrationTreeExcludingWithPolicy(root, scope string, skipRuntime boo
 		if entry.IsDir() {
 			if policy != nil {
 				if err := policy(rel, entry); err != nil {
+					if errors.Is(err, errSkipMigrationEntry) {
+						return filepath.SkipDir
+					}
 					return err
 				}
 			}
@@ -1050,6 +1132,9 @@ func collectMigrationTreeExcludingWithPolicy(root, scope string, skipRuntime boo
 		}
 		if policy != nil {
 			if err := policy(rel, entry); err != nil {
+				if errors.Is(err, errSkipMigrationEntry) {
+					return nil
+				}
 				return err
 			}
 		}
@@ -1081,14 +1166,43 @@ var legacyPersistentRootFiles = map[string]struct{}{
 	"workspace_bindings.json": {},
 }
 
+// errSkipMigrationEntry lets a path policy drop one entry without failing the
+// whole inventory. Directories are not descended into.
+var errSkipMigrationEntry = errors.New("skip migration entry")
+
+// collectLegacyDataDir inventories a custom data_dir, skipping anything this
+// build does not recognize as CC Connect state.
+//
+// A configured data_dir is not necessarily a directory the product owns alone:
+// real installations accumulate onboarding images, hand-made backups, and
+// third-party runtimes beside the state. Failing the migration for one of those
+// blocked users whose setup was fine, while the protection that actually
+// matters — never inventorying an unrelated file — is what skipping does. A
+// data_dir that yields no recognizable state at all is still refused, because
+// then the setting itself is wrong and a near-empty "success" would hide it.
 func collectLegacyDataDir(root string, cfg *ccconfig.Config, destination *migrationDestination, report *migrationReport) error {
+	skipped := make([]string, 0)
 	policy := func(rel string, entry fs.DirEntry) error {
 		if isKnownLegacyDataDirPath(rel, entry.IsDir(), cfg) {
 			return nil
 		}
-		return fmt.Errorf("source data_dir must be dedicated: unexpected non-CC Connect entry %s under %s; refusing to inventory unrelated files", rel, root)
+		skipped = append(skipped, filepath.ToSlash(filepath.Clean(rel)))
+		return errSkipMigrationEntry
 	}
-	return collectMigrationTreeExcludingWithPolicy(root, "data-dir", true, nil, policy, destination, report)
+	if err := collectMigrationTreeExcludingWithPolicy(root, "data-dir", true, nil, policy, destination, report); err != nil {
+		return err
+	}
+	if len(destination.Files) == 0 && len(skipped) > 0 {
+		sort.Strings(skipped)
+		sample := skipped
+		if len(sample) > 5 {
+			sample = sample[:5]
+		}
+		return fmt.Errorf("source data_dir must be dedicated: %s holds no recognizable CC Connect state, only unrelated entries (%s); refusing to inventory it", root, strings.Join(sample, ", "))
+	}
+	sort.Strings(skipped)
+	report.SkippedDataEntries = append(report.SkippedDataEntries, skipped...)
+	return nil
 }
 
 func isKnownLegacyDataDirPath(rel string, isDir bool, cfg *ccconfig.Config) bool {
