@@ -13981,7 +13981,7 @@ func TestUnsolicitedReader_ResetsIdleCloseOnEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-idle-reset")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 	e.SetAgentSessionIdleTimeout(50 * time.Millisecond)
 
 	sessions := e.sessions
