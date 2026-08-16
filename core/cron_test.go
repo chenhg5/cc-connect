@@ -688,6 +688,35 @@ func TestCronScheduler_AddJob_NormalizesSessionMode(t *testing.T) {
 	}
 }
 
+// TestCronScheduler_AddJob_PreservesReuseOverride is a regression test for a
+// bug where AddJob normalized SessionMode="reuse" to "" before storage, which
+// then made cs.UsesNewSession fall back to the global default — silently
+// flipping an explicit reuse override into new_per_run. The job should retain
+// the explicit "reuse" intent end-to-end.
+func TestCronScheduler_AddJob_PreservesReuseOverride(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	cs.SetDefaultSessionMode("new_per_run")
+
+	job := &CronJob{
+		ID: "r1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "reuse",
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if job.SessionMode != "reuse" {
+		t.Errorf("after AddJob, SessionMode = %q, want \"reuse\"", job.SessionMode)
+	}
+	if cs.UsesNewSession(job) {
+		t.Error("explicit reuse must override global new_per_run, but UsesNewSession returned true")
+	}
+}
+
 func TestCronScheduler_UsesNewSession_GlobalDefault(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
