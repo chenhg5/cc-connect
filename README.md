@@ -4,7 +4,7 @@ Privacy-first successor to [CC Connect](https://github.com/chenhg5/cc-connect), 
 
 [中文说明](README.zh-CN.md) · [Install guide](INSTALL.md) · [Feishu guide](docs/feishu.md) · [Answer-card contract](docs/feishu-card-contract.md) · [Migration matrix](docs/migration-compatibility.md) · [Upstream Feishu parity](docs/upstream-feishu-parity-2026-08-15.md) · [Upstream beta.3 audit](docs/upstream-v1.5.0-beta.3-audit.md)
 
-> Current release: `0.1.0-beta.3`. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
+> Current release: `0.1.0` — the first stable release. The repository and runtime identity are independent from official CC Connect; no upstream patch, MCP server, proxy, message snapshot, or companion plugin is required.
 
 ## What changes for Feishu
 
@@ -23,13 +23,17 @@ The successor also carries the Feishu functionality merged by official CC Connec
 
 ## Install
 
-### npm beta
+### npm
 
-Install the published beta channel:
+```bash
+npm install -g cc-connect-next
+cc-connect-next --version
+```
+
+`@beta` still tracks the newest prerelease when one exists:
 
 ```bash
 npm install -g cc-connect-next@beta
-cc-connect-next --version
 ```
 
 The npm package and GitHub release use the same version. The installer fetches that release's `checksums.txt`, selects the exact platform archive, verifies SHA-256, and only then extracts and atomically replaces the binary.
@@ -171,7 +175,7 @@ Paste this into a coding agent:
 Install cc-connect-next from https://github.com/timmyagentic/cc-connect-next.
 First verify the OS/architecture and whether cc-connect is currently running.
 Do not stop, uninstall, overwrite, or edit official CC Connect.
-Use the beta package if it is published; otherwise build the current source. Then run
+Install the published npm package, or build the current source. Then run
 `cc-connect-next migrate --dry-run`, report the plan,
 then run the real one-command migration only after confirming the target is ~/.cc-connect-next.
 Check its migration-manifest.json and report any timestamped pre-migration backups.

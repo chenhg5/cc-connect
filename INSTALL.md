@@ -19,20 +19,20 @@ Do not stop, uninstall, overwrite, or edit official CC Connect during installati
 
 ## 2. Install
 
-### Published beta
-
-Once the first npm beta and matching GitHub release exist:
+### Published release
 
 ```bash
-npm install -g cc-connect-next@beta
+npm install -g cc-connect-next
 cc-connect-next --version
 ```
+
+`cc-connect-next@beta` installs the newest prerelease instead, when one exists.
 
 The npm installer downloads the same-version native asset from the GitHub release. Supported targets are macOS, Linux, and Windows on amd64 or arm64.
 
 ### Current source
 
-Until a beta is published, or when testing an unreleased commit, use Go 1.25+, Node.js 20+, and Git:
+When testing an unreleased commit, use Go 1.25+, Node.js 20+, and Git:
 
 ```bash
 git clone https://github.com/timmyagentic/cc-connect-next.git

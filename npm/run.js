@@ -65,7 +65,7 @@ if (needsReinstall()) {
       cwd: __dirname,
     });
   } catch {
-    console.error("[cc-connect-next] Auto-install failed. Run manually: npm uninstall -g cc-connect-next && npm install -g cc-connect-next@beta");
+    console.error(`[cc-connect-next] Auto-install failed. Run manually: npm uninstall -g cc-connect-next && npm install -g cc-connect-next@${EXPECTED_VER}`);
     process.exit(1);
   }
 }

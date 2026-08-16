@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.0 (2026-08-17)
+
+First stable release. Code-identical to `v0.1.0-beta.3`: this tag promotes the
+beta line, so the GitHub release becomes the latest one and npm `latest` moves
+off the prerelease channel. `@beta` continues to track prereleases.
+
+The stable line covers the native Feishu Card 2.0 answer-card lifecycle, the
+fail-closed one-command migration from official CC Connect v1.4.1 /
+v1.5.0-beta.1–beta.3, the upstream Feishu capabilities merged after the fork
+point, quiet-by-default display settings, and the hardened first install
+(placeholder refusal, `cc-connect-next doctor`, single-definition starter
+template). Real Feishu tenant rendering, permissions, quoted-file access, and
+bot-to-bot delivery remain external release gates and are UNVERIFIED here.
+
+See `changelogs/v0.1.0.md` for the bilingual release notes, and the
+`v0.1.0-beta.*` entries below for the change-by-change history.
+
 ## v0.1.0-beta.3 (2026-08-16)
 
 ### Fixed

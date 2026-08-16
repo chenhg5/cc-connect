@@ -1,6 +1,6 @@
 {
   "name": "cc-connect-next",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0",
   "description": "Privacy-first AI agent bridge with native Feishu Card 2.0 streaming",
   "keywords": [
     "claude-code",
