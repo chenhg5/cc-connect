@@ -454,6 +454,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("wecom: invalid reply context type %T", rctx)
 	}
+	content = core.NormalizeOutgoingContent(content)
 	if content == "" {
 		return nil
 	}
