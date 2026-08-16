@@ -728,17 +728,26 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		}
 
 		if body.Language != nil {
-			switch *body.Language {
-			case "en":
+			// The caller's value is persisted by the config updater either way,
+			// so an unhandled spelling used to leave the running process on the
+			// old language until the next restart. config.NormalizeLanguage is
+			// the authority on accepted spellings; keep this in step with it.
+			switch strings.ToLower(strings.TrimSpace(*body.Language)) {
+			case "en", "english":
 				e.i18n.SetLang(LangEnglish)
-			case "zh":
+			case "zh", "chinese":
 				e.i18n.SetLang(LangChinese)
-			case "zh-TW":
+			case "zh-tw", "zh_tw", "zhtw":
 				e.i18n.SetLang(LangTraditionalChinese)
-			case "ja":
+			case "ja", "japanese":
 				e.i18n.SetLang(LangJapanese)
-			case "es":
+			case "es", "spanish":
 				e.i18n.SetLang(LangSpanish)
+			case "auto":
+				e.i18n.SetLang(LangAuto)
+			default:
+				slog.Warn("management: unrecognized language, keeping the current one",
+					"language", *body.Language)
 			}
 		}
 		if body.AdminFrom != nil {

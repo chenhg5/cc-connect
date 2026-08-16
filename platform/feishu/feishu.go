@@ -444,11 +444,16 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if reactionEmoji == "" {
 		reactionEmoji = "OnIt"
 	}
+	reactionsOptedOut := false
 	if v, ok := opts["reaction_emoji"].(string); ok && v == "none" {
 		reactionEmoji = ""
+		reactionsOptedOut = true
 	}
 	doneEmoji, _ := opts["done_emoji"].(string)
-	if doneEmoji == "" {
+	if doneEmoji == "" && !reactionsOptedOut {
+		// reaction_emoji = "none" is an explicit "do not react to my messages",
+		// so it covers the completion reaction too. Spelling done_emoji out
+		// still wins, for anyone who wants only the finished-turn ping.
 		doneEmoji = "Done"
 	}
 	if doneEmoji == "none" {
@@ -1114,7 +1119,9 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 }
 
 // AddDoneReaction adds a "done" emoji reaction so the user gets a push
-// notification when the agent finishes a multi-round turn in quiet mode.
+// notification when the agent finishes a turn. The engine calls this for every
+// non-silent turn, not only for a particular display mode; reaction_emoji =
+// "none" or done_emoji = "none" turns it off.
 func (p *Platform) AddDoneReaction(rctx any) {
 	if p.doneEmoji == "" {
 		return

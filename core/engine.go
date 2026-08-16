@@ -304,8 +304,8 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
-	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	Mode             string // resolved "full", "compact", or "quiet" — thinking/tool visibility
+	CardMode         string // "rich" (default, Card 2.0 Feishu) or "legacy"
 	ThinkingMessages bool
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
@@ -9784,7 +9784,9 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.i18n.SetLang(lang)
+	if err := e.i18n.SetLangAndSave(lang); err != nil {
+		slog.Error("failed to persist language after /lang", "error", err)
+	}
 	name := langDisplayName(lang)
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgLangChanged, name))
 }

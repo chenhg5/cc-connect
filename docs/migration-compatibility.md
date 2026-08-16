@@ -23,9 +23,9 @@ A migrated configuration keeps its bytes, so every setting it does not spell out
 
 - **`card_mode` defaults to `rich`** (the privacy-first Feishu Card 2.0 answer-card contract) where official CC Connect defaults to `legacy` plain messages. A migrated config that never set `card_mode` changes rendering. Set `card_mode = "legacy"` globally under `[display]` or per project to keep the official look.
 - **`data_dir` defaults to `~/.cc-connect-next`** instead of `~/.cc-connect`. Migration removes the ambiguity for migrated configs by pinning the rewritten `data_dir` to the migration target explicitly.
-- **The chat surface defaults to the final answer only**: `thinking_messages`, `tool_messages`, `show_context_indicator`, and `reply_footer` all default to `false` (official: all shown). Set them to `true` explicitly to restore the official process output.
-- **Feishu/Lark `done_emoji` defaults to `"Done"`** (official: no completion reaction). Set `done_emoji = "none"` to disable it.
-- **`language` defaults to `"zh"`** (official: auto-detect from user messages). Set `language = "auto"` for the official detection behavior or pick a language explicitly.
+- **The chat surface defaults to the final answer only when no display mode is configured**: with no `mode` in `[display]` or `[projects.display]`, `thinking_messages`, `tool_messages`, `show_context_indicator`, and `reply_footer` are `false` (official: all shown). A spelled-out `mode` keeps its official meaning, so a migrated config that set `mode = "full"` still gets thinking and tool messages, and `mode = "compact"` / `"quiet"` still hide them. Per-key values always win over the mode-derived default.
+- **Feishu/Lark `done_emoji` defaults to `"Done"`** (official: no completion reaction). Set `done_emoji = "none"` to disable it. An explicit `reaction_emoji = "none"` already covers the completion reaction, so a migrated config that opted out of reactions stays silent.
+- **`language` defaults to `"zh"`** (official: auto-detect from user messages). Set `language = "auto"` for the official detection behavior or pick a language explicitly. Regional spellings (`zh-CN`, `en-US`, `ja-JP`, …), casing, and surrounding whitespace resolve to the matching language; a value no language matches still falls back to detection and logs a warning at startup.
 
 Everything else — including Feishu `progress_style` (`legacy`), `reaction_emoji` (`OnIt`), the Weixin send quota (4 per 24h), and all timeout defaults — matches the official values.
 

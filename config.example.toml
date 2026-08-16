@@ -20,7 +20,11 @@
 # Language for bot messages / 机器人消息语言
 # - "zh": 中文 (default / 默认)
 # - "en": English
+# - "zh-TW" | "ja" | "es"
 # - "auto": Auto-detect from user's first message / 按用户首条消息自动检测
+# Regional spellings such as "zh-CN", "en-US", "ja-JP" resolve to their language;
+# a value no language matches falls back to auto-detect and warns at startup.
+# 地区写法（如 "zh-CN"、"en-US"）会归一到对应语言；无法识别的值回退为自动检测并在启动时告警。
 # language = "zh"
 
 # Shell for /shell commands, cron exec, hooks, and webhook exec.
@@ -111,6 +115,9 @@ level = "info" # debug, info, warn, error
 [display]
 mode = "compact"            # Hide raw intermediate messages outside the rich card
 card_mode = "rich"          # Privacy-first Feishu Card 2.0 lifecycle (default)
+#                           # Spelling mode out also sets the thinking/tool default;
+#                           # with no mode configured both stay off (final answer only).
+#                           # 显式写 mode 会同时决定 thinking/tool 的默认值；不写 mode 时两者都关闭（只发最终答案）。
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
@@ -1001,7 +1008,9 @@ app_secret = "your-feishu-app-secret"
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
 # done_emoji = "Done"       # Emoji reaction when agent finishes a reply (default: "Done"); set to "none" to disable
+#                           # reaction_emoji = "none" already turns this off too, unless done_emoji is set explicitly
 #                           # Agent 完成回复后添加的表情回复（默认 "Done"）；设为 "none" 可禁用
+#                           # reaction_emoji = "none" 时该表情也一并关闭，除非显式设置 done_emoji
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 #                           # Feishu also requires the published sensitive permission

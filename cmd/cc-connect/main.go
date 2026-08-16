@@ -672,8 +672,11 @@ func main() {
 			}
 		}
 
+		// Display commands run inside this project's engine, so persist into
+		// this project's own table instead of the shared global one.
+		displayProject := proj.Name
 		engine.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
+			return config.SaveProjectDisplayConfig(displayProject, mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -878,12 +881,19 @@ func main() {
 			}
 		}
 
-		// Set up save callback for auto-detected language
-		if lang == core.LangAuto {
-			engine.SetLanguageSaveFunc(func(l core.Language) error {
-				return config.SaveLanguage(string(l))
-			})
-		}
+		// Set up the save callback for both auto-detection and /lang. Wiring it
+		// only for LangAuto left a configured language with no way to change
+		// persistently from chat.
+		engine.SetLanguageSaveFunc(func(l core.Language) error {
+			// LangAuto is the empty string internally, but an empty
+			// language key now means the Chinese default, so persist the
+			// spelled-out escape hatch instead.
+			value := string(l)
+			if l == core.LangAuto {
+				value = "auto"
+			}
+			return config.SaveLanguage(value)
+		})
 
 		// Set up save callbacks for provider management
 		projName := proj.Name
@@ -1654,20 +1664,22 @@ Examples:
 // configLanguage maps the top-level language setting to the engine language.
 // Empty defaults to Chinese; "auto" (or any unrecognized value) detects the
 // language from user messages instead.
+// configLanguage maps the configured language key to a runtime language.
+// config.NormalizeLanguage owns which spellings are accepted so the config
+// validator, this parser, and the persisted value cannot drift apart.
 func configLanguage(raw string) core.Language {
-	switch raw {
-	case "zh", "chinese":
+	canonical, _ := config.NormalizeLanguage(raw)
+	switch canonical {
+	case "zh":
 		return core.LangChinese
-	case "zh-TW", "zh_TW", "zhtw":
+	case "zh-TW":
 		return core.LangTraditionalChinese
-	case "ja", "japanese":
+	case "ja":
 		return core.LangJapanese
-	case "es", "spanish":
+	case "es":
 		return core.LangSpanish
-	case "en", "english":
+	case "en":
 		return core.LangEnglish
-	case "":
-		return core.LangChinese
 	default:
 		return core.LangAuto
 	}

@@ -336,6 +336,75 @@ func TestEffectiveDisplay_FinalAnswerOnlyDefaults(t *testing.T) {
 	}
 }
 
+func TestEffectiveDisplay_ExplicitModeKeepsOfficialMeaning(t *testing.T) {
+	// mode is the official switch for thinking/tool visibility. Spelling it out
+	// must keep meaning what it means in official CC Connect, otherwise a
+	// migrated config that asked for full output silently loses it. Leaving
+	// mode unset still resolves to full but keeps the final-answer-only default.
+	full, compact, quiet := DisplayModeFull, DisplayModeCompact, DisplayModeQuiet
+	fal := false
+
+	tests := []struct {
+		name         string
+		cfg          Config
+		proj         *ProjectConfig
+		wantMode     string
+		wantThinking bool
+		wantTool     bool
+	}{
+		{
+			name:     "unset mode keeps the final-answer-only default",
+			wantMode: DisplayModeFull,
+		},
+		{
+			name:         "global full asks for process messages",
+			cfg:          Config{Display: DisplayConfig{Mode: &full}},
+			wantMode:     DisplayModeFull,
+			wantThinking: true,
+			wantTool:     true,
+		},
+		{
+			name:         "project full asks for process messages",
+			proj:         &ProjectConfig{Display: &DisplayConfig{Mode: &full}},
+			wantMode:     DisplayModeFull,
+			wantThinking: true,
+			wantTool:     true,
+		},
+		{
+			name:     "explicit compact hides them",
+			cfg:      Config{Display: DisplayConfig{Mode: &compact}},
+			wantMode: DisplayModeCompact,
+		},
+		{
+			name:     "explicit quiet hides them",
+			cfg:      Config{Display: DisplayConfig{Mode: &quiet}},
+			wantMode: DisplayModeQuiet,
+		},
+		{
+			name:     "project compact overrides global full",
+			cfg:      Config{Display: DisplayConfig{Mode: &full}},
+			proj:     &ProjectConfig{Display: &DisplayConfig{Mode: &compact}},
+			wantMode: DisplayModeCompact,
+		},
+		{
+			name:     "explicit false still wins over the mode-derived default",
+			cfg:      Config{Display: DisplayConfig{Mode: &full, ThinkingMessages: &fal, ToolMessages: &fal}},
+			wantMode: DisplayModeFull,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			mode, thinking, tool, _, _, _, _, _ := EffectiveDisplay(&cfg, tt.proj)
+			if mode != tt.wantMode || thinking != tt.wantThinking || tool != tt.wantTool {
+				t.Fatalf("mode=%q thinking=%v tool=%v, want mode=%q thinking=%v tool=%v",
+					mode, thinking, tool, tt.wantMode, tt.wantThinking, tt.wantTool)
+			}
+		})
+	}
+}
+
 func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	tru, fal := true, false
 	maxA, maxB := 100, 200
@@ -958,6 +1027,109 @@ func TestSaveLanguage_PreservesComments(t *testing.T) {
 	cfg := readTestConfig(t)
 	if cfg.Language != "zh" {
 		t.Fatalf("Language = %q, want zh", cfg.Language)
+	}
+}
+
+func TestSaveProjectDisplayConfig_WritesTheProjectTable(t *testing.T) {
+	// /quiet runs inside one project's engine. Persisting to the global
+	// [display] table leaks the change into every other project and is
+	// shadowed on restart by a project table that spells the key out, so the
+	// runtime change silently reverts. Write where the engine actually reads.
+	writeTestConfig(t, `
+language = "zh"
+
+[display]
+thinking_messages = false
+
+[[projects]]
+name = "alpha"
+
+[projects.display]
+mode = "quiet"
+thinking_messages = false
+
+[projects.agent]
+type = "claudecode"
+
+[[projects]]
+name = "beta"
+
+[projects.agent]
+type = "claudecode"
+`)
+
+	mode := DisplayModeFull
+	on := true
+	if err := SaveProjectDisplayConfig("alpha", &mode, &on, nil, nil, &on); err != nil {
+		t.Fatalf("SaveProjectDisplayConfig() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("projects = %d, want 2", len(cfg.Projects))
+	}
+	alpha := &cfg.Projects[0]
+	if alpha.Display == nil || alpha.Display.Mode == nil || *alpha.Display.Mode != DisplayModeFull {
+		t.Fatalf("alpha display mode = %#v, want full", alpha.Display)
+	}
+	_, thinking, tool, _, _, _, _, _ := EffectiveDisplay(&cfg, alpha)
+	if !thinking || !tool {
+		t.Fatalf("alpha thinking=%v tool=%v, want the persisted values to survive a reload", thinking, tool)
+	}
+
+	// The untouched project keeps the global default.
+	_, thinking, tool, _, _, _, _, _ = EffectiveDisplay(&cfg, &cfg.Projects[1])
+	if thinking || tool {
+		t.Fatalf("beta thinking=%v tool=%v, want no cross-project leakage", thinking, tool)
+	}
+	if cfg.Display.ThinkingMessages == nil || *cfg.Display.ThinkingMessages {
+		t.Fatalf("global display was modified: %#v", cfg.Display.ThinkingMessages)
+	}
+}
+
+func TestSaveProjectDisplayConfig_CreatesMissingTable(t *testing.T) {
+	writeTestConfig(t, `
+[[projects]]
+name = "solo"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+work_dir = "/tmp/x"
+`)
+
+	on := true
+	if err := SaveProjectDisplayConfig("solo", nil, &on, nil, nil, nil); err != nil {
+		t.Fatalf("SaveProjectDisplayConfig() error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	proj := &cfg.Projects[0]
+	if proj.Display == nil || proj.Display.ThinkingMessages == nil || !*proj.Display.ThinkingMessages {
+		t.Fatalf("solo display = %#v, want thinking_messages = true", proj.Display)
+	}
+	if opts := proj.Agent.Options; opts["work_dir"] != "/tmp/x" {
+		t.Fatalf("agent options damaged: %#v", opts)
+	}
+}
+
+func TestSaveProjectDisplayConfig_UnknownProjectFallsBackToGlobal(t *testing.T) {
+	writeTestConfig(t, `
+[[projects]]
+name = "solo"
+
+[projects.agent]
+type = "claudecode"
+`)
+
+	on := true
+	if err := SaveProjectDisplayConfig("", nil, &on, nil, nil, nil); err != nil {
+		t.Fatalf("SaveProjectDisplayConfig() error: %v", err)
+	}
+	cfg := readTestConfig(t)
+	if cfg.Display.ThinkingMessages == nil || !*cfg.Display.ThinkingMessages {
+		t.Fatalf("global display = %#v, want the fallback write", cfg.Display.ThinkingMessages)
 	}
 }
 
@@ -3485,5 +3657,59 @@ func TestEffectiveDisplay_HideAgentFooterPrecedence(t *testing.T) {
 	_, _, _, _, _, _, _, got = EffectiveDisplay(&cfg, &proj)
 	if !got {
 		t.Fatal("global hide_agent_footer=true was not applied")
+	}
+}
+
+func TestNormalizeLanguage(t *testing.T) {
+	tests := []struct {
+		raw       string
+		want      string
+		wantKnown bool
+	}{
+		{"", "zh", true},
+		{"zh", "zh", true},
+		{" ZH ", "zh", true},
+		{"zh-CN", "zh", true},
+		{"zh_CN", "zh", true},
+		{"zh-Hans", "zh", true},
+		{"cn", "zh", true},
+		{"chinese", "zh", true},
+		{"zh-TW", "zh-TW", true},
+		{"zh_TW", "zh-TW", true},
+		{"zhtw", "zh-TW", true},
+		{"zh-Hant", "zh-TW", true},
+		{"zh-HK", "zh-TW", true},
+		{"en", "en", true},
+		{"en-US", "en", true},
+		{"english", "en", true},
+		{"ja", "ja", true},
+		{"jp", "ja", true},
+		{"ja-JP", "ja", true},
+		{"es", "es", true},
+		{"es-MX", "es", true},
+		{"auto", LanguageAuto, true},
+		{"AUTO", LanguageAuto, true},
+		{"fr", LanguageAuto, false},
+		{"klingon", LanguageAuto, false},
+	}
+	for _, tt := range tests {
+		got, known := NormalizeLanguage(tt.raw)
+		if got != tt.want || known != tt.wantKnown {
+			t.Errorf("NormalizeLanguage(%q) = (%q, %v), want (%q, %v)", tt.raw, got, known, tt.want, tt.wantKnown)
+		}
+	}
+}
+
+func TestValidateAcceptsUnknownLanguage(t *testing.T) {
+	// Official CC Connect also falls back to detection, so rejecting would
+	// make such a configuration unmigratable. It must warn, not fail.
+	cfg := &Config{Language: "klingon"}
+	cfg.Projects = []ProjectConfig{{
+		Name:      "p",
+		Agent:     AgentConfig{Type: "claudecode"},
+		Platforms: []PlatformConfig{{Type: "feishu"}},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
 	}
 }

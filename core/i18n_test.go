@@ -187,3 +187,43 @@ func TestIsJapanese(t *testing.T) {
 		t.Error("ASCII 'a' should not be Japanese")
 	}
 }
+
+func TestI18n_SetLangAndSavePersists(t *testing.T) {
+	// A configured language pins i18n.lang, so auto-detection never runs and
+	// never writes back. Without an explicit persist, /lang only lasted until
+	// the next restart.
+	var saved []Language
+	i := NewI18n(LangChinese)
+	i.SetSaveFunc(func(l Language) error {
+		saved = append(saved, l)
+		return nil
+	})
+
+	if err := i.SetLangAndSave(LangEnglish); err != nil {
+		t.Fatalf("SetLangAndSave() error = %v", err)
+	}
+	if i.CurrentLang() != LangEnglish {
+		t.Fatalf("CurrentLang() = %q, want en", i.CurrentLang())
+	}
+	if len(saved) != 1 || saved[0] != LangEnglish {
+		t.Fatalf("persisted = %v, want [en]", saved)
+	}
+
+	// Switching back to auto must persist too, so the escape hatch survives.
+	if err := i.SetLangAndSave(LangAuto); err != nil {
+		t.Fatalf("SetLangAndSave(auto) error = %v", err)
+	}
+	if len(saved) != 2 || saved[1] != LangAuto {
+		t.Fatalf("persisted = %v, want [en auto]", saved)
+	}
+}
+
+func TestI18n_SetLangAndSaveWithoutSaveFunc(t *testing.T) {
+	i := NewI18n(LangChinese)
+	if err := i.SetLangAndSave(LangJapanese); err != nil {
+		t.Fatalf("SetLangAndSave() error = %v", err)
+	}
+	if i.CurrentLang() != LangJapanese {
+		t.Fatalf("CurrentLang() = %q, want ja", i.CurrentLang())
+	}
+}
