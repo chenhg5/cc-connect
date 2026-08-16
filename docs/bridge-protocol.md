@@ -54,6 +54,7 @@ The port and path are configured in `config.toml`:
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"        # loopback only by default; use 0.0.0.0 for remote adapters
 port = 9810
 path = "/bridge/ws"       # optional, default "/bridge/ws"
 token = "your-secret"     # required for authentication
@@ -818,6 +819,7 @@ Messages within a single WebSocket connection are ordered. cc-connect processes 
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"
 port = 9810
 token = "a-strong-random-secret"
 

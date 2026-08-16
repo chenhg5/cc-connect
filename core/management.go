@@ -35,6 +35,7 @@ type ProjectSettingsUpdate struct {
 // ManagementServer provides an HTTP REST API for external management tools
 // (web dashboards, TUI clients, GUI desktop apps, Mac tray apps, etc.).
 type ManagementServer struct {
+	bind        string
 	port        int
 	token       string
 	corsOrigins []string
@@ -74,7 +75,13 @@ type ManagementServer struct {
 
 // NewManagementServer creates a new management API server.
 func NewManagementServer(port int, token string, corsOrigins []string) *ManagementServer {
+	return NewManagementServerWithBind("", port, token, corsOrigins)
+}
+
+// NewManagementServerWithBind creates a management API server on the specified interface.
+func NewManagementServerWithBind(bind string, port int, token string, corsOrigins []string) *ManagementServer {
 	return &ManagementServer{
+		bind:        normalizeBind(bind),
 		port:        port,
 		token:       token,
 		corsOrigins: corsOrigins,
@@ -198,9 +205,10 @@ type CCSwitchProviderInfo struct {
 func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
 	handler := m.buildHandler(mux)
+	addr := listenAddress(m.bind, m.port)
 
 	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
+		Addr:    addr,
 		Handler: handler,
 	}
 	go func() {
@@ -208,7 +216,7 @@ func (m *ManagementServer) Start() {
 			slog.Error("management api server error", "error", err)
 		}
 	}()
-	slog.Info("management api started", "port", m.port)
+	slog.Info("management api started", "addr", addr)
 }
 
 func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
