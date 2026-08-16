@@ -166,6 +166,143 @@ func TestLoadAllSessions(t *testing.T) {
 	}
 }
 
+func TestLoadSessionsForListOnlyIncludesActiveSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	writeSessionFile(t, sessionsDir, "project_a.json", sessionFileData{
+		Sessions: map[string]*sessionData{
+			"s1": {
+				ID:        "s1",
+				Name:      "old",
+				UpdatedAt: now.Add(-time.Hour),
+			},
+			"s2": {
+				ID:        "s2",
+				Name:      "new",
+				UpdatedAt: now,
+			},
+		},
+		ActiveSession: map[string]string{
+			"feishu:oc_chat:ou_user": "s2",
+		},
+		UserSessions: map[string][]string{
+			"feishu:oc_chat:ou_user": {"s1", "s2"},
+		},
+	})
+
+	records, err := loadSessionsForList(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+	if records[0].GlobalID != "project_a:s2" {
+		t.Fatalf("record GlobalID = %q, want %q", records[0].GlobalID, "project_a:s2")
+	}
+
+	all, err := loadAllSessions(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSessionRecord(all, "project_a:s1") {
+		t.Fatal("historical loader did not include project_a:s1")
+	}
+}
+
+func TestLoadSessionsForShowIndexMatchesList(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	writeSessionFile(t, sessionsDir, "project_a.json", sessionFileData{
+		Sessions: map[string]*sessionData{
+			"s1": {ID: "s1", Name: "old", UpdatedAt: now.Add(-time.Hour)},
+			"s2": {ID: "s2", Name: "new", UpdatedAt: now},
+		},
+		ActiveSession: map[string]string{
+			"feishu:oc_chat:ou_user": "s2",
+		},
+		UserSessions: map[string][]string{
+			"feishu:oc_chat:ou_user": {"s1", "s2"},
+		},
+	})
+
+	listRecords, err := loadSessionsForList(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexRecords, err := loadSessionsForShowID(tmpDir, "#1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listRecords) != 1 || len(indexRecords) != 1 {
+		t.Fatalf("list records=%d index records=%d, want 1 each", len(listRecords), len(indexRecords))
+	}
+	if indexRecords[0].GlobalID != listRecords[0].GlobalID {
+		t.Fatalf("show index first record = %q, want list first record %q", indexRecords[0].GlobalID, listRecords[0].GlobalID)
+	}
+
+	explicitRecords, err := loadSessionsForShowID(tmpDir, "project_a:s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSessionRecord(explicitRecords, "project_a:s1") {
+		t.Fatal("explicit project:sid lookup path did not include historical project_a:s1")
+	}
+}
+
+func TestLoadSessionsForListFallsBackWhenActiveSessionMissingOrEmpty(t *testing.T) {
+	tests := []struct {
+		name          string
+		activeSession map[string]string
+	}{
+		{name: "missing", activeSession: nil},
+		{name: "empty", activeSession: map[string]string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			sessionsDir := filepath.Join(tmpDir, "sessions")
+			if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			now := time.Now()
+			writeSessionFile(t, sessionsDir, "project_a.json", sessionFileData{
+				Sessions: map[string]*sessionData{
+					"s1": {ID: "s1", Name: "old", UpdatedAt: now.Add(-time.Hour)},
+					"s2": {ID: "s2", Name: "new", UpdatedAt: now},
+				},
+				ActiveSession: tt.activeSession,
+				UserSessions: map[string][]string{
+					"feishu:oc_chat:ou_user": {"s1", "s2"},
+				},
+			})
+
+			records, err := loadSessionsForList(tmpDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 2 {
+				t.Fatalf("got %d records, want 2", len(records))
+			}
+			if !hasSessionRecord(records, "project_a:s1") || !hasSessionRecord(records, "project_a:s2") {
+				t.Fatalf("records = %#v, want both project_a:s1 and project_a:s2", records)
+			}
+		})
+	}
+}
+
 func TestLoadAllSessionsSkipsMalformed(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionsDir := filepath.Join(tmpDir, "sessions")
@@ -224,6 +361,15 @@ func TestLoadAllSessionsNoDir(t *testing.T) {
 	if records != nil {
 		t.Fatalf("got %v, want nil", records)
 	}
+}
+
+func hasSessionRecord(records []sessionRecord, globalID string) bool {
+	for i := range records {
+		if records[i].GlobalID == globalID {
+			return true
+		}
+	}
+	return false
 }
 
 func writeSessionFile(t *testing.T, dir, name string, data sessionFileData) {
