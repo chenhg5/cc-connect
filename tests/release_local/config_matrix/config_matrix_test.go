@@ -102,7 +102,7 @@ app_secret = "secret"
 	}
 }
 
-func TestReleaseConfig_DefaultsKeepAttachmentsAndFullDisplayEnabled(t *testing.T) {
+func TestReleaseConfig_DefaultsKeepAttachmentsAndFinalAnswerOnlyDisplay(t *testing.T) {
 	path := writeConfig(t, baseProjectTOML(""))
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -112,8 +112,8 @@ func TestReleaseConfig_DefaultsKeepAttachmentsAndFullDisplayEnabled(t *testing.T
 		t.Fatalf("AttachmentSend = %q, want default on", cfg.AttachmentSend)
 	}
 	mode, thinking, tools, _, _, _, _, _ := config.EffectiveDisplay(cfg, &cfg.Projects[0])
-	if mode != config.DisplayModeFull || !thinking || !tools {
-		t.Fatalf("display = mode:%s thinking:%v tools:%v, want full/true/true", mode, thinking, tools)
+	if mode != config.DisplayModeFull || thinking || tools {
+		t.Fatalf("display = mode:%s thinking:%v tools:%v, want full mode with final-answer-only defaults", mode, thinking, tools)
 	}
 	if got := config.EffectiveCardMode(cfg, &cfg.Projects[0]); got != "rich" {
 		t.Fatalf("card mode = %q, want privacy-first rich default", got)

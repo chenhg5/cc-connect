@@ -18,10 +18,10 @@
 # =============================================================================
 
 # Language for bot messages / 机器人消息语言
+# - "zh": 中文 (default / 默认)
 # - "en": English
-# - "zh": 中文
-# - "" (empty/not set): Auto-detect from user's first message / 留空自动检测
-# language = "en"
+# - "auto": Auto-detect from user's first message / 按用户首条消息自动检测
+# language = "zh"
 
 # Shell for /shell commands, cron exec, hooks, and webhook exec.
 # /shell 命令、cron exec、hooks 和 webhook exec 使用的 shell。
@@ -123,9 +123,9 @@ thinking_messages = false   # Rich cards expose counts only, never reasoning tex
 # history_max_len = 1000    # Max chars per /history entry (default: 1000; 0 = no truncation) / 每条历史记录最大字符数（默认 1000；0 表示不截断）
 tool_messages = false       # Rich cards expose counts only, never tool details
 show_context_indicator = false  # Keep model/token/context metadata out of chat
-#                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+#                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 false 隐藏）
 reply_footer = false             # Keep model/token/workdir footer out of chat
-#                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+#                                # 在助手回复底部显示类似 Codex 的状态行（默认 false 隐藏）
 hide_agent_footer = true         # Strip equivalent model/token/context lines emitted by the Agent itself
 #                                # 隐藏 Agent 自己输出的模型、token、上下文状态行（默认 false）
 
@@ -696,10 +696,10 @@ hide_agent_footer = true         # Strip equivalent model/token/context lines em
 
 [[projects]]
 name = "my-backend"
-# reply_footer = false             # Master toggle for the per-turn reply footer (default: true / show)
-#                                   # 每条助手回复底部状态 footer 总开关（默认 true 显示）
-# show_context_indicator = false   # Hide the footer's first line: model · [effort ·] out/in/cw/cr · ctx % (default: true)
-#                                   # 隐藏 footer 第一行：model · [effort ·] out/in/cw/cr · ctx %（默认 true 显示）
+# reply_footer = true              # Master toggle for the per-turn reply footer (default: false / hidden)
+#                                   # 每条助手回复底部状态 footer 总开关（默认 false 隐藏）
+# show_context_indicator = true    # Show the footer's first line: model · [effort ·] out/in/cw/cr · ctx % (default: false)
+#                                   # 显示 footer 第一行：model · [effort ·] out/in/cw/cr · ctx %（默认 false 隐藏）
 # show_workdir_indicator = false   # Hide the footer's second line: workspace directory (default: true)
 #                                   # 隐藏 footer 第二行：工作区目录（默认 true 显示）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
@@ -1000,8 +1000,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，仅响应群聊消息，忽略私聊（P2P）消息（默认 false）
 # reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
 #                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
-# done_emoji = "none"       # Emoji reaction when agent finishes a reply (e.g. "Done"); set to "none" to disable
-#                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
+# done_emoji = "Done"       # Emoji reaction when agent finishes a reply (default: "Done"); set to "none" to disable
+#                           # Agent 完成回复后添加的表情回复（默认 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 #                           # Feishu also requires the published sensitive permission
@@ -1063,7 +1063,7 @@ app_secret = "your-feishu-app-secret"
 # enable_feishu_card = true
 # allow_from = "*"
 # reaction_emoji = "OnIt"
-# done_emoji = "none"
+# done_emoji = "Done"       # default; "none" disables / 默认 "Done"，"none" 关闭
 # progress_style = "legacy"  # legacy | compact | card
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)

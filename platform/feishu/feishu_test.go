@@ -1773,3 +1773,40 @@ func TestFlushImageBatchesEmptySafe(t *testing.T) {
 	// Should not panic, should not block.
 	p.flushImageBatches()
 }
+
+// ── done_emoji default ───────────────────────────────────────
+
+func TestNewPlatformDoneEmojiDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  any // nil = absent
+		want string
+	}{
+		{"absent defaults to Done", nil, "Done"},
+		{"none disables the reaction", "none", ""},
+		{"custom emoji is kept", "OK", "OK"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := map[string]any{
+				"app_id":             "cli_fixture",
+				"app_secret":         "fixture-secret",
+				"enable_feishu_card": false, // get the bare *Platform back
+			}
+			if tt.opt != nil {
+				opts["done_emoji"] = tt.opt
+			}
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, opts)
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			plat, ok := p.(*Platform)
+			if !ok {
+				t.Fatalf("expected bare *Platform with enable_feishu_card=false, got %T", p)
+			}
+			if plat.doneEmoji != tt.want {
+				t.Fatalf("doneEmoji = %q, want %q", plat.doneEmoji, tt.want)
+			}
+		})
+	}
+}

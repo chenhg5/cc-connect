@@ -220,12 +220,12 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 		wantTool bool
 	}{
 		{
-			name:     "defaults no quiet",
+			name:     "defaults are final-answer-only",
 			cfg:      Config{},
 			proj:     ProjectConfig{},
 			wantMode: "full",
-			wantTM:   true,
-			wantTool: true,
+			wantTM:   false,
+			wantTool: false,
 		},
 		{
 			name:     "global quiet maps to quiet mode",
@@ -259,8 +259,8 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{Quiet: &fal},
 			wantMode: "full",
-			wantTM:   true,
-			wantTool: true,
+			wantTM:   false,
+			wantTool: false,
 		},
 		{
 			name:     "explicit mode compact",
@@ -313,6 +313,29 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 }
 
+func TestEffectiveDisplay_FinalAnswerOnlyDefaults(t *testing.T) {
+	// The out-of-the-box chat shows only the final answer: process messages,
+	// the context indicator, and the reply footer all require explicit opt-in.
+	_, thinking, tool, _, _, ctxIndicator, footer, _ := EffectiveDisplay(&Config{}, nil)
+	if thinking || tool || ctxIndicator || footer {
+		t.Fatalf("empty config must default to final-answer-only output, got thinking=%v tool=%v ctx=%v footer=%v",
+			thinking, tool, ctxIndicator, footer)
+	}
+
+	tru := true
+	cfg := &Config{Display: DisplayConfig{
+		ThinkingMessages:     &tru,
+		ToolMessages:         &tru,
+		ShowContextIndicator: &tru,
+		ReplyFooter:          &tru,
+	}}
+	_, thinking, tool, _, _, ctxIndicator, footer, _ = EffectiveDisplay(cfg, nil)
+	if !thinking || !tool || !ctxIndicator || !footer {
+		t.Fatalf("explicit true must restore process output, got thinking=%v tool=%v ctx=%v footer=%v",
+			thinking, tool, ctxIndicator, footer)
+	}
+}
+
 func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	tru, fal := true, false
 	maxA, maxB := 100, 200
@@ -358,8 +381,8 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 			proj: ProjectConfig{
 				Display: &DisplayConfig{},
 			},
-			wantTM:         true,
-			wantTool:       true,
+			wantTM:         false,
+			wantTool:       false,
 			wantThinkLen:   300,
 			wantToolMaxLen: 500,
 		},
@@ -371,8 +394,8 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 			proj: ProjectConfig{
 				Display: &DisplayConfig{ThinkingMaxLen: &maxB, ToolMaxLen: &maxB},
 			},
-			wantTM:         true,
-			wantTool:       true,
+			wantTM:         false,
+			wantTool:       false,
 			wantThinkLen:   200,
 			wantToolMaxLen: 200,
 		},
@@ -405,7 +428,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 			},
 			proj:           ProjectConfig{},
 			wantTM:         false,
-			wantTool:       true,
+			wantTool:       false,
 			wantThinkLen:   300,
 			wantToolMaxLen: 500,
 		},

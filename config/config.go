@@ -96,7 +96,7 @@ type Config struct {
 	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
 	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
 	Log                LogConfig               `toml:"log"`
-	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
+	Language           string                  `toml:"language"` // "zh" (default), "en", "zh-TW", "ja", "es"; "auto" = detect from user messages
 	Speech             SpeechConfig            `toml:"speech"`
 	TTS                TTSConfig               `toml:"tts"`
 	Display            DisplayConfig           `toml:"display"`
@@ -194,13 +194,13 @@ const (
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
 	CardMode             *string `toml:"card_mode"`              // "rich" (default, Card 2.0 Feishu) or "legacy"
-	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default false (final answer only)
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default false (final answer only)
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
-	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default false
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default false
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
 }
 
@@ -500,14 +500,14 @@ type ProjectConfig struct {
 	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
 	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
-	// ShowContextIndicator: nil/true = render the reply footer's first line
-	// (model · effort · token usage · context %); false = hide that line.
+	// ShowContextIndicator: true = render the reply footer's first line
+	// (model · effort · token usage · context %); nil/false = hide that line.
 	// Subordinate to ReplyFooter — the master footer toggle.
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
 	// ShowWorkdirIndicator: nil/true = render the reply footer's second line
 	// (workspace directory); false = hide that line. Subordinate to ReplyFooter.
 	ShowWorkdirIndicator *bool `toml:"show_workdir_indicator,omitempty"`
-	// ReplyFooter: nil/true = render the reply footer; false = disable it
+	// ReplyFooter: true = render the reply footer; nil/false = disable it
 	// entirely (the per-line indicator flags above become no-ops).
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
@@ -794,7 +794,7 @@ func resolveEnvPlaceholders(s string) string {
 // projectQuietEffective returns whether legacy quiet applies to this project: an explicit
 // per-project quiet overrides; otherwise the global root quiet applies.
 func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
-	if proj.Quiet != nil {
+	if proj != nil && proj.Quiet != nil {
 		return *proj.Quiet
 	}
 	if cfg.Quiet != nil {
@@ -815,7 +815,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 // Resolution order for thinking_messages / tool_messages:
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
-//  3. mode-derived default (compact/quiet → false, full → true)
+//  3. default false — the out-of-the-box chat shows only the final answer
 func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter, hideAgentFooter bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
@@ -832,12 +832,9 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		mode = DisplayModeQuiet
 	}
 
-	// Mode-derived defaults.
-	thinkingDefault, toolDefault := true, true
-	switch mode {
-	case DisplayModeCompact, DisplayModeQuiet:
-		thinkingDefault, toolDefault = false, false
-	}
+	// Process messages are opt-in in every mode: the default chat surface
+	// carries only the final answer.
+	thinkingDefault, toolDefault := false, false
 
 	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
 		if projVal != nil {
@@ -892,7 +889,7 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		500,
 	)
 
-	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
+	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default false
 	if proj != nil && proj.ShowContextIndicator != nil {
 		showContextIndicator = *proj.ShowContextIndicator
 	} else if projDisp != nil && projDisp.ShowContextIndicator != nil {
@@ -900,10 +897,10 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	} else if cfg.Display.ShowContextIndicator != nil {
 		showContextIndicator = *cfg.Display.ShowContextIndicator
 	} else {
-		showContextIndicator = true
+		showContextIndicator = false
 	}
 
-	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default true
+	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default false
 	if proj != nil && proj.ReplyFooter != nil {
 		replyFooter = *proj.ReplyFooter
 	} else if projDisp != nil && projDisp.ReplyFooter != nil {
@@ -911,7 +908,7 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	} else if cfg.Display.ReplyFooter != nil {
 		replyFooter = *cfg.Display.ReplyFooter
 	} else {
-		replyFooter = true
+		replyFooter = false
 	}
 
 	hideAgentFooter = pickBool(

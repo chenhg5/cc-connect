@@ -448,6 +448,9 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		reactionEmoji = ""
 	}
 	doneEmoji, _ := opts["done_emoji"].(string)
+	if doneEmoji == "" {
+		doneEmoji = "Done"
+	}
 	if doneEmoji == "none" {
 		doneEmoji = ""
 	}

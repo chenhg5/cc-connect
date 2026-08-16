@@ -420,21 +420,7 @@ func main() {
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
 		// Parse language setting
-		var lang core.Language
-		switch cfg.Language {
-		case "zh", "chinese":
-			lang = core.LangChinese
-		case "zh-TW", "zh_TW", "zhtw":
-			lang = core.LangTraditionalChinese
-		case "ja", "japanese":
-			lang = core.LangJapanese
-		case "es", "spanish":
-			lang = core.LangSpanish
-		case "en", "english":
-			lang = core.LangEnglish
-		default:
-			lang = core.LangAuto // auto-detect
-		}
+		lang := configLanguage(cfg.Language)
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 		// Wire display settings including show_context_indicator and reply_footer
@@ -1663,6 +1649,28 @@ Examples:
   cc-connect-next config example > c.toml  Save example config to a file
 
 `, v, updateHint)
+}
+
+// configLanguage maps the top-level language setting to the engine language.
+// Empty defaults to Chinese; "auto" (or any unrecognized value) detects the
+// language from user messages instead.
+func configLanguage(raw string) core.Language {
+	switch raw {
+	case "zh", "chinese":
+		return core.LangChinese
+	case "zh-TW", "zh_TW", "zhtw":
+		return core.LangTraditionalChinese
+	case "ja", "japanese":
+		return core.LangJapanese
+	case "es", "spanish":
+		return core.LangSpanish
+	case "en", "english":
+		return core.LangEnglish
+	case "":
+		return core.LangChinese
+	default:
+		return core.LangAuto
+	}
 }
 
 func setupLogger(level string, w io.Writer) {
