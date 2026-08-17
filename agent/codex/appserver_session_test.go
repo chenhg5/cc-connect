@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -12,6 +13,26 @@ import (
 
 	"github.com/timmyagentic/cc-connect-next/core"
 )
+
+func TestAppServerSession_UsageLimitErrorNotificationIsClassified(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 1)}
+	s.handleNotification("error", json.RawMessage(`{"message":"No remaining credits for this account"}`))
+
+	event := <-s.events
+	if !errors.Is(event.Error, core.ErrUsageLimit) {
+		t.Fatalf("error notification = %v, want usage-limit marker", event.Error)
+	}
+}
+
+func TestAppServerSession_TurnCompletedUsageLimitIsClassified(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 1)}
+	s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1","status":"failed","error":{"message":"You've reached your usage limit"}}}`))
+
+	event := <-s.events
+	if !errors.Is(event.Error, core.ErrUsageLimit) {
+		t.Fatalf("turn/completed error = %v, want usage-limit marker", event.Error)
+	}
+}
 
 func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	s := &appServerSession{}

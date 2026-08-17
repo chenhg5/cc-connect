@@ -304,7 +304,7 @@ func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("codexSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+				evt := core.Event{Type: core.EventError, Error: classifyCodexError(fmt.Errorf("%s", stderrMsg))}
 				select {
 				case cs.events <- evt:
 				case <-cs.ctx.Done():
@@ -415,7 +415,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 			errMsg = "turn failed (no details)"
 		}
 		slog.Warn("codexSession: turn failed", "error", errMsg)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+		evt := core.Event{Type: core.EventError, Error: classifyCodexError(fmt.Errorf("%s", errMsg))}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -428,6 +428,14 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 			slog.Debug("codexSession: transient error", "message", msg)
 		} else {
 			slog.Warn("codexSession: error event", "message", msg)
+			if classified := classifyCodexError(fmt.Errorf("%s", msg)); errors.Is(classified, core.ErrUsageLimit) {
+				evt := core.Event{Type: core.EventError, Error: classified}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
+			}
 		}
 
 	default:

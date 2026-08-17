@@ -94,19 +94,22 @@ type RichCardSupporter interface {
 // core ensures platform renderers never hardcode one language or need to infer
 // locale from a phase token.
 type RichCardCopy struct {
-	Thinking        string
-	CallingTools    string
-	Answering       string
-	Done            string
-	Error           string
-	CompletedBody   string
-	ErrorBody       string
-	PrivacyNotice   string
-	ProgressFormat  string
-	ThinkingSummary string
-	ToolSummary     string
-	AnswerSummary   string
-	ErrorSummary    string
+	Thinking          string
+	CallingTools      string
+	Answering         string
+	Done              string
+	Error             string
+	CompletedBody     string
+	ErrorBody         string
+	PrivacyNotice     string
+	ProgressFormat    string
+	ThinkingSummary   string
+	ToolSummary       string
+	AnswerSummary     string
+	ErrorSummary      string
+	UsageLimit        string
+	UsageLimitBody    string
+	UsageLimitSummary string
 }
 
 // LocalizedRichCardSupporter is an optional extension for native rich-card

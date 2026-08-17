@@ -4748,6 +4748,38 @@ var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
 }
 
+const richCardUsageLimitPhase = "usage_limit"
+
+func richCardFailurePhase(err error) string {
+	if errors.Is(err, ErrUsageLimit) {
+		return richCardUsageLimitPhase
+	}
+	return "error"
+}
+
+func richCardFailureCopy(copy RichCardCopy, phase string) (summary, body string) {
+	if phase == richCardUsageLimitPhase && strings.TrimSpace(copy.UsageLimitBody) != "" {
+		return copy.UsageLimitSummary, copy.UsageLimitBody
+	}
+	return copy.ErrorSummary, copy.ErrorBody
+}
+
+func richCardFailureBody(copy RichCardCopy, phase, partial string) string {
+	partial = strings.TrimSpace(partial)
+	if phase != richCardUsageLimitPhase {
+		return partial
+	}
+	_, message := richCardFailureCopy(copy, phase)
+	message = strings.TrimSpace(message)
+	if partial == "" {
+		return message
+	}
+	if message == "" {
+		return partial
+	}
+	return partial + "\n\n" + message
+}
+
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	if !e.beginInteractiveTurn(state) {
 		state.markStopped()
@@ -4916,7 +4948,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		return handle
 	}
-	markRichCardFailed := func(p Platform, handle any, safeBody ...string) bool {
+	markRichCardFailedWithPhase := func(p Platform, handle any, phase string, safeBody ...string) bool {
 		if handle == nil || turnDisplay.CardMode != "rich" {
 			return false
 		}
@@ -4933,14 +4965,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// answer is safe to retain because it was already user-visible.
 		body := ""
 		if len(safeBody) > 0 {
-			body = prepareRichCardMarkdown(p, replyCtx, safeBody[0], true)
+			body = safeBody[0]
 		}
-		card := buildRichCard(p, supporter, CardStatusError, "error", nil, body, false, "")
+		body = richCardFailureBody(turnRichCardCopy, phase, body)
+		body = prepareRichCardMarkdown(p, replyCtx, body, true)
+		card := buildRichCard(p, supporter, CardStatusError, phase, nil, body, false, "")
 		if err := updater.UpdateMessage(e.ctx, handle, card); err != nil {
 			slog.Debug("rich card: failed to update error state", "platform", p.Name(), "error", err)
 			return false
 		}
 		return true
+	}
+	markRichCardFailed := func(p Platform, handle any, safeBody ...string) bool {
+		return markRichCardFailedWithPhase(p, handle, "error", safeBody...)
 	}
 	removeRichCardForFallback := func(p Platform, handle any) {
 		if handle == nil {
@@ -4955,19 +4992,36 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Debug("rich card: failed to remove stale fallback preview", "platform", p.Name(), "error", err)
 		}
 	}
-	sendGenericRichFailure := func(p Platform, rctx any, handle any, safeBody ...string) {
+	sendRichFailure := func(p Platform, rctx any, handle any, phase string, safeBody ...string) {
 		// A failed card update must never turn a private runtime error into a
 		// normal chat message. Remove the stale lifecycle card when possible and
 		// send only an already-visible assistant partial plus localized static copy.
 		removeRichCardForFallback(p, handle)
-		content := turnRichCardCopy.ErrorBody
-		if content == "" {
-			content = e.i18n.T(MsgRichCardErrorBody)
+		partial := ""
+		if len(safeBody) > 0 {
+			partial = safeBody[0]
 		}
-		if len(safeBody) > 0 && strings.TrimSpace(safeBody[0]) != "" {
-			content = strings.TrimSpace(safeBody[0]) + "\n\n" + content
+		content := richCardFailureBody(turnRichCardCopy, phase, partial)
+		if phase != richCardUsageLimitPhase {
+			content = strings.TrimSpace(turnRichCardCopy.ErrorBody)
+			if content == "" {
+				content = e.i18n.T(MsgRichCardErrorBody)
+			}
+			if strings.TrimSpace(partial) != "" {
+				content = strings.TrimSpace(partial) + "\n\n" + content
+			}
+		}
+		if content == "" {
+			if phase == richCardUsageLimitPhase {
+				content = e.i18n.T(MsgRichCardUsageLimitBody)
+			} else {
+				content = e.i18n.T(MsgRichCardErrorBody)
+			}
 		}
 		sendWorkspace(p, rctx, content)
+	}
+	sendGenericRichFailure := func(p Platform, rctx any, handle any, safeBody ...string) {
+		sendRichFailure(p, rctx, handle, "error", safeBody...)
 	}
 	visibleRichPartial := func() string {
 		// Only retain text confirmed by a successful Feishu create/update call.
@@ -5173,11 +5227,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					p := state.platform
 					state.mu.Unlock()
 					safePartial := persistVisibleRichPartial(p)
-					if !markRichCardFailed(p, cardMessageID, safePartial) {
+					phase := richCardFailurePhase(err)
+					if !markRichCardFailedWithPhase(p, cardMessageID, phase, safePartial) {
 						if usesRichCard(p) {
-							sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+							sendRichFailure(p, replyCtx, cardMessageID, phase, safePartial)
 						} else {
-							e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+							if phase == richCardUsageLimitPhase {
+								message := richCardFailureBody(turnRichCardCopy, phase, "")
+								if message == "" {
+									message = e.i18n.T(MsgRichCardUsageLimitBody)
+								}
+								e.send(p, replyCtx, message)
+							} else {
+								e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+							}
 						}
 					}
 					return
@@ -6510,7 +6573,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			state.mu.Unlock()
 			safePartial := persistVisibleRichPartial(p)
-			updatedRichError := hasRichCard && markRichCardFailed(p, cardMessageID, safePartial)
+			phase := richCardFailurePhase(event.Error)
+			updatedRichError := hasRichCard && markRichCardFailedWithPhase(p, cardMessageID, phase, safePartial)
 			if event.Error != nil {
 				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
@@ -6522,9 +6586,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				})
 				if !updatedRichError {
 					if usesRichCard(p) {
-						sendGenericRichFailure(p, replyCtx, cardMessageID, safePartial)
+						sendRichFailure(p, replyCtx, cardMessageID, phase, safePartial)
 					} else {
 						userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
+						if phase == richCardUsageLimitPhase {
+							userMsg = richCardFailureBody(turnRichCardCopy, phase, "")
+							if userMsg == "" {
+								userMsg = e.i18n.T(MsgRichCardUsageLimitBody)
+							}
+						}
 						for _, h := range agentErrorHandlers {
 							if strings.Contains(errMsg, h.contains) {
 								userMsg = e.i18n.T(h.msgKey)
@@ -6782,9 +6852,17 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	display, _ := e.displayRuntimeSnapshot()
 	for _, q := range remaining {
 		message := fmt.Sprintf(e.i18n.TForText(MsgError, q.content), reason)
+		if errors.Is(reason, ErrUsageLimit) {
+			message = e.i18n.RichCardCopyForText(q.content).UsageLimitBody
+			if message == "" {
+				message = e.i18n.T(MsgRichCardUsageLimitBody)
+			}
+		}
 		if display.CardMode == "rich" {
 			if _, ok := q.platform.(RichCardSupporter); ok {
-				message = e.i18n.TForText(MsgRichCardErrorBody, q.content)
+				if !errors.Is(reason, ErrUsageLimit) {
+					message = e.i18n.TForText(MsgRichCardErrorBody, q.content)
+				}
 			}
 		}
 		e.send(q.platform, q.replyCtx, message)

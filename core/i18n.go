@@ -387,6 +387,9 @@ const (
 	MsgRichCardToolSummary       MsgKey = "rich_card_tool_summary"
 	MsgRichCardAnswerSummary     MsgKey = "rich_card_answer_summary"
 	MsgRichCardErrorSummary      MsgKey = "rich_card_error_summary"
+	MsgRichCardUsageLimit        MsgKey = "rich_card_usage_limit"
+	MsgRichCardUsageLimitBody    MsgKey = "rich_card_usage_limit_body"
+	MsgRichCardUsageLimitSummary MsgKey = "rich_card_usage_limit_summary"
 	MsgCardTitleModel            MsgKey = "card_title_model"
 	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
@@ -2625,6 +2628,21 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Processing failed", LangChinese: "处理失败", LangTraditionalChinese: "處理失敗",
 		LangJapanese: "処理に失敗しました", LangSpanish: "Error de procesamiento",
 	},
+	MsgRichCardUsageLimit: {
+		LangEnglish: "Usage limit reached", LangChinese: "额度已用完", LangTraditionalChinese: "額度已用完",
+		LangJapanese: "利用上限に達しました", LangSpanish: "Límite de uso alcanzado",
+	},
+	MsgRichCardUsageLimitBody: {
+		LangEnglish:            "The token usage limit has been reached, so this request cannot continue.\n\nPlease try again after your allowance resets, or switch to another available provider.",
+		LangChinese:            "当前 token 使用额度已用完，暂时无法继续处理。\n\n请等待额度恢复后再试，或切换到其他可用的服务商。",
+		LangTraditionalChinese: "目前 token 使用額度已用完，暫時無法繼續處理。\n\n請等待額度恢復後再試，或切換到其他可用的服務商。",
+		LangJapanese:           "トークンの利用上限に達したため、この処理を続行できません。\n\n利用枠が回復してから再試行するか、別の利用可能なプロバイダーに切り替えてください。",
+		LangSpanish:            "Se alcanzó el límite de uso de tokens, por lo que esta solicitud no puede continuar.\n\nInténtalo de nuevo cuando se restablezca tu cuota o cambia a otro proveedor disponible.",
+	},
+	MsgRichCardUsageLimitSummary: {
+		LangEnglish: "Token usage limit reached", LangChinese: "Token 使用额度已用完", LangTraditionalChinese: "Token 使用額度已用完",
+		LangJapanese: "トークン利用上限に達しました", LangSpanish: "Límite de uso de tokens alcanzado",
+	},
 	MsgCardTitleModel: {
 		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
 		LangJapanese: "モデル", LangSpanish: "Modelo",
@@ -4341,19 +4359,22 @@ func (i *I18n) languageForText(text string) Language {
 func richCardCopyForLanguage(lang Language) RichCardCopy {
 	t := func(key MsgKey) string { return translateMessage(key, lang) }
 	return RichCardCopy{
-		Thinking:        t(MsgRichCardThinking),
-		CallingTools:    t(MsgRichCardCallingTools),
-		Answering:       t(MsgRichCardAnswering),
-		Done:            t(MsgRichCardDone),
-		Error:           t(MsgRichCardError),
-		CompletedBody:   t(MsgRichCardCompletedBody),
-		ErrorBody:       t(MsgRichCardErrorBody),
-		PrivacyNotice:   t(MsgRichCardPrivacyNotice),
-		ProgressFormat:  t(MsgRichCardProgressFormat),
-		ThinkingSummary: t(MsgRichCardThinkingSummary),
-		ToolSummary:     t(MsgRichCardToolSummary),
-		AnswerSummary:   t(MsgRichCardAnswerSummary),
-		ErrorSummary:    t(MsgRichCardErrorSummary),
+		Thinking:          t(MsgRichCardThinking),
+		CallingTools:      t(MsgRichCardCallingTools),
+		Answering:         t(MsgRichCardAnswering),
+		Done:              t(MsgRichCardDone),
+		Error:             t(MsgRichCardError),
+		CompletedBody:     t(MsgRichCardCompletedBody),
+		ErrorBody:         t(MsgRichCardErrorBody),
+		PrivacyNotice:     t(MsgRichCardPrivacyNotice),
+		ProgressFormat:    t(MsgRichCardProgressFormat),
+		ThinkingSummary:   t(MsgRichCardThinkingSummary),
+		ToolSummary:       t(MsgRichCardToolSummary),
+		AnswerSummary:     t(MsgRichCardAnswerSummary),
+		ErrorSummary:      t(MsgRichCardErrorSummary),
+		UsageLimit:        t(MsgRichCardUsageLimit),
+		UsageLimitBody:    t(MsgRichCardUsageLimitBody),
+		UsageLimitSummary: t(MsgRichCardUsageLimitSummary),
 	}
 }
 

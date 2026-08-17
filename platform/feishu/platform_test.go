@@ -1168,6 +1168,15 @@ func TestBuildRichCard_CompletedAndErrorStatesAreClean(t *testing.T) {
 	if !strings.Contains(failed, "⚠️ 未完成") || !strings.Contains(failed, "本次处理未能完成") {
 		t.Fatalf("failed card should contain a safe visible fallback, got %q", failed)
 	}
+	usageLimit := buildRichCard(core.CardStatusError, "usage_limit", steps, "", false, "model · token · ctx")
+	for _, want := range []string{"⚠️ 额度已用完", "Token 使用额度已用完", "当前 token 使用额度已用完"} {
+		if !strings.Contains(usageLimit, want) {
+			t.Fatalf("usage-limit card should contain %q, got %q", want, usageLimit)
+		}
+	}
+	if strings.Contains(usageLimit, "本次处理未能完成") {
+		t.Fatalf("usage-limit card should not use generic failure copy: %q", usageLimit)
+	}
 	for _, cardJSON := range []string{done, failed} {
 		for _, forbidden := range []string{"private reasoning", "secret command", "推理 1 次", "model · token · ctx", "collapsible_panel"} {
 			if strings.Contains(cardJSON, forbidden) {
