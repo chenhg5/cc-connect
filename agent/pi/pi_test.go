@@ -470,6 +470,71 @@ func TestPiSettingsDir(t *testing.T) {
 	}
 }
 
+func TestPiSessionDir_WindowsPathEncoding(t *testing.T) {
+	// piSessionDir relies on filepath.Abs to resolve the input, then replaces
+	// the OS-specific path separators and colon with "-" to produce a single
+	// path-component directory name. The exact encoded name varies by platform
+	// (e.g. "D:/project" → "D:\project" on Windows, "<cwd>/D:/project" on Linux),
+	// so we compute the expected value dynamically from filepath.Abs and the
+	// same replace logic used by the implementation.
+
+	inputs := []struct {
+		name    string
+		workDir string
+	}{
+		{name: "Windows drive path", workDir: "D:/project"},
+		{name: "Windows deep path", workDir: "D:\\project\\open-source"},
+		{name: "Windows C: drive", workDir: "C:/Users/test"},
+		{name: "Unix absolute path", workDir: "/home/user/project"},
+		{name: "Unix path with spaces", workDir: "/home/user/my project"},
+		{name: "Unix deep path", workDir: "/var/log/app/2025"},
+		{name: "relative path", workDir: "."},
+		{name: "empty string", workDir: ""},
+	}
+
+	for _, tt := range inputs {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := piSessionDir(tt.workDir)
+			if dir == "" {
+				t.Fatal("piSessionDir() returned empty string")
+			}
+
+			home, _ := os.UserHomeDir()
+			wantPrefix := filepath.Join(home, ".pi", "agent", "sessions")
+			if !strings.HasPrefix(dir, wantPrefix) {
+				t.Errorf("piSessionDir() = %q, want prefix %q", dir, wantPrefix)
+			}
+
+			encoded := filepath.Base(dir)
+
+			// Structural invariants (the bug we fixed).
+			if strings.Contains(encoded, ":") {
+				t.Errorf("encoded dir %q contains colon", encoded)
+			}
+			if strings.Contains(encoded, "\\") {
+				t.Errorf("encoded dir %q contains backslash", encoded)
+			}
+			if !strings.HasPrefix(encoded, "--") || !strings.HasSuffix(encoded, "--") {
+				t.Errorf("encoded dir %q should be wrapped with --", encoded)
+			}
+
+			// Compute expected from filepath.Abs + encoding logic.
+			absDir, err := filepath.Abs(tt.workDir)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", tt.workDir, err)
+			}
+			safe := strings.ReplaceAll(absDir, "/", "-")
+			safe = strings.ReplaceAll(safe, "\\", "-")
+			safe = strings.ReplaceAll(safe, ":", "-")
+			wantEncoded := "--" + strings.TrimPrefix(safe, "-") + "--"
+
+			if encoded != wantEncoded {
+				t.Errorf("encoded dir = %q, want %q", encoded, wantEncoded)
+			}
+		})
+	}
+}
+
 func TestSettingsPath(t *testing.T) {
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
 	defer func() {
