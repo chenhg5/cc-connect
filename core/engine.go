@@ -72,6 +72,14 @@ const (
 	slowAgentClose      = 3 * time.Second  // agentSession.Close
 	slowAgentSend       = 2 * time.Second  // agentSession.Send
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
+
+	// platformSendTimeout bounds how long a single platform Send/Reply may
+	// take before the engine gives up. This prevents an unresponsive
+	// platform API from blocking the agent event loop (backpressure
+	// through the events channel into readLoop and eventually into the
+	// agent process itself). 15 s allows for one resolveMentions cache-miss
+	// (≤10 s internally) plus the actual HTTP reply with retries.
+	platformSendTimeout = 15 * time.Second
 )
 
 const (
@@ -3709,10 +3717,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
-	// Persist user message immediately so crashes between user input and
-	// assistant reply don't lose it (the assistant-side Save below depends
-	// on the turn completing without a process crash).
-	sessions.Save()
+	// Persist user message asynchronously so disk I/O (fsync) does not
+	// block the critical path from user input to agent.Send. In the
+	// extremely rare event of a crash before the background write
+	// completes, the only consequence is a missing history entry — the
+	// message has already been dispatched to the agent.
+	go sessions.Save()
 
 	// Use the agent override when available (multi-workspace mode)
 	var agentOverride Agent
@@ -3773,20 +3783,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}
 
-	// Start typing indicator if platform supports it.
-	// Ownership is transferred to processInteractiveEvents which manages
-	// stopping/restarting it across queued message turns.
-	var stopTyping func()
-	if ti, ok := p.(TypingIndicator); ok {
-		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
-	}
-	defer func() {
-		// Stop typing if ownership was NOT transferred to processInteractiveEvents
-		// (i.e. an early return before that call).
-		if stopTyping != nil {
-			stopTyping()
-		}
-	}()
 
 	// Stop the unsolicited reader (if running) and hand off event channel
 	// ownership to this foreground turn. Only drain events when the previous
@@ -3819,6 +3815,21 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			return
 		}
 		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+	}()
+
+	// Start typing indicator AFTER Send has been dispatched to the agent, so
+	// Ownership is transferred to processInteractiveEvents which manages
+	// stopping/restarting it across queued message turns.
+	var stopTyping func()
+	if ti, ok := p.(TypingIndicator); ok {
+		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
+	}
+	defer func() {
+		// Stop typing if ownership was NOT transferred to processInteractiveEvents
+		// (i.e. an early return before that call).
+		if stopTyping != nil {
+			stopTyping()
+		}
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -11742,7 +11753,9 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(e.ctx, replyCtx, content); err != nil {
+	ctx, cancel := context.WithTimeout(e.ctx, platformSendTimeout)
+	defer cancel()
+	if err := p.Send(ctx, replyCtx, content); err != nil {
 		// Check for context_token missing error (common for Weixin platform)
 		if strings.Contains(err.Error(), "missing context_token") {
 			slog.Error("platform send failed: context_token missing",
