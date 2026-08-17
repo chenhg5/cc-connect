@@ -39,13 +39,7 @@ func runRunAsUserStartupChecks(ctx context.Context, cfg *config.Config) error {
 		otherUsers []string
 	}
 	var pendingProjects []pending
-	var allUsers []string
-	for _, proj := range cfg.Projects {
-		if proj.RunAsUser == "" {
-			continue
-		}
-		allUsers = append(allUsers, proj.RunAsUser)
-	}
+	allUsers := cfg.RunAsUsers()
 	for _, proj := range cfg.Projects {
 		if proj.RunAsUser == "" {
 			continue
