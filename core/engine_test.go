@@ -7617,6 +7617,104 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	}
 }
 
+// TestSessionResume_CanceledPreservesSavedID verifies the shutdown/restart guard:
+// when StartSession fails with context.Canceled (cc-connect restarting mid-resume),
+// the saved AgentSessionID must be preserved (NOT cleared) so the next message
+// re-loads the same conversation. Clearing it would permanently truncate history.
+func TestSessionResume_CanceledPreservesSavedID(t *testing.T) {
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			return nil, context.Canceled
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := &Session{AgentSessionID: "saved-agent-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	if got := session.GetAgentSessionID(); got != "saved-agent-id" {
+		t.Fatalf("AgentSessionID = %q, want %q — canceled resume must not wipe the saved id", got, "saved-agent-id")
+	}
+	if state == nil || !state.eventsNeedResync {
+		t.Fatal("expected a resync placeholder state after canceled resume")
+	}
+	if state.agentSession != nil {
+		t.Fatal("expected no live agent session after canceled resume")
+	}
+}
+
+// TestSessionResume_RealFailureClearsID verifies that a genuine (non-cancel)
+// resume failure still falls back to a fresh session by clearing the stale id,
+// preserving the pre-existing recovery behavior.
+func TestSessionResume_RealFailureClearsID(t *testing.T) {
+	freshSess := newControllableSession("fresh-after-failure")
+	calls := 0
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
+			calls++
+			if sessionID != "" {
+				return nil, fmt.Errorf("resume: no such session")
+			}
+			return freshSess, nil
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := &Session{AgentSessionID: "stale-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	if calls != 2 {
+		t.Fatalf("StartSession calls = %d, want 2 (resume then fresh)", calls)
+	}
+	if state.agentSession != freshSess {
+		t.Fatal("expected fresh agent session after real resume failure")
+	}
+	if got := session.GetAgentSessionID(); got != "fresh-after-failure" {
+		t.Fatalf("AgentSessionID = %q, want %q — fresh id should be written back", got, "fresh-after-failure")
+	}
+}
+
+// TestSessionResume_TimeoutPreservesSavedID verifies the resume-timeout guard:
+// when StartSession fails with ErrSessionResumeTimeout (a giant session/load that
+// exceeded its budget), the saved AgentSessionID must be preserved (NOT cleared)
+// and no fresh session should be started. Clearing it would truncate history; the
+// placeholder is flagged resumeTimedOut so the caller tells the user to /new.
+func TestSessionResume_TimeoutPreservesSavedID(t *testing.T) {
+	calls := 0
+	agent := &controllableAgent{
+		startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+			calls++
+			return nil, fmt.Errorf("acp: session/load: %w", ErrSessionResumeTimeout)
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := &Session{AgentSessionID: "big-session-id"}
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+
+	if calls != 1 {
+		t.Fatalf("StartSession calls = %d, want 1 — timeout must NOT retry a fresh session", calls)
+	}
+	if got := session.GetAgentSessionID(); got != "big-session-id" {
+		t.Fatalf("AgentSessionID = %q, want %q — timed-out resume must not wipe the saved id", got, "big-session-id")
+	}
+	if state == nil || !state.resumeTimedOut {
+		t.Fatal("expected a placeholder state flagged resumeTimedOut after resume timeout")
+	}
+	if state.agentSession != nil {
+		t.Fatal("expected no live agent session after resume timeout")
+	}
+}
+
 // TestSessionClearedAfterNew_RecyclesAliveAgent verifies issue #238: after /new the
 // Session's AgentSessionID is empty but an older Claude process may still be alive;
 // it must be recycled instead of reused (which would keep prior --resume context).
