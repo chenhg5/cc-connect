@@ -5090,6 +5090,46 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+		case EventNotice:
+			// Transient, non-fatal hint (#1684). Must not finalize the turn,
+			// must not discard the preview, must not stop reading events.
+			// The Pi adapter emits these for provider rate-limit / retry
+			// backoff hints; subsequent EventToolUse / EventText on the next
+			// retry will append normally and a final EventResult / EventError
+			// will continue to drive terminal state via its own case.
+			notice := strings.TrimSpace(event.Notice)
+			if notice == "" {
+				break
+			}
+			if hasRichCard {
+				toolSteps = append(toolSteps, ToolStep{
+					Kind:    ToolStepKindInfo,
+					Name:    "Notice",
+					Summary: truncateIf(notice, e.display.ToolMaxLen),
+					Done:    true,
+				})
+				if cardMessageID == nil {
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					if starter, ok := p.(PreviewStarter); ok {
+						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+						if err != nil {
+							slog.Debug("rich card: failed to create notice card", "platform", p.Name(), "error", err)
+						} else {
+							cardMessageID = handle
+						}
+					}
+				} else if updater, ok := p.(MessageUpdater); ok {
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+						slog.Debug("rich card: failed to update notice card", "platform", p.Name(), "error", err)
+					}
+				}
+				break
+			}
+			if !cp.AppendEvent(ProgressEntryNotice, notice, "", notice) {
+				sendWorkspace(p, replyCtx, notice)
+			}
+
 		case EventToolUse:
 			toolCount++
 			if hasRichCard {

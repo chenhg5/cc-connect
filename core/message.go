@@ -412,6 +412,13 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	// EventNotice is a non-fatal, non-terminal progress hint — e.g. "provider
+	// is rate-limited, retrying in 8s". The engine must surface it on the
+	// progress card but MUST NOT finalize the turn as failed/completed and
+	// MUST NOT treat it as a turn boundary. It is the engine-level channel
+	// for transient retry hints (#1684). Currently only the Pi adapter emits
+	// this; other agents can opt in by translating their own retry signals.
+	EventNotice EventType = "notice"
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.
@@ -450,6 +457,13 @@ type Event struct {
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
+	// Notice is the human-readable hint for EventNotice. It is rendered on the
+	// platform progress card but does NOT end the turn.
+	Notice string
+	// NoticeMetadata carries optional structured retry context — typically
+	// {"attempt": int, "maxAttempts": int, "delayMs": int, "error": string}.
+	// Platforms that ignore it still get the Notice text.
+	NoticeMetadata map[string]any
 }
 
 // HistoryEntry is one turn in a conversation.
