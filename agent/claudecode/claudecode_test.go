@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -12,7 +13,7 @@ import (
 
 func TestNew_ParsesRunAsUserAndRunAsEnv(t *testing.T) {
 	opts := map[string]any{
-		"work_dir":    "/tmp/claudecode-test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "partseeker-coder",
 		"run_as_env":  []any{"PGSSLROOTCERT", "PGSSLMODE"},
 	}
@@ -37,7 +38,7 @@ func TestNew_RunAsUserSkipsClaudeLookPath(t *testing.T) {
 	// skipped because the target user's PATH is what matters. Verify that
 	// New() doesn't fail even when claude isn't on this test process's PATH.
 	opts := map[string]any{
-		"work_dir":    "/tmp/claudecode-test",
+		"work_dir":    t.TempDir(),
 		"run_as_user": "target-that-definitely-exists",
 	}
 	// Note: this test relies on New() NOT calling exec.LookPath("claude")
@@ -634,7 +635,7 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 		routerAPIKey:     "secret",
 	}
 	opts := parent.WorkspaceAgentOptions()
-	opts["work_dir"] = "/tmp/claudecode-test"
+	opts["work_dir"] = t.TempDir()
 	opts["run_as_user"] = "skip-lookpath"
 
 	a, err := New(opts)
@@ -708,9 +709,52 @@ func TestScanSessionMeta_ArrayContent(t *testing.T) {
 		t.Errorf("scanSessionMeta count = %d, want 4 (2 user + 2 assistant, array content should not be skipped)", count)
 	}
 
-	// Summary should come from the last user message with string content (line 2)
+	// Summary should come from the first user message with string content (line 2)
 	if summary != "Hello world" {
 		t.Errorf("scanSessionMeta summary = %q, want %q", summary, "Hello world")
+	}
+}
+
+func TestScanSessionMeta_AITitleAndCustomTitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "[cc-connect sender_id=abc] first prompt"}}`,
+		`{"type": "assistant", "message": {"content": "reply"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "查看cc-connect开机自启功能"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "查看cc-connect开机自启功能" {
+		t.Errorf("scanSessionMeta summary = %q, want ai-title", summary)
+	}
+}
+
+func TestScanSessionMeta_CustomTitleOverridesAITitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "ignored fallback"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "AI generated title"}`,
+		`{"type": "custom-title", "sessionId": "sess-1", "customTitle": "User renamed title"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, _ := scanSessionMeta(path)
+	if summary != "User renamed title" {
+		t.Errorf("scanSessionMeta summary = %q, want custom-title", summary)
 	}
 }
 
@@ -873,4 +917,17 @@ func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 // regression can ship.
 func TestAgent_ImplementsSessionIDValidator(t *testing.T) {
 	var _ core.SessionIDValidator = (*Agent)(nil)
+}
+
+func TestNew_WorkDirDoesNotExist(t *testing.T) {
+	opts := map[string]any{
+		"work_dir": "/tmp/cc-connect-nonexistent-dir-that-should-not-exist",
+	}
+	_, err := New(opts)
+	if err == nil {
+		t.Fatal("expected error for non-existent work_dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected 'does not exist' in error, got: %v", err)
+	}
 }

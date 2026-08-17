@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -2323,5 +2324,91 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		if strings.Contains(m, postText) {
 			t.Fatalf("post-resolution text was bulk-sent via plain Send (regression: streaming broken after permission prompt). getSent=%#v", plat.getSent())
 		}
+	}
+}
+
+func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
+	baseDir := t.TempDir()
+	defaultWorkspace := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-default"))
+	workspaceA := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-a"))
+	workspaceB := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-b"))
+	for _, dir := range []string{defaultWorkspace, workspaceA, workspaceB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defaultWorkspace = normalizeWorkspacePath(defaultWorkspace)
+	workspaceA = normalizeWorkspacePath(workspaceA)
+	workspaceB = normalizeWorkspacePath(workspaceB)
+
+	const agentName = "cuj-feishu-topic-workspace-agent"
+	RegisterAgent(agentName, func(map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+	platform := &stubPlatformEngine{n: "feishu"}
+	engine := NewEngine(
+		"test",
+		&namedTestAgent{name: agentName},
+		[]Platform{platform},
+		filepath.Join(t.TempDir(), "sessions.json"),
+		LangEnglish,
+	)
+	engine.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	engine.workspaceBindings.Bind(
+		"project:test",
+		workspaceChannelKey("feishu", "oc_chat"),
+		"topic-group",
+		defaultWorkspace,
+	)
+
+	sendTopicCommand := func(rootID, command string) {
+		engine.ReceiveMessage(platform, &Message{
+			SessionKey:       "feishu:oc_chat:root:" + rootID,
+			Platform:         "feishu",
+			MessageID:        "msg-" + rootID,
+			UserID:           "user",
+			UserName:         "user",
+			Content:          command,
+			ChannelKey:       "oc_chat:topic:" + rootID,
+			LegacyChannelKey: "oc_chat",
+			ReplyCtx:         "ctx-" + rootID,
+		})
+	}
+	lastReply := func() string {
+		sent := platform.getSent()
+		if len(sent) == 0 {
+			t.Fatal("expected a user-visible workspace reply")
+		}
+		return sent[len(sent)-1]
+	}
+
+	// User actions 1-3: A gets an override, while B first inherits the chat
+	// default and can then set its own override.
+	sendTopicCommand("om_root_a", "/workspace bind workspace-a")
+	sendTopicCommand("om_root_b", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(defaultWorkspace)) {
+		t.Fatalf("topic B did not inherit the chat default: %q", got)
+	}
+	sendTopicCommand("om_root_b", "/workspace bind workspace-b")
+
+	// User actions 4-5: each topic reports its own workspace.
+	sendTopicCommand("om_root_a", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceA)) {
+		t.Fatalf("topic A workspace reply = %q, want %q", got, normalizeWorkspacePath(workspaceA))
+	}
+	sendTopicCommand("om_root_b", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceB)) {
+		t.Fatalf("topic B workspace reply = %q, want %q", got, normalizeWorkspacePath(workspaceB))
+	}
+
+	// User action 6: unbinding A restores the chat default and does not affect B.
+	sendTopicCommand("om_root_a", "/workspace unbind")
+	sendTopicCommand("om_root_a", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(defaultWorkspace)) {
+		t.Fatalf("topic A did not fall back to the chat default after unbind: %q", got)
+	}
+	sendTopicCommand("om_root_b", "/workspace")
+	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceB)) {
+		t.Fatalf("topic B changed after topic A unbind: %q", got)
 	}
 }

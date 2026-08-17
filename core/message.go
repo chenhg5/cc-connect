@@ -34,6 +34,29 @@ func MergeEnv(base, extra []string) []string {
 	return append(merged, extra...)
 }
 
+// InjectedAgentEnv returns the env vars cc-connect injects into a spawned
+// agent process so in-process extensions can learn cc-connect's runtime state.
+// The CC_ prefix marks these vars as cc-connect's public extension contract,
+// alongside CC_PROJECT / CC_SESSION_KEY / CC_DATA_DIR that the engine injects
+// as session env.
+//
+// Currently only the permission mode is exposed:
+//
+//	CC_PERMISSION_MODE — the session's permission mode ("default" | "yolo").
+//	    Extensions such as the pi permission-gate read it to auto-approve tool
+//	    calls in yolo mode. An empty mode returns nil, so non-yolo sessions see
+//	    no injected var.
+//
+// Kept as a single core helper so every agent opts into the same convention
+// instead of hardcoding the variable name; extending the contract (e.g.
+// CC_MODEL, CC_THINKING) only means extending this function.
+func InjectedAgentEnv(mode string) []string {
+	if mode == "" {
+		return nil
+	}
+	return []string{"CC_PERMISSION_MODE=" + mode}
+}
+
 // CheckAllowFrom logs a security warning at startup when allow_from is not
 // configured (defaults to permit-all). Platforms should call this during init.
 func CheckAllowFrom(platform, allowFrom string) {
@@ -354,9 +377,13 @@ type Message struct {
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	OnAccepted   func()              // called once when the engine accepts this message for an agent turn
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx     any                 // platform-specific context needed for replying
-	FromVoice    bool                // true if message originated from voice transcription
-	ModeOverride string              // if set, temporarily override agent permission mode for this message
+	// LegacyChannelKey is the platform-provided channel identifier used by an
+	// older workspace-binding scope. When both keys are set, multi-workspace
+	// routing atomically migrates the legacy binding to ChannelKey.
+	LegacyChannelKey string
+	ReplyCtx         any    // platform-specific context needed for replying
+	FromVoice        bool   // true if message originated from voice transcription
+	ModeOverride     string // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,

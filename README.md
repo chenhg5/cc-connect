@@ -47,13 +47,13 @@
 <details open>
 <summary>Sponsors</summary>
 
-[![Kimi](assets/sponsors/kimi-banner-en.png)](https://www.kimi.com/code/?aff=cc-connect)
+[![Kimi](https://gcdn.moonshot.cn/growth-cdn/sponsor/kimi-en.png)](https://www.kimi.com/code/?aff=cc-connect)
 
-Thanks to [Kimi](https://www.kimi.com/code/?aff=cc-connect) for sponsoring this project! [Kimi K2.7 Code](https://platform.kimi.ai/docs/guide/kimi-k2-7-code-quickstart) is an open-source, coding-focused agentic model developed by Moonshot AI, delivering substantial gains on real-world long-horizon coding tasks and higher end-to-end success across complex software engineering workflows. It also reduces thinking-token usage by approximately 30% compared with K2.6.
+Thanks to [Kimi](https://www.kimi.com/code/?aff=cc-connect) for sponsoring this project! [Kimi K3](https://www.kimi.com/blog/kimi-k3) is Moonshot AI's most capable model and the world's first open 3T-class model. With 2.8 trillion parameters, native vision, and a 1-million-token context window, K3 delivers frontier performance across long-horizon coding, knowledge work, and reasoning.
 
-With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark, DingTalk, Telegram, Slack, Discord, WeChat Work, and other instant messaging tools. Wherever you are, you can continue working on local projects through chat and ask Kimi to inspect or modify code, troubleshoot issues, run commands, and handle automation tasks.
+With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark, DingTalk, Telegram, Slack, Discord, WeCom, and other instant messaging tools. Wherever you are, you can continue working on local projects through chat and ask Kimi to inspect or modify code, troubleshoot issues, run commands, and handle automation tasks.
 
-cc-connect already supports Kimi CLI. Try the cost-effective [Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect) or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com/?aff=cc-connect)｜[Global](https://platform.kimi.ai/?aff=cc-connect)).
+**cc-connect already supports Kimi CLI. Try the **[Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect)**, or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect) | [Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)).
 
 ---
 
@@ -276,6 +276,91 @@ High-level view of what each **built-in platform** can do in cc-connect.
 </p>
 
 
+## 📋 Prerequisites
+
+> **Install in this exact order** — cc-connect is a bridge for local AI coding agents, so the agent CLI must be installed and authenticated *before* cc-connect starts. Skipping ahead will cause `cc-connect` to exit with `claudecode: claude CLI not found in PATH` (or similar for your chosen agent), and the Web UI on `:9820` will never come up.
+
+### 1️⃣ Install your AI Agent CLI
+
+Pick the agent you want to bridge. You need **at least one**.
+
+```bash
+# Claude Code (most common)
+brew install --cask claude-code            # macOS / Linux Homebrew
+# or
+npm install -g @anthropic-ai/claude-code   # any platform via npm
+
+# OpenAI Codex
+npm install -g @openai/codex
+
+# Google Gemini CLI
+npm install -g @google/gemini-cli
+
+# iFlow CLI
+npm install -g @iflow-ai/iflow-cli
+
+# Qoder CLI
+curl -fsSL https://qoder.com/install | bash
+```
+
+For **Cursor Agent** and **OpenCode**, follow the official install pages:
+- Cursor Agent: <https://docs.cursor.com/agent>
+- OpenCode: <https://github.com/opencode-ai/opencode>
+
+Verify the binary is on your `PATH`:
+
+```bash
+claude --version       # or: codex / gemini / opencode / qodercli / cursor-agent ...
+```
+
+### 2️⃣ Authenticate the agent
+
+Each agent has its own login flow — run the agent once interactively so it stores credentials in your home directory:
+
+```bash
+claude login           # opens a browser to authenticate
+# or
+codex login            # /gemini / opencode auth — see the agent's docs
+```
+
+If you skip this step, `cc-connect` will still start, but the agent will reject every prompt with an auth error.
+
+### 3️⃣ Install cc-connect
+
+```bash
+# npm (any platform)
+npm install -g cc-connect
+
+# Homebrew (macOS / Linux)
+brew install cc-connect
+
+# Or download a binary from https://github.com/chenhg5/cc-connect/releases
+```
+
+### 4️⃣ Start cc-connect and open the Web UI
+
+```bash
+cc-connect             # starts the service; first run auto-creates ~/.cc-connect/config.toml
+```
+
+On first launch, cc-connect prints something like:
+
+```
+Web admin:  http://localhost:9820
+```
+
+Open that URL in your browser. If `9820` is already in use, pass `--web-port 9821` or set `web_port` in `config.toml`.
+
+> **Note:** `cc-connect web` *only* opens the browser and the config UI — it does **not** start the service. You still need `cc-connect` running in another terminal.
+
+### 5️⃣ Configure platform bot tokens in the Web UI
+
+In the Web UI, create a project, then add at least one platform (Feishu / Telegram / Discord / Slack / DingTalk / WeChat Work / QQ / LINE / Weixin) and paste the bot token from that platform's developer console. Save and cc-connect will hot-reload.
+
+That's it — send a message to your bot and cc-connect will relay it to your local agent.
+
+---
+
 ## 🚀 Quick Start
 
 ### 🤖 Install & Configure via AI Agent (Recommended)
@@ -401,6 +486,7 @@ cc-connect update --pre     # Include pre-releases
 | WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
+| Google Chat | [docs/googlechat.md](docs/googlechat.md) | Cloud Pub/Sub | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |

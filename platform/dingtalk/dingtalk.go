@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -60,6 +61,8 @@ const (
 	defaultReactionEmoji        = "🤔Thinking"
 	customTextEmotionID         = "2659900"
 	customTextEmotionBackground = "im_bg_1"
+	cardTitleMaxRunes           = 20
+	cardTitleFallback           = "reply"
 )
 
 type downloadResponse struct {
@@ -851,7 +854,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	payload := map[string]any{
 		"msgtype":  "markdown",
-		"markdown": map[string]string{"title": "reply", "text": content},
+		"markdown": map[string]string{"title": cardTitleFromContent(content), "text": content},
 	}
 	if len(atUserIds) > 0 {
 		payload["at"] = map[string]any{
@@ -1661,7 +1664,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	} else if rc.senderStaffId != "" {
 		// Direct message via /v1.0/robot/oToMessages/batchSend
 		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
-		msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
+		msgParam, _ := json.Marshal(map[string]string{"title": cardTitleFromContent(content), "text": content})
 		requestBody = map[string]any{
 			"robotCode": p.robotCode,
 			"userIds":   []string{rc.senderStaffId},
@@ -1750,4 +1753,58 @@ func preprocessDingTalkMarkdown(s string) string {
 		}
 	}
 	return sb.String()
+}
+
+// cardTitleFromContent derives a short single-line preview title from message
+// content, suitable for the DingTalk chat list and notification previews
+// (the `markdown.title` field on sampleMarkdown messages).
+//
+// Behaviour:
+//   - Strips markdown formatting via core.StripMarkdown so titles don't show
+//     leftover ** / # / ` markers.
+//   - Trims whitespace, takes the first non-empty line, and truncates to
+//     cardTitleMaxRunes runes (Chinese / emoji counted as 1 rune each so we
+//     never split a multi-byte character mid-codepoint).
+//   - Falls back to cardTitleFallback when nothing readable remains — empty
+//     input, whitespace-only, pure emoji, or content that strips down to
+//     only orphan markdown markers (e.g. "****", "####"). Pure emoji is
+//     treated as not-readable on purpose: the user's spec lists emoji-only
+//     as a fallback case, and showing a lone 🎉 as a DingTalk chat list
+//     preview is usually less helpful than the previous "reply".
+//
+// Previously both Reply and sendProactiveMessage hardcoded "reply", which
+// made every DingTalk chat list entry look identical regardless of what the
+// agent actually said (#1269).
+func cardTitleFromContent(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return cardTitleFallback
+	}
+	stripped := strings.TrimSpace(core.StripMarkdown(content))
+	if stripped == "" || !hasReadableChar(stripped) {
+		return cardTitleFallback
+	}
+	if idx := strings.IndexByte(stripped, '\n'); idx >= 0 {
+		stripped = strings.TrimSpace(stripped[:idx])
+		if stripped == "" || !hasReadableChar(stripped) {
+			return cardTitleFallback
+		}
+	}
+	runes := []rune(stripped)
+	if len(runes) > cardTitleMaxRunes {
+		return string(runes[:cardTitleMaxRunes])
+	}
+	return stripped
+}
+
+// hasReadableChar reports whether s contains at least one letter or digit
+// (including CJK ideographs). Used to decide whether a stripped title has
+// enough semantic content to show in the chat list — pure markdown markers,
+// pure emoji, and pure whitespace are treated as "not readable".
+func hasReadableChar(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }

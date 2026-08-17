@@ -129,6 +129,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("claudecode: work_dir %q does not exist", workDir)
+	}
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "claude")
 	cmdArgsFlag, _ := opts["cmd_args_flag"].(string)
 	if cmdArgsFlag == "" {
@@ -368,6 +371,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	}
 	return []core.ModelOption{
 		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
+		{Name: "sonnet[1m]", Desc: "Claude Sonnet (1M context)"},
 		{Name: "opus", Desc: "Claude Opus (most capable)"},
 		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
 		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
@@ -632,27 +636,48 @@ func scanSessionMeta(path string) (string, int) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
-	var summary string
+	var firstUserMessage string
+	var aiTitle string
+	var customTitle string
 	var count int
 
 	for scanner.Scan() {
 		var entry struct {
-			Type    string `json:"type"`
-			Message struct {
+			Type        string `json:"type"`
+			AITitle     string `json:"aiTitle"`
+			CustomTitle string `json:"customTitle"`
+			Message     struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		if entry.Type == "user" || entry.Type == "assistant" {
+		switch entry.Type {
+		case "ai-title":
+			if entry.AITitle != "" {
+				aiTitle = entry.AITitle
+			}
+		case "custom-title":
+			if entry.CustomTitle != "" {
+				customTitle = entry.CustomTitle
+			}
+		case "user", "assistant":
 			count++
-			if entry.Type == "user" {
+			if entry.Type == "user" && firstUserMessage == "" {
 				if s := extractStringContent(entry.Message.Content); s != "" {
-					summary = s
+					firstUserMessage = s
 				}
 			}
 		}
+	}
+
+	summary := customTitle
+	if summary == "" {
+		summary = aiTitle
+	}
+	if summary == "" {
+		summary = firstUserMessage
 	}
 	summary = stripXMLTags(summary)
 	summary = strings.TrimSpace(summary)

@@ -2202,11 +2202,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelo actual: %s",
 	},
 	MsgModelChanged: {
-		LangEnglish:            "Model switched to `%s`. New sessions will use this model.",
-		LangChinese:            "模型已切换为 `%s`，新会话将使用此模型。",
-		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
-		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+		LangEnglish:            "Model switched to `%s`. This session and all future sessions will use it.",
+		LangChinese:            "模型已切换为 `%s`，当前会话与后续会话均使用此模型。",
+		LangTraditionalChinese: "模型已切換為 `%s`，當前會話與後續會話均使用此模型。",
+		LangJapanese:           "モデルを `%s` に切り替えました。このセッションと今後のセッションで使用されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Esta sesión y las futuras usarán este modelo.",
 	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",

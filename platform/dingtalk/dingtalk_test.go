@@ -1322,3 +1322,122 @@ func TestReply_NoAtUserIdsWhenNoMention(t *testing.T) {
 		t.Fatal("timed out waiting for reply")
 	}
 }
+
+// ──────────────────────────────────────────────────────────────
+// Card title derivation (Fixes #1269)
+// ──────────────────────────────────────────────────────────────
+
+func TestCardTitleFromContent(t *testing.T) {
+	// Long input — 30 ASCII chars. Verifies plain truncation at 20 runes.
+	longPlain := "012345678901234567890123456789"
+	if len(longPlain) != 30 {
+		t.Fatalf("longPlain fixture = %d chars, want 30", len(longPlain))
+	}
+
+	// Chinese / CJK fixture — 22 runes. Verifies []rune counting so we never
+	// split a multi-byte character mid-codepoint.
+	chinese22 := "你好世界这是一段测试中文超过二十字符测试数据"
+	if got := len([]rune(chinese22)); got != 22 {
+		t.Fatalf("chinese22 fixture = %d runes, want 22", got)
+	}
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// ── Fallback cases (#1269 acceptance: empty / pure formatting) ──
+		{"empty", "", cardTitleFallback},
+		{"whitespace only", "   \n\n  \t", cardTitleFallback},
+		{"pure bold markers", "****", cardTitleFallback},
+		{"pure heading markers", "####", cardTitleFallback},
+		{"pure italic markers", "**", cardTitleFallback},
+		{"pure emoji (fallback per spec)", "🎉🎊✨", cardTitleFallback},
+		{"empty fenced code block", "```\n```", cardTitleFallback},
+
+		// ── Plain text — return as-is (within limit) ──
+		{"short plain", "hello world", "hello world"},
+		{"plain exactly 20 runes", "01234567890123456789", "01234567890123456789"},
+
+		// ── Plain text truncation (ASCII) ──
+		{"plain 30 chars truncated to 20", longPlain, "01234567890123456789"},
+
+		// ── Markdown stripping — format removed, then first line truncated ──
+		{"bold stripped", "**hello** world", "hello world"},
+		{"italic stripped", "this is *italic* text", "this is italic text"},
+		{"heading stripped", "## My Title\nbody", "My Title"},
+		{"inline code stripped", "use `os.path.join` now", "use os.path.join now"},
+		{"link keeps text and url", "[a](b) c", "a (b) c"},
+
+		// ── First-line wins (DingTalk title is single-line) ──
+		{"first line wins", "first line\nsecond line", "first line"},
+		{"first line wins after markdown strip", "# heading\nbody", "heading"},
+		{"markdown strip keeps first non-empty line", "**bold first**\nplain second", "bold first"},
+
+		// ── Truncation respects markdown stripping (#1269: don't break markdown) ──
+		// The marker must be removed BEFORE truncation so we never cut mid-**bold**.
+		{"bold span not split", "**" + strings.Repeat("a", 25) + "**", strings.Repeat("a", 20)},
+
+		// ── Multi-byte / CJK rune counting ──
+		{"chinese 22 runes truncated to 20", chinese22, "你好世界这是一段测试中文超过二十字符测试"},
+		{"chinese under limit passes through", "你好世界", "你好世界"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cardTitleFromContent(tt.in)
+			if got != tt.want {
+				t.Errorf("cardTitleFromContent(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			// Defensive: every returned title must fit within the cap so the
+			// DingTalk chat list never sees a runaway title.
+			if got != cardTitleFallback && len([]rune(got)) > cardTitleMaxRunes {
+				t.Errorf("cardTitleFromContent(%q) returned %d runes, exceeds cap %d",
+					tt.in, len([]rune(got)), cardTitleMaxRunes)
+			}
+		})
+	}
+}
+
+// TestCardTitleFromContent_UsedInReplyPayload is a smoke test that the
+// title derivation actually flows into the `markdown.title` field of the
+// outgoing sessionWebhook payload (Reply path). It captures the POST body
+// and asserts the title no longer equals the old hardcoded "reply".
+func TestCardTitleFromContent_UsedInReplyPayload(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Errorf("decode: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gotPayload <- p
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	if err := p.Reply(context.Background(), rc, "**Standup notes** for today — see PRs."); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		markdown, ok := payload["markdown"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload[markdown] = %T, want map[string]any", payload["markdown"])
+		}
+		title, _ := markdown["title"].(string)
+		if title == "reply" {
+			t.Errorf("title still hardcoded to %q after fix — regression of #1269", title)
+		}
+		want := "Standup notes for to"
+		if title != want {
+			t.Errorf("title = %q, want %q", title, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply payload")
+	}
+}
