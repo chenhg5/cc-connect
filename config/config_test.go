@@ -911,6 +911,59 @@ func TestSaveAgentModel_PreservesCommentsAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestSaveAgentName_PreservesCommentsAndUnknownFields(t *testing.T) {
+	writeTestConfig(t, providerConfigWithCommentsTOML)
+
+	if err := SaveAgentName("demo", "brainstorm"); err != nil {
+		t.Fatalf("SaveAgentName() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "# This is my config file") {
+		t.Fatalf("expected top comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `mode = "default"`) {
+		t.Fatalf("expected mode to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `agent = "brainstorm"`) {
+		t.Fatalf("expected agent to be set, got:\n%s", text)
+	}
+}
+
+func TestSaveAgentName_EmptyValueClearsKey(t *testing.T) {
+	writeTestConfig(t, strings.Replace(providerConfigWithCommentsTOML,
+		"[[projects.agent.providers]]",
+		"# agent below\nagent = \"brainstorm\"\n\n[[projects.agent.providers]]", 1))
+
+	if err := SaveAgentName("demo", ""); err != nil {
+		t.Fatalf("SaveAgentName() error: %v", err)
+	}
+
+	content, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+
+	if strings.Contains(text, `agent = "brainstorm"`) {
+		t.Fatalf("expected agent key to be removed, got:\n%s", text)
+	}
+	if !strings.Contains(text, "# agent below") {
+		t.Fatalf("expected comment to be preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, `custom_option = "still_here"`) {
+		t.Fatalf("expected unknown options field to be preserved, got:\n%s", text)
+	}
+}
+
 func TestSaveProviderModel_PreservesCommentsAndUnknownFields(t *testing.T) {
 	writeTestConfig(t, providerConfigWithCommentsTOML)
 

@@ -367,6 +367,7 @@ type Engine struct {
 	providerRefsSaveFunc    func(refs []string) error
 	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
 	modelSaveFunc           func(model string) error
+	agentSaveFunc           func(agentName string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -1061,6 +1062,10 @@ func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]Provide
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
+}
+
+func (e *Engine) SetAgentSaveFunc(fn func(agentName string) error) {
+	e.agentSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -6290,6 +6295,7 @@ var builtinCommands = []struct {
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
+	{[]string{"agent"}, "agent"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
@@ -6499,6 +6505,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdAllow(p, msg, args)
 	case "model":
 		e.cmdModel(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
 	case "reasoning":
 		e.cmdReasoning(p, msg, args)
 	case "mode":
@@ -7143,7 +7151,7 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 			parts = append(parts, contextLeft)
 			hasStatus = true
 		}
-		if model := replyFooterModel(session, agent); model != "" {
+		if model := replyFooterDisplayModel(session, agent); model != "" {
 			parts = append(parts, model)
 			hasStatus = true
 		}
@@ -7198,18 +7206,18 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 	// Line 1: elapsed timer (now always the "done" form since streaming branch returned above)
 	lines = append(lines, formatElapsed(time.Since(turnStart), streaming, e.i18n.currentLang()))
 
-	// Line 2: model + effort + token usage detail + ctx %
+	// Line 2: agent + model + effort + token usage detail + ctx %
 	if e.showContextIndicator {
 		usage := replyFooterSessionContextUsage(session)
-		model := replyFooterModel(session, agent)
+		displayModel := replyFooterDisplayModel(session, agent)
 		effort := replyFooterReasoningEffort(session, agent)
-		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
+		if line := buildClaudeStatusLineFooter(displayModel, effort, usage); line != "" {
 			lines = append(lines, line)
 		} else if fallback := e.replyFooterUsageText(session, agent); fallback != "" {
 			// fallback for non-claudecode agents that still expose UsageReporter
 			parts := []string{}
-			if model != "" {
-				parts = append(parts, model)
+			if displayModel != "" {
+				parts = append(parts, displayModel)
 			}
 			if effort != "" {
 				parts = append(parts, effort)
@@ -7381,6 +7389,36 @@ func replyFooterReasoningEffort(session AgentSession, agent Agent) string {
 		return strings.TrimSpace(getter.GetReasoningEffort())
 	}
 	return ""
+}
+
+func replyFooterAgent(session AgentSession, agent Agent) string {
+	if session != nil {
+		if getter, ok := session.(interface{ GetAgent() string }); ok {
+			if name := strings.TrimSpace(getter.GetAgent()); name != "" {
+				return name
+			}
+		}
+	}
+	if getter, ok := agent.(AgentSwitcher); ok {
+		return strings.TrimSpace(getter.GetAgent())
+	}
+	return ""
+}
+
+// replyFooterDisplayModel returns the model name prefixed with the agent name
+// when one is active (e.g. "brainstorm · deepseek/deepseek-v4-pro"). Used by
+// the legacy footer paths (buildReplyFooter / buildClaudeStatusLineFooter)
+// which are the effective renderers for non-Claude agents and pure-text
+// platforms.
+func replyFooterDisplayModel(session AgentSession, agent Agent) string {
+	model := replyFooterModel(session, agent)
+	if agentName := replyFooterAgent(session, agent); agentName != "" {
+		if model != "" {
+			return agentName + " · " + model
+		}
+		return agentName
+	}
+	return model
 }
 
 func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string {
@@ -7608,7 +7646,7 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 		// Raw model id is preserved (e.g. "claude-opus-4-7[1m]") for diagnostic
 		// clarity over a prettified display name.
 		var line1Parts []string
-		if model := strings.TrimSpace(replyFooterModel(session, agent)); model != "" {
+		if model := strings.TrimSpace(replyFooterDisplayModel(session, agent)); model != "" {
 			line1Parts = append(line1Parts, model)
 		}
 		if effort := strings.TrimSpace(replyFooterReasoningEffort(session, agent)); effort != "" {
@@ -8896,6 +8934,10 @@ func (e *Engine) modelCardBackButton() CardButton {
 	return DefaultBtn(e.i18n.T(MsgCardBack), "nav:/model")
 }
 
+func (e *Engine) agentCardBackButton() CardButton {
+	return DefaultBtn(e.i18n.T(MsgCardBack), "nav:/agent")
+}
+
 func (e *Engine) cardPrevButton(action string) CardButton {
 	return DefaultBtn(e.i18n.T(MsgCardPrev), action)
 }
@@ -9282,6 +9324,7 @@ func helpCardGroups() []helpCardGroup {
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
 				{command: "/model", action: "nav:/model"},
+				{command: "/agent", action: "nav:/agent"},
 				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
 				{command: "/lang", action: "nav:/lang"},
@@ -9635,6 +9678,173 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+// errAgentSwitchRejected marks a switch target that cannot be used as a
+// primary agent (subagent, internal, or unknown name).
+var errAgentSwitchRejected = errors.New("agent switch rejected")
+
+func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+
+	switcher, ok := agent.(AgentSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentNotSupported))
+		return
+	}
+
+	if len(args) == 0 {
+		if !supportsCards(p) {
+			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+			defer cancel()
+			agents := switcher.AvailableAgents(fetchCtx)
+
+			var sb strings.Builder
+			current := switcher.GetAgent()
+			if current == "" {
+				sb.WriteString(e.i18n.T(MsgAgentDefault))
+			} else {
+				sb.WriteString(e.i18n.Tf(MsgAgentCurrent, current))
+			}
+
+			var buttons [][]ButtonOption
+			if len(agents) == 0 {
+				sb.WriteString("\n\n")
+				sb.WriteString(e.i18n.T(MsgAgentListUnavailable))
+			} else {
+				sb.WriteString("\n\n")
+				sb.WriteString(e.i18n.T(MsgAgentListTitle))
+				var row []ButtonOption
+				for i, a := range agents {
+					marker := "  "
+					if a.Name == current {
+						marker = "> "
+					}
+					fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, a.Name)
+
+					label := a.Name
+					if a.Name == current {
+						label = "▶ " + label
+					}
+					row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/agent switch %d", i+1)})
+					if len(row) >= 3 {
+						buttons = append(buttons, row)
+						row = nil
+					}
+				}
+				if len(row) > 0 {
+					buttons = append(buttons, row)
+				}
+			}
+			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgAgentUsage))
+			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
+			return
+		}
+		e.replyWithCard(p, msg.ReplyCtx, e.renderAgentCard(msg.SessionKey))
+		return
+	}
+
+	target, ok := parseAgentSwitchArgs(args)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentUsage))
+		return
+	}
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+	defer cancel()
+	resolved, err := e.switchAgentOnAgent(fetchCtx, agent, sessions, interactiveKey, switcher, target)
+	if err != nil {
+		if errors.Is(err, errAgentSwitchRejected) {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentSwitchRejected, target))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChangeFailed, err))
+		}
+		return
+	}
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChanged, resolved))
+}
+
+// parseAgentSwitchArgs extracts the switch target from `/agent` arguments:
+// "/agent switch <target>" or "/agent <target>" where target is a name or a
+// 1-based list index.
+func parseAgentSwitchArgs(args []string) (string, bool) {
+	if len(args) == 0 {
+		return "", false
+	}
+	if len(args) == 1 {
+		if strings.EqualFold(strings.TrimSpace(args[0]), "switch") {
+			return "", false
+		}
+		return strings.TrimSpace(args[0]), true
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "switch") && len(args) >= 2 {
+		return strings.TrimSpace(args[1]), true
+	}
+	return "", false
+}
+
+// switchAgentOnAgent applies a runtime agent selection: resolve and validate
+// the target against the enumeration, SetAgent, persist to config, then
+// cleanup the interactive state so the next message starts a fresh session
+// (--resume <id> --agent <new>). A failed persistence rolls back the in-memory
+// value. Returns the resolved agent name.
+func (e *Engine) switchAgentOnAgent(ctx context.Context, agent Agent, sessions *SessionManager, interactiveKey string, switcher AgentSwitcher, input string) (string, error) {
+	target, err := resolveAgentSwitchTarget(ctx, switcher, input)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errAgentSwitchRejected, err)
+	}
+
+	oldName := switcher.GetAgent()
+	if err := switcher.SetAgent(target); err != nil {
+		return "", fmt.Errorf("%w: %v", errAgentSwitchRejected, err)
+	}
+
+	if agent == e.agent && e.agentSaveFunc != nil {
+		if err := e.agentSaveFunc(target); err != nil {
+			if rbErr := switcher.SetAgent(oldName); rbErr != nil {
+				slog.Error("agent switch: rollback failed", "agent", oldName, "err", rbErr)
+			}
+			return "", fmt.Errorf("save agent: %w", err)
+		}
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
+	if sessions != nil {
+		sessions.Save()
+	}
+	return target, nil
+}
+
+// resolveAgentSwitchTarget resolves a user-supplied target (1-based index or
+// name) against the agent enumeration. An index maps into the list; a name
+// must match a listed primary/all-mode agent (case-insensitive). When the
+// enumeration is unavailable (empty result), the name is passed through so
+// configured values remain switchable by name (spec: enumeration failure
+// degrades gracefully).
+func resolveAgentSwitchTarget(ctx context.Context, switcher AgentSwitcher, input string) (string, error) {
+	input = strings.TrimSpace(input)
+	agents := switcher.AvailableAgents(ctx)
+	if idx, err := strconv.Atoi(input); err == nil {
+		if idx >= 1 && idx <= len(agents) {
+			return agents[idx-1].Name, nil
+		}
+		return "", fmt.Errorf("invalid agent number %d", idx)
+	}
+	if len(agents) > 0 {
+		for _, a := range agents {
+			if strings.EqualFold(a.Name, input) {
+				return a.Name, nil
+			}
+		}
+		return "", fmt.Errorf("agent %q is not available as a primary agent", input)
+	}
+	return input, nil
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
@@ -11907,6 +12117,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.handleModelCardAction(args, sessionKey)
 	}
 
+	if prefix == "act" && cmd == "/agent" {
+		return e.handleAgentCardAction(args, sessionKey)
+	}
+
 	if prefix == "act" {
 		e.executeCardAction(cmd, args, sessionKey)
 	}
@@ -11916,6 +12130,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHelpGroupCard(args)
 	case "/model":
 		return e.renderModelCard(sessionKey)
+	case "/agent":
+		return e.renderAgentCard(sessionKey)
 	case "/reasoning":
 		return e.renderReasoningCard()
 	case "/mode":
@@ -12019,6 +12235,25 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	return e.renderModelSwitchResultCard(resolved, err)
+}
+
+func (e *Engine) handleAgentCardAction(args, sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	switcher, ok := agent.(AgentSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleAgent), "blue", e.i18n.T(MsgAgentNotSupported))
+	}
+
+	target, ok := parseAgentSwitchArgs(strings.Fields(args))
+	if !ok {
+		return e.renderAgentCard(sessionKey)
+	}
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+	defer cancel()
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	resolved, err := e.switchAgentOnAgent(fetchCtx, agent, sessions, interactiveKey, switcher, target)
+	return e.renderAgentSwitchResultCard(resolved, err)
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
@@ -12915,6 +13150,76 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 		Title(e.i18n.T(MsgCardTitleModel), "green").
 		Markdown(e.i18n.Tf(MsgModelCardSwitched, target)).
 		Buttons(e.modelCardBackButton()).
+		Build()
+}
+
+func (e *Engine) renderAgentCard(sessionKey string) *Card {
+	agent := e.agent
+	if sessionKey != "" {
+		agent, _ = e.sessionContextForKey(sessionKey)
+	}
+
+	switcher, ok := agent.(AgentSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleAgent), "blue", e.i18n.T(MsgAgentNotSupported))
+	}
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+	defer cancel()
+	agents := switcher.AvailableAgents(fetchCtx)
+	current := switcher.GetAgent()
+
+	var sb strings.Builder
+	if current == "" {
+		sb.WriteString(e.i18n.T(MsgAgentDefault))
+	} else {
+		sb.WriteString(e.i18n.Tf(MsgAgentCurrent, current))
+	}
+
+	var opts []CardSelectOption
+	initVal := ""
+	if len(agents) == 0 {
+		sb.WriteString("\n\n")
+		sb.WriteString(e.i18n.T(MsgAgentListUnavailable))
+	} else {
+		sb.WriteString("\n\n")
+		sb.WriteString(e.i18n.T(MsgAgentListTitle))
+		for i, a := range agents {
+			marker := "  "
+			if a.Name == current {
+				marker = "> "
+			}
+			fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, a.Name)
+			val := fmt.Sprintf("act:/agent switch %d", i+1)
+			opts = append(opts, CardSelectOption{Text: a.Name, Value: val})
+			if a.Name == current {
+				initVal = val
+			}
+		}
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleAgent), "blue").
+		Markdown(sb.String()).
+		Buttons(e.cardBackButton())
+	if len(opts) > 0 {
+		cb.Select(e.i18n.T(MsgAgentSelectPlaceholder), opts, initVal)
+	}
+	cb.Note(e.i18n.T(MsgAgentUsage))
+	return cb.Build()
+}
+
+func (e *Engine) renderAgentSwitchResultCard(target string, err error) *Card {
+	if err != nil {
+		return NewCard().
+			Title(e.i18n.T(MsgCardTitleAgent), "red").
+			Markdown(e.i18n.Tf(MsgAgentCardSwitchFailed, err)).
+			Buttons(e.agentCardBackButton()).
+			Build()
+	}
+	return NewCard().
+		Title(e.i18n.T(MsgCardTitleAgent), "green").
+		Markdown(e.i18n.Tf(MsgAgentCardSwitched, target)).
+		Buttons(e.agentCardBackButton()).
 		Build()
 }
 

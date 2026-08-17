@@ -455,6 +455,48 @@ type stubStrictModelAgent struct {
 	calls  int
 }
 
+// stubAgentSwitchAgent implements AgentSwitcher for /agent command tests.
+// It mimics the opencode adapter: validation against the enumeration when
+// available, lenient name acceptance when the enumeration is empty.
+type stubAgentSwitchAgent struct {
+	stubAgent
+	agent     string
+	available []AgentInfo
+}
+
+func (a *stubAgentSwitchAgent) SetAgent(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		a.agent = ""
+		return nil
+	}
+	if len(a.available) > 0 {
+		for _, info := range a.available {
+			if strings.EqualFold(info.Name, name) {
+				a.agent = info.Name
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown agent %q", name)
+	}
+	a.agent = name
+	return nil
+}
+
+func (a *stubAgentSwitchAgent) GetAgent() string { return a.agent }
+
+func (a *stubAgentSwitchAgent) AvailableAgents(_ context.Context) []AgentInfo {
+	return append([]AgentInfo(nil), a.available...)
+}
+
+func stubAgentSwitchList() []AgentInfo {
+	return []AgentInfo{
+		{Name: "build", Mode: "primary"},
+		{Name: "plan", Mode: "primary"},
+		{Name: "brainstorm", Mode: "all"},
+	}
+}
+
 type stubLiveModeSession struct {
 	stubAgentSession
 	modes []string
@@ -5443,6 +5485,310 @@ func TestEngine_AdminFrom_GatesDir(t *testing.T) {
 	}
 	if agent.workDir != tempDir {
 		t.Fatalf("workDir = %q, want unchanged %q", agent.workDir, tempDir)
+	}
+}
+
+func TestCmdAgent_TextModeShowsListAndInlineButtons(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.buttonRows) == 0 {
+		t.Fatal("expected /agent to send inline buttons on button-only platform")
+	}
+	if got := p.buttonRows[0][0].Data; got != "cmd:/agent switch 1" {
+		t.Fatalf("first /agent button = %q, want %q", got, "cmd:/agent switch 1")
+	}
+	if got := p.buttonRows[0][0].Text; got != "build" {
+		t.Fatalf("first /agent button text = %q, want build", got)
+	}
+	if !strings.Contains(p.buttonContent, "Available agents") {
+		t.Fatalf("button content missing list title, got: %s", p.buttonContent)
+	}
+	if !strings.Contains(p.buttonContent, "/agent switch") {
+		t.Fatalf("button content missing usage line, got: %s", p.buttonContent)
+	}
+}
+
+func TestCmdAgent_TextModeWithEnumerationFailureStillShowsCurrentAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{agent: "brainstorm"} // empty enumeration = degraded
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0], "brainstorm") {
+		t.Fatalf("reply missing current agent, got: %s", sent[0])
+	}
+	if !strings.Contains(sent[0], "agent list unavailable") {
+		t.Fatalf("reply missing list-unavailable hint, got: %s", sent[0])
+	}
+}
+
+func TestCmdAgent_CardModeShowsSelectWithCurrentMarked(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	agent := &stubAgentSwitchAgent{agent: "plan", available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	card := p.repliedCards[0]
+	var sel *CardSelect
+	for _, el := range card.Elements {
+		if s, ok := el.(CardSelect); ok {
+			sel = &s
+			break
+		}
+	}
+	if sel == nil {
+		t.Fatal("expected /agent card to contain a select")
+	}
+	if len(sel.Options) != 3 {
+		t.Fatalf("select options = %d, want 3", len(sel.Options))
+	}
+	if sel.Options[1].Value != "act:/agent switch 2" {
+		t.Fatalf("second option value = %q, want act:/agent switch 2", sel.Options[1].Value)
+	}
+	if sel.InitValue != "act:/agent switch 2" {
+		t.Fatalf("select init value = %q, want current agent plan marked", sel.InitValue)
+	}
+}
+
+func TestCmdAgent_SwitchByIndex(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedAgent string
+	e.SetAgentSaveFunc(func(agentName string) error {
+		savedAgent = agentName
+		return nil
+	})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+
+	e.cmdAgent(p, msg, []string{"switch", "2"})
+
+	if agent.GetAgent() != "plan" {
+		t.Fatalf("agent = %q, want plan", agent.GetAgent())
+	}
+	if savedAgent != "plan" {
+		t.Fatalf("saved agent = %q, want plan", savedAgent)
+	}
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "existing-session" {
+		t.Fatalf("session id = %q, want preserved after agent switch", active.AgentSessionID)
+	}
+	if !strings.Contains(p.getSent()[0], "plan") {
+		t.Fatalf("reply = %q, want switch confirmation mentioning plan", p.getSent()[0])
+	}
+}
+
+func TestCmdAgent_SwitchByName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedAgent string
+	e.SetAgentSaveFunc(func(agentName string) error {
+		savedAgent = agentName
+		return nil
+	})
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"brainstorm"})
+
+	if agent.GetAgent() != "brainstorm" {
+		t.Fatalf("agent = %q, want brainstorm", agent.GetAgent())
+	}
+	if savedAgent != "brainstorm" {
+		t.Fatalf("saved agent = %q, want brainstorm", savedAgent)
+	}
+}
+
+func TestCmdAgent_SwitchByIndexOutOfRangeRejected(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"switch", "99"})
+
+	if agent.GetAgent() != "" {
+		t.Fatalf("agent = %q, want unchanged after invalid index", agent.GetAgent())
+	}
+	if !strings.Contains(p.getSent()[0], "cannot be used as a primary agent") {
+		t.Fatalf("reply = %q, want rejection message", p.getSent()[0])
+	}
+}
+
+func TestCmdAgent_RejectsUnknownName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"switch", "does-not-exist"})
+
+	if agent.GetAgent() != "" {
+		t.Fatalf("agent = %q, want unchanged after rejected switch", agent.GetAgent())
+	}
+	if !strings.Contains(p.getSent()[0], "cannot be used as a primary agent") {
+		t.Fatalf("reply = %q, want rejection message", p.getSent()[0])
+	}
+}
+
+func TestCmdAgent_RejectsSubagentName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()} // subagents filtered out
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"switch", "explore"})
+
+	if agent.GetAgent() != "" {
+		t.Fatalf("agent = %q, want unchanged after rejected subagent switch", agent.GetAgent())
+	}
+	if !strings.Contains(p.getSent()[0], "cannot be used as a primary agent") {
+		t.Fatalf("reply = %q, want rejection message", p.getSent()[0])
+	}
+}
+
+func TestCmdAgent_EnumerationFailureStillAllowsSwitchByName(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: nil} // enumeration failed
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedAgent string
+	e.SetAgentSaveFunc(func(agentName string) error {
+		savedAgent = agentName
+		return nil
+	})
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"switch", "brainstorm"})
+
+	if agent.GetAgent() != "brainstorm" {
+		t.Fatalf("agent = %q, want brainstorm via name fallback", agent.GetAgent())
+	}
+	if savedAgent != "brainstorm" {
+		t.Fatalf("saved agent = %q, want brainstorm", savedAgent)
+	}
+}
+
+func TestCmdAgent_PersistFailureRollsBackAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAgentSaveFunc(func(agentName string) error {
+		return errors.New("disk full")
+	})
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+
+	e.cmdAgent(p, msg, []string{"switch", "2"})
+
+	if agent.GetAgent() != "" {
+		t.Fatalf("agent = %q, want rolled back to previous value", agent.GetAgent())
+	}
+	if active := e.sessions.GetOrCreateActive(msg.SessionKey); active.AgentSessionID != "existing-session" {
+		t.Fatalf("session id = %q, want preserved after failed switch", active.AgentSessionID)
+	}
+	if !strings.Contains(p.getSent()[0], "Failed to change agent") {
+		t.Fatalf("reply = %q, want failure message", p.getSent()[0])
+	}
+}
+
+func TestCmdAgent_NotSupportedAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubAgent{} // no AgentSwitcher
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if !strings.Contains(p.getSent()[0], "does not support") {
+		t.Fatalf("reply = %q, want not-supported message", p.getSent()[0])
+	}
+}
+
+func TestCmdAgent_CardActionSwitchesAndReturnsResultCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	agent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	var savedAgent string
+	e.SetAgentSaveFunc(func(agentName string) error {
+		savedAgent = agentName
+		return nil
+	})
+
+	sessionKey := "test:user1"
+	card := e.handleCardNav("act:/agent switch 3", sessionKey)
+	if card == nil {
+		t.Fatal("handleCardNav(act:/agent switch 3) returned nil card")
+	}
+	if agent.GetAgent() != "brainstorm" {
+		t.Fatalf("agent = %q, want brainstorm after card action", agent.GetAgent())
+	}
+	if savedAgent != "brainstorm" {
+		t.Fatalf("saved agent = %q, want brainstorm", savedAgent)
+	}
+	if !strings.Contains(card.RenderText(), "brainstorm") {
+		t.Fatalf("result card = %s, want switch confirmation", card.RenderText())
+	}
+}
+
+func TestCmdAgent_CardNavRendersAgentCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	agent := &stubAgentSwitchAgent{agent: "build", available: stubAgentSwitchList()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	card := e.handleCardNav("nav:/agent", "test:user1")
+	if card == nil {
+		t.Fatal("handleCardNav(nav:/agent) returned nil card")
+	}
+	if card.Header == nil || !strings.Contains(card.Header.Title, "Agent") {
+		t.Fatalf("card title = %+v, want agent card title", card.Header)
+	}
+}
+
+func TestCmdAgent_MultiWorkspaceSwitchDoesNotPersistGlobally(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	globalAgent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+	var savedAgent string
+	e.SetAgentSaveFunc(func(agentName string) error {
+		savedAgent = agentName
+		return nil
+	})
+
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-agent"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	wsAgent := &stubAgentSwitchAgent{available: stubAgentSwitchList()}
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{SessionKey: "feishu:" + channelID + ":u1", ReplyCtx: "ctx"}
+	e.cmdAgent(p, msg, []string{"switch", "brainstorm"})
+
+	if wsAgent.GetAgent() != "brainstorm" {
+		t.Fatalf("workspace agent = %q, want brainstorm", wsAgent.GetAgent())
+	}
+	if globalAgent.GetAgent() != "" {
+		t.Fatalf("global agent = %q, want unchanged", globalAgent.GetAgent())
+	}
+	if savedAgent != "" {
+		t.Fatalf("global agent save called with %q, want no config save for workspace switch", savedAgent)
 	}
 }
 

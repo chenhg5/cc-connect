@@ -53,6 +53,12 @@ type cujAgent struct {
 	sessions []*cujAgentSession
 	nextID   int
 
+	// agent is the current AgentSwitcher value; sessionAgents records the
+	// agent snapshot taken at each StartSession so CUJs can assert which
+	// agent actually ran a user turn.
+	agent         string
+	sessionAgents []string
+
 	// failStartCount lets tests simulate "agent process won't start" — the
 	// next N StartSession calls return failStartErr. Set both > 0 to use.
 	// When the count hits 0, StartSession resumes normal behavior, which
@@ -85,11 +91,35 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	a.nextID++
 	s := newCUJAgentSession()
 	a.sessions = append(a.sessions, s)
+	a.sessionAgents = append(a.sessionAgents, a.agent)
 	s.pendingEvents = a.nextSessionEvents
 	s.pendingDelayMs = a.nextSessionDelayMs
 	a.nextSessionEvents = nil
 	a.nextSessionDelayMs = 0
 	return s, nil
+}
+
+// -- AgentSwitcher (for the /agent CUJ) --
+
+func (a *cujAgent) SetAgent(name string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.agent = name
+	return nil
+}
+
+func (a *cujAgent) GetAgent() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.agent
+}
+
+func (a *cujAgent) AvailableAgents(_ context.Context) []AgentInfo {
+	return []AgentInfo{
+		{Name: "build", Mode: "primary"},
+		{Name: "plan", Mode: "primary"},
+		{Name: "brainstorm", Mode: "all"},
+	}
 }
 
 func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
@@ -1784,6 +1814,68 @@ func TestCUJ_F4_HotReloadBannedWordsTakesEffect(t *testing.T) {
 	// reaching the agent.
 	if afterCount > beforeCount {
 		t.Fatalf("hot-reload of banned_words did not take effect: agent received the message")
+	}
+}
+
+// CUJ-F5 · /agent switches the coding agent at runtime. Journey:
+// view the list → switch to brainstorm → the next message actually runs
+// with brainstorm → /agent shows the new current agent → switch back to
+// build. Asserts what the USER sees on the platform side and that the
+// switched agent really drove a turn.
+func TestCUJ_F5_AgentSwitchRuntimeAndBack(t *testing.T) {
+	env := newCUJEnv(t)
+	var savedAgents []string
+	env.engine.SetAgentSaveFunc(func(agentName string) error {
+		savedAgents = append(savedAgents, agentName)
+		return nil
+	})
+
+	// 1. View: /agent lists available agents and the current (default) one.
+	env.userSends("f5", "/agent")
+	env.waitFor("/agent view", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	if !env.sentContains("Available agents") {
+		t.Fatalf("/agent view missing agent list, got: %v", env.plat.getSent())
+	}
+
+	// 2. Switch to brainstorm by name.
+	env.plat.clearSent()
+	env.userSends("f5", "/agent switch brainstorm")
+	env.waitFor("switch reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	if !env.sentContains("brainstorm") {
+		t.Fatalf("/agent switch reply = %v, want brainstorm confirmation", env.plat.getSent())
+	}
+
+	// 3. The next message runs with brainstorm: a fresh agent session is
+	// started and its snapshot agent is brainstorm.
+	env.plat.clearSent()
+	env.userSends("f5", "hello from the brainstorm agent")
+	env.waitFor("agent reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+
+	env.agent.mu.Lock()
+	snapshots := append([]string(nil), env.agent.sessionAgents...)
+	env.agent.mu.Unlock()
+	if len(snapshots) == 0 || snapshots[len(snapshots)-1] != "brainstorm" {
+		t.Fatalf("last session started with agent = %v, want brainstorm", snapshots)
+	}
+
+	// 4. /agent now shows brainstorm as the current agent.
+	env.plat.clearSent()
+	env.userSends("f5", "/agent")
+	env.waitFor("view after switch", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	if !env.sentContains("brainstorm") {
+		t.Fatalf("/agent after switch = %v, want current agent brainstorm", env.plat.getSent())
+	}
+
+	// 5. Switch back to build.
+	env.plat.clearSent()
+	env.userSends("f5", "/agent switch build")
+	env.waitFor("switch back", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	if !env.sentContains("build") {
+		t.Fatalf("/agent switch build reply = %v, want build confirmation", env.plat.getSent())
+	}
+
+	if len(savedAgents) != 2 || savedAgents[0] != "brainstorm" || savedAgents[1] != "build" {
+		t.Fatalf("persisted agents = %v, want [brainstorm build]", savedAgents)
 	}
 }
 
