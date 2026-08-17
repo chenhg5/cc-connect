@@ -49,6 +49,94 @@ func TestHandleResultParsesUsage(t *testing.T) {
 	}
 }
 
+// writeCloser wraps a bytes.Buffer to satisfy io.WriteCloser without touching
+// any real pipe. Used in tests that exercise handleControlRequest paths which
+// may call RespondPermission (writing the allow/deny response to stdin).
+type writeCloser struct{ *bytes.Buffer }
+
+func (*writeCloser) Close() error { return nil }
+
+// TestHandleControlRequest_AskUserQuestionBypassesAutoApprove is a regression
+// test for the bug where yolo / bypassPermissions mode (autoApprove=true)
+// silently auto-approved AskUserQuestion. AskUserQuestion is a user-facing
+// question (rendered as a card with option buttons on Feishu/Telegram/etc.),
+// NOT a permission decision — it must always be forwarded to the platform
+// even when other tools are auto-approved.
+//
+// This test verifies:
+//  1. AskUserQuestion under autoApprove=true emits EventPermissionRequest
+//     (with Questions populated), instead of being auto-allowed.
+//  2. A regular tool (Bash) under autoApprove=true is still auto-approved
+//     (no event emitted) — the carve-out is AskUserQuestion-specific.
+func TestHandleControlRequest_AskUserQuestionBypassesAutoApprove(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events:  make(chan core.Event, 4),
+		ctx:     ctx,
+		ccHooks: newCCPermissionHookRunner(""),
+		stdin:   &writeCloser{new(bytes.Buffer)},
+	}
+	cs.autoApprove.Store(true)
+
+	// 1. AskUserQuestion must be forwarded despite autoApprove.
+	cs.handleControlRequest(map[string]any{
+		"request_id": "req-askq",
+		"request": map[string]any{
+			"subtype":   "can_use_tool",
+			"tool_name": "AskUserQuestion",
+			"input": map[string]any{
+				"questions": []any{
+					map[string]any{
+						"question": "pick one",
+						"header":   "test",
+						"options": []any{
+							map[string]any{"label": "A"},
+							map[string]any{"label": "B"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventPermissionRequest {
+			t.Fatalf("event type = %q, want %q", evt.Type, core.EventPermissionRequest)
+		}
+		if evt.ToolName != "AskUserQuestion" {
+			t.Errorf("ToolName = %q, want AskUserQuestion", evt.ToolName)
+		}
+		if len(evt.Questions) != 1 {
+			t.Errorf("Questions length = %d, want 1", len(evt.Questions))
+		}
+		if len(evt.Questions[0].Options) != 2 {
+			t.Errorf("Options length = %d, want 2", len(evt.Questions[0].Options))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AskUserQuestion was auto-approved instead of forwarded (no EventPermissionRequest emitted)")
+	}
+
+	// 2. A regular tool under autoApprove must still be auto-approved (no event).
+	cs.handleControlRequest(map[string]any{
+		"request_id": "req-bash",
+		"request": map[string]any{
+			"subtype":   "can_use_tool",
+			"tool_name": "Bash",
+			"input":     map[string]any{"command": "ls"},
+		},
+	})
+
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("Bash should be auto-approved (no event expected), got %+v", evt)
+	case <-time.After(100 * time.Millisecond):
+		// expected: Bash auto-approved, no event forwarded
+	}
+}
+
 // TestHandleResultCompactionSubtypeIsNotTerminal is a regression test for
 // issue #481: Claude Code's mid-turn context compaction emits a
 // `type:"result"` event with `subtype:"compact"` (newer CLI) or
