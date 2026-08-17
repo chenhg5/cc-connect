@@ -131,6 +131,82 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_IgnoresSubagentLifecycleNotifications(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.threadID.Store("parent-thread")
+	s.currentTurn = "parent-turn"
+
+	s.handleNotification("turn/started", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turn":     map[string]any{"id": "child-turn", "status": "inProgress"},
+	}))
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q after child turn started, want parent-turn", got)
+	}
+
+	s.handleNotification("item/completed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turnId":   "child-turn",
+		"item":     map[string]any{"type": "agentMessage", "text": "child-only answer"},
+	}))
+	if got := appServerPendingMessages(s); len(got) != 0 {
+		t.Fatalf("pending messages = %v after child item, want none", got)
+	}
+
+	s.handleNotification("turn/completed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turn":     map[string]any{"id": "child-turn", "status": "completed"},
+	}))
+	s.handleNotification("thread/status/changed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"status":   map[string]any{"type": "idle"},
+	}))
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q after child completion, want parent-turn", got)
+	}
+	select {
+	case event := <-s.events:
+		t.Fatalf("child lifecycle emitted event %#v, want none", event)
+	default:
+	}
+
+	s.handleNotification("item/completed", notificationProbe(t, map[string]any{
+		"threadId": "parent-thread",
+		"turnId":   "parent-turn",
+		"item":     map[string]any{"type": "agentMessage", "text": "parent answer"},
+	}))
+	s.handleNotification("turn/completed", notificationProbe(t, map[string]any{
+		"threadId": "parent-thread",
+		"turn":     map[string]any{"id": "parent-turn", "status": "completed"},
+	}))
+
+	textEvent := <-s.events
+	if textEvent.Type != core.EventText || textEvent.Content != "parent answer" {
+		t.Fatalf("text event = %#v, want parent answer", textEvent)
+	}
+	resultEvent := <-s.events
+	if resultEvent.Type != core.EventResult || !resultEvent.Done {
+		t.Fatalf("result event = %#v, want completed parent result", resultEvent)
+	}
+}
+
+func TestAppServerSession_IgnoresSubagentTokenUsageNotifications(t *testing.T) {
+	s := &appServerSession{}
+	s.threadID.Store("parent-thread")
+	s.currentTurn = "parent-turn"
+
+	s.handleNotification("thread/tokenUsage/updated", tokenUsageNotificationProbe(t, "parent-thread", "parent-turn", 1234))
+	s.handleNotification("thread/tokenUsage/updated", tokenUsageNotificationProbe(t, "child-thread", "child-turn", 9876))
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want parent usage")
+	}
+	if usage.UsedTokens != 1234 {
+		t.Fatalf("used tokens = %d after child update, want parent value 1234", usage.UsedTokens)
+	}
+}
+
 func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -430,6 +506,42 @@ func serverRequestProbe(t *testing.T, idJSON, method string, params any) map[str
 		"method": methodJSON,
 		"params": paramsJSON,
 	}
+}
+
+func notificationProbe(t *testing.T, params any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	return raw
+}
+
+func tokenUsageNotificationProbe(t *testing.T, threadID, turnID string, totalTokens int) json.RawMessage {
+	t.Helper()
+	return notificationProbe(t, map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+		"tokenUsage": map[string]any{
+			"total": map[string]any{},
+			"last": map[string]any{
+				"totalTokens": totalTokens,
+			},
+			"modelContextWindow": 258400,
+		},
+	})
+}
+
+func appServerCurrentTurn(s *appServerSession) string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.currentTurn
+}
+
+func appServerPendingMessages(s *appServerSession) []string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return append([]string(nil), s.pendingMsgs...)
 }
 
 func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
