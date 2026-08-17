@@ -1595,17 +1595,25 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Requires: npm install -g @openai/codex
 # 需要安装：npm install -g @openai/codex
-# Codex uses `codex exec --json` under the hood.
-# Codex 底层使用 `codex exec --json` 命令。
+# Codex defaults to `codex exec --json`; use the app-server backend below for
+# a persistent process and in-flight text steering.
+# Codex 默认使用 `codex exec --json`；如需常驻进程和执行中补充文本，请使用下方
+# app-server 后端。
 
 # [[projects]]
 # name = "my-codex-project"
+# agent_session_idle_timeout_mins = 60  # Close the live process after 1h idle, while preserving the resumable session ID
+#                                       # 空闲 1 小时后关闭 live 进程，但保留可恢复的会话 ID
+# busy_message_mode = "steer"           # Append plain-text follow-ups to the active turn; default is "queue"
+#                                       # 将纯文本补充追加到当前回合；默认值为 "queue"
 #
 # [projects.agent]
 # type = "codex"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
+# backend = "app_server"
+# app_server_url = "stdio"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:
