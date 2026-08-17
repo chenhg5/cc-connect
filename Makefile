@@ -3,7 +3,7 @@ MODULE     := github.com/timmyagentic/cc-connect-next
 CMD        := ./cmd/cc-connect
 DIST       := dist
 
-VERSION := v0.1.0
+VERSION := v0.1.1-beta.1
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 

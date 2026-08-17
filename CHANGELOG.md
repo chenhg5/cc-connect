@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.1-beta.1 (2026-08-18)
+
+First beta after the v0.1.0 stable release, built from the latest `main`.
+This beta carries the unified stable-only updater and the recent Feishu card
+and Codex usage-limit fixes. Install it explicitly from the beta channel;
+`cc-connect-next update` remains stable-only.
+
+See `changelogs/v0.1.1-beta.1.md` for the bilingual release notes.
+
 ## v0.1.0 (2026-08-17)
 
 First stable release. Code-identical to `v0.1.0-beta.3`: this tag promotes the
