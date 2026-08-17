@@ -38,6 +38,14 @@ npm install -g cc-connect-next@beta
 
 The npm package and GitHub release use the same version. The installer fetches that release's `checksums.txt`, selects the exact platform archive, verifies SHA-256, and only then extracts and atomically replaces the binary.
 
+### Update
+
+```bash
+cc-connect-next update
+```
+
+The command installs stable releases only and detects the installation method automatically. For npm installs it updates the same global prefix to the exact stable package version; for standalone binaries it downloads the matching GitHub Release archive, verifies it against `checksums.txt`, and then replaces the executable. Use `npm install -g cc-connect-next@beta` explicitly when you want the prerelease channel.
+
 ### Build the current source
 
 ```bash

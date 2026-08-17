@@ -4,13 +4,17 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -20,7 +24,6 @@ import (
 const (
 	githubRepo   = "timmyagentic/cc-connect-next"
 	githubAPI    = "https://api.github.com/repos/" + githubRepo + "/releases/latest"
-	githubAllAPI = "https://api.github.com/repos/" + githubRepo + "/releases"
 	downloadBase = "https://github.com/" + githubRepo + "/releases/download"
 )
 
@@ -39,6 +42,25 @@ type githubRelease struct {
 	HTMLURL    string `json:"html_url"`
 	Prerelease bool   `json:"prerelease"`
 }
+
+type updateInstallKind string
+
+const (
+	updateInstallStandalone updateInstallKind = "standalone"
+	updateInstallNPM        updateInstallKind = "npm"
+)
+
+type updateInstallation struct {
+	Kind           updateInstallKind
+	ExecutablePath string
+	PackageDir     string
+	NPMPrefix      string
+}
+
+type commandRunner func(name string, args ...string) error
+type installedVersionVerifier func(path, tag string) error
+
+var stableReleaseTagPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 
 // fetchLatestStableReleaseAsync asynchronously fetches the latest stable
 // release from the cc-connect-next GitHub repository.
@@ -90,124 +112,66 @@ func getUpdateHintIfAvailable() string {
 }
 
 func runUpdate() {
-	pre := false
-	for _, arg := range os.Args[2:] {
-		if arg == "--pre" || arg == "--beta" {
-			pre = true
-		}
+	if len(os.Args) == 3 && (os.Args[2] == "--help" || os.Args[2] == "-h") {
+		fmt.Println("Usage: cc-connect-next update\n\nUpdates to the latest stable release. The installation method is detected automatically.")
+		return
+	}
+	if err := runStableUpdate(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runStableUpdate(args []string) error {
+	if err := validateStableUpdateArgs(args); err != nil {
+		return err
 	}
 
 	fmt.Printf("cc-connect-next %s\n", version)
-	if pre {
-		fmt.Println("Checking for updates (including pre-releases)...")
-	} else {
-		fmt.Println("Checking for updates...")
-	}
+	fmt.Println("Checking for stable updates...")
 
-	release, err := fetchRelease(pre)
+	release, err := fetchLatestStableRelease()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error checking updates: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("check stable release: %w", err)
+	}
+	if err := validateStableRelease(release); err != nil {
+		return err
 	}
 
 	latest := release.TagName
 	if !isNewer(latest, version) {
 		fmt.Printf("Already up to date (%s >= %s).\n", version, latest)
-		return
+		return nil
 	}
-
-	label := latest
-	if release.Prerelease {
-		label += " (pre-release)"
-	}
-	fmt.Printf("New version available: %s → %s\n", version, label)
-
-	// Try archive format first (tar.gz/zip), then bare binary as fallback
-	archiveAsset := archiveAssetName(latest)
-	archiveURL := fmt.Sprintf("%s/%s/%s", downloadBase, latest, archiveAsset)
-
-	fmt.Printf("Downloading %s ...\n", archiveURL)
-
-	tmpFile, err := downloadToTemp(archiveURL)
-	needExtract := err == nil
-
-	if err != nil {
-		// Fallback: try bare binary format (older releases)
-		binaryAsset := binaryAssetName(latest)
-		binaryURL := fmt.Sprintf("%s/%s/%s", downloadBase, latest, binaryAsset)
-		fmt.Printf("Archive not found, trying bare binary %s ...\n", binaryURL)
-
-		tmpFile, err = downloadToTemp(binaryURL)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	if needExtract {
-		// Downloaded an archive - extract binary
-		extracted, extractErr := extractBinaryFromArchive(tmpFile, archiveAsset)
-		os.Remove(tmpFile) // clean up archive
-		if extractErr != nil {
-			fmt.Fprintf(os.Stderr, "Extract failed: %v\n", extractErr)
-			os.Exit(1)
-		}
-		tmpFile = extracted
-	}
-	defer os.Remove(tmpFile)
 
 	execPath, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot locate current binary: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("locate current binary: %w", err)
+	}
+	installation, err := detectUpdateInstallation(execPath)
+	if err != nil {
+		return err
 	}
 
-	if err := replaceExecutable(execPath, tmpFile); err != nil {
-		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
-		os.Exit(1)
+	fmt.Printf("New stable version available: %s → %s\n", version, latest)
+	switch installation.Kind {
+	case updateInstallNPM:
+		fmt.Printf("Detected npm installation at %s.\n", installation.PackageDir)
+		if err := updateNPMInstallation(installation, latest, runExternalCommand, verifyInstalledVersion); err != nil {
+			return err
+		}
+	case updateInstallStandalone:
+		fmt.Printf("Detected standalone binary at %s.\n", installation.ExecutablePath)
+		if err := updateStandaloneInstallation(installation, latest); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported installation method %q", installation.Kind)
 	}
-
-	syncNpmPackageVersion(execPath, strings.TrimPrefix(latest, "v"))
 
 	fmt.Printf("Updated to %s\n", latest)
 	fmt.Println("Restart cc-connect-next to use the new version.")
-}
-
-// fetchRelease returns the latest release. If pre=true, includes pre-releases.
-func fetchRelease(pre bool) (*githubRelease, error) {
-	if pre {
-		return fetchLatestPreRelease()
-	}
-	return fetchLatestStableRelease()
-}
-
-// fetchLatestPreRelease fetches the newest release (including pre-releases) from GitHub.
-func fetchLatestPreRelease() (*githubRelease, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, _ := http.NewRequest("GET", githubAllAPI+"?per_page=10", nil)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
-	}
-
-	var releases []githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return nil, fmt.Errorf("parse releases: %w", err)
-	}
-
-	if len(releases) == 0 {
-		return nil, fmt.Errorf("no releases found")
-	}
-
-	// Return the first (newest) release, which may be a pre-release
-	return &releases[0], nil
+	return nil
 }
 
 // fetchLatestStableRelease fetches the latest stable release (no pre-releases).
@@ -252,14 +216,209 @@ func fetchLatestStableRelease() (*githubRelease, error) {
 	return &githubRelease{TagName: parts[1], HTMLURL: loc}, nil
 }
 
-func binaryAssetName(tag string) string {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
-	name := fmt.Sprintf("cc-connect-next-%s-%s-%s", tag, goos, goarch)
-	if goos == "windows" {
-		name += ".exe"
+func validateStableUpdateArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
 	}
-	return name
+	for _, arg := range args {
+		if arg == "--pre" || arg == "--beta" {
+			return fmt.Errorf("cc-connect-next update installs stable releases only; use npm install -g cc-connect-next@beta to opt into prereleases")
+		}
+	}
+	return fmt.Errorf("unknown update option %q; cc-connect-next update accepts no options and installs the latest stable release", args[0])
+}
+
+func validateStableRelease(release *githubRelease) error {
+	if release == nil {
+		return fmt.Errorf("stable release response was empty")
+	}
+	tag := strings.TrimSpace(release.TagName)
+	if release.Prerelease || !stableReleaseTagPattern.MatchString(tag) {
+		return fmt.Errorf("refusing non-stable release %q", release.TagName)
+	}
+	return nil
+}
+
+func detectUpdateInstallation(execPath string) (updateInstallation, error) {
+	if strings.TrimSpace(execPath) == "" {
+		return updateInstallation{}, fmt.Errorf("current executable path is empty")
+	}
+
+	resolvedPath := execPath
+	if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
+		resolvedPath = resolved
+	}
+	installation := updateInstallation{
+		Kind:           updateInstallStandalone,
+		ExecutablePath: resolvedPath,
+	}
+
+	binDir := filepath.Dir(resolvedPath)
+	if filepath.Base(binDir) != "bin" {
+		return installation, nil
+	}
+	packageDir := filepath.Dir(binDir)
+	packageJSONPath := filepath.Join(packageDir, "package.json")
+	data, err := os.ReadFile(packageJSONPath)
+	if os.IsNotExist(err) {
+		return installation, nil
+	}
+	if err != nil {
+		return updateInstallation{}, fmt.Errorf("inspect possible npm installation: %w", err)
+	}
+
+	var metadata struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return updateInstallation{}, fmt.Errorf("parse %s: %w", packageJSONPath, err)
+	}
+	if metadata.Name != "cc-connect-next" {
+		return installation, nil
+	}
+
+	nodeModulesDir := filepath.Dir(packageDir)
+	if filepath.Base(nodeModulesDir) != "node_modules" {
+		return updateInstallation{}, fmt.Errorf("npm package %s is not directly inside node_modules", packageDir)
+	}
+	prefixParent := filepath.Dir(nodeModulesDir)
+	npmPrefix := prefixParent
+	if filepath.Base(prefixParent) == "lib" {
+		npmPrefix = filepath.Dir(prefixParent)
+	}
+
+	installation.Kind = updateInstallNPM
+	installation.PackageDir = packageDir
+	installation.NPMPrefix = npmPrefix
+	return installation, nil
+}
+
+func npmExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "npm.cmd"
+	}
+	return "npm"
+}
+
+func runExternalCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func updateNPMInstallation(installation updateInstallation, tag string, runner commandRunner, verifyVersion installedVersionVerifier) error {
+	if installation.Kind != updateInstallNPM || installation.PackageDir == "" || installation.NPMPrefix == "" {
+		return fmt.Errorf("invalid npm installation metadata")
+	}
+	if !stableReleaseTagPattern.MatchString(tag) {
+		return fmt.Errorf("refusing non-stable npm version %q", tag)
+	}
+	if runner == nil {
+		return fmt.Errorf("npm command runner is unavailable")
+	}
+	if verifyVersion == nil {
+		return fmt.Errorf("installed version verifier is unavailable")
+	}
+
+	stableVersion := strings.TrimPrefix(tag, "v")
+	packageSpec := "cc-connect-next@" + stableVersion
+	fmt.Printf("Updating npm package to %s...\n", packageSpec)
+	if err := runner(npmExecutableName(), "install", "--global", "--prefix", installation.NPMPrefix, packageSpec); err != nil {
+		return fmt.Errorf("npm install %s: %w", packageSpec, err)
+	}
+
+	packageJSONPath := filepath.Join(installation.PackageDir, "package.json")
+	data, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		return fmt.Errorf("verify updated npm package: %w", err)
+	}
+	var metadata struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return fmt.Errorf("verify updated npm package metadata: %w", err)
+	}
+	if metadata.Name != "cc-connect-next" || strings.TrimPrefix(metadata.Version, "v") != stableVersion {
+		return fmt.Errorf("npm package metadata did not update to %s", stableVersion)
+	}
+	if err := verifyVersion(installation.ExecutablePath, tag); err != nil {
+		return fmt.Errorf("verify updated npm binary: %w", err)
+	}
+	return nil
+}
+
+func updateStandaloneInstallation(installation updateInstallation, tag string) error {
+	if installation.Kind != updateInstallStandalone || installation.ExecutablePath == "" {
+		return fmt.Errorf("invalid standalone installation metadata")
+	}
+	if !stableReleaseTagPattern.MatchString(tag) {
+		return fmt.Errorf("refusing non-stable standalone version %q", tag)
+	}
+
+	archiveAsset := archiveAssetName(tag)
+	checksumsURL := fmt.Sprintf("%s/%s/checksums.txt", downloadBase, tag)
+	manifest, err := downloadSmallFile(checksumsURL, 1024*1024)
+	if err != nil {
+		return fmt.Errorf("download checksums.txt: %w", err)
+	}
+	expectedChecksum, err := parseReleaseChecksum(string(manifest), archiveAsset)
+	if err != nil {
+		return err
+	}
+
+	archiveURL := fmt.Sprintf("%s/%s/%s", downloadBase, tag, archiveAsset)
+	fmt.Printf("Downloading %s ...\n", archiveURL)
+	archivePath, err := downloadToTemp(archiveURL)
+	if err != nil {
+		return fmt.Errorf("download release archive: %w", err)
+	}
+	defer os.Remove(archivePath)
+
+	if err := verifyReleaseChecksum(archivePath, expectedChecksum); err != nil {
+		return err
+	}
+	fmt.Printf("Verified SHA-256 for %s\n", archiveAsset)
+
+	extractedPath, err := extractBinaryFromArchive(archivePath, archiveAsset)
+	if err != nil {
+		return fmt.Errorf("extract release archive: %w", err)
+	}
+	defer os.Remove(extractedPath)
+
+	verifyVersion := func(path string) error {
+		return verifyInstalledVersion(path, tag)
+	}
+	if err := replaceExecutable(installation.ExecutablePath, extractedPath, verifyVersion); err != nil {
+		return fmt.Errorf("replace standalone binary: %w", err)
+	}
+	return nil
+}
+
+func verifyInstalledVersion(path, tag string) error {
+	if path == "" {
+		return fmt.Errorf("updated binary path is empty")
+	}
+	cmd := exec.Command(path, "--version")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("run updated binary: %w", err)
+	}
+	if !versionOutputMatches(string(output), tag) {
+		return fmt.Errorf("updated binary does not report %s", tag)
+	}
+	return nil
+}
+
+func versionOutputMatches(output, tag string) bool {
+	expectedTag := strings.TrimSpace(tag)
+	if !strings.HasPrefix(expectedTag, "v") {
+		expectedTag = "v" + expectedTag
+	}
+	firstLine, _, _ := strings.Cut(strings.TrimSpace(output), "\n")
+	return strings.TrimSpace(firstLine) == "cc-connect-next "+expectedTag
 }
 
 func archiveAssetName(tag string) string {
@@ -355,6 +514,87 @@ func extractFromZip(archivePath string) (string, error) {
 	return "", fmt.Errorf("binary not found in archive")
 }
 
+func downloadSmallFile(url string, maxBytes int64) ([]byte, error) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "cc-connect-next-updater")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("download exceeded %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
+func parseReleaseChecksum(manifest, asset string) (string, error) {
+	var checksum string
+	for _, line := range strings.Split(manifest, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != asset {
+			continue
+		}
+		if checksum != "" {
+			return "", fmt.Errorf("checksums.txt contains more than one entry for %s", asset)
+		}
+		candidate := strings.ToLower(fields[0])
+		decoded, err := hex.DecodeString(candidate)
+		if err != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("checksums.txt contains an invalid SHA-256 for %s", asset)
+		}
+		checksum = candidate
+	}
+	if checksum == "" {
+		return "", fmt.Errorf("checksums.txt does not contain %s", asset)
+	}
+	return checksum, nil
+}
+
+func verifyReleaseChecksum(path, expected string) error {
+	normalizedExpected := strings.ToLower(strings.TrimSpace(expected))
+	decoded, err := hex.DecodeString(normalizedExpected)
+	if err != nil || len(decoded) != sha256.Size {
+		return fmt.Errorf("invalid expected SHA-256")
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open downloaded archive: %w", err)
+	}
+	defer f.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return fmt.Errorf("hash downloaded archive: %w", err)
+	}
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if actual != normalizedExpected {
+		return fmt.Errorf("checksum mismatch for downloaded release archive; refusing to install")
+	}
+	return nil
+}
+
 func downloadToTemp(url string) (string, error) {
 	client := &http.Client{
 		Timeout: 5 * time.Minute,
@@ -366,7 +606,12 @@ func downloadToTemp(url string) (string, error) {
 		},
 	}
 
-	resp, err := client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "cc-connect-next-updater")
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
@@ -393,7 +638,7 @@ func downloadToTemp(url string) (string, error) {
 	return tmp.Name(), nil
 }
 
-func replaceExecutable(target, src string) error {
+func replaceExecutable(target, src string, verify func(path string) error) error {
 	if err := os.Chmod(src, 0o755); err != nil {
 		return fmt.Errorf("chmod: %w", err)
 	}
@@ -401,25 +646,49 @@ func replaceExecutable(target, src string) error {
 	// On Windows, rename over a running exe is not possible directly.
 	// Move old binary aside, then move new one in.
 	backup := target + ".old"
-	os.Remove(backup)
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove previous backup: %w", err)
+	}
 
 	if err := os.Rename(target, backup); err != nil {
 		return fmt.Errorf("backup old binary: %w", err)
 	}
 
 	if err := copyFile(src, target); err != nil {
-		// Attempt to restore
-		if restoreErr := os.Rename(backup, target); restoreErr != nil {
+		if restoreErr := restoreExecutable(target, backup); restoreErr != nil {
 			slog.Warn("update: failed to restore old binary after copy error", "error", restoreErr)
 		}
 		return fmt.Errorf("install new binary: %w", err)
 	}
 
 	if err := os.Chmod(target, 0o755); err != nil {
+		if restoreErr := restoreExecutable(target, backup); restoreErr != nil {
+			slog.Warn("update: failed to restore old binary after chmod error", "error", restoreErr)
+		}
 		return fmt.Errorf("chmod new binary: %w", err)
 	}
+	if verify != nil {
+		if err := verify(target); err != nil {
+			if restoreErr := restoreExecutable(target, backup); restoreErr != nil {
+				slog.Warn("update: failed to restore old binary after verification error", "error", restoreErr)
+			}
+			return fmt.Errorf("verify new binary: %w", err)
+		}
+	}
 
-	os.Remove(backup)
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		slog.Warn("update: failed to remove old binary backup", "path", backup, "error", err)
+	}
+	return nil
+}
+
+func restoreExecutable(target, backup string) error {
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove failed update: %w", err)
+	}
+	if err := os.Rename(backup, target); err != nil {
+		return fmt.Errorf("restore backup: %w", err)
+	}
 	return nil
 }
 
@@ -443,23 +712,15 @@ func copyFile(src, dst string) error {
 }
 
 func checkUpdate() {
-	pre := false
-	for _, arg := range os.Args[2:] {
-		if arg == "--pre" || arg == "--beta" {
-			pre = true
-		}
-	}
-
-	release, err := fetchRelease(pre)
+	release, err := fetchLatestStableRelease()
 	if err != nil {
 		return
 	}
+	if err := validateStableRelease(release); err != nil {
+		return
+	}
 	if isNewer(release.TagName, version) {
-		hint := "cc-connect-next update"
-		if release.Prerelease {
-			hint = "cc-connect-next update --pre"
-		}
-		fmt.Fprintf(os.Stderr, "Update available: %s → %s (run: %s)\n", version, release.TagName, hint)
+		fmt.Fprintf(os.Stderr, "Stable update available: %s → %s (run: cc-connect-next update)\n", version, release.TagName)
 	}
 }
 
@@ -558,55 +819,4 @@ func comparePreRelease(a, b string) int {
 		}
 	}
 	return 0
-}
-
-// syncNpmPackageVersion detects if the binary lives inside an npm package
-// (node_modules/cc-connect-next/bin/) and updates the package.json version to
-// match the newly installed binary. Without this, the npm wrapper's run.js
-// would see a version mismatch and re-download the old version on next run.
-func syncNpmPackageVersion(execPath, newVer string) {
-	binDir := filepath.Dir(execPath)
-	if filepath.Base(binDir) != "bin" {
-		return
-	}
-	pkgDir := filepath.Dir(binDir)
-	pkgJSON := filepath.Join(pkgDir, "package.json")
-
-	data, err := os.ReadFile(pkgJSON)
-	if err != nil {
-		return
-	}
-
-	var pkg map[string]any
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return
-	}
-
-	name, _ := pkg["name"].(string)
-	if name != "cc-connect-next" {
-		return
-	}
-
-	oldVer, _ := pkg["version"].(string)
-	// Normalize both sides by stripping optional "v" prefix before comparing.
-	// package.json may store "v1.0.0" while newVer is already stripped to "1.0.0".
-	oldNorm := strings.TrimPrefix(oldVer, "v")
-	newNorm := strings.TrimPrefix(newVer, "v")
-	if oldNorm == newNorm {
-		return
-	}
-
-	pkg["version"] = newVer
-	out, err := json.MarshalIndent(pkg, "", "  ")
-	if err != nil {
-		return
-	}
-	out = append(out, '\n')
-	if err := os.WriteFile(pkgJSON, out, 0o644); err != nil {
-		slog.Warn("update: failed to sync npm package.json version", "error", err)
-		fmt.Println("⚠️  Note: npm package version not synced. If the next run re-downloads an old version,")
-		fmt.Println("   please run: npm update -g cc-connect-next")
-	} else {
-		slog.Debug("update: synced npm package.json version", "old", oldVer, "new", newVer)
-	}
 }

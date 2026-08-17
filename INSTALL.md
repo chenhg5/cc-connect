@@ -30,6 +30,20 @@ cc-connect-next --version
 
 The npm installer downloads the same-version native asset from the GitHub release. Supported targets are macOS, Linux, and Windows on amd64 or arm64.
 
+### Update a published installation
+
+```bash
+cc-connect-next update
+```
+
+`update` follows the stable channel only. It detects whether the running binary belongs to a global npm package or is a standalone executable. npm installs are updated in their existing global prefix to the exact stable version; standalone installs verify the release archive against `checksums.txt` before replacing the binary. Restart a running daemon after the command completes:
+
+```bash
+cc-connect-next daemon restart
+```
+
+Prerelease updates remain explicit through `npm install -g cc-connect-next@beta`; `cc-connect-next update --pre` and `--beta` are intentionally rejected.
+
 ### Current source
 
 When testing an unreleased commit, use Go 1.25+, Node.js 20+, and Git:

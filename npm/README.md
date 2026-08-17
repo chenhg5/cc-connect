@@ -6,13 +6,25 @@ Chat with your AI dev assistant from anywhere.
 
 ## Install
 
-Install the public beta channel:
+Install the stable channel:
+
+```bash
+npm install -g cc-connect-next
+```
+
+Opt into the public beta channel explicitly:
 
 ```bash
 npm install -g cc-connect-next@beta
 ```
 
 The installer verifies the matching GitHub Release archive against `checksums.txt` before extraction.
+
+Update an existing npm or standalone installation to the latest stable release:
+
+```bash
+cc-connect-next update
+```
 
 ## Usage
 

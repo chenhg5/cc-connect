@@ -1629,7 +1629,7 @@ Commands:
                      (--config <path>, --project <name>)
     user-isolation   Audit run_as_user projects and emit an isolation report
 
-  update             Check for updates and upgrade the binary (--pre for beta)
+  update             Update the current npm or standalone install to latest stable
   migrate            Copy official CC Connect config/state into ~/.cc-connect-next
   check-update       Check if a newer version is available
   config-example     (deprecated: use 'config example' instead)
@@ -1644,7 +1644,7 @@ Examples:
   cc-connect-next feishu setup             Setup Feishu/Lark bot credentials
   cc-connect-next doctor                   Diagnose the configured setup
   cc-connect-next weixin setup             Setup Weixin (ilink) with QR or --token
-  cc-connect-next update                   Update to the latest version
+  cc-connect-next update                   Update to the latest stable version
   cc-connect-next migrate --dry-run        Preview migration from official CC Connect
   cc-connect-next config format            Format the config file
   cc-connect-next config example > c.toml  Save example config to a file
