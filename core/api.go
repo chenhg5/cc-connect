@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/exec", s.handleCronExec)
 	s.mux.HandleFunc("/cron/run", s.handleCronExec)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
+	s.mux.HandleFunc("/relay/send-async", s.handleRelaySendAsync)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
 
@@ -767,13 +769,9 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req RelayRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.To == "" || req.Message == "" || req.SessionKey == "" {
-		http.Error(w, "to, session_key, and message are required", http.StatusBadRequest)
+	req, err := decodeRelayRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -784,6 +782,46 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiJSON(w, http.StatusOK, resp)
+}
+
+// handleRelaySendAsync accepts a relay request and executes it after returning.
+// The request context cannot be reused because clients may disconnect as soon
+// as the job is accepted.
+func (s *APIServer) handleRelaySendAsync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.relay == nil {
+		http.Error(w, "relay not available", http.StatusServiceUnavailable)
+		return
+	}
+	req, err := decodeRelayRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	jobID := fmt.Sprintf("relay-%d", time.Now().UnixNano())
+	go func() {
+		if _, err := s.relay.Send(context.Background(), req); err != nil {
+			slog.Error("relay: async job failed", "job", jobID, "error", err)
+			return
+		}
+		slog.Info("relay: async job completed", "job", jobID)
+	}()
+	apiJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "job": jobID})
+}
+
+func decodeRelayRequest(r *http.Request) (RelayRequest, error) {
+	var req RelayRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return req, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if req.To == "" || req.Message == "" || req.SessionKey == "" {
+		return req, fmt.Errorf("to, session_key, and message are required")
+	}
+	return req, nil
 }
 
 func (s *APIServer) handleRelayBind(w http.ResponseWriter, r *http.Request) {
