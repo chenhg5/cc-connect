@@ -2379,6 +2379,45 @@ func TestProcessInteractiveEvents_RichCardErrorStaysOnCardAndHidesDetails(t *tes
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardUsageLimitUsesDedicatedCopy(t *testing.T) {
+	p := &stubRichCardSilentPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", CardMode: "rich"})
+	sessionKey := "feishu:user-rich-usage-limit"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-usage-limit")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-usage-limit",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	privateError := "You've reached your usage limit at /Users/example/project"
+	agentSession.events <- Event{Type: EventError, Error: WrapUsageLimit(errors.New(privateError))}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-usage-limit", time.Now(), nil, nil, state.replyCtx)
+
+	starts, streams, updates, deletes := p.snapshot()
+	if len(starts) != 1 || len(updates) == 0 || deletes != 0 {
+		t.Fatalf("usage-limit card lifecycle = starts %d, streams %d, updates %d, deletes %d; want one start and in-place update", len(starts), len(streams), len(updates), deletes)
+	}
+	rendered := strings.Join(append(append(starts, streams...), updates...), "\n")
+	copy := NewI18n(LangEnglish).RichCardCopy()
+	for _, want := range []string{
+		"The token usage limit has been reached",
+		"Please try again after your allowance resets",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("usage-limit card missing %q: %q", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, copy.ErrorBody) || strings.Contains(rendered, privateError) {
+		t.Fatalf("usage-limit card used generic or private error copy: %q", rendered)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardPreservesReplyContextTransforms(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -1126,6 +1126,10 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			if notif.Turn.Error != nil && strings.TrimSpace(notif.Turn.Error.Message) != "" {
+				s.failTurn(classifyCodexError(fmt.Errorf("%s", notif.Turn.Error.Message)))
+				return
+			}
 			s.completeTurn()
 		}
 
@@ -1156,7 +1160,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "error":
 		var notif errorNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && strings.TrimSpace(notif.Message) != "" {
-			s.emitError(fmt.Errorf("%s", notif.Message))
+			s.emitError(classifyCodexError(fmt.Errorf("%s", notif.Message)))
 		}
 	}
 }
@@ -1520,6 +1524,14 @@ func (s *appServerSession) completeTurn() {
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 
+func (s *appServerSession) failTurn(err error) {
+	s.stateMu.Lock()
+	s.currentTurn = ""
+	s.pendingMsgs = nil
+	s.stateMu.Unlock()
+	s.emitError(err)
+}
+
 func (s *appServerSession) flushPendingAsThinking() {
 	s.stateMu.Lock()
 	msgs := append([]string(nil), s.pendingMsgs...)
@@ -1616,7 +1628,7 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return classifyCodexError(fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message)))
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {
