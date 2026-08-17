@@ -420,10 +420,23 @@ type CronScheduler struct {
 	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
+// cronWallClockResyncInterval bounds how long robfig/cron can wait on one
+// monotonic timer. On macOS the monotonic clock stops while the machine is
+// asleep, so a timer created for a weekday job before a long sleep can drift by
+// the full sleep duration. This internal entry wakes the scheduler regularly;
+// the scheduler then compares every job's Next value with the current wall
+// clock and runs an overdue job at most once.
+const cronWallClockResyncInterval = time.Minute
+
 func NewCronScheduler(store *CronStore) *CronScheduler {
+	c := cron.New()
+	// Keep this entry internal: it must not be persisted or exposed in the job
+	// ID map. Its empty callback only bounds the scheduler's timer duration.
+	c.Schedule(cron.Every(cronWallClockResyncInterval), cron.FuncJob(func() {}))
+
 	return &CronScheduler{
 		store:   store,
-		cron:    cron.New(),
+		cron:    c,
 		engines: make(map[string]*Engine),
 		entries: make(map[string]cron.EntryID),
 	}
@@ -470,6 +483,7 @@ func (cs *CronScheduler) Start() error {
 		}
 	}
 	cs.cron.Start()
+	slog.Info("cron: wall-clock resync enabled", "interval", cronWallClockResyncInterval)
 	slog.Info("cron: scheduler started", "jobs", len(jobs))
 	return nil
 }

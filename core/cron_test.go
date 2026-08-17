@@ -63,6 +63,35 @@ func TestCronStore_MuteToggle(t *testing.T) {
 	}
 }
 
+func TestCronScheduler_WallClockResyncBoundsWait(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scheduler := NewCronScheduler(store)
+	if err := scheduler.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(scheduler.Stop)
+
+	entries := scheduler.cron.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("internal cron entries = %d, want 1 wall-clock resync entry", len(entries))
+	}
+	if len(scheduler.entries) != 0 {
+		t.Fatalf("persisted entry map contains %d internal entries, want 0", len(scheduler.entries))
+	}
+
+	next := entries[0].Next
+	if next.IsZero() {
+		t.Fatal("wall-clock resync entry has zero next run")
+	}
+	if max := time.Now().Add(cronWallClockResyncInterval + time.Second); next.After(max) {
+		t.Fatalf("wall-clock resync next run = %v, want no later than %v", next, max)
+	}
+}
+
 func TestCronStore_MutePersistence(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
