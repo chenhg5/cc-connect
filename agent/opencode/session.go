@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,9 +21,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// opencodeSession manages multi-turn conversations with the OpenCode CLI.
-// Each Send() launches a new `opencode run --format json` process
-// with --session for conversation continuity.
+// opencodeSession manages multi-turn conversations with OpenCode.
 type opencodeSession struct {
 	cmd               string
 	extraArgs         []string // extra args from cmd, prepended before opencode args
@@ -39,6 +38,17 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	httpClient        *http.Client
+	connectionURL     string
+	username          string
+	password          string
+	pendingMu         sync.Mutex
+	pendingQuestions  map[string][]core.UserQuestion
+	httpPartMu        sync.Mutex
+	httpPartText      map[string]string
+	httpAssistantMsg  map[string]struct{}
+	agentErrMu        sync.Mutex
+	agentErr          error
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -80,6 +90,9 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	if s.httpClient != nil {
+		return s.sendHTTP(prompt, imagePaths)
+	}
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -416,12 +429,35 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+	err := fmt.Errorf("%s", errMsg)
+	s.rememberAgentError(err)
+	evt := core.Event{Type: core.EventError, Error: err}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 		return
 	}
+}
+
+func (s *opencodeSession) rememberAgentError(err error) {
+	if err == nil {
+		return
+	}
+	s.agentErrMu.Lock()
+	s.agentErr = err
+	s.agentErrMu.Unlock()
+}
+
+func (s *opencodeSession) clearAgentError() {
+	s.agentErrMu.Lock()
+	s.agentErr = nil
+	s.agentErrMu.Unlock()
+}
+
+func (s *opencodeSession) currentAgentError() error {
+	s.agentErrMu.Lock()
+	defer s.agentErrMu.Unlock()
+	return s.agentErr
 }
 
 // extractErrorMessage tries to pull a human-readable message from various
@@ -487,7 +523,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
+	if reason == "stop" && s.httpClient == nil {
 		s.sendEventResult()
 	}
 }
@@ -506,8 +542,11 @@ func (s *opencodeSession) sendEventResult() {
 	}
 }
 
-// RespondPermission is a no-op — OpenCode handles permissions internally.
-func (s *opencodeSession) RespondPermission(_ string, _ core.PermissionResult) error {
+// RespondPermission is handled over HTTP in persistent-server mode.
+func (s *opencodeSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	if s.httpClient != nil {
+		return s.respondHTTPPermission(requestID, result)
+	}
 	return nil
 }
 
