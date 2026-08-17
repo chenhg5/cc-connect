@@ -3944,6 +3944,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
 		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
 	sessions := NewSessionManager(sessionFile)
+	sessions.InvalidateForAgent(agent.Name())
 
 	ws.agent = agent
 	ws.sessions = sessions
