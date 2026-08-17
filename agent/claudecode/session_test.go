@@ -221,6 +221,126 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 	}
 }
 
+// TestHandleResultUsesReportedContextWindow verifies that the CLI-reported
+// contextWindow in the result event's modelUsage map wins over the model-id
+// heuristic. claude-opus-5 has a native 1M window but no "[1m]" suffix in its
+// id, so the heuristic alone would report 200k and inflate ctx % 5x.
+func TestHandleResultUsesReportedContextWindow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+	cs.activeModel.Store("claude-opus-5") // native 1M, no "[1m]" suffix
+
+	assistant := map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"content": []any{},
+			"usage": map[string]any{
+				"input_tokens":                float64(2),
+				"output_tokens":               float64(1),
+				"cache_creation_input_tokens": float64(19_800),
+				"cache_read_input_tokens":     float64(16_700),
+			},
+		},
+	}
+
+	cs.handleAssistant(assistant)
+	if usage := cs.GetContextUsage(); usage.ContextWindow != 200_000 {
+		t.Fatalf("pre-result ContextWindow = %d, want 200_000 (heuristic fallback)", usage.ContextWindow)
+	}
+
+	cs.handleResult(map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "test-session",
+		"usage": map[string]any{
+			"output_tokens": float64(65),
+		},
+		"modelUsage": map[string]any{
+			"claude-opus-5": map[string]any{
+				"contextWindow":  float64(1_000_000),
+				"canonicalModel": "claude-opus-5",
+			},
+		},
+	})
+
+	usage := cs.GetContextUsage()
+	if usage.ContextWindow != 1_000_000 {
+		t.Errorf("ContextWindow = %d, want 1_000_000 (reported by modelUsage)", usage.ContextWindow)
+	}
+	// The turn that reported the window must itself render the right ctx %:
+	// 36.5k of 1M is ~4%, not the 18% a 200k denominator produces.
+	pct := usage.UsedTokens * 100 / usage.ContextWindow
+	if pct != 3 {
+		t.Errorf("ctx %% = %d, want 3 (36.5k of 1M)", pct)
+	}
+
+	// Later assistant events reuse the reported window without waiting for
+	// another result event.
+	cs.handleAssistant(assistant)
+	if usage := cs.GetContextUsage(); usage.ContextWindow != 1_000_000 {
+		t.Errorf("post-result assistant ContextWindow = %d, want 1_000_000 (cached)", usage.ContextWindow)
+	}
+}
+
+func TestParseModelUsageContextWindow(t *testing.T) {
+	entry := func(window float64) map[string]any {
+		return map[string]any{"contextWindow": window}
+	}
+	tests := []struct {
+		name  string
+		raw   map[string]any
+		model string
+		want  int
+	}{
+		{"no modelUsage", map[string]any{"type": "result"}, "claude-opus-5", 0},
+		{"empty modelUsage", map[string]any{"modelUsage": map[string]any{}}, "claude-opus-5", 0},
+		{
+			"active model matches",
+			map[string]any{"modelUsage": map[string]any{
+				"claude-haiku-4-5": entry(200_000),
+				"claude-opus-5":    entry(1_000_000),
+			}},
+			"claude-opus-5",
+			1_000_000,
+		},
+		{
+			"sole entry used when model unknown",
+			map[string]any{"modelUsage": map[string]any{"claude-opus-5": entry(1_000_000)}},
+			"",
+			1_000_000,
+		},
+		{
+			"ambiguous multi-model, no match",
+			map[string]any{"modelUsage": map[string]any{
+				"claude-haiku-4-5": entry(200_000),
+				"claude-opus-5":    entry(1_000_000),
+			}},
+			"claude-sonnet-5",
+			0,
+		},
+		{
+			"zero window ignored",
+			map[string]any{"modelUsage": map[string]any{"claude-opus-5": entry(0)}},
+			"claude-opus-5",
+			0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseModelUsageContextWindow(tt.raw, tt.model); got != tt.want {
+				t.Errorf("parseModelUsageContextWindow() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleResultNoUsage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
