@@ -4726,8 +4726,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 			case EventError:
 				if event.Error != nil {
-					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					errMsg := event.Error.Error()
+					if isIntentionalTurnCancel(errMsg) {
+						slog.Info("unsolicited agent turn cancelled", "error", errMsg, "session", sessionKey)
+					} else {
+						slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
+						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					}
 				}
 				state.mu.Lock()
 				state.eventsNeedResync = true
@@ -4745,6 +4750,22 @@ type agentErrorHandler struct {
 
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
+}
+
+// isIntentionalTurnCancel reports errors emitted when /stop (or CancelTurn)
+// aborts the current headless turn. Grok and similar agents surface this as
+// EventError("…turn stopped: context canceled"); /stop already replied with
+// MsgExecutionStopped, so we must not also spam the IM user with an error card.
+func isIntentionalTurnCancel(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	// Keep timeouts (deadline exceeded) as real errors.
+	if strings.Contains(errMsg, "deadline exceeded") {
+		return false
+	}
+	return strings.Contains(errMsg, "turn stopped") &&
+		(strings.Contains(errMsg, "context canceled") || strings.Contains(errMsg, "context cancelled"))
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
@@ -6046,21 +6067,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if event.Error != nil {
 				errMsg := event.Error.Error()
-				slog.Error("agent error", "error", event.Error)
-				e.hooks.Emit(HookEvent{
-					Event:      HookEventError,
-					SessionKey: sessionKey,
-					Platform:   p.Name(),
-					Error:      event.Error.Error(),
-				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
+				if isIntentionalTurnCancel(errMsg) {
+					// /stop already notified the user; suppress the noisy error.
+					slog.Info("agent turn cancelled", "error", errMsg, "session_key", sessionKey)
+				} else {
+					slog.Error("agent error", "error", event.Error)
+					e.hooks.Emit(HookEvent{
+						Event:      HookEventError,
+						SessionKey: sessionKey,
+						Platform:   p.Name(),
+						Error:      event.Error.Error(),
+					})
+					userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
+					for _, h := range agentErrorHandlers {
+						if strings.Contains(errMsg, h.contains) {
+							userMsg = e.i18n.T(h.msgKey)
+							break
+						}
 					}
+					e.send(p, replyCtx, userMsg)
 				}
-				e.send(p, replyCtx, userMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
