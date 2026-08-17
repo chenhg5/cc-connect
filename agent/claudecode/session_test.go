@@ -775,3 +775,27 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 }
+
+func TestClaudeContextWindow(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"", 200_000},
+		{"claude-sonnet-5", 200_000},
+		{"claude-opus-4-8", 200_000},
+		{"sonnet[1m]", 1_000_000},
+		{"claude-sonnet-5[1M]", 1_000_000},
+		// Mythos-class models (Fable/Mythos) ship with a native 1M window
+		// and no "[1m]" suffix in their model ids.
+		{"claude-fable-5", 1_000_000},
+		{"claude-mythos-5", 1_000_000},
+		{"Claude-Fable-5", 1_000_000},
+		{"fable", 1_000_000},
+	}
+	for _, tc := range cases {
+		if got := claudeContextWindow(tc.model); got != tc.want {
+			t.Errorf("claudeContextWindow(%q) = %d, want %d", tc.model, got, tc.want)
+		}
+	}
+}
