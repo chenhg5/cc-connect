@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -152,6 +153,12 @@ type appServerSession struct {
 	codexHome      string
 	promptPreamble string
 
+	// requestUserInputTimeout bounds how long the AskUserQuestion approval
+	// waits for a remote user reply. Zero means indefinite (no timer is
+	// created); positive values are used directly. See config option
+	// `request_user_input_timeout_mins` (#1484).
+	requestUserInputTimeout time.Duration
+
 	events chan core.Event
 
 	ctx    context.Context
@@ -189,27 +196,83 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+
+	// defaultAppServerRequestUserInputTimeout is the fallback used when the
+	// user has not configured `request_user_input_timeout_mins`. Matches the
+	// legacy hard-coded 5-minute wait so existing deployments see no change.
+	defaultAppServerRequestUserInputTimeout = 5 * time.Minute
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+// parseRequestUserInputTimeoutMins converts the raw `request_user_input_timeout_mins`
+// config value into a time.Duration for the app-server AskUserQuestion approval wait.
+//
+// Semantics (see issue #1484):
+//   - missing / nil / empty string → defaultAppServerRequestUserInputTimeout (5 min)
+//   - 0 → 0 (caller must NOT create a timer; indefinite wait until user reply or ctx cancel)
+//   - positive integer → that many minutes
+//   - negative or unparseable value → warn and fall back to defaultAppServerRequestUserInputTimeout
+func parseRequestUserInputTimeoutMins(raw any) time.Duration {
+	defaultMins := int(defaultAppServerRequestUserInputTimeout / time.Minute)
+	if raw == nil {
+		return defaultAppServerRequestUserInputTimeout
+	}
+	var mins int
+	parsed := true
+	switch v := raw.(type) {
+	case int:
+		mins = v
+	case int64:
+		mins = int(v)
+	case float64:
+		mins = int(v)
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return defaultAppServerRequestUserInputTimeout
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			slog.Warn("codex: invalid request_user_input_timeout_mins, fallback to default",
+				"value", v, "default_mins", defaultMins)
+			return defaultAppServerRequestUserInputTimeout
+		}
+		mins = n
+	default:
+		parsed = false
+	}
+	if !parsed {
+		slog.Warn("codex: invalid request_user_input_timeout_mins type, fallback to default",
+			"type", fmt.Sprintf("%T", raw), "default_mins", defaultMins)
+		return defaultAppServerRequestUserInputTimeout
+	}
+	if mins < 0 {
+		slog.Warn("codex: negative request_user_input_timeout_mins, fallback to default",
+			"value", mins, "default_mins", defaultMins)
+		return defaultAppServerRequestUserInputTimeout
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, requestUserInputTimeout time.Duration) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		url:              url,
-		workDir:          workDir,
-		model:            model,
-		effort:           effort,
-		mode:             mode,
-		baseURL:          baseURL,
-		modelProvider:    modelProvider,
-		extraEnv:         append([]string(nil), extraEnv...),
-		codexHome:        strings.TrimSpace(codexHome),
-		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:           make(chan core.Event, 128),
-		ctx:              sessionCtx,
-		cancel:           cancel,
-		pending:          make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+		url:                     url,
+		workDir:                 workDir,
+		model:                   model,
+		effort:                  effort,
+		mode:                    mode,
+		baseURL:                 baseURL,
+		modelProvider:           modelProvider,
+		extraEnv:                append([]string(nil), extraEnv...),
+		codexHome:               strings.TrimSpace(codexHome),
+		promptPreamble:          buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		requestUserInputTimeout: requestUserInputTimeout,
+		events:                  make(chan core.Event, 128),
+		ctx:                     sessionCtx,
+		cancel:                  cancel,
+		pending:                 make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:        make(map[string]chan core.PermissionResult),
+		preambleSent:            resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -733,14 +796,18 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	})
 
 	go func() {
-		timer := time.NewTimer(5 * time.Minute)
-		defer timer.Stop()
+		var timerC <-chan time.Time
+		if s.requestUserInputTimeout > 0 {
+			timer := time.NewTimer(s.requestUserInputTimeout)
+			defer timer.Stop()
+			timerC = timer.C
+		}
 		var result core.PermissionResult
 		select {
 		case result = <-ch:
 		case <-s.ctx.Done():
 			result = core.PermissionResult{Behavior: "deny"}
-		case <-timer.C:
+		case <-timerC:
 			result = core.PermissionResult{Behavior: "deny"}
 		}
 		s.approvalsMu.Lock()
