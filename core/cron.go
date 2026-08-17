@@ -32,7 +32,7 @@ type CronJob struct {
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
-	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
+	SessionMode string    `json:"session_mode,omitempty"` // "" = scheduler default; "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
@@ -71,14 +71,20 @@ func (j *CronJob) UsesNewSessionPerRun() bool {
 	return NormalizeCronSessionMode(j.SessionMode) == "new_per_run"
 }
 
-// NormalizeCronSessionMode maps CLI/API aliases to canonical values ("", "new_per_run").
+// defaultScheduledSessionMode is the built-in default for scheduled cron and
+// timer jobs. It can be overridden globally by scheduler config or per job.
+const defaultScheduledSessionMode = "new_per_run"
+
+// NormalizeCronSessionMode maps CLI/API aliases to canonical values ("", "reuse", "new_per_run").
 // Returns the original string if unrecognized (caller should validate).
 func NormalizeCronSessionMode(s string) string {
 	s = strings.TrimSpace(s)
 	low := strings.ToLower(s)
 	switch low {
-	case "", "reuse":
+	case "":
 		return ""
+	case "reuse":
+		return "reuse"
 	case "new_per_run", "new-per-run":
 		return "new_per_run"
 	default:
@@ -97,7 +103,7 @@ func validateCronJob(j *CronJob) error {
 		return fmt.Errorf("session_key is required")
 	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
-	if mode != "" && mode != "new_per_run" {
+	if mode != "" && mode != "reuse" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
 	}
 	if j.Mode != "" {
@@ -417,15 +423,16 @@ type CronScheduler struct {
 	mu                 sync.RWMutex
 	entries            map[string]cron.EntryID // job ID → cron entry
 	defaultSilent      bool                    // global default for suppressing cron start notifications
-	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	defaultSessionMode string                  // global default session mode; "reuse" = share active session, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
 	return &CronScheduler{
-		store:   store,
-		cron:    cron.New(),
-		engines: make(map[string]*Engine),
-		entries: make(map[string]cron.EntryID),
+		store:              store,
+		cron:               cron.New(),
+		engines:            make(map[string]*Engine),
+		entries:            make(map[string]cron.EntryID),
+		defaultSessionMode: defaultScheduledSessionMode,
 	}
 }
 
@@ -563,7 +570,7 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 	if field == "session_mode" {
 		if v, ok := value.(string); ok && v != "" {
 			mode := NormalizeCronSessionMode(v)
-			if mode != "" && mode != "new_per_run" {
+			if mode != "" && mode != "reuse" && mode != "new_per_run" {
 				return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", v)
 			}
 		}
@@ -731,7 +738,6 @@ type mutePlatform struct {
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
-
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
