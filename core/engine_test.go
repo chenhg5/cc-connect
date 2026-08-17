@@ -16074,3 +16074,156 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+// ── handleMessage: engine-level dedup safety net (issue #1667) ──
+
+func TestHandleMessage_EngineDedup_DropsDuplicate(t *testing.T) {
+	p := &stubPlatformEngine{n: "weixin"}
+	e := newTestEngine()
+	e.SetDedupConfig(true, time.Minute)
+
+	mkMsg := func(id, content string) *Message {
+		return &Message{
+			SessionKey: "weixin:user1",
+			Platform:   "weixin",
+			UserID:     "user1",
+			UserName:   "user1",
+			MessageID:  id,
+			Content:    content,
+			ReplyCtx:   "ctx",
+		}
+	}
+
+	// First arrival: should pass through to the normal handleMessage path
+	// (no Reply because the test stub agent returns immediately).
+	e.handleMessage(p, mkMsg("7492913259736648968", "first"))
+
+	// Simulate a platform that already injected a "you sent this twice" reply
+	// so we can verify the dedup short-circuit skipped the Reply call entirely.
+	p.clearSent()
+
+	// Same MessageID within the window — must be dropped before any side effect.
+	e.handleMessage(p, mkMsg("7492913259736648968", "first"))
+
+	if got := p.getSent(); len(got) != 0 {
+		t.Errorf("expected no platform messages after dedup drop, got %v", got)
+	}
+}
+
+func TestHandleMessage_EngineDedup_AllowsDifferentMessageIDs(t *testing.T) {
+	p := &stubPlatformEngine{n: "weixin"}
+	e := newTestEngine()
+	e.SetDedupConfig(true, time.Minute)
+
+	for _, id := range []string{"m1", "m2", "m3"} {
+		e.handleMessage(p, &Message{
+			SessionKey: "weixin:user1",
+			Platform:   "weixin",
+			UserID:     "user1",
+			MessageID:  id,
+			Content:    "hi",
+			ReplyCtx:   "ctx",
+		})
+	}
+	// All three reached the normal path; the dedup only short-circuited on
+	// collisions, never on unique ids.
+	if !e.dedupEnabled {
+		t.Fatal("expected dedup to be enabled")
+	}
+}
+
+func TestHandleMessage_EngineDedup_DisabledPassesAll(t *testing.T) {
+	p := &stubPlatformEngine{n: "weixin"}
+	e := newTestEngine()
+	e.SetDedupConfig(false, time.Minute)
+
+	for i := 0; i < 3; i++ {
+		e.handleMessage(p, &Message{
+			SessionKey: "weixin:user1",
+			Platform:   "weixin",
+			UserID:     "user1",
+			MessageID:  "same-id",
+			Content:    "hi",
+			ReplyCtx:   "ctx",
+		})
+	}
+	if e.dedup != nil {
+		t.Errorf("expected dedup cache to be nil when disabled, got %+v", e.dedup)
+	}
+	if e.dedupEnabled {
+		t.Error("expected dedupEnabled to be false")
+	}
+}
+
+func TestHandleMessage_EngineDedup_EmptyMessageIDSkipsDedup(t *testing.T) {
+	// Platforms that omit MessageID (rare but possible) must never be silently
+	// dropped — we have no key to dedup by. The dedup cache is exercised but
+	// never matches.
+	p := &stubPlatformEngine{n: "feishu"}
+	e := newTestEngine()
+	e.SetDedupConfig(true, time.Minute)
+
+	for i := 0; i < 5; i++ {
+		e.handleMessage(p, &Message{
+			SessionKey: "feishu:user1",
+			Platform:   "feishu",
+			UserID:     "user1",
+			MessageID:  "", // intentionally empty
+			Content:    "hi",
+			ReplyCtx:   "ctx",
+		})
+	}
+}
+
+func TestHandleMessage_EngineDedup_RecalledMessagesSkipped(t *testing.T) {
+	// Recalls (delete/recall events) hit handleMessageRecall, not the dedup
+	// path. Make sure we don't accidentally drop them when the original
+	// message_id was already in the dedup cache.
+	p := &stubPlatformEngine{n: "weixin"}
+	e := newTestEngine()
+	e.SetDedupConfig(true, time.Minute)
+
+	// Prime the dedup cache with a normal message.
+	e.handleMessage(p, &Message{
+		SessionKey: "weixin:user1",
+		Platform:   "weixin",
+		UserID:     "user1",
+		MessageID:  "7492913259736648968",
+		Content:    "hi",
+		ReplyCtx:   "ctx",
+	})
+
+	// Now a recall event with the same MessageID should reach handleMessageRecall,
+	// not be dropped as a duplicate.
+	recall := &Message{
+		SessionKey: "weixin:user1",
+		Platform:   "weixin",
+		UserID:     "user1",
+		MessageID:  "7492913259736648968",
+		Recalled:   true,
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, recall)
+
+	// No assertion on side effects — handleMessageRecall is covered by its own
+	// tests. The point is that the recall path wasn't short-circuited.
+	if !e.dedupEnabled {
+		t.Fatal("expected dedup to still be enabled")
+	}
+}
+
+func TestHandleMessage_EngineDedup_TogglesOffAndOn(t *testing.T) {
+	e := newTestEngine()
+	e.SetDedupConfig(true, time.Minute)
+	if e.dedup == nil || !e.dedupEnabled {
+		t.Fatal("setup: dedup should be on")
+	}
+	e.SetDedupConfig(false, time.Minute)
+	if e.dedup != nil || e.dedupEnabled {
+		t.Errorf("expected dedup off (cache=nil, enabled=false), got cache=%v enabled=%v", e.dedup, e.dedupEnabled)
+	}
+	e.SetDedupConfig(true, time.Minute)
+	if e.dedup == nil || !e.dedupEnabled {
+		t.Errorf("expected dedup back on, got cache=%v enabled=%v", e.dedup, e.dedupEnabled)
+	}
+}

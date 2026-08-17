@@ -640,6 +640,21 @@ func main() {
 				})
 			}
 		}
+		// Wire engine-level message dedup (issue #1667 — WeChat server
+		// retransmits can slip past per-platform dedup; this catch-all keys
+		// by MessageID only). Default enabled=true with a 30s window to cover
+		// the typical retry interval reported by the issue reporter.
+		{
+			dedupEnabled := true
+			if cfg.Dedup.Enabled != nil {
+				dedupEnabled = *cfg.Dedup.Enabled
+			}
+			windowSecs := 30
+			if cfg.Dedup.WindowSecs != nil {
+				windowSecs = *cfg.Dedup.WindowSecs
+			}
+			engine.SetDedupConfig(dedupEnabled, time.Duration(windowSecs)*time.Second)
+		}
 		// Wire outgoing rate limiting
 		{
 			var maxPS float64
@@ -1823,6 +1838,19 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload filter_external_sessions
 	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+
+	// Reload engine-level message dedup (issue #1667)
+	{
+		dedupEnabled := true
+		if cfg.Dedup.Enabled != nil {
+			dedupEnabled = *cfg.Dedup.Enabled
+		}
+		windowSecs := 30
+		if cfg.Dedup.WindowSecs != nil {
+			windowSecs = *cfg.Dedup.WindowSecs
+		}
+		engine.SetDedupConfig(dedupEnabled, time.Duration(windowSecs)*time.Second)
+	}
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {

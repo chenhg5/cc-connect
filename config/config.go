@@ -104,6 +104,7 @@ type Config struct {
 	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
 	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
 	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Dedup              DedupConfig             `toml:"dedup"`               // engine-level message-id dedup safety net (issue #1667)
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
 	Queue              QueueConfig             `toml:"queue"`
@@ -239,6 +240,16 @@ type OutgoingRateLimitConfig struct {
 type OutgoingRateLimitPlatConfig struct {
 	MaxPerSecond *float64 `toml:"max_per_second"`
 	Burst        *int     `toml:"burst"`
+}
+
+// DedupConfig configures the engine-level message-id dedup safety net (issue
+// #1667). Per-platform dedup is the primary line of defense; this catch-all
+// matches by MessageID alone and silently drops duplicates that slipped past
+// the platform layer (e.g. WeChat server retransmits whose create_time_ms was
+// refreshed on retry, breaking the platform's composite dedup key).
+type DedupConfig struct {
+	Enabled    *bool `toml:"enabled"`     // default true; set false to disable
+	WindowSecs *int  `toml:"window_secs"` // dedup window in seconds; default 30
 }
 
 // UsersConfig controls per-user role assignments and policies within a project.

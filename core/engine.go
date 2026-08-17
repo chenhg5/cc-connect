@@ -399,6 +399,8 @@ type Engine struct {
 
 	rateLimiter      *RateLimiter
 	outgoingRL       *OutgoingRateLimiter
+	dedup            *MessageDedup
+	dedupEnabled     bool
 	streamPreview    StreamPreviewCfg
 	instantReply     InstantReplyCfg
 	references       ReferenceRenderCfg
@@ -1303,6 +1305,23 @@ func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
 // SetOutgoingRateLimitCfg configures per-platform outgoing message throttling.
 func (e *Engine) SetOutgoingRateLimitCfg(defaults OutgoingRateLimitCfg, overrides map[string]OutgoingRateLimitCfg) {
 	e.outgoingRL = NewOutgoingRateLimiter(defaults, overrides)
+}
+
+// SetDedupConfig enables or disables the engine-level message dedup safety net
+// that catches duplicates escaping per-platform dedup (issue #1667 — WeChat
+// server retransmits with a refreshed create_time_ms so the platform-level
+// dedup key changes, and both copies reach handleMessage).
+//
+// Pass enabled=false to disable dedup entirely (no cache is built). Pass
+// window=0 to use the package default (60s).
+func (e *Engine) SetDedupConfig(enabled bool, window time.Duration) {
+	if !enabled {
+		e.dedup = nil
+		e.dedupEnabled = false
+		return
+	}
+	e.dedup = NewMessageDedup(window)
+	e.dedupEnabled = true
 }
 
 // checkRateLimit returns true if the message is allowed, false if rate-limited.
@@ -2792,6 +2811,19 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
+		return
+	}
+
+	// Engine-level dedup safety net (issue #1667). Per-platform dedup is the
+	// primary line of defense, but a few platforms key their dedup by fields
+	// that server-side retransmission can refresh (e.g. WeChat's create_time_ms).
+	// When the platform copy slips through, this catch-all matches by MessageID
+	// alone and silently drops the second copy. Disabled when dedupEnabled is
+	// false or when the platform didn't supply a MessageID.
+	if e.dedupEnabled && e.dedup != nil && msg.MessageID != "" && e.dedup.IsDuplicate(msg.MessageID) {
+		slog.Info("message deduplicated by engine",
+			"platform", msg.Platform, "msg_id", msg.MessageID,
+			"session", msg.SessionKey, "user", msg.UserName)
 		return
 	}
 
