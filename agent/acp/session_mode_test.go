@@ -277,13 +277,27 @@ func TestProbeListSessions_parsesSessions(t *testing.T) {
 // fakeCallbacks captures reportModes / reportListSupported invocations
 // so tests can assert on them deterministically.
 type fakeCallbacks struct {
-	mu         sync.Mutex
-	modes      []acpModesBlock
-	listCalls  []bool
+	mu        sync.Mutex
+	modes     []acpModesBlock
+	models    []acpModelsBlock
+	listCalls []bool
 }
 
-func (f *fakeCallbacks) reportModes(b acpModesBlock)       { f.mu.Lock(); f.modes = append(f.modes, b); f.mu.Unlock() }
-func (f *fakeCallbacks) reportListSupported(supported bool) { f.mu.Lock(); f.listCalls = append(f.listCalls, supported); f.mu.Unlock() }
+func (f *fakeCallbacks) reportModes(b acpModesBlock) {
+	f.mu.Lock()
+	f.modes = append(f.modes, b)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportModels(b acpModelsBlock) {
+	f.mu.Lock()
+	f.models = append(f.models, b)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportListSupported(supported bool) {
+	f.mu.Lock()
+	f.listCalls = append(f.listCalls, supported)
+	f.mu.Unlock()
+}
 func (f *fakeCallbacks) lastModes() (acpModesBlock, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -291,6 +305,14 @@ func (f *fakeCallbacks) lastModes() (acpModesBlock, bool) {
 		return acpModesBlock{}, false
 	}
 	return f.modes[len(f.modes)-1], true
+}
+func (f *fakeCallbacks) lastModels() (acpModelsBlock, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.models) == 0 {
+		return acpModelsBlock{}, false
+	}
+	return f.models[len(f.models)-1], true
 }
 
 // newTestSession builds an acpSession with a pipe-backed transport
