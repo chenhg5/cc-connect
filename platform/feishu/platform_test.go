@@ -1104,6 +1104,9 @@ func TestBuildRichCard_InitialStateIsVisibleAndLocked(t *testing.T) {
 	if len(contents) != 1 || strings.TrimSpace(contents[0]) == "" {
 		t.Fatalf("initial rich card body must be non-empty, got %#v", contents)
 	}
+	if strings.Contains(contents[0], "正在思考…") {
+		t.Fatalf("initial rich card body should not repeat the header phase, got %#v", contents)
+	}
 }
 
 func TestBuildRichCard_ProgressExposesCountsButNeverDetails(t *testing.T) {
@@ -1119,6 +1122,10 @@ func TestBuildRichCard_ProgressExposesCountsButNeverDetails(t *testing.T) {
 		if !strings.Contains(cardJSON, want) {
 			t.Fatalf("working rich card should contain %q, got %q", want, cardJSON)
 		}
+	}
+	contents := collectCardMarkdownContents(t, cardJSON)
+	if len(contents) != 1 || strings.Contains(contents[0], "正在调用工具…") {
+		t.Fatalf("working rich card body should not repeat the header phase, got %#v", contents)
 	}
 	for _, forbidden := range []string{"private chain of thought", "Bash", "id_ed25519", "PRIVATE_KEY", "token=secret", "failed", "gpt-5.6-sol", "/Users/private/project", "collapsible_panel"} {
 		if strings.Contains(cardJSON, forbidden) {

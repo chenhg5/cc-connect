@@ -7300,7 +7300,7 @@ func buildRichCardJSONBytes(status core.CardStatus, phase string, steps []core.T
 				summary = copy.ToolSummary
 			}
 			headerTitle = "⏳ " + phaseText
-			lines := []string{phaseText}
+			lines := make([]string, 0, 2)
 			if reasoningCount > 0 || toolCount > 0 {
 				progress := fmt.Sprintf(copy.ProgressFormat, reasoningCount, toolCount)
 				lines = append(lines, progress)
