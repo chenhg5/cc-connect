@@ -76,12 +76,31 @@ func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workD
 }
 
 func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	// Cursor Agent CLI has no --image flag; headless vision works by putting
+	// image paths in the prompt so the agent can Read them (same as files).
+	// See https://cursor.com/docs/cli/headless#working-with-images
+	var localPaths []string
 	if len(images) > 0 {
-		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
+		imgFiles := make([]core.FileAttachment, 0, len(images))
+		for i, img := range images {
+			name := img.FileName
+			if name == "" {
+				name = fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, cursorImageExt(img.MimeType))
+			}
+			imgFiles = append(imgFiles, core.FileAttachment{
+				MimeType: img.MimeType,
+				Data:     img.Data,
+				FileName: name,
+			})
+		}
+		localPaths = append(localPaths, core.SaveFilesToDisk(cs.workDir, messageID, imgFiles)...)
+		slog.Info("cursorSession: saved inbound images for CLI path refs", "count", len(imgFiles), "saved", len(localPaths))
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
-		prompt = core.AppendFileRefs(prompt, filePaths)
+		localPaths = append(localPaths, core.SaveFilesToDisk(cs.workDir, messageID, files)...)
+	}
+	if len(localPaths) > 0 {
+		prompt = core.AppendFileRefs(prompt, localPaths)
 	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
@@ -608,6 +627,21 @@ func (cs *cursorSession) Close() error {
 		slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
 	}
 	return nil
+}
+
+func cursorImageExt(mimeType string) string {
+	switch strings.ToLower(mimeType) {
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	default:
+		return ".png"
+	}
 }
 
 func truncateStr(s string, maxRunes int) string {
