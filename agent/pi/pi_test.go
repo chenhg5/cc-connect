@@ -1555,6 +1555,167 @@ func TestHandleMessageUpdate_ToolcallEnd_NilMessage(t *testing.T) {
 	}
 }
 
+func TestHandleMessageUpdate_ToolcallEnd_NewProtocol(t *testing.T) {
+	// pi ≥ 0.84.0 ships the completed call directly on the event as
+	// assistantMessageEvent.toolCall. Without this branch every tool-call
+	// event from pi ≥ 0.84.0 is silently dropped (see issue #1659).
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type": "toolcall_end",
+			"toolCall": map[string]any{
+				"name":      "bash",
+				"arguments": map[string]any{"command": "ls -la"},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse {
+		t.Errorf("type = %s", evts[0].Type)
+	}
+	if evts[0].ToolName != "bash" {
+		t.Errorf("toolName = %q", evts[0].ToolName)
+	}
+	if evts[0].ToolInput != "ls -la" {
+		t.Errorf("toolInput = %q", evts[0].ToolInput)
+	}
+}
+
+func TestHandleMessageUpdate_ToolcallEnd_NewProtocol_Description(t *testing.T) {
+	// extractToolInput prefers tool-specific fields like "description" over
+	// the JSON dump of the arguments map. Verify the new protocol honours
+	// the same priority so cc-connect's chat UX matches what callers saw
+	// from the legacy path.
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type": "toolcall_end",
+			"toolCall": map[string]any{
+				"name":      "edit",
+				"arguments": map[string]any{"description": "Update README", "command": "ignored"},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].ToolName != "edit" {
+		t.Errorf("toolName = %q", evts[0].ToolName)
+	}
+	if evts[0].ToolInput != "Update README" {
+		t.Errorf("toolInput = %q", evts[0].ToolInput)
+	}
+}
+
+func TestHandleMessageUpdate_ToolcallEnd_NewProtocol_NoArguments(t *testing.T) {
+	// pi may emit a toolCall with no arguments map; extractToolInput should
+	// still produce an empty string instead of "{}".
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":     "toolcall_end",
+			"toolCall": map[string]any{"name": "noargs"},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].ToolName != "noargs" {
+		t.Errorf("toolName = %q", evts[0].ToolName)
+	}
+	if evts[0].ToolInput != "" {
+		t.Errorf("toolInput = %q, want empty", evts[0].ToolInput)
+	}
+}
+
+func TestHandleMessageUpdate_ToolcallEnd_NewProtocol_TakesPrecedenceOverLegacy(t *testing.T) {
+	// When both toolCall and message/partial are present (transitional or
+	// malformed events), trust the new protocol so we don't silently fall
+	// back to a stale snapshot from the legacy path.
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_end",
+			"contentIndex": float64(0),
+			"toolCall": map[string]any{
+				"name":      "bash",
+				"arguments": map[string]any{"command": "new"},
+			},
+			"message": map[string]any{
+				"content": []any{
+					map[string]any{
+						"type":      "toolCall",
+						"name":      "bash",
+						"arguments": map[string]any{"command": "legacy"},
+					},
+				},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].ToolInput != "new" {
+		t.Errorf("toolInput = %q, want \"new\" (new protocol should win)", evts[0].ToolInput)
+	}
+}
+
+func TestHandleMessageUpdate_ToolcallEnd_NewProtocol_WrongTypeIsIgnored(t *testing.T) {
+	// If "toolCall" exists but is not a map (e.g. accidentally a string),
+	// fall through to the legacy path. This mirrors the existing
+	// defensive-type-assertion style used elsewhere in this file.
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_end",
+			"contentIndex": float64(0),
+			"toolCall":     "not-a-map",
+			"message": map[string]any{
+				"content": []any{
+					map[string]any{
+						"type":      "toolCall",
+						"name":      "bash",
+						"arguments": map[string]any{"command": "fallback"},
+					},
+				},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].ToolInput != "fallback" {
+		t.Errorf("toolInput = %q, want legacy fallback", evts[0].ToolInput)
+	}
+}
+
 func TestHandleMessageUpdate_NilAssistantEvent(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
