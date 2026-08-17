@@ -2,14 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - 'v*'
 
-# Superseded PR pushes cancel their in-flight run; main pushes always run to completion.
+# CI is intentionally release-tag driven. Pull requests and branch pushes do not
+# start this workflow; the release workflow performs the publication checks for
+# the same v* tag.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   lint:
@@ -68,16 +69,7 @@ jobs:
             }
           }
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags origin "${{ github.base_ref }}"
-            run_lint --new-from-rev "origin/${{ github.base_ref }}" ./...
-          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            run_lint --new-from-rev "${{ github.event.before }}" ./...
-          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            run_lint --new-from-rev "$(git rev-parse HEAD^)" ./...
-          else
-            run_lint ./...
-          fi
+          run_lint ./...
 
       - name: Lint GitHub workflows
         run: |
@@ -154,8 +146,7 @@ jobs:
 
   performance-test:
     runs-on: ubuntu-latest
-    # Benchmarks on shared runners are informational; run them on main only, not per PR.
-    if: github.event_name == 'push'
+    # Benchmarks run as part of the release-tag verification path.
 
     steps:
       - uses: actions/checkout@v7

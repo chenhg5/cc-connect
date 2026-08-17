@@ -16,6 +16,8 @@ cc-connect-next is an independent successor derived from [CC Connect](https://gi
 
 Keep changes narrow and preserve the independent runtime boundaries: the `cc-connect-next` command, `~/.cc-connect-next` data directory, daemon/service names, API socket, release assets, and npm package must not collide with official CC Connect.
 
+CI is intentionally triggered only by pushing a version tag matching `v*`. Pull requests and ordinary branch pushes do not start the CI workflow, so run the local checks below before opening a PR. The release workflow runs its own complete validation for the same tag.
+
 Before submitting, run at least:
 
 ```bash
@@ -50,6 +52,8 @@ cc-connect-next 是从 [CC Connect](https://github.com/chenhg5/cc-connect) 派�
 ## Pull Request
 
 改动应保持聚焦，并保护独立运行边界：`cc-connect-next` 命令、`~/.cc-connect-next` 数据目录、daemon/service、API socket、Release 产物和 npm 包均不能与官方 CC Connect 冲突。
+
+CI 现在只在推送匹配 `v*` 的版本 tag 时触发；Pull Request 和普通分支 push 不会启动 CI。因此提交 PR 前请先在本地执行下面的检查；同一个 tag 的 Release workflow 还会执行完整发布验证。
 
 提交前至少执行：
 
