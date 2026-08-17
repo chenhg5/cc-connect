@@ -3,8 +3,10 @@ MODULE     := github.com/chenhg5/cc-connect
 CMD        := ./cmd/cc-connect
 DIST       := dist
 
-VERSION := v1.3.3
-COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
+# Derive the build version from the checked-out Git state.
+GIT_VERSION := $(if $(wildcard .git),$(shell git describe --tags --always --dirty))
+VERSION     := $(if $(strip $(GIT_VERSION)),$(GIT_VERSION),dev)
+COMMIT     := $(if $(wildcard .git),$(shell git rev-parse --short HEAD),none)
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS := -s -w \
