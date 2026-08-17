@@ -1423,6 +1423,16 @@ app_secret = "your-feishu-app-secret"
 #             # 示例："http://你的VPS-IP:8888" — 将 VPS IP 加入可信 IP 列表
 # proxy_username = ""  # optional: proxy authentication username / 代理认证用户名
 # proxy_password = ""  # optional: proxy authentication password / 代理认证密码
+# burst_limit = 0           # Max outbound messages per sliding window; 0 = unlimited (default)
+#                            # 滑动窗口内最大出站消息数；0 = 不限（默认）
+#                            # WeChat Work throttles apps at ~20-30 msgs/min; set e.g. 20 to stay safe.
+#                            # 企业微信应用消息频率约 20-30 条/分钟；例如设 20 以留余量。
+# burst_window_secs = 60     # Sliding window length in seconds (default 60)
+#                            # 滑动窗口长度（秒，默认 60）
+#                            # Counts per API request: a long reply split into chunks consumes multiple slots.
+#                            # 按 API 请求计数：长回复被切分后每段占一个配额。阻塞等待，不丢消息。
+#                            # Stacks with [outgoing_rate_limit.platforms.wecom] (token bucket = per-second pacing).
+#                            # 与 [outgoing_rate_limit.platforms.wecom] 令牌桶叠加（令牌桶管每秒匀速）。
 
 # WeChat Work WebSocket / 企业微信长连接模式 (uncomment to enable / 取消注释以启用)
 # No public URL, no message encryption, no IP allowlist needed!
@@ -1442,6 +1452,14 @@ app_secret = "your-feishu-app-secret"
 # bot_id = "your-bot-id"
 # bot_secret = "your-bot-secret"
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
+# burst_limit = 0           # Max outbound messages per sliding window; 0 = unlimited (default)
+#                            # 滑动窗口内最大出站消息数；0 = 不限（默认）
+#                            # WeChat Work throttles apps at ~20-30 msgs/min; set e.g. 20 to stay safe.
+#                            # 企业微信应用消息频率约 20-30 条/分钟；例如设 20 以留余量。
+# burst_window_secs = 60     # Sliding window length in seconds (default 60)
+#                            # 滑动窗口长度（秒，默认 60）
+#                            # Counts per API request: a long reply split into chunks consumes multiple slots.
+#                            # 按 API 请求计数：长回复被切分后每段占一个配额。阻塞等待，不丢消息。
 
 # Weixin personal (ilink bot) / 微信个人号（ilink 机器人网关）
 # Same HTTP API as OpenClaw @tencent-weixin/openclaw-weixin: long-poll getUpdates + sendMessage.
