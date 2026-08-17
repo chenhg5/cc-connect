@@ -18,11 +18,12 @@ const ContinueSession = "__continue__"
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	AgentSessionID      string   `json:"agent_session_id"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
+	Background          bool     `json:"background,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
@@ -288,6 +289,9 @@ type SessionManager struct {
 	userMeta      map[string]*UserMeta // sessionKey → display info
 	counter       int64
 	storePath     string // empty = no persistence
+	// hideBackgroundSessions controls whether scheduler-created background
+	// sessions are excluded from user-facing session lists and tracked ID sets.
+	hideBackgroundSessions bool
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -298,12 +302,13 @@ type SessionManager struct {
 
 func NewSessionManager(storePath string) *SessionManager {
 	sm := &SessionManager{
-		sessions:      make(map[string]*Session),
-		activeSession: make(map[string]string),
-		userSessions:  make(map[string][]string),
-		sessionNames:  make(map[string]string),
-		userMeta:      make(map[string]*UserMeta),
-		storePath:     storePath,
+		sessions:               make(map[string]*Session),
+		activeSession:          make(map[string]string),
+		userSessions:           make(map[string][]string),
+		sessionNames:           make(map[string]string),
+		userMeta:               make(map[string]*UserMeta),
+		storePath:              storePath,
+		hideBackgroundSessions: true,
 	}
 	if storePath != "" {
 		sm.load()
@@ -314,6 +319,12 @@ func NewSessionManager(storePath string) *SessionManager {
 // StorePath returns the file path used for session persistence.
 func (sm *SessionManager) StorePath() string {
 	return sm.storePath
+}
+
+func (sm *SessionManager) SetHideBackgroundSessions(v bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.hideBackgroundSessions = v
 }
 
 func (sm *SessionManager) nextID() string {
@@ -347,15 +358,27 @@ func (sm *SessionManager) NewSession(userKey, name string) *Session {
 // session. Used for isolated one-off runs (e.g. cron with session_mode=new_per_run)
 // so the user's current chat remains the default target for normal messages.
 func (sm *SessionManager) NewSideSession(userKey, name string) *Session {
+	return sm.newSideSession(userKey, name, false)
+}
+
+// NewBackgroundSession registers an isolated background session without making
+// it the user's active session. Background sessions are hidden from normal
+// /list, /switch, and /delete views after they complete.
+func (sm *SessionManager) NewBackgroundSession(userKey, name string) *Session {
+	return sm.newSideSession(userKey, name, true)
+}
+
+func (sm *SessionManager) newSideSession(userKey, name string, background bool) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	id := sm.nextID()
 	now := time.Now()
 	s := &Session{
-		ID:        id,
-		Name:      name,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         id,
+		Name:       name,
+		Background: background,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	sm.sessions[id] = s
 	sm.userSessions[userKey] = append(sm.userSessions[userKey], id)
@@ -430,6 +453,12 @@ func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	out := make([]*Session, 0, len(ids))
 	for _, sid := range ids {
 		if s, ok := sm.sessions[sid]; ok {
+			s.mu.Lock()
+			background := s.Background
+			s.mu.Unlock()
+			if sm.hideBackgroundSessions && background {
+				continue
+			}
 			out = append(out, s)
 		}
 	}
@@ -522,14 +551,40 @@ func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
 	if sm.legacyData {
 		return nil
 	}
+	hideBackground := sm.hideBackgroundSessions
 	ids := make(map[string]struct{})
 	for _, s := range sm.sessions {
 		s.mu.Lock()
-		if s.AgentSessionID != "" {
+		background := s.Background
+		include := !hideBackground || !background
+		if include && s.AgentSessionID != "" {
 			ids[s.AgentSessionID] = struct{}{}
 		}
-		for _, past := range s.PastAgentSessionIDs {
-			ids[past] = struct{}{}
+		if include {
+			for _, past := range s.PastAgentSessionIDs {
+				ids[past] = struct{}{}
+			}
+		}
+		s.mu.Unlock()
+	}
+	return ids
+}
+
+// BackgroundAgentSessionIDs returns agent session IDs created by scheduler
+// background runs. These should stay out of normal user-facing session lists.
+func (sm *SessionManager) BackgroundAgentSessionIDs() map[string]struct{} {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ids := make(map[string]struct{})
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		if s.Background {
+			if s.AgentSessionID != "" {
+				ids[s.AgentSessionID] = struct{}{}
+			}
+			for _, past := range s.PastAgentSessionIDs {
+				ids[past] = struct{}{}
+			}
 		}
 		s.mu.Unlock()
 	}
@@ -642,6 +697,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
+			Background:          s.Background,
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
@@ -828,7 +884,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	defer sm.mu.Unlock()
 
 	// Group sessions by baseChat
-	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
 	for userKey, sessionIDs := range sm.userSessions {

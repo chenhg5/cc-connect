@@ -174,6 +174,14 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
+# Hide cron/timer new_per_run background sessions from normal session commands.
+# Default: true. Set false to keep scheduler sessions visible in /list, /switch,
+# and /delete, matching the pre-#1417 behavior.
+# 从普通会话命令中隐藏 cron/timer new_per_run 后台会话。默认 true。
+# 设为 false 可让这些后台会话继续出现在 /list、/switch、/delete 中。
+# [[projects]]
+# hide_scheduler_sessions = true
+
 # Close an idle live agent process after a clean turn while preserving the
 # cc-connect session and saved agent session ID. The next message in the same
 # chat/thread starts a new agent process and resumes the same conversation.
