@@ -2119,6 +2119,60 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Using DeepSeek Harness (dsh) / 项目：使用 DeepSeek Harness (dsh)
+# =============================================================================
+# Bridges cc-connect to a RUNNING dsh web server on the same machine. Start
+# the server first: `dsh web` (default http://127.0.0.1:3080). Sessions are
+# created in the project's work_dir, so each cc-connect project maps to its
+# own dsh session and resumes automatically.
+# 需要先在本机启动 dsh web 服务（默认 http://127.0.0.1:3080）。会话以项目的
+# work_dir 为工作目录创建，每个 cc-connect 项目对应一个 dsh 会话，自动续聊。
+#
+# Optional options / 可选参数:
+#   base_url      dsh web server URL (default "http://127.0.0.1:3080")
+#                  dsh web 服务地址（默认 "http://127.0.0.1:3080"）
+#   agent_preset  dsh agent preset for new sessions (optional)
+#                 新会话使用的 dsh agent preset（可选）
+#   model         "provider/model" override applied at session start (optional)
+#                  会话启动时应用的 "provider/model" 模型覆盖（可选）
+#   reasoning_effort  reasoning-effort override ("off"/"high"/"max" or the
+#                   model's advertised efforts), applied at session start
+#                   (optional) / 会话启动时应用的推理强度覆盖（可选）
+#   mode          permission mode: "default" | "yolo" | "plan" (optional)
+#                  权限模式：default（默认）/ yolo（全自动）/ plan（只读规划）
+#                  映射到 dsh 的 /permission 预设（workspace-write /
+#                  danger-full-access / read-only），无命令注册表的 dsh 构建
+#                  降级为 settings.update 默认预设（新会话生效）
+#   timeout_mins  per-turn timeout in minutes (0 = unlimited, default)
+#                  单轮超时分钟数（0 = 不限时，默认）
+#
+# Note: make sure the `cc-connect` binary is on the PATH of the dsh server
+# process so cron/timer/relay CLI calls from inside dsh sessions work.
+# 注意：请确保 dsh 服务进程的 PATH 中包含 cc-connect 二进制，dsh 会话内调用
+# cron/timer/relay 命令时才可正常工作。
+#
+# Recommended: enable Card 2.0 rich mode for the best streaming UX
+# (typewriter text, collapsible thinking, tool steps). Platforms without
+# rich-card support fall back to legacy automatically.
+# 推荐开启富卡片模式获得最佳流式体验（打字机文本、可折叠思考、工具步骤），
+# 不支持的平台会自动回退 legacy。
+# [display]
+#   card_mode = "rich"
+
+# [[projects]]
+# name = "my-dsh-project"
+#
+# [projects.agent]
+# type = "dsh"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/your/project"
+# base_url = "http://127.0.0.1:3080"
+# # agent_preset = "standard"
+# # model = "deepseek/deepseek-chat"
+# # timeout_mins = 30
+
+# =============================================================================
 # Project: Using Kimi CLI / 项目：使用 Kimi CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: pip install kimi-cli
