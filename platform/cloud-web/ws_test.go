@@ -123,3 +123,67 @@ func TestAllowFromFilter(t *testing.T) {
 		t.Fatal("expected blocked user")
 	}
 }
+
+// TestExtraHeadersInjected verifies that extra_headers from the platform
+// options are injected into the WebSocket upgrade request, alongside the
+// standard Authorization/X-Cloud-Web-Token headers.
+func TestExtraHeadersInjected(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	var gotAuth, gotCloudWeb, gotCustom, gotEmpty string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCloudWeb = r.Header.Get("X-Cloud-Web-Token")
+		gotCustom = r.Header.Get("X-Brain-Authorization")
+		gotEmpty = r.Header.Get("X-Empty")
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _, _ = conn.ReadMessage() // register
+		_ = conn.WriteJSON(wireRegisterAck{Type: "register_ack", OK: true, Capabilities: []string{"text"}})
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	p := mustNew(t, map[string]any{
+		"token":     "secret",
+		"transport": "websocket",
+		"ws_url":    wsURL,
+		"extra_headers": map[string]any{
+			"X-Brain-Authorization": "Basic abc123",
+			"X-Empty":               "",
+		},
+	})
+	if err := p.Start(func(_ core.Platform, _ *core.Message) {}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	// Give the transport a moment to dial + complete the handshake.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for websocket handshake")
+		default:
+		}
+		if gotCustom != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if gotAuth != "Bearer secret" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer secret")
+	}
+	if gotCloudWeb != "secret" {
+		t.Errorf("X-Cloud-Web-Token = %q, want %q", gotCloudWeb, "secret")
+	}
+	if gotCustom != "Basic abc123" {
+		t.Errorf("X-Brain-Authorization = %q, want %q", gotCustom, "Basic abc123")
+	}
+	if gotEmpty != "" {
+		t.Errorf("X-Empty should not be set for empty value, got %q", gotEmpty)
+	}
+}
