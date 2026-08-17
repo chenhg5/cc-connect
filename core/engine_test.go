@@ -16074,3 +16074,25 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+func TestPlatformMessageLimit(t *testing.T) {
+	if got := platformMessageLimit(nil); got != maxPlatformMessageLen {
+		t.Fatalf("nil platform: got %d", got)
+	}
+	if got := platformMessageLimit(telegramNamedPlatform{}); got != maxPlatformMessageLen {
+		t.Fatalf("telegram: got %d", got)
+	}
+	if got := platformMessageLimit(matrixNamedPlatform{}); got != matrixMaxMessageLen {
+		t.Fatalf("matrix: got %d", got)
+	}
+}
+
+type fakePlatformNamed struct{ Platform }
+
+type matrixNamedPlatform struct{ fakePlatformNamed }
+
+func (matrixNamedPlatform) Name() string { return "matrix" }
+
+type telegramNamedPlatform struct{ fakePlatformNamed }
+
+func (telegramNamedPlatform) Name() string { return "telegram" }
