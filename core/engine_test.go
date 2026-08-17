@@ -649,6 +649,22 @@ func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string
 	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
 }
 
+// waitForRefreshedCards waits until the stub platform has observed at least
+// minCount refreshes or the timeout expires.
+func waitForRefreshedCards(t *testing.T, p *stubCardPlatform, minCount int) []*Card {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		refreshed := p.getRefreshedCards()
+		if len(refreshed) >= minCount {
+			return refreshed
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d refreshed cards", minCount)
+	return nil
+}
+
 type stubProviderAgent struct {
 	stubAgent
 	providers []ProviderConfig
@@ -1086,6 +1102,410 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 	if got := p.getSent()[1]; got != finalText {
 		t.Fatalf("final sent text = %q, want %q", got, finalText)
+	}
+}
+
+func TestProcessInteractiveEvents_ReturnsRetriableErrorWithoutSendingRawError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	retryTurn := e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if retryTurn == nil {
+		t.Fatal("retryTurn = nil, want retriable turn")
+	}
+	if retryTurn.kind != ErrorKindOverloaded {
+		t.Fatalf("retryKind = %q, want %q", retryTurn.kind, ErrorKindOverloaded)
+	}
+	if retryTurn.err == nil || !strings.Contains(retryTurn.err.Error(), "capacity") {
+		t.Fatalf("retryErr = %v, want capacity error", retryTurn.err)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent = %#v, want no raw error sent before retry", sent)
+	}
+	state.mu.Lock()
+	needResync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !needResync {
+		t.Fatal("eventsNeedResync = false, want true after retriable error")
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ReplaysQueuedPromptAfterOverloaded(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newQueuedRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-queued", content: "queued-msg", messageID: "queued-1"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"))
+
+	calls := agentSession.prompts()
+	if len(calls) != 3 {
+		t.Fatalf("prompts = %#v, want initial + queued + queued retry", calls)
+	}
+	if calls[0] != "initial-msg" {
+		t.Fatalf("first prompt = %q, want initial-msg", calls[0])
+	}
+	if !strings.Contains(calls[1], "queued-msg") || !strings.Contains(calls[2], "queued-msg") {
+		t.Fatalf("queued prompts = %#v, want both retries to target queued-msg", calls[1:])
+	}
+	if strings.Contains(calls[2], "initial-msg") {
+		t.Fatalf("retry prompt = %q, should not replay initial prompt", calls[2])
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_StopCancelsRetryDelay(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Hour
+	RetriableErrorRetryDelay = time.Hour
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newAlwaysRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"))
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for agentSession.sendCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	state.markStopped()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry delay did not stop after state.markStopped")
+	}
+	if got := agentSession.sendCount(); got != 1 {
+		t.Fatalf("sendCount = %d, want no retry after stop", got)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ReplaysPromptAfterOverloaded(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRetryOnceAgentSession("s1")
+	state := &interactiveState{
+		agentSession:     agentSession,
+		platform:         p,
+		replyCtx:         "ctx-1",
+		eventsNeedResync: true,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"))
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2", got)
+	}
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %#v, want retry notice and final response", sent)
+	}
+	if !strings.Contains(sent[0], "Retrying") {
+		t.Fatalf("retry notice = %q, want English retry notice", sent[0])
+	}
+	if sent[1] != "ok after retry" {
+		t.Fatalf("final response = %q, want ok after retry", sent[1])
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_RichCardNoticeUpdatesCard(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "rich",
+	})
+	sessionKey := "feishu:user-rich-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-rich-retry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-retry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-rich-retry", nil, nil, "ctx-rich-retry", time.Now(), sessionKey, len("hello"))
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2", got)
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
+			t.Fatalf("retry notice was sent as standalone message: %#v", p.getSent())
+		}
+	}
+	rendered := strings.Join(append(p.getPreviewStarts(), p.getPreviewEdits()...), "\n")
+	if !strings.Contains(rendered, "Retrying in") || !strings.Contains(rendered, "attempt 2/2") {
+		t.Fatalf("rich card updates should contain retry notice, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "rich status=done") {
+		t.Fatalf("rich card retry notice should be finalized before replay, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "ok after retry") {
+		t.Fatalf("rich card updates should contain final response, got %q", rendered)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ProgressCardNoticeUpdatesCard(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-progress-card-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-progress-card-retry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry", nil, nil, "ctx-progress-card-retry", time.Now(), sessionKey, len("hello"))
+
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
+			t.Fatalf("retry notice was sent as standalone message: %#v", p.getSent())
+		}
+	}
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 {
+		t.Fatal("preview edits = 0, want retry notice to update progress card")
+	}
+	var sawRetry bool
+	var sawCompleted bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if payload.State == ProgressCardStateCompleted {
+			sawCompleted = true
+		}
+		for _, item := range payload.Items {
+			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "attempt 2/2") {
+				sawRetry = true
+			}
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("progress card edits should contain retry info item, got %#v", edits)
+	}
+	if !sawCompleted {
+		t.Fatalf("progress card retry notice should be finalized before replay, got %#v", edits)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ProgressCardRetryExhaustionFinalizesFailed(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 1
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-progress-card-retry-exhausted"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardAlwaysRetryAgentSession("s-progress-card-retry-exhausted")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry-exhausted",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-exhausted", nil, nil, "ctx-progress-card-retry-exhausted", time.Now(), sessionKey, len("hello"))
+
+	edits := p.getPreviewEdits()
+	var sawFailed bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if payload.State == ProgressCardStateFailed {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("exhausted retry progress card should be finalized failed, edits=%#v", edits)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ProgressCardRetryNoticeBypassesThrottle(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubThrottledProgressPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			style:              "card",
+			supportPayload:     true,
+		},
+		throttle: time.Hour,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "discord:user-progress-card-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-progress-card-retry-throttle")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry-throttle",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-throttle", nil, nil, "ctx-progress-card-retry-throttle", time.Now(), sessionKey, len("hello"))
+
+	edits := p.getPreviewEdits()
+	var sawRetry bool
+	var sawCompleted bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if payload.State == ProgressCardStateCompleted {
+			sawCompleted = true
+		}
+		for _, item := range payload.Items {
+			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") {
+				sawRetry = true
+			}
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("retry notice should bypass progress edit throttle, edits=%#v", edits)
+	}
+	if !sawCompleted {
+		t.Fatalf("retry notice should finalize progress card before replay, edits=%#v", edits)
 	}
 }
 
@@ -4209,10 +4629,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitForRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -4244,10 +4661,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}
 	// Wait for async deletion to complete.
 	waitDeleteModePhase(t, e, msg.SessionKey, "result")
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitForRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	resultText := pushedCard.RenderText()
 	if !strings.Contains(resultText, "Session deleted: One") {
@@ -4349,10 +4763,8 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
-	if len(p.getRefreshedCards()) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
-	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
+	refreshed := waitForRefreshedCards(t, p, 1)
+	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
 		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
 	}
@@ -4425,10 +4837,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected pushed result card via RefreshCard")
-	}
+	refreshed := waitForRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -7232,6 +7641,236 @@ type controllableAgentSession struct {
 	report          *UsageReport
 	contextUsage    *ContextUsage
 	usageErr        error
+}
+
+type retryOnceAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type queuedRetryAgentSession struct {
+	sessionID  string
+	events     chan Event
+	promptList []string
+	queuedSeen int
+	mu         sync.Mutex
+}
+
+type alwaysRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type richCardRetryOnceAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type richCardAlwaysRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+func newRetryOnceAgentSession(id string) *retryOnceAgentSession {
+	return &retryOnceAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newQueuedRetryAgentSession(id string) *queuedRetryAgentSession {
+	return &queuedRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newAlwaysRetryAgentSession(id string) *alwaysRetryAgentSession {
+	return &alwaysRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newRichCardRetryOnceAgentSession(id string) *richCardRetryOnceAgentSession {
+	return &richCardRetryOnceAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newRichCardAlwaysRetryAgentSession(id string) *richCardAlwaysRetryAgentSession {
+	return &richCardAlwaysRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func (s *retryOnceAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *retryOnceAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *retryOnceAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *retryOnceAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *retryOnceAgentSession) Alive() bool                                          { return true }
+func (s *retryOnceAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *retryOnceAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *queuedRetryAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.promptList = append(s.promptList, prompt)
+	isQueued := strings.Contains(prompt, "queued-msg")
+	if isQueued {
+		s.queuedSeen++
+	}
+	queuedSeen := s.queuedSeen
+	s.mu.Unlock()
+
+	if !isQueued {
+		s.events <- Event{Type: EventResult, Content: "initial ok", Done: true}
+		return nil
+	}
+	if queuedSeen == 1 {
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "queued ok", Done: true}
+	return nil
+}
+
+func (s *queuedRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *queuedRetryAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *queuedRetryAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *queuedRetryAgentSession) Alive() bool                                          { return true }
+func (s *queuedRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *queuedRetryAgentSession) prompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.promptList...)
+}
+
+func (s *alwaysRetryAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	s.mu.Unlock()
+	s.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	return nil
+}
+
+func (s *alwaysRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *alwaysRetryAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *alwaysRetryAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *alwaysRetryAgentSession) Alive() bool                                          { return true }
+func (s *alwaysRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *alwaysRetryAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *richCardRetryOnceAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{Type: EventThinking, Content: "Inspecting retry path"}
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventText, Content: "ok after retry"}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *richCardRetryOnceAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *richCardRetryOnceAgentSession) Events() <-chan Event     { return s.events }
+func (s *richCardRetryOnceAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *richCardRetryOnceAgentSession) Alive() bool              { return true }
+func (s *richCardRetryOnceAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+func (s *richCardRetryOnceAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *richCardAlwaysRetryAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	s.mu.Unlock()
+	s.events <- Event{Type: EventThinking, Content: "Inspecting retry path"}
+	s.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	return nil
+}
+
+func (s *richCardAlwaysRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *richCardAlwaysRetryAgentSession) Events() <-chan Event     { return s.events }
+func (s *richCardAlwaysRetryAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *richCardAlwaysRetryAgentSession) Alive() bool              { return true }
+func (s *richCardAlwaysRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
 }
 
 func newControllableSession(id string) *controllableAgentSession {
