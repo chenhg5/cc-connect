@@ -23,10 +23,19 @@ func TestNormalizeReasoningEffort_RejectsMinimal(t *testing.T) {
 	}
 }
 
+func TestNormalizeReasoningEffort_AcceptsMax(t *testing.T) {
+	if got := normalizeReasoningEffort("max"); got != "max" {
+		t.Fatalf("normalizeReasoningEffort(max) = %q, want max", got)
+	}
+	if got := normalizeReasoningEffort("maximum"); got != "max" {
+		t.Fatalf("normalizeReasoningEffort(maximum) = %q, want max", got)
+	}
+}
+
 func TestAvailableReasoningEfforts_ExcludesMinimal(t *testing.T) {
 	agent := &Agent{}
 	got := agent.AvailableReasoningEfforts()
-	want := []string{"low", "medium", "high", "xhigh"}
+	want := []string{"low", "medium", "high", "xhigh", "max"}
 	if len(got) != len(want) {
 		t.Fatalf("AvailableReasoningEfforts len = %d, want %d, got=%v", len(got), len(want), got)
 	}
