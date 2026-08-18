@@ -37,6 +37,7 @@ type WSPlatform struct {
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
 	pendingAcks sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
+	sendQuota   sendQuota    // outbound sliding-window quota (burst_limit/burst_window_secs)
 }
 
 const (
@@ -125,10 +126,31 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 
+	// Outbound sliding-window quota (see sendQuota). 0 disables the quota.
+	burstLimit := pickInt(opts["burst_limit"])
+	if burstLimit < 0 {
+		burstLimit = 0
+	}
+	burstWindow := pickInt(opts["burst_window_secs"])
+	if burstWindow < 0 {
+		burstWindow = 0
+	}
+	quotaWindow := time.Duration(0)
+	if burstLimit > 0 {
+		if burstWindow <= 0 {
+			burstWindow = 60
+		}
+		quotaWindow = time.Duration(burstWindow) * time.Second
+	}
+
 	return &WSPlatform{
 		botID:     botID,
 		secret:    secret,
 		allowFrom: allowFrom,
+		sendQuota: sendQuota{
+			limit:  burstLimit,
+			window: quotaWindow,
+		},
 	}, nil
 }
 
@@ -473,6 +495,12 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 		return nil
 	}
 
+	// Throttle: a stream reply is one WS frame / WeCom send.
+	if err := p.sendQuota.wait(ctx); err != nil {
+		slog.Error("wecom-ws: reply quota wait cancelled", "user", rc.userID, "error", err)
+		return fmt.Errorf("wecom-ws: reply quota: %w", err)
+	}
+
 	streamID := p.generateReqID("stream")
 	frame := map[string]any{
 		"cmd":     "aibot_respond_msg",
@@ -511,6 +539,11 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 
 	chunks := splitByBytes(content, 2000)
 	for i, chunk := range chunks {
+		// Throttle per API request: each chunk is a separate WS send.
+		if err := p.sendQuota.wait(ctx); err != nil {
+			slog.Error("wecom-ws: send quota wait cancelled", "user", rc.userID, "chunk", i, "error", err)
+			return fmt.Errorf("wecom-ws: send quota: %w", err)
+		}
 		reqID := p.generateReqID("aibot_send_msg")
 		frame := map[string]any{
 			"cmd":     "aibot_send_msg",
