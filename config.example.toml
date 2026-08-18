@@ -1441,6 +1441,7 @@ app_secret = "your-feishu-app-secret"
 # mode = "websocket"
 # bot_id = "your-bot-id"
 # bot_secret = "your-bot-secret"
+# ws_url = "wss://your-wecom-host:port/im_openws?bizid=10001"  # optional / 可选：私有化部署 WebSocket 地址，留空默认公有云 wss://openws.work.weixin.qq.com
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
 # Weixin personal (ilink bot) / 微信个人号（ilink 机器人网关）
