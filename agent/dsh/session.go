@@ -21,7 +21,8 @@ import (
 )
 
 // dshSession runs a multi-turn dsh conversation. Each Send() spawns
-// `dsh --profile headless --jsonl` as a one-shot process; the persisted dsh
+// `dsh --profile headless --provider ... --model ... --jsonl` as a one-shot process;
+// the persisted dsh
 // session (identified by the cc-connect-owned session id) is resumed on every
 // run, so context carries across turns.
 //
@@ -33,8 +34,10 @@ type dshSession struct {
 	cmd       string
 	extraArgs []string // extra args from cmd, prepended before dsh args
 	workDir   string
+	provider  string // provider route override ("" = use dsh settings default)
 	model     string // "" = use dsh settings default
 	mode      string // "read-only" | "workspace-write" | "danger-full-access" | "confirm"
+	preset    string // dsh agent preset requested for this session's next run
 	extraEnv  []string
 	events    chan core.Event
 	sessionID atomic.Value
@@ -53,14 +56,16 @@ type dshSession struct {
 // newDSHSession creates a session. sessionID is the cc-connect-persisted dsh
 // session id (empty on the first message); when empty, one is generated so
 // every run after the first resumes the same conversation.
-func newDSHSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, sessionID string, extraEnv []string) (*dshSession, error) {
+func newDSHSession(ctx context.Context, cmd string, extraArgs []string, workDir, provider, model, mode, preset, sessionID string, extraEnv []string) (*dshSession, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &dshSession{
 		cmd:       cmd,
 		extraArgs: extraArgs,
 		workDir:   workDir,
+		provider:  strings.TrimSpace(provider),
 		model:     model,
 		mode:      mode,
+		preset:    strings.TrimSpace(preset),
 		extraEnv:  extraEnv,
 		events:    make(chan core.Event, 64),
 		ctx:       ctx,
@@ -333,11 +338,20 @@ func (s *dshSession) buildPrompt(msg, messageID string, images []core.ImageAttac
 func (s *dshSession) buildArgs(prompt string) []string {
 	args := append([]string{}, s.extraArgs...)
 	args = append(args, "--profile", "headless", "--session-id", s.CurrentSessionID())
+	if s.provider != "" {
+		args = append(args, "--provider", s.provider)
+	}
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
 	if s.mode != "" {
 		args = append(args, "--mode", s.mode)
+	}
+	s.runMu.Lock()
+	preset := s.preset
+	s.runMu.Unlock()
+	if preset != "" {
+		args = append(args, "--preset", preset)
 	}
 	args = append(args, "--jsonl")
 	return append(args, prompt)
@@ -363,6 +377,26 @@ func (s *dshSession) CurrentSessionID() string {
 
 func (s *dshSession) Alive() bool {
 	return s.alive.Load()
+}
+
+// SetPreset stores the preset to apply before the next headless turn. The
+// dsh runner performs the blank-session check and writes its durable selection
+// event; this object only carries the command choice across process launches.
+func (s *dshSession) SetPreset(preset string) error {
+	preset = strings.TrimSpace(preset)
+	if preset == "" {
+		return fmt.Errorf("dsh: preset name must not be empty")
+	}
+	s.runMu.Lock()
+	s.preset = preset
+	s.runMu.Unlock()
+	return nil
+}
+
+func (s *dshSession) GetPreset() string {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.preset
 }
 
 func (s *dshSession) Close() error {

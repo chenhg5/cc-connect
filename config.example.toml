@@ -1927,8 +1927,10 @@ app_secret = "your-feishu-app-secret"
 # final assistant text back to the chat.
 #
 # The installed dsh must carry the headless-cc-connect patch (see the user's
-# home-manager agent/dsh/dsh.nix), which adds --session-id / --model / --mode
-# support to the headless runner.
+# home-manager agent/dsh/dsh.nix), which adds --session-id / --provider /
+# --model / --mode / --preset / --list-models / --jsonl support to the
+# headless runner. `--list-models` must return the dsh runtime provider/model
+# catalog so `/model` does not fall back to only the two native DeepSeek models.
 #
 # Prerequisites / 前置条件:
 #   1. Install dsh per https://github.com/deepseek-ai/deepseek-harness
@@ -1949,7 +1951,10 @@ app_secret = "your-feishu-app-secret"
 # mode = "confirm"          # "read-only" | "workspace-write" | "danger-full-access" | "confirm"
 #                           # (confirm = full access + ask, matches the dsh web profile default;
 #                           #  headless 无审批端时 confirm 等同 danger-full-access)
+# # provider = "openrouter"  # optional / 可选; `/model` switches this together with the model
 # # model = "deepseek-v4-flash"  # optional / 可选; 未配置时使用 dsh settings 中的默认模型
+# # `/model` reads dsh's live catalog; `/preset` lists/selects a blank-session preset
+# # and `/mode` selects the permission mode. Preset changes are locked after history starts.
 #
 # # Optional: point at a custom dsh binary (absolute path recommended under systemd).
 # # 可选：自定义 dsh 可执行文件路径（systemd 环境下建议使用绝对路径）

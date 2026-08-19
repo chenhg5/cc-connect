@@ -5,8 +5,10 @@
 // dsh.nix `headless-cc-connect.patch`) accepts:
 //
 //	--session-id <id>   create-or-resume a persisted dsh session with this id
+//	--provider <name>   override the provider route for this run
 //	--model <model>     override the default model for this run
 //	--mode <mode>       pin sandbox/approval knobs for this run
+//	--preset <name>     select/recompose a blank session's agent preset
 //
 // The session id is owned by cc-connect: the engine's StartSession(sessionID)
 // is used directly as the dsh session id, so a multi-turn Feishu conversation
@@ -36,6 +38,7 @@ type Agent struct {
 	configEnv    []string // env vars from [projects.agent.options.env]
 	workDir      string
 	model        string // model override ("" = use dsh settings default)
+	provider     string // provider route override ("" = use dsh settings default)
 	mode         string // "read-only" | "workspace-write" | "danger-full-access" | "confirm"
 	sessionEnv   []string
 	mu           sync.Mutex
@@ -48,6 +51,10 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	provider, _ := opts["provider"].(string)
+	if strings.TrimSpace(provider) == "" {
+		provider = readDefaultProvider()
+	}
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 
@@ -63,6 +70,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		configEnv:    core.ParseConfigEnv(opts),
 		workDir:      workDir,
 		model:        model,
+		provider:     strings.TrimSpace(provider),
 		mode:         mode,
 	}, nil
 }
@@ -134,15 +142,56 @@ func (a *Agent) GetModel() string {
 	return ""
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	if models := readSettingsModels(); len(models) > 0 {
+// GetModelProvider returns the provider route used by the next dsh run.
+func (a *Agent) GetModelProvider() string {
+	a.mu.Lock()
+	provider := a.provider
+	a.mu.Unlock()
+	if provider != "" {
+		return provider
+	}
+	return readDefaultProvider()
+}
+
+// SetModelForProvider switches both halves of a dsh model selection. dsh's
+// native runner keeps provider and model separate, so changing only the model
+// would send a valid id to the wrong route when catalogs overlap.
+func (a *Agent) SetModelForProvider(provider, model string) {
+	a.mu.Lock()
+	a.provider = strings.TrimSpace(provider)
+	a.model = strings.TrimSpace(model)
+	a.mu.Unlock()
+	slog.Info("dsh: model route changed", "provider", provider, "model", model)
+}
+
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := a.readRuntimeModelCatalog(ctx); len(models) > 0 {
+		return appendDeepSeekFallback(models, readSettingsModels("deepseek-official"))
+	}
+	if models := readSettingsModels("deepseek-official"); len(models) > 0 {
 		return models
 	}
 	// Fallback: the catalog dsh ships for the deepseek-official provider.
-	return []core.ModelOption{
-		{Name: "deepseek-v4-flash", Desc: "DeepSeek-V4-Flash"},
-		{Name: "deepseek-v4-pro", Desc: "DeepSeek-V4-Pro"},
+	models := []core.ModelOption{
+		{Name: "deepseek-v4-flash", Desc: "DeepSeek-V4-Flash", Provider: "deepseek-official"},
+		{Name: "deepseek-v4-pro", Desc: "DeepSeek-V4-Pro", Provider: "deepseek-official"},
 	}
+	if current := a.GetModel(); current != "" {
+		seen := false
+		for _, model := range models {
+			if model.Name == current {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			models = append(models, core.ModelOption{
+				Name:     current,
+				Provider: a.GetModelProvider(),
+			})
+		}
+	}
+	return models
 }
 
 // ── ModeSwitcher ─────────────────────────────────────────────
@@ -204,15 +253,23 @@ func (a *Agent) SkillDirs() []string {
 // ── Session lifecycle ────────────────────────────────────────
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.StartSessionWithPreset(ctx, sessionID, "")
+}
+
+// StartSessionWithPreset carries cc-connect's per-session preset choice to the
+// headless runner. dsh itself owns composition and durable selection events;
+// this adapter only forwards the requested id.
+func (a *Agent) StartSessionWithPreset(ctx context.Context, sessionID, preset string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	provider := a.provider
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	workDir := a.workDir
 	a.mu.Unlock()
-	return newDSHSession(ctx, a.cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
+	return newDSHSession(ctx, a.cmd, extraArgs, workDir, provider, model, mode, preset, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

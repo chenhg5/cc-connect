@@ -109,12 +109,43 @@ func TestSetGetModel(t *testing.T) {
 	}
 }
 
+func TestSetModelForProvider(t *testing.T) {
+	ag, _ := New(map[string]any{"cmd": "echo"})
+	a := ag.(*Agent)
+	a.SetModelForProvider("openrouter", "deepseek/deepseek-v4-pro")
+	if got := a.GetModel(); got != "deepseek/deepseek-v4-pro" {
+		t.Errorf("GetModel() = %q", got)
+	}
+	if got := a.GetModelProvider(); got != "openrouter" {
+		t.Errorf("GetModelProvider() = %q", got)
+	}
+}
+
 func TestSetGetMode(t *testing.T) {
 	ag, _ := New(map[string]any{"cmd": "echo"})
 	a := ag.(*Agent)
 	a.SetMode("yolo")
 	if got := a.GetMode(); got != "danger-full-access" {
 		t.Errorf("GetMode() = %q, want danger-full-access", got)
+	}
+}
+
+func TestSessionPreset(t *testing.T) {
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "", "session-preset", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.GetPreset(); got != "" {
+		t.Fatalf("initial preset = %q, want empty", got)
+	}
+	if err := s.SetPreset("minimal"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.GetPreset(); got != "minimal" {
+		t.Fatalf("preset = %q, want minimal", got)
+	}
+	if err := s.SetPreset(" "); err == nil {
+		t.Fatal("SetPreset with empty name should fail")
 	}
 }
 
@@ -176,6 +207,30 @@ llm-deepseek:
 	}
 }
 
+func TestAvailableModels_FromRuntimeCatalog(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "fake-dsh")
+	content := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"models\",\"models\":[{\"provider\":\"openrouter\",\"id\":\"deepseek/deepseek-v4-pro\",\"name\":\"DeepSeek V4 Pro\"},{\"provider\":\"openai\",\"id\":\"gpt-5.6-luna\",\"name\":\"GPT 5.6 Luna\"}]}'\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSH_HOME", filepath.Join(home, "dsh-home"))
+	ag, err := New(map[string]any{"cmd": script})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := ag.(*Agent).AvailableModels(context.Background())
+	if len(models) != 4 {
+		t.Fatalf("AvailableModels len = %d, want runtime catalog plus DeepSeek fallback: %+v", len(models), models)
+	}
+	if models[0].Provider != "openrouter" || models[0].Name != "deepseek/deepseek-v4-pro" {
+		t.Errorf("unexpected first runtime model: %+v", models[0])
+	}
+	if !strings.Contains(models[1].Desc, "openai") {
+		t.Errorf("runtime model description = %q, want provider label", models[1].Desc)
+	}
+}
+
 func TestGetModel_FallsBackToSettings(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "settings.yaml"), []byte(`
@@ -192,22 +247,51 @@ agent-default-model:
 	}
 }
 
+func TestAvailablePresets_FromUserRoot(t *testing.T) {
+	home := t.TempDir()
+	userRoot := filepath.Join(home, ".agent-presets", "minimal")
+	if err := os.MkdirAll(userRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "settings.yaml"), []byte("agent-presets:\n  default: minimal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userRoot, "agent.cordis.yml"), []byte("[]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userRoot, "preset.yml"), []byte("name: Minimal\ndescription: Small surface\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSH_HOME", home)
+	ag, err := New(map[string]any{"cmd": "echo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	presets := ag.(*Agent).AvailablePresets(context.Background())
+	if len(presets) != 1 {
+		t.Fatalf("presets = %+v, want one entry", presets)
+	}
+	if presets[0].ID != "minimal" || !presets[0].Default || presets[0].Name != "Minimal" {
+		t.Fatalf("preset = %+v", presets[0])
+	}
+}
+
 // ── buildArgs ────────────────────────────────────────────────
 
 func TestBuildArgs(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "confirm", "session-abc", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "confirm", "codex", "session-abc", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := s.buildArgs("hello world")
-	want := []string{"--profile", "headless", "--session-id", "session-abc", "--mode", "confirm", "--jsonl", "hello world"}
+	want := []string{"--profile", "headless", "--session-id", "session-abc", "--mode", "confirm", "--preset", "codex", "--jsonl", "hello world"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("buildArgs() = %v, want %v", args, want)
 	}
 }
 
 func TestBuildArgs_WithModel(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "deepseek-v4-pro", "danger-full-access", "session-abc", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "deepseek-v4-pro", "danger-full-access", "", "session-abc", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,8 +304,22 @@ func TestBuildArgs_WithModel(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_WithProvider(t *testing.T) {
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "openrouter", "deepseek/deepseek-v4-pro", "", "", "session-abc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := s.buildArgs("task")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--provider openrouter", "--model deepseek/deepseek-v4-pro"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("buildArgs() = %v missing %q", args, want)
+		}
+	}
+}
+
 func TestSessionID_GeneratedWhenEmpty(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +378,7 @@ func TestSend_Success(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := fakeDSHScript(t, argvFile, false, false)
 
-	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "deepseek-v4-flash", "confirm", "session-test-1", nil)
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "deepseek-v4-flash", "confirm", "", "session-test-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +447,7 @@ func TestSend_Approval(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := fakeDSHScript(t, argvFile, false, true)
 
-	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "confirm", "session-approval", nil)
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "confirm", "", "session-approval", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,6 +487,7 @@ loop:
 
 	if permReq == nil {
 		t.Fatal("expected EventPermissionRequest")
+		return
 	}
 	if permReq.ToolName != "bash" || !strings.HasPrefix(permReq.RequestID, "dsh_") {
 		t.Errorf("EventPermissionRequest = %+v", permReq)
@@ -402,7 +501,7 @@ loop:
 }
 
 func TestRespondPermission_NoActiveRun(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "echo", nil, t.TempDir(), "", "", "session-x", nil)
+	s, err := newDSHSession(context.Background(), "echo", nil, t.TempDir(), "", "", "", "", "session-x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +516,7 @@ func TestSend_Error(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := fakeDSHScript(t, argvFile, true, false)
 
-	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "session-test-2", nil)
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "", "", "session-test-2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
