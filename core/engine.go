@@ -334,8 +334,9 @@ type DisplayCfg struct {
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
 // is received, before the agent starts processing.
 type InstantReplyCfg struct {
-	Enabled bool
-	Content string // custom reply text; empty = use i18n MsgStarting default
+	Enabled    bool
+	Content    string // custom reply text; empty = use i18n MsgStarting default
+	AutoRecall bool   // recall instant reply message when real response arrives
 }
 
 // RateLimitCfg controls per-session message rate limiting.
@@ -4820,12 +4821,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
+	var instantReplyMsgID string
 	if e.instantReply.Enabled && streamCard == nil {
 		replyContent := e.instantReply.Content
 		if replyContent == "" {
 			replyContent = e.i18n.T(MsgStarting)
 		}
-		e.send(state.platform, state.replyCtx, replyContent)
+		if e.instantReply.AutoRecall {
+			if sender, ok := state.platform.(MessageRecallSender); ok {
+				msgID, err := sender.SendAndRecall(e.ctx, state.replyCtx, replyContent)
+				if err != nil {
+					slog.Warn("instant reply send failed, falling back to plain send", "error", err)
+					e.send(state.platform, state.replyCtx, replyContent)
+				} else {
+					instantReplyMsgID = msgID
+				}
+			} else {
+				e.send(state.platform, state.replyCtx, replyContent)
+			}
+		} else {
+			e.send(state.platform, state.replyCtx, replyContent)
+		}
 	}
 
 	// Idle timeout: resets on every received event (0 = disabled)
@@ -4865,6 +4881,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if err != nil {
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				sp.discard()
+				if instantReplyMsgID != "" {
+					if sender, ok := state.platform.(MessageRecallSender); ok {
+						_ = sender.RecallMessage(e.ctx, instantReplyMsgID)
+						instantReplyMsgID = ""
+					}
+				}
 				if stopTyping != nil {
 					stopTyping()
 					stopTyping = nil
@@ -4885,6 +4907,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			if instantReplyMsgID != "" {
+				if sender, ok := state.platform.(MessageRecallSender); ok {
+					_ = sender.RecallMessage(e.ctx, instantReplyMsgID)
+					instantReplyMsgID = ""
+				}
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
@@ -4898,6 +4926,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			if instantReplyMsgID != "" {
+				if sender, ok := state.platform.(MessageRecallSender); ok {
+					_ = sender.RecallMessage(e.ctx, instantReplyMsgID)
+					instantReplyMsgID = ""
+				}
+			}
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -4941,6 +4975,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
+			if instantReplyMsgID != "" {
+				if sender, ok := state.platform.(MessageRecallSender); ok {
+					_ = sender.RecallMessage(e.ctx, instantReplyMsgID)
+					instantReplyMsgID = ""
+				}
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -5273,6 +5313,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				content = stripAgentFooterLines(content)
 			}
 			if content != "" && !isEllipsisOnly(content) {
+				// Recall instant reply when real response starts arriving.
+				if instantReplyMsgID != "" {
+					if sender, ok := p.(MessageRecallSender); ok {
+						if err := sender.RecallMessage(e.ctx, instantReplyMsgID); err != nil {
+							slog.Debug("failed to recall instant reply", "error", err, "msgid", instantReplyMsgID)
+						} else {
+							slog.Debug("instant reply recalled", "msgid", instantReplyMsgID)
+						}
+					}
+					instantReplyMsgID = ""
+				}
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
 				// end-of-stream when the text resolves to bare NO_REPLY (Lark
@@ -5514,6 +5565,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 			cp.Finalize(ProgressCardStateCompleted)
+			// Recall instant reply as soon as we know the turn is done and real
+			// response is about to be sent. Must happen before any send path
+			// (streaming card, rich card, plain text, etc.).
+			if instantReplyMsgID != "" {
+				if sender, ok := p.(MessageRecallSender); ok {
+					if err := sender.RecallMessage(e.ctx, instantReplyMsgID); err != nil {
+						slog.Debug("failed to recall instant reply on EventResult", "error", err, "msgid", instantReplyMsgID)
+					} else {
+						slog.Info("instant reply recalled", "msgid", instantReplyMsgID)
+					}
+				}
+				instantReplyMsgID = ""
+			}
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
 			// to not be persisted to disk, breaking session resume on next startup.
@@ -5982,14 +6046,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
-					replyContent := e.instantReply.Content
-					if replyContent == "" {
-						replyContent = e.i18n.T(MsgStarting)
+			// Send instant reply for queued turn if no streaming card is active.
+			if e.instantReply.Enabled && streamCard == nil {
+				replyContent := e.instantReply.Content
+				if replyContent == "" {
+					replyContent = e.i18n.T(MsgStarting)
+				}
+				if e.instantReply.AutoRecall {
+					if sender, ok := queued.platform.(MessageRecallSender); ok {
+						msgID, err := sender.SendAndRecall(e.ctx, queued.replyCtx, replyContent)
+						if err != nil {
+							slog.Warn("instant reply send failed for queued turn, falling back to plain send", "error", err)
+							e.send(queued.platform, queued.replyCtx, replyContent)
+						} else {
+							instantReplyMsgID = msgID
+						}
+					} else {
+						e.send(queued.platform, queued.replyCtx, replyContent)
 					}
+				} else {
 					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
+			}
 
 				session.AddHistory("user", queued.content)
 				// Persist queued user message immediately (mirror of the
@@ -6075,6 +6153,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
+	// Recall any pending instant reply on abnormal exit.
+	if instantReplyMsgID != "" {
+		if sender, ok := state.platform.(MessageRecallSender); ok {
+			if err := sender.RecallMessage(e.ctx, instantReplyMsgID); err != nil {
+				slog.Debug("failed to recall instant reply on channel close", "error", err)
+			}
+			instantReplyMsgID = ""
+		}
+	}
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	state.mu.Unlock()
