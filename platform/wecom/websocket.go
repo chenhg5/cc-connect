@@ -36,7 +36,8 @@ type WSPlatform struct {
 	dedup       core.MessageDedup
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
-	pendingAcks sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
+	pendingAcks   sync.Map // req_id -> chan wsAckResult, for sequential send with ack waiting
+	pendingStreams sync.Map // chatID -> pendingStreamInfo, for streaming instant reply (finish=false → finish=true)
 }
 
 const (
@@ -48,10 +49,15 @@ var errWSAckTimeout = errors.New("wecom-ws: ack timeout")
 
 // wsReplyContext holds the context needed to reply to a specific message.
 type wsReplyContext struct {
-	reqID    string // req_id from headers of aibot_msg_callback
-	chatID   string // chatid for aibot_send_msg
-	chatType string // chattype: "single" or "group"
-	userID   string // from.userid
+	reqID  string // req_id from headers of aibot_msg_callback
+	chatID string // chatid for aibot_send_msg
+	userID string // from.userid
+}
+
+// pendingStreamInfo tracks a streaming instant reply that needs to be finished.
+type pendingStreamInfo struct {
+	reqID    string // original req_id from the callback (for aibot_respond_msg header)
+	streamID string // stream ID used in the initial finish=false frame
 }
 
 // --- WebSocket protocol frame types (matching official SDK) ---
@@ -383,10 +389,9 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		chatID = body.From.UserID
 	}
 	rctx := wsReplyContext{
-		reqID:    reqID,
-		chatID:   chatID,
-		chatType: body.ChatType,
-		userID:   body.From.UserID,
+		reqID:  reqID,
+		chatID: chatID,
+		userID: body.From.UserID,
 	}
 
 	if !core.AllowList(p.allowFrom, body.From.UserID) {
@@ -464,6 +469,8 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 // The stream content field is a full-replacement (not incremental append), so we
 // send the complete content in one frame with finish=true.
 // Markdown is natively supported by the stream reply format.
+// If there's a pending streaming instant reply (from SendAndRecall), this method
+// finishes it with the real response content (finish=true on the same stream).
 func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
@@ -473,6 +480,30 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 		return nil
 	}
 
+	// Check if there's a pending streaming instant reply to finish
+	if psVal, ok := p.pendingStreams.LoadAndDelete(rc.chatID); ok {
+		ps := psVal.(*pendingStreamInfo)
+		frame := map[string]any{
+			"cmd":     "aibot_respond_msg",
+			"headers": map[string]string{"req_id": ps.reqID},
+			"body": map[string]any{
+				"msgtype": "stream",
+				"stream": map[string]any{
+					"id":      ps.streamID,
+					"finish":  true,
+					"content": content,
+				},
+			},
+		}
+		if err := p.writeJSON(frame); err != nil {
+			slog.Error("wecom-ws: reply (finish stream) failed", "user", rc.userID, "error", err)
+			return err
+		}
+		slog.Debug("wecom-ws: reply sent (finished streaming instant reply)", "user", rc.userID, "len", len(content))
+		return nil
+	}
+
+	// Normal reply (no pending stream)
 	streamID := p.generateReqID("stream")
 	frame := map[string]any{
 		"cmd":     "aibot_respond_msg",
@@ -497,6 +528,9 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 // Send sends a proactive message via aibot_send_msg (markdown format).
 // Used for follow-up messages and cron-triggered messages where no req_id is available.
 // Markdown is natively supported.
+// If there's a pending streaming instant reply (from SendAndRecall), this method
+// finishes it with the real response content via aibot_respond_msg (finish=true)
+// instead of sending a new aibot_send_msg — the stream replaces the placeholder.
 func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 	rc, ok := rctx.(wsReplyContext)
 	if !ok {
@@ -507,6 +541,30 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 	}
 	if rc.chatID == "" {
 		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")
+	}
+
+	// Finish any pending streaming instant reply with the real content
+	if psVal, ok := p.pendingStreams.LoadAndDelete(rc.chatID); ok {
+		ps := psVal.(*pendingStreamInfo)
+		finishFrame := map[string]any{
+			"cmd":     "aibot_respond_msg",
+			"headers": map[string]string{"req_id": ps.reqID},
+			"body": map[string]any{
+				"msgtype": "stream",
+				"stream": map[string]any{
+					"id":      ps.streamID,
+					"finish":  true,
+					"content": content,
+				},
+			},
+		}
+		if err := p.writeJSON(finishFrame); err != nil {
+			slog.Error("wecom-ws: finish pending stream failed", "user", rc.userID, "error", err)
+			// Fall through to send via aibot_send_msg as backup
+		} else {
+			slog.Debug("wecom-ws: finished streaming instant reply with real content", "user", rc.userID, "len", len(content))
+			return nil
+		}
 	}
 
 	chunks := splitByBytes(content, 2000)
@@ -631,4 +689,50 @@ func (p *WSPlatform) writeAndWaitResult(ctx context.Context, frame map[string]an
 		p.pendingAcks.Delete(reqID)
 		return wsAckResult{}, errWSAckTimeout
 	}
+}
+
+// SendAndRecall sends an instant reply via WebSocket streaming (finish=false)
+// and stores the stream info for later finishing by Reply() or Send().
+// This avoids the IP whitelist issue with REST API (error 60020).
+// The returned "msgID" is actually the reqID, used as key for RecallMessage.
+func (p *WSPlatform) SendAndRecall(ctx context.Context, rctx any, content string) (string, error) {
+	rc, ok := rctx.(wsReplyContext)
+	if !ok {
+		return "", fmt.Errorf("wecom-ws: SendAndRecall: invalid reply context type %T", rctx)
+	}
+	if content == "" {
+		return "", nil
+	}
+
+	streamID := p.generateReqID("stream")
+	frame := map[string]any{
+		"cmd":     "aibot_respond_msg",
+		"headers": map[string]string{"req_id": rc.reqID},
+		"body": map[string]any{
+			"msgtype": "stream",
+			"stream": map[string]any{
+				"id":      streamID,
+				"finish":  false,
+				"content": content,
+			},
+		},
+	}
+	if err := p.writeJSON(frame); err != nil {
+		slog.Error("wecom-ws: SendAndRecall: send failed", "user", rc.userID, "error", err)
+		return "", err
+	}
+
+	// Store stream info keyed by chatID (both Reply and Send can look it up)
+	p.pendingStreams.Store(rc.chatID, &pendingStreamInfo{reqID: rc.reqID, streamID: streamID})
+	slog.Debug("wecom-ws: SendAndRecall: instant reply sent via streaming", "user", rc.userID, "chat_id", rc.chatID, "req_id", rc.reqID, "stream_id", streamID)
+	return rc.reqID, nil
+}
+
+// RecallMessage is a no-op in streaming mode.
+// The instant reply stream will be finished by the next Reply() call
+// with the real response content (finish=true on the same stream).
+// msgID is actually the reqID from SendAndRecall.
+func (p *WSPlatform) RecallMessage(ctx context.Context, msgID string) error {
+	slog.Debug("wecom-ws: RecallMessage: stream will be finished by next Reply", "req_id", msgID)
+	return nil
 }
