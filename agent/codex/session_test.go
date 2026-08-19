@@ -284,6 +284,11 @@ func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
+	oldTimeout := codexRuntimeConfigTimeout
+	codexRuntimeConfigTimeout = 5 * time.Second
+	t.Cleanup(func() {
+		codexRuntimeConfigTimeout = oldTimeout
+	})
 
 	script := `#!/bin/sh
 while IFS= read -r line; do
@@ -735,11 +740,17 @@ func writeFakeCodexScript(t *testing.T, dir, shellScript, powershellScript strin
 func waitForArgsFile(t *testing.T, path string) []string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	var last string
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			text := strings.TrimSpace(string(data))
 			if text != "" {
+				if text != last {
+					last = text
+					time.Sleep(20 * time.Millisecond)
+					continue
+				}
 				lines := strings.Split(text, "\n")
 				args := make([]string, 0, len(lines))
 				for _, line := range lines {
