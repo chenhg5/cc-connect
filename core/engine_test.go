@@ -7232,6 +7232,11 @@ type controllableAgentSession struct {
 	report          *UsageReport
 	contextUsage    *ContextUsage
 	usageErr        error
+
+	// Teardown controls, for tests that exercise the close/spawn race.
+	closeDelay    time.Duration // how long Close() blocks before returning
+	closeErr      error         // what Close() reports (e.g. "process still alive")
+	closeFinished atomic.Bool   // set once Close() has returned
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -7261,6 +7266,9 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
 func (s *controllableAgentSession) Close() error {
+	if s.closeDelay > 0 {
+		time.Sleep(s.closeDelay)
+	}
 	s.alive = false
 	close(s.events)
 	select {
@@ -7268,7 +7276,8 @@ func (s *controllableAgentSession) Close() error {
 	default:
 		close(s.closed)
 	}
-	return nil
+	s.closeFinished.Store(true)
+	return s.closeErr
 }
 
 func waitForInteractiveStateRemoved(t *testing.T, e *Engine, key string) {
@@ -14200,9 +14209,16 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	defer e.Stop()
 
-	sess := newControllableSession("unsol-perm")
+	// NOTE: constructed inline rather than copying a *controllableAgentSession,
+	// because that struct now carries an atomic.Bool (closeFinished) and must
+	// not be copied by value.
 	permRecorder := &permRecordingSession{
-		controllableAgentSession: *sess,
+		controllableAgentSession: controllableAgentSession{
+			sessionID: "unsol-perm",
+			alive:     true,
+			events:    make(chan Event, 8),
+			closed:    make(chan struct{}),
+		},
 	}
 
 	sessions := e.sessions
