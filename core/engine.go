@@ -74,6 +74,15 @@ const (
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
 )
 
+// closeTimeout bounds a single agent session teardown. It must cover the
+// agent's own graceful shutdown sequence: stdin close → Stop hooks
+// (claude-mem summary etc.) → SIGTERM → SIGKILL (with retries). Claude Code's
+// Stop hooks can take up to 120s (claude-mem uses a sonnet summarizer), so the
+// 150s budget covers the 120s graceful phase + 5s SIGTERM + ~16s of bounded
+// SIGKILL retries/confirmation + buffer. The wait ends early if the process
+// exits sooner — this is the ceiling, not the typical duration.
+const closeTimeout = 150 * time.Second
+
 const (
 	replyFooterUsageTimeout  = 1500 * time.Millisecond
 	replyFooterUsageCacheTTL = 30 * time.Second
@@ -461,6 +470,16 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	// Teardown tracking. A session's state is removed from interactiveStates
+	// as soon as /stop is issued, but its OS process can live on for up to
+	// closeTimeout while it drains stdin and runs Stop hooks. Without the two
+	// maps below, a message arriving in that window spawns a second process
+	// that resumes the *same* agent session ID — two live agents then share
+	// one conversation lineage, each acting on it independently.
+	closingMu       sync.Mutex
+	closingSessions map[string]chan struct{} // sessionKey → closed when teardown finishes
+	unsafeResume    map[string]bool          // sessionKey → next spawn must start fresh, not resume
+
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
@@ -744,6 +763,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		closingSessions:       make(map[string]chan struct{}),
+		unsafeResume:          make(map[string]bool),
 		sendWorkDirs:          make(map[string]string),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
@@ -3995,6 +4016,12 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+	// /stop removes the state from the map immediately but tears the process
+	// down in the background. Wait that teardown out *before* taking the lock:
+	// spawning now would start a second process on the same agent session ID
+	// while the first one is still alive and writing to the same transcript.
+	closeSettled := e.awaitSessionClose(sessionKey)
+
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -4025,7 +4052,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		state.markStopped()
 		// Close synchronously to prevent race condition where old agent
 		// continues outputting while new agent starts (issue #327).
-		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
+		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession, state.platform, state.replyCtx)
 		delete(e.interactiveStates, sessionKey)
 		ok = false // prevent reading stale settings below
 	}
@@ -4109,6 +4136,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			startSessionID = ""
 		}
 	}
+	// Refuse to resume when the previous process could not be confirmed dead
+	// (close reported a kill failure, timed out, or we gave up waiting for it).
+	// Starting fresh loses this conversation's history, but resuming would put
+	// two live agents on one transcript — both replying, both calling tools.
+	if startSessionID != "" && (!closeSettled || e.consumeUnsafeResume(sessionKey)) {
+		slog.Warn("previous agent process not confirmed dead, starting a fresh session instead of resuming",
+			"session_key", sessionKey, "abandoned_session_id", startSessionID)
+		session.SetAgentSessionID("", agent.Name())
+		sessions.Save()
+		startSessionID = ""
+		e.send(p, replyCtx, e.i18n.T(MsgSessionResumeUnsafe))
+	}
+
 	isResume := startSessionID != ""
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
@@ -4222,10 +4262,14 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// Capture the agent session and nil it out atomically to prevent a
 	// concurrent cleanup (without expected) from closing the same session.
 	var agentSession AgentSession
+	var closePlatform Platform
+	var closeReplyCtx any
 	if ok && state != nil {
 		state.mu.Lock()
 		agentSession = state.agentSession
 		state.agentSession = nil
+		closePlatform = state.platform
+		closeReplyCtx = state.replyCtx
 		if state.agentSessionIdleCancel != nil {
 			state.agentSessionIdleCancel()
 			state.agentSessionIdleCancel = nil
@@ -4259,7 +4303,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// an empty map and reports "No execution in progress" while
 	// the agent session Close() is still blocking (up to 130s).
 	if agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, agentSession)
+		e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
 	}
 
 	// Now delete the state from the map after the session is closed.
@@ -4354,6 +4398,8 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 	state.agentSession = nil
 	state.agentSessionIdleCancel = nil
 	state.agentSessionIdleToken = 0
+	closePlatform := state.platform
+	closeReplyCtx := state.replyCtx
 	state.mu.Unlock()
 	e.interactiveMu.Unlock()
 
@@ -4371,7 +4417,7 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 	}
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 
-	e.closeAgentSessionWithTimeout(sessionKey, agentSession)
+	e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
 
 	e.interactiveMu.Lock()
 	if currentState, currentOk := e.interactiveStates[sessionKey]; currentOk && currentState == expected {
@@ -4380,43 +4426,193 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 	e.interactiveMu.Unlock()
 }
 
-func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
-	if agentSession == nil {
-		return
+// beginSessionClose registers an in-flight teardown for sessionKey and returns
+// the function that must be called once the teardown is over. Spawns for the
+// same key wait on this registration (awaitSessionClose), so a new agent
+// process is never started while the previous one may still be alive.
+func (e *Engine) beginSessionClose(sessionKey string) func() {
+	if sessionKey == "" {
+		return func() {}
 	}
-	go e.closeAgentSessionWithTimeout(sessionKey, agentSession)
+	done := make(chan struct{})
+	e.closingMu.Lock()
+	if e.closingSessions == nil {
+		e.closingSessions = make(map[string]chan struct{})
+	}
+	e.closingSessions[sessionKey] = done
+	e.closingMu.Unlock()
+
+	return func() {
+		e.closingMu.Lock()
+		// Only clear the registry if it still points at *this* teardown; an
+		// overlapping close may have replaced it and is still running.
+		if cur, ok := e.closingSessions[sessionKey]; ok && cur == done {
+			delete(e.closingSessions, sessionKey)
+		}
+		e.closingMu.Unlock()
+		close(done)
+	}
 }
 
-func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession AgentSession) {
+// awaitSessionClose blocks until no teardown is in flight for sessionKey.
+// It reports whether the wait ended cleanly; false means the previous process
+// could not be confirmed gone, in which case the caller must not resume its
+// agent session ID. Must NOT be called while holding interactiveMu — the
+// teardown itself can take up to closeTimeout.
+func (e *Engine) awaitSessionClose(sessionKey string) bool {
+	if sessionKey == "" {
+		return true
+	}
+	// Budget slightly above the teardown's own ceiling so the close path
+	// always gets to resolve (and flag the session) before we give up.
+	deadline := time.After(closeTimeout + 30*time.Second)
+	start := time.Now()
+	waited := false
+	for {
+		e.closingMu.Lock()
+		done := e.closingSessions[sessionKey]
+		e.closingMu.Unlock()
+		if done == nil {
+			if waited {
+				slog.Info("previous session teardown finished, starting new session",
+					"session_key", sessionKey, "waited", time.Since(start))
+			}
+			return true
+		}
+		if !waited {
+			waited = true
+			slog.Info("waiting for previous session teardown before spawning",
+				"session_key", sessionKey)
+		}
+		select {
+		case <-done:
+			// Loop again: an overlapping teardown may have been registered.
+		case <-deadline:
+			slog.Error("timed out waiting for previous session teardown; refusing to resume its agent session",
+				"session_key", sessionKey, "waited", time.Since(start))
+			return false
+		case <-e.ctx.Done():
+			return false
+		}
+	}
+}
+
+// markUnsafeResume records that sessionKey's previous agent process could not
+// be confirmed dead, so its agent session ID must not be resumed. Resuming it
+// would attach a second live process to the same conversation — both would
+// read and write the same transcript and act on it independently.
+func (e *Engine) markUnsafeResume(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	e.closingMu.Lock()
+	if e.unsafeResume == nil {
+		e.unsafeResume = make(map[string]bool)
+	}
+	e.unsafeResume[sessionKey] = true
+	e.closingMu.Unlock()
+}
+
+// consumeUnsafeResume reports (and clears) whether the next spawn for
+// sessionKey must start a fresh agent session instead of resuming.
+func (e *Engine) consumeUnsafeResume(sessionKey string) bool {
+	if sessionKey == "" {
+		return false
+	}
+	e.closingMu.Lock()
+	defer e.closingMu.Unlock()
+	if !e.unsafeResume[sessionKey] {
+		return false
+	}
+	delete(e.unsafeResume, sessionKey)
+	return true
+}
+
+func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
 	if agentSession == nil {
 		return
 	}
+	// Register synchronously: a message arriving right after /stop must see
+	// the teardown even if this goroutine has not been scheduled yet.
+	finish := e.beginSessionClose(sessionKey)
+	go func() {
+		defer finish()
+		e.closeAgentSession(sessionKey, agentSession, platform, replyCtx)
+	}()
+}
 
-	// Allow enough time for the agent's own graceful shutdown sequence:
-	// stdin close → Stop hooks (claude-mem summary etc.) → SIGTERM → SIGKILL.
-	// Claude Code's Stop hooks can take up to 120s (claude-mem uses a
-	// sonnet summarizer). The 130s budget covers the default 120s graceful
-	// phase + 5s SIGTERM + 5s buffer. The wait ends early if the process
-	// exits sooner — this is the ceiling, not the typical duration.
-	const closeTimeout = 130 * time.Second
+// closeAgentSessionWithTimeout tears down agentSession in the background and
+// waits up to closeTimeout for it to finish. platform/replyCtx (the chat that
+// owned the session, if known) are used to alert the user if the underlying
+// OS process cannot be confirmed dead — either because Close() itself
+// reports a kill failure, or because it does not return within the budget
+// at all. In both cases the process may still be running with the session's
+// original credentials, so silence here is worse than a noisy warning.
+func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
+	if agentSession == nil {
+		return
+	}
+	finish := e.beginSessionClose(sessionKey)
+	defer finish()
+	e.closeAgentSession(sessionKey, agentSession, platform, replyCtx)
+}
+
+// closeAgentSession performs the teardown itself. Callers must have registered
+// the in-flight close (beginSessionClose) first.
+func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
+	if agentSession == nil {
+		return
+	}
 
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
 
 	done := make(chan struct{})
+	var closeErr error
 	go func() {
-		agentSession.Close()
+		closeErr = agentSession.Close()
 		close(done)
 	}()
 
 	select {
 	case <-done:
+		if closeErr != nil {
+			slog.Error("agent session close reported failure, process may still be running",
+				"session", sessionKey, "error", closeErr)
+			// The old process may still hold this conversation open — the
+			// next turn must not resume into it.
+			e.markUnsafeResume(sessionKey)
+			e.notifySessionCloseFailure(sessionKey, platform, replyCtx, closeErr)
+			return
+		}
 		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
 			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
 		}
 	case <-time.After(closeTimeout):
 		slog.Error("agent session close timed out, abandoning",
 			"timeout", closeTimeout, "session", sessionKey)
+		e.markUnsafeResume(sessionKey)
+		e.notifySessionCloseFailure(sessionKey, platform, replyCtx,
+			fmt.Errorf("did not respond within %s", closeTimeout))
+	}
+}
+
+// notifySessionCloseFailure alerts the chat that owned a session when its
+// underlying process could not be confirmed killed. Without this, a stuck
+// process can keep running in the background — still holding the session's
+// credentials — while the user believes /stop (or /new) already ended it.
+func (e *Engine) notifySessionCloseFailure(sessionKey string, platform Platform, replyCtx any, cause error) {
+	if platform == nil || replyCtx == nil {
+		slog.Error("agent session close failed and no chat is available to alert",
+			"session", sessionKey, "cause", cause)
+		return
+	}
+	text := e.i18n.T(MsgSessionCloseFailed) + fmt.Sprintf(" (%v)", cause)
+	if err := e.waitOutgoing(platform); err != nil {
+		slog.Warn("notifySessionCloseFailure: wait outgoing failed", "session", sessionKey, "error", err)
+	}
+	if err := platform.Send(e.ctx, replyCtx, text); err != nil {
+		slog.Error("notifySessionCloseFailure: send failed", "session", sessionKey, "error", err)
 	}
 }
 
@@ -10105,6 +10301,8 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	pending := state.pending
 	state.pending = nil
 	agentSession := state.agentSession
+	closePlatform := state.platform
+	closeReplyCtx := state.replyCtx
 	state.mu.Unlock()
 
 	// If the agent session supports graceful turn cancellation (e.g. ACP),
@@ -10167,7 +10365,7 @@ normalCleanup:
 		state.pendingMessages = nil
 		state.mu.Unlock()
 	}
-	e.closeAgentSessionAsync(sessionKey, agentSession)
+	e.closeAgentSessionAsync(sessionKey, agentSession, closePlatform, closeReplyCtx)
 
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventSessionEnded,

@@ -425,6 +425,31 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
+	// 🔴 /stop「杀不死」的根因修复（2026-07-29）。
+	//
+	// 症状：taskkill /T /F 报成功，Close() 却在 10 秒后返回
+	// "process tree (pid N) still alive 10s after SIGKILL reported success"，
+	// engine 于是认定 teardown 失败 —— 用户按了 /stop，却像在跟另一个 session 说话。
+	//
+	// 机制：上面这行把 stderr 接到 *bytes.Buffer（不是 *os.File），os/exec 因此会
+	// 自建一条管道 + 一个 io.Copy goroutine。**cmd.Wait() 不只等进程退出，还要等
+	// 那个 goroutine 结束**，而它要等管道 EOF —— 只要**任何一个孙进程**
+	// （Claude Code 拉起的 MCP server）继承了 stderr 写端还活着，管道就永不 EOF。
+	// 于是：直接子进程早被杀死，Wait() 却永不返回 → cs.done 永不关闭 → Close() 只能超时。
+	// **"还活着"的其实不是进程，是那根没人关的管道。**
+	// （下面 startReadLoopWait 对 stdout 已经做了 50ms 后强关来躲这个坑，
+	//   注释里还写着 "no descendants holding it" —— 唯独 stderr 漏了同样的处理。）
+	//
+	// 证据：同一个仓库的 gemini / kimi / antigravity / hooks **四个适配器全都设了
+	// WaitDelay**（gemini 那行注释：「确保 I/O goroutine 在 context 结束后不会长时间阻塞」）
+	// —— 唯独 claudecode 漏了。这不是新发明，是补上一致性。
+	//
+	// 取 3s 而非兄弟们的 1s：Claude Code 退出时可能还在吐最后一段 stderr（报错栈），
+	// 太短会截掉有用的诊断；而 Close() 的兜底等待是 10s，3s 留足余量。
+	// 超时后 Wait() 返回 ErrWaitDelay 并强制关管道 —— stderr 可能不全，
+	// 但**进程状态是准的**。这正是要的取舍：宁可少一段日志，不要一个杀不死的会话。
+	cmd.WaitDelay = 3 * time.Second
+
 	if err := cmd.Start(); err != nil {
 		if promptFilePath != "" && !promptFileIsShared {
 			_ = os.Remove(promptFilePath)
@@ -450,7 +475,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		ctx:                 sessionCtx,
 		cancel:              cancel,
 		done:                make(chan struct{}),
-		gracefulStopTimeout: 120 * time.Second,
+		gracefulStopTimeout: defaultGracefulStopTimeout,
 		ccHooks:             newCCPermissionHookRunner(workDir),
 		startupWarning:      rootDowngradeWarning,
 		promptFilePath:      cleanupPromptPath,
@@ -1168,6 +1193,34 @@ func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
 
+// defaultGracefulStopTimeout 是 Close() Phase 1「关掉 stdin、等它自己干净退出」
+// 的等待上限。
+//
+// 🔴 2026-07-31 从 120s 降到 5s（Cheney 实测逼出来的）。
+//
+// 症状：按 /stop，飞书**立刻**回「执行已停止」，但 bot **还在继续干活、继续说话**，
+// 连按好几次都一样。实测时间线：
+//     17:45:20 /stop → 17:47:20 graceful 超时才发 SIGTERM → 17:47:29 真死，**用时 2 分 09 秒**。
+// 那 2 分钟里它照常写库、照常推消息 —— 而用户按 /stop 的原因恰恰是**它正在做错的事**。
+//
+// 为什么原来是 120s：注释写着「to match claude-mem's Stop hook timeout」——
+// 留时间给 Stop 钩子（如 claude-mem 的会话摘要）跑完。
+// 🔴 但这台机器上**根本没有任何 Stop hook**（全局 settings 只有 PreToolUse + SessionStart，
+// 五个 bot 项目也都没有，claude-mem 未安装）。**那 120 秒在等一个不存在的东西。**
+//
+// 为什么 graceful 对"正在干活"根本不管用：Claude Code 只有在**当前这一轮跑完**之后
+// 才会理会 stdin EOF。它要是正卡在一个长工具调用里，等多久都没用 —— 等的不是"它快好了"，
+// 是"这一轮什么时候结束"。所以对 /stop 这个语义（**现在就停**），graceful 窗口只该覆盖
+// 「它本来就闲着」这一种情况，剩下的一律交给 SIGTERM/SIGKILL。
+//
+// 5s 的取舍：闲置会话关 stdin 后 1s 内就退，5s 是宽裕的余量；真在跑的会话则
+// 5s + 5s(SIGTERM) ≈ **10 秒内**被强杀，用户体感是"按了就停"。
+//
+// ⚠️ **哪天真装了 Stop hook（claude-mem 之类），必须回来重新评估这个值** ——
+// 5s 会把钩子切掉，而且是无声的。届时正确做法是按"用户主动 /stop"和"系统内部回收"
+// 分成两个窗口，而不是把这个数字调回 120s。
+const defaultGracefulStopTimeout = 5 * time.Second
+
 func (cs *claudeSession) Close() error {
 	// Best-effort cleanup of the --append-system-prompt-file temp file on
 	// every exit path. The file is small (~9KB) and OS temp cleanup also
@@ -1219,12 +1272,44 @@ func (cs *claudeSession) Close() error {
 	// group-wide kill ensures grandchildren (Claude Code's MCP servers
 	// such as the Telegram bridge) are reaped along with the direct child;
 	// otherwise they can survive as orphans and spin at 100% CPU.
+	//
+	// A single taskkill /T /F attempt can lose a race against a
+	// still-forking descendant tree (e.g. an MCP server process spawned
+	// moments earlier) and report a PID as "could not be terminated" even
+	// though a repeat attempt kills it cleanly. Retry a few times before
+	// giving up, and bound the final wait so a kill that silently failed
+	// to take effect cannot hang this goroutine — and by extension the
+	// caller's abandon-timeout — forever.
 	cs.cancel()
-	if err := forceKillCmd(cs.cmd); err != nil {
-		slog.Warn("claudeSession: force kill", "error", err)
+	const killAttempts = 3
+	var killErr error
+	for attempt := 1; attempt <= killAttempts; attempt++ {
+		if killErr = forceKillCmd(cs.cmd); killErr == nil {
+			break
+		}
+		slog.Warn("claudeSession: force kill attempt failed",
+			"attempt", attempt, "max_attempts", killAttempts, "error", killErr)
+		select {
+		case <-cs.done:
+			slog.Info("claudeSession: exited during force-kill retries")
+			return nil
+		case <-time.After(2 * time.Second):
+		}
 	}
-	<-cs.done
-	return nil
+
+	select {
+	case <-cs.done:
+		return nil
+	case <-time.After(10 * time.Second):
+		pid := -1
+		if cs.cmd != nil && cs.cmd.Process != nil {
+			pid = cs.cmd.Process.Pid
+		}
+		if killErr != nil {
+			return fmt.Errorf("process tree (pid %d) still alive after SIGKILL retries: %w", pid, killErr)
+		}
+		return fmt.Errorf("process tree (pid %d) still alive 10s after SIGKILL reported success", pid)
+	}
 }
 
 // shellJoinArgs joins args into a single string, quoting any arg that

@@ -169,6 +169,8 @@ const (
 	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
+	MsgSessionCloseFailed        MsgKey = "session_close_failed"
+	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
 	MsgSessionCancelled          MsgKey = "session_cancelled"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
@@ -715,6 +717,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹ 執行已停止。",
 		LangJapanese:           "⏹ 実行を停止しました。",
 		LangSpanish:            "⏹ Ejecución detenida.",
+	},
+	MsgSessionCloseFailed: {
+		LangEnglish:            "⚠️ Warning: the stopped session's background process could not be confirmed killed. It may still be running and using its old credentials.",
+		LangChinese:            "⚠️ 警告：已停止会话的后台进程未能确认已终止，可能仍在运行并占用原有凭证。",
+		LangTraditionalChinese: "⚠️ 警告：已停止會話的後台進程未能確認已終止，可能仍在運行並佔用原有憑證。",
+		LangJapanese:           "⚠️ 警告：停止したセッションのバックグラウンドプロセスの終了を確認できませんでした。まだ実行中で、以前の認証情報を使用している可能性があります。",
+		LangSpanish:            "⚠️ Advertencia: no se pudo confirmar que el proceso en segundo plano de la sesión detenida haya finalizado. Podría seguir en ejecución usando sus credenciales anteriores.",
+	},
+	MsgSessionResumeUnsafe: {
+		LangEnglish:            "⚠️ The previous process could not be confirmed stopped, so this conversation was NOT resumed — a brand-new session was started instead (earlier context is not carried over). This avoids two agents acting on the same conversation.",
+		LangChinese:            "⚠️ 上一个进程未能确认已停止，因此没有续接原会话，已为你开启全新会话（此前上下文未带入）。这是为了避免两个智能体同时操作同一个会话。",
+		LangTraditionalChinese: "⚠️ 上一個行程未能確認已停止，因此沒有續接原會話，已為你開啟全新會話（先前上下文未帶入）。這是為了避免兩個智能體同時操作同一個會話。",
+		LangJapanese:           "⚠️ 前のプロセスの停止を確認できなかったため、会話を再開せず新しいセッションを開始しました（以前の文脈は引き継がれません）。同じ会話を2つのエージェントが操作するのを防ぐためです。",
+		LangSpanish:            "⚠️ No se pudo confirmar que el proceso anterior se detuviera, así que no se reanudó esta conversación: se inició una sesión nueva (sin el contexto anterior). Así se evita que dos agentes actúen sobre la misma conversación.",
 	},
 	MsgSessionCancelled: {
 		LangEnglish:            "Session cancelled. Ready for new instructions.",
