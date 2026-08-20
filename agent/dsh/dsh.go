@@ -7,6 +7,7 @@
 //	--session-id <id>   create-or-resume a persisted dsh session with this id
 //	--provider <name>   override the provider route for this run
 //	--model <model>     override the default model for this run
+//	--reasoning-effort <effort>  override the reasoning effort for this run
 //	--mode <mode>       pin sandbox/approval knobs for this run
 //	--preset <name>     select/recompose a blank session's agent preset
 //
@@ -33,15 +34,16 @@ func init() {
 
 // Agent drives the DeepSeek Harness CLI (dsh) in headless profile.
 type Agent struct {
-	cmd          string   // path to dsh binary
-	cliExtraArgs []string // extra args from cmd after the binary name
-	configEnv    []string // env vars from [projects.agent.options.env]
-	workDir      string
-	model        string // model override ("" = use dsh settings default)
-	provider     string // provider route override ("" = use dsh settings default)
-	mode         string // "read-only" | "workspace-write" | "danger-full-access" | "confirm"
-	sessionEnv   []string
-	mu           sync.Mutex
+	cmd             string   // path to dsh binary
+	cliExtraArgs    []string // extra args from cmd after the binary name
+	configEnv       []string // env vars from [projects.agent.options.env]
+	workDir         string
+	model           string // model override ("" = use dsh settings default)
+	provider        string // provider route override ("" = use dsh settings default)
+	reasoningEffort string // reasoning effort override ("" = use dsh settings default)
+	mode            string // "read-only" | "workspace-write" | "danger-full-access" | "confirm"
+	sessionEnv      []string
+	mu              sync.Mutex
 }
 
 // New creates the dsh agent from cc-connect config options.
@@ -52,6 +54,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	provider, _ := opts["provider"].(string)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	if strings.TrimSpace(provider) == "" {
 		provider = readDefaultProvider()
 	}
@@ -65,13 +68,14 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		cmd:          cmd,
-		cliExtraArgs: extraArgs,
-		configEnv:    core.ParseConfigEnv(opts),
-		workDir:      workDir,
-		model:        model,
-		provider:     strings.TrimSpace(provider),
-		mode:         mode,
+		cmd:             cmd,
+		cliExtraArgs:    extraArgs,
+		configEnv:       core.ParseConfigEnv(opts),
+		workDir:         workDir,
+		model:           model,
+		provider:        strings.TrimSpace(provider),
+		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+		mode:            mode,
 	}, nil
 }
 
@@ -194,6 +198,45 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	return models
 }
 
+// ── ReasoningEffortSwitcher ─────────────────────────────────
+
+func normalizeReasoningEffort(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	effort = normalizeReasoningEffort(effort)
+	a.mu.Lock()
+	a.reasoningEffort = effort
+	a.mu.Unlock()
+	slog.Info("dsh: reasoning effort changed", "reasoning_effort", effort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.Lock()
+	effort := a.reasoningEffort
+	a.mu.Unlock()
+	if effort != "" {
+		return effort
+	}
+	return readDefaultReasoningEffort()
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	if levels := a.readRuntimeReasoningEfforts(context.Background()); len(levels) > 0 {
+		return levels
+	}
+	// dsh providers expose different subsets; this union keeps the selector
+	// useful when the live catalog cannot resolve the current route (for
+	// example, an OAuth-only route is not mounted in the headless profile).
+	return []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+}
+
 // ── ModeSwitcher ─────────────────────────────────────────────
 
 func (a *Agent) SetMode(mode string) {
@@ -264,12 +307,16 @@ func (a *Agent) StartSessionWithPreset(ctx context.Context, sessionID, preset st
 	mode := a.mode
 	model := a.model
 	provider := a.provider
+	reasoningEffort := a.reasoningEffort
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	workDir := a.workDir
 	a.mu.Unlock()
-	return newDSHSession(ctx, a.cmd, extraArgs, workDir, provider, model, mode, preset, sessionID, extraEnv)
+	if reasoningEffort == "" {
+		reasoningEffort = readDefaultReasoningEffort()
+	}
+	return newDSHSession(ctx, a.cmd, extraArgs, workDir, provider, model, reasoningEffort, mode, preset, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

@@ -21,30 +21,31 @@ import (
 )
 
 // dshSession runs a multi-turn dsh conversation. Each Send() spawns
-// `dsh --profile headless --provider ... --model ... --jsonl` as a one-shot process;
-// the persisted dsh
-// session (identified by the cc-connect-owned session id) is resumed on every
-// run, so context carries across turns.
+// `dsh --profile headless --provider ... --model ... --reasoning-effort ...
+// --jsonl` as a one-shot process; the persisted dsh session (identified by the
+// cc-connect-owned session id) is resumed on every run, so context carries
+// across turns.
 //
 // With --jsonl the dsh headless runner streams events on stdout (text /
 // thinking deltas, tool calls, approval requests, result/done envelopes) and
 // reads approval responses from stdin, so cc-connect can show tool progress
 // in the chat and relay permission decisions from the human (Feishu card).
 type dshSession struct {
-	cmd       string
-	extraArgs []string // extra args from cmd, prepended before dsh args
-	workDir   string
-	provider  string // provider route override ("" = use dsh settings default)
-	model     string // "" = use dsh settings default
-	mode      string // "read-only" | "workspace-write" | "danger-full-access" | "confirm"
-	preset    string // dsh agent preset requested for this session's next run
-	extraEnv  []string
-	events    chan core.Event
-	sessionID atomic.Value
-	ctx       context.Context
-	cancel    context.CancelFunc
-	sendWg    sync.WaitGroup // tracks in-flight Send() calls
-	alive     atomic.Bool
+	cmd             string
+	extraArgs       []string // extra args from cmd, prepended before dsh args
+	workDir         string
+	provider        string // provider route override ("" = use dsh settings default)
+	model           string // "" = use dsh settings default
+	reasoningEffort string // "" = use dsh settings default
+	mode            string // "read-only" | "workspace-write" | "danger-full-access" | "confirm"
+	preset          string // dsh agent preset requested for this session's next run
+	extraEnv        []string
+	events          chan core.Event
+	sessionID       atomic.Value
+	ctx             context.Context
+	cancel          context.CancelFunc
+	sendWg          sync.WaitGroup // tracks in-flight Send() calls
+	alive           atomic.Bool
 
 	// per-run process wiring (nil between runs)
 	runMu   sync.Mutex // guards stdin + pendingApprovals
@@ -56,20 +57,21 @@ type dshSession struct {
 // newDSHSession creates a session. sessionID is the cc-connect-persisted dsh
 // session id (empty on the first message); when empty, one is generated so
 // every run after the first resumes the same conversation.
-func newDSHSession(ctx context.Context, cmd string, extraArgs []string, workDir, provider, model, mode, preset, sessionID string, extraEnv []string) (*dshSession, error) {
+func newDSHSession(ctx context.Context, cmd string, extraArgs []string, workDir, provider, model, reasoningEffort, mode, preset, sessionID string, extraEnv []string) (*dshSession, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &dshSession{
-		cmd:       cmd,
-		extraArgs: extraArgs,
-		workDir:   workDir,
-		provider:  strings.TrimSpace(provider),
-		model:     model,
-		mode:      mode,
-		preset:    strings.TrimSpace(preset),
-		extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       ctx,
-		cancel:    cancel,
+		cmd:             cmd,
+		extraArgs:       extraArgs,
+		workDir:         workDir,
+		provider:        strings.TrimSpace(provider),
+		model:           model,
+		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+		mode:            mode,
+		preset:          strings.TrimSpace(preset),
+		extraEnv:        extraEnv,
+		events:          make(chan core.Event, 64),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 	s.alive.Store(true)
 
@@ -343,6 +345,9 @@ func (s *dshSession) buildArgs(prompt string) []string {
 	}
 	if s.model != "" {
 		args = append(args, "--model", s.model)
+	}
+	if s.reasoningEffort != "" {
+		args = append(args, "--reasoning-effort", s.reasoningEffort)
 	}
 	if s.mode != "" {
 		args = append(args, "--mode", s.mode)

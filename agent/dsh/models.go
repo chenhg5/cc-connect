@@ -56,8 +56,9 @@ type dshModelCatalogEntry struct {
 }
 
 type dshModelCatalogResponse struct {
-	Type   string                 `json:"type"`
-	Models []dshModelCatalogEntry `json:"models"`
+	Type             string                 `json:"type"`
+	Models           []dshModelCatalogEntry `json:"models"`
+	ReasoningEfforts []string               `json:"reasoningEfforts"`
 }
 
 // readRuntimeModelCatalog asks the running dsh composition for the same model
@@ -65,14 +66,58 @@ type dshModelCatalogResponse struct {
 // built-in catalogs, Nix-injected model rows, and settings/profile merge rules
 // in Go.
 func (a *Agent) readRuntimeModelCatalog(ctx context.Context) []core.ModelOption {
+	response := a.readRuntimeModelCatalogResponse(ctx)
+	if response == nil || len(response.Models) == 0 {
+		return nil
+	}
+	return modelOptionsFromCatalog(response.Models)
+}
+
+func (a *Agent) readRuntimeReasoningEfforts(ctx context.Context) []string {
+	response := a.readRuntimeModelCatalogResponse(ctx)
+	if response == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(response.ReasoningEfforts))
+	levels := make([]string, 0, len(response.ReasoningEfforts))
+	for _, raw := range response.ReasoningEfforts {
+		level := normalizeReasoningEffort(raw)
+		if level == "" {
+			continue
+		}
+		if _, exists := seen[level]; exists {
+			continue
+		}
+		seen[level] = struct{}{}
+		levels = append(levels, level)
+	}
+	return levels
+}
+
+func (a *Agent) readRuntimeModelCatalogResponse(ctx context.Context) *dshModelCatalogResponse {
 	a.mu.Lock()
 	cmdName := a.cmd
 	extraArgs := append([]string(nil), a.cliExtraArgs...)
 	configEnv := append([]string(nil), a.configEnv...)
+	provider := a.provider
+	model := a.model
 	workDir := a.workDir
 	a.mu.Unlock()
+	if provider == "" {
+		provider = readDefaultProvider()
+	}
+	if model == "" {
+		model, _ = readDefaultModel()
+	}
 
-	args := append(extraArgs, "--profile", "headless", "--list-models")
+	args := append(extraArgs, "--profile", "headless")
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "--list-models")
 	cmd := exec.CommandContext(ctx, cmdName, args...)
 	cmd.Dir = workDir
 	cmd.Env = core.MergeEnv(os.Environ(), configEnv)
@@ -94,10 +139,10 @@ func (a *Agent) readRuntimeModelCatalog(ctx context.Context) []core.ModelOption 
 			break
 		}
 	}
-	if len(response.Models) == 0 {
+	if len(response.Models) == 0 && len(response.ReasoningEfforts) == 0 {
 		return nil
 	}
-	return modelOptionsFromCatalog(response.Models)
+	return &response
 }
 
 func modelOptionsFromCatalog(entries []dshModelCatalogEntry) []core.ModelOption {
@@ -297,6 +342,14 @@ func readDefaultProvider() string {
 		return ""
 	}
 	return strings.TrimSpace(s.AgentDefaultModel.Provider)
+}
+
+func readDefaultReasoningEffort() string {
+	s := readDSHSettings()
+	if s == nil {
+		return ""
+	}
+	return normalizeReasoningEffort(s.AgentDefaultModel.ReasoningEffort)
 }
 
 // readSettingsModels returns the advisory model catalog dsh knows about:

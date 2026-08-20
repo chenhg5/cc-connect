@@ -3883,6 +3883,23 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			}
 		}
 	}
+	// Copy provider route and reasoning effort for agents that expose the
+	// optional model-control capabilities. Without these, a newly created
+	// workspace agent silently reverts to the deployment defaults.
+	if _, ok := opts["provider"]; !ok {
+		if ma, ok := e.agent.(ProviderModelSwitcher); ok {
+			if provider := ma.GetModelProvider(); provider != "" {
+				opts["provider"] = provider
+			}
+		}
+	}
+	if _, ok := opts["reasoning_effort"]; !ok {
+		if ma, ok := e.agent.(ReasoningEffortSwitcher); ok {
+			if effort := ma.GetReasoningEffort(); effort != "" {
+				opts["reasoning_effort"] = effort
+			}
+		}
+	}
 	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
 	// this, per-workspace agents silently bypass the project-level
 	// run_as_user config because their opts map is freshly constructed

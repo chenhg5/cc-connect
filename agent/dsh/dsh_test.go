@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +122,29 @@ func TestSetModelForProvider(t *testing.T) {
 	}
 }
 
+func TestSetGetReasoningEffort(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir())
+	ag, _ := New(map[string]any{"cmd": "echo"})
+	a := ag.(*Agent)
+	a.SetReasoningEffort("HIGH")
+	if got := a.GetReasoningEffort(); got != "high" {
+		t.Errorf("GetReasoningEffort() = %q, want high", got)
+	}
+	a.SetReasoningEffort("not-a-level")
+	if got := a.GetReasoningEffort(); got != "" {
+		t.Errorf("GetReasoningEffort(invalid) = %q, want empty", got)
+	}
+}
+
+func TestAvailableReasoningEfforts_Fallback(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir())
+	ag, _ := New(map[string]any{"cmd": "echo"})
+	got := ag.(*Agent).AvailableReasoningEfforts()
+	if len(got) != 7 || got[0] != "off" || got[len(got)-1] != "max" {
+		t.Fatalf("AvailableReasoningEfforts() = %v, want standard dsh union", got)
+	}
+}
+
 func TestSetGetMode(t *testing.T) {
 	ag, _ := New(map[string]any{"cmd": "echo"})
 	a := ag.(*Agent)
@@ -131,7 +155,7 @@ func TestSetGetMode(t *testing.T) {
 }
 
 func TestSessionPreset(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "", "session-preset", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "", "", "session-preset", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,6 +255,25 @@ func TestAvailableModels_FromRuntimeCatalog(t *testing.T) {
 	}
 }
 
+func TestAvailableReasoningEfforts_FromRuntimeCatalog(t *testing.T) {
+	home := t.TempDir()
+	script := filepath.Join(home, "fake-dsh")
+	content := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"models\",\"models\":[],\"reasoningEfforts\":[\"minimal\",\"high\",\"high\",\"max\"]}'\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSH_HOME", filepath.Join(home, "dsh-home"))
+	ag, err := New(map[string]any{"cmd": script})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ag.(*Agent).AvailableReasoningEfforts()
+	want := []string{"minimal", "high", "max"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AvailableReasoningEfforts() = %v, want %v", got, want)
+	}
+}
+
 func TestGetModel_FallsBackToSettings(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "settings.yaml"), []byte(`
@@ -279,7 +322,7 @@ func TestAvailablePresets_FromUserRoot(t *testing.T) {
 // ── buildArgs ────────────────────────────────────────────────
 
 func TestBuildArgs(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "confirm", "codex", "session-abc", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "confirm", "codex", "session-abc", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +334,7 @@ func TestBuildArgs(t *testing.T) {
 }
 
 func TestBuildArgs_WithModel(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "deepseek-v4-pro", "danger-full-access", "", "session-abc", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "deepseek-v4-pro", "", "danger-full-access", "", "session-abc", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +348,7 @@ func TestBuildArgs_WithModel(t *testing.T) {
 }
 
 func TestBuildArgs_WithProvider(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "openrouter", "deepseek/deepseek-v4-pro", "", "", "session-abc", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "openrouter", "deepseek/deepseek-v4-pro", "", "", "", "session-abc", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,8 +361,20 @@ func TestBuildArgs_WithProvider(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_WithReasoningEffort(t *testing.T) {
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "openrouter", "deepseek/deepseek-v4-pro", "high", "", "", "session-abc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := s.buildArgs("task")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--reasoning-effort high") {
+		t.Errorf("buildArgs() = %v missing reasoning effort", args)
+	}
+}
+
 func TestSessionID_GeneratedWhenEmpty(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "", "", nil)
+	s, err := newDSHSession(context.Background(), "dsh", nil, "/tmp", "", "", "", "", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +433,7 @@ func TestSend_Success(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := fakeDSHScript(t, argvFile, false, false)
 
-	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "deepseek-v4-flash", "confirm", "", "session-test-1", nil)
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "deepseek-v4-flash", "", "confirm", "", "session-test-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +502,7 @@ func TestSend_Approval(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := fakeDSHScript(t, argvFile, false, true)
 
-	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "confirm", "", "session-approval", nil)
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "", "confirm", "", "session-approval", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +556,7 @@ loop:
 }
 
 func TestRespondPermission_NoActiveRun(t *testing.T) {
-	s, err := newDSHSession(context.Background(), "echo", nil, t.TempDir(), "", "", "", "", "session-x", nil)
+	s, err := newDSHSession(context.Background(), "echo", nil, t.TempDir(), "", "", "", "", "", "session-x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +571,7 @@ func TestSend_Error(t *testing.T) {
 	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 	script := fakeDSHScript(t, argvFile, true, false)
 
-	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "", "", "session-test-2", nil)
+	s, err := newDSHSession(context.Background(), script, nil, t.TempDir(), "", "", "", "", "", "session-test-2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

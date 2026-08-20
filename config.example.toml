@@ -1928,7 +1928,7 @@ app_secret = "your-feishu-app-secret"
 #
 # The installed dsh must carry the headless-cc-connect patch (see the user's
 # home-manager agent/dsh/dsh.nix), which adds --session-id / --provider /
-# --model / --mode / --preset / --list-models / --jsonl support to the
+# --model / --reasoning-effort / --mode / --preset / --list-models / --jsonl support to the
 # headless runner. `--list-models` must return the dsh runtime provider/model
 # catalog so `/model` does not fall back to only the two native DeepSeek models.
 #
@@ -1952,6 +1952,7 @@ app_secret = "your-feishu-app-secret"
 #                           # (confirm = full access + ask, matches the dsh web profile default;
 #                           #  headless 无审批端时 confirm 等同 danger-full-access)
 # # provider = "openrouter"  # optional / 可选; `/model` switches this together with the model
+# # reasoning_effort = "high" # optional / 可选; `/reasoning` changes it for the next session
 # # model = "deepseek-v4-flash"  # optional / 可选; 未配置时使用 dsh settings 中的默认模型
 # # `/model` reads dsh's live catalog; `/preset` lists/selects a blank-session preset
 # # and `/mode` selects the permission mode. Preset changes are locked after history starts.
