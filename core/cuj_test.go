@@ -1745,6 +1745,59 @@ func TestCUJ_F2_ModelSwitchLinkedToAgent(t *testing.T) {
 	t.Log("CUJ-F2: model switching is per-agent; covered by agent/*_test.go model tests")
 }
 
+// CUJ-F5 · /preset returns a card and the card action changes the blank session.
+func TestCUJ_F5_PresetCardSwitchesBlankSession(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &presetTestAgent{options: []PresetOption{
+		{ID: "standard", Name: "Standard", Default: true},
+		{ID: "minimal", Name: "Minimal"},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	sessionKey := "feishu:chat:user1"
+
+	// Action 1: the user sends /preset through the normal platform entrypoint.
+	e.ReceiveMessage(p, &Message{
+		SessionKey: sessionKey,
+		Platform:   "feishu",
+		MessageID:  "preset-1",
+		UserID:     "user1",
+		UserName:   "user1",
+		Content:    "/preset",
+		ReplyCtx:   "ctx",
+	})
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("user-visible preset cards = %d, want 1", len(p.repliedCards))
+	}
+	var hasSelect bool
+	for _, element := range p.repliedCards[0].Elements {
+		if _, ok := element.(CardSelect); ok {
+			hasSelect = true
+			break
+		}
+	}
+	if !hasSelect {
+		t.Fatal("/preset card has no selectable preset control")
+	}
+
+	// Action 2: the user selects minimal from the card.
+	result := e.handleCardNav("act:/preset minimal", sessionKey)
+	if result == nil || !strings.Contains(result.RenderText(), "Preset switched to `minimal`") {
+		t.Fatalf("preset selection result card = %#v", result)
+	}
+	if got := e.sessions.GetOrCreateActive(sessionKey).GetAgentPreset(); got != "minimal" {
+		t.Fatalf("session preset = %q, want minimal", got)
+	}
+
+	// Action 3: the user opens the change control again from the result card.
+	card := e.handleCardNav("nav:/preset", sessionKey)
+	if card == nil {
+		t.Fatal("preset result card did not return to preset selector")
+	}
+	if text := card.RenderText(); !strings.Contains(text, "minimal") {
+		t.Fatalf("returned preset card = %q, want current minimal", text)
+	}
+}
+
 // CUJ-F3 · /lang switches i18n locale; next reply uses new language.
 func TestCUJ_F3_LangSwitchChangesReplyLanguage(t *testing.T) {
 	env := newCUJEnv(t)

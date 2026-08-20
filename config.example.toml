@@ -1919,6 +1919,59 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: DeepSeek Harness (dsh) agent / 使用 DeepSeek Harness
+# =============================================================================
+# Drives the DeepSeek Harness CLI (`dsh`) in headless profile: every user
+# message spawns `dsh --profile headless` as a one-shot run that resumes the
+# same persisted dsh session (context carries across turns), then prints the
+# final assistant text back to the chat.
+#
+# The installed dsh must carry the headless-cc-connect patch (see the user's
+# home-manager agent/dsh/dsh.nix), which adds --session-id / --provider /
+# --model / --reasoning-effort / --mode / --preset / --list-models / --jsonl support to the
+# headless runner. `--list-models` must return the dsh runtime provider/model
+# catalog so `/model` does not fall back to only the two native DeepSeek models.
+#
+# Prerequisites / 前置条件:
+#   1. Install dsh per https://github.com/deepseek-ai/deepseek-harness
+#      (the user's setup: home-manager agent/dsh/dsh.nix, built from the
+#      deepseek-ai/deepseek-harness repo with the headless patch applied).
+#   2. Configure a provider in dsh's settings ($DSH_HOME/settings.yaml:
+#      `agent-default-model` + credentials). dsh headless reads them itself;
+#      cc-connect never sees the API key.
+
+# [[projects]]
+# name = "my-dsh-project"
+#
+# [projects.agent]
+# type = "dsh"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "confirm"          # "read-only" | "workspace-write" | "danger-full-access" | "confirm"
+#                           # (confirm = full access + ask, matches the dsh web profile default;
+#                           #  headless 无审批端时 confirm 等同 danger-full-access)
+# # provider = "openrouter"  # optional / 可选; `/model` switches this together with the model
+# # reasoning_effort = "high" # optional / 可选; `/reasoning` changes it for the next session
+# # model = "deepseek-v4-flash"  # optional / 可选; 未配置时使用 dsh settings 中的默认模型
+# # `/model` reads dsh's live catalog; `/preset` lists/selects a blank-session preset
+# # and `/mode` selects the permission mode. Preset changes are locked after history starts.
+#
+# # Optional: point at a custom dsh binary (absolute path recommended under systemd).
+# # 可选：自定义 dsh 可执行文件路径（systemd 环境下建议使用绝对路径）
+# # cmd = "/home/me/.nix-profile/bin/dsh"
+#
+# # Optional: extra environment variables for the dsh process / 可选：传给 dsh 进程的环境变量
+# # [projects.agent.options.env]
+# # DSH_HOME = "/home/me/.dsh"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
 # =============================================================================
 # Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
