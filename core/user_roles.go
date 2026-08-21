@@ -26,10 +26,10 @@ type RoleInput struct {
 // UserRoleManager resolves user IDs to roles and manages per-role rate limiters.
 type UserRoleManager struct {
 	mu          sync.RWMutex
-	roles       []roleEntry              // ordered list for iteration
-	defaultRole string                   // fallback role name
-	roleMap     map[string]*UserRole     // role name → resolved policy
-	limiters    map[string]*RateLimiter  // role name → shared per-role rate limiter
+	roles       []roleEntry             // ordered list for iteration
+	defaultRole string                  // fallback role name
+	roleMap     map[string]*UserRole    // role name → resolved policy
+	limiters    map[string]*RateLimiter // role name → shared per-role rate limiter
 }
 
 type roleEntry struct {
