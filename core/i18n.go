@@ -692,6 +692,15 @@ const (
 	MsgAgentCronToolPrompt MsgKey = "agent_cron_tool_prompt"
 	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
+
+	// Socket not found error (Issue #1719)
+	// Args: %s = searched paths list, %s = current data_dir
+	MsgSocketNotFound        MsgKey = "socket_not_found"
+	MsgSocketNotFoundHint    MsgKey = "socket_not_found_hint"
+	MsgSocketSearchedTitle   MsgKey = "socket_searched_title"
+	MsgSocketConfigHint      MsgKey = "socket_config_hint"
+	MsgSocketEnvHint         MsgKey = "socket_env_hint"
+	MsgSocketDataDirLabel    MsgKey = "socket_data_dir_label"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -4506,6 +4515,49 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 会话在群聊里可见,每个 bot 维护自己的 relay 会话。
 
 环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,relay 知道用哪个群聊。`,
+	},
+
+	MsgSocketNotFound: {
+		LangEnglish:            "cc-connect is not running: no API socket found.\nSearched: %s\nActive data_dir: %s",
+		LangChinese:            "cc-connect 未运行: 找不到 API socket。\n已搜索: %s\n当前 data_dir: %s",
+		LangTraditionalChinese: "cc-connect 未執行: 找不到 API socket。\n已搜尋: %s\n目前 data_dir: %s",
+		LangJapanese:           "cc-connect は実行されていません: API ソケットが見つかりません。\n検索パス: %s\n現在の data_dir: %s",
+		LangSpanish:            "cc-connect no se está ejecutando: no se encontró el socket de la API.\nBuscado en: %s\ndata_dir activo: %s",
+	},
+	MsgSocketNotFoundHint: {
+		LangEnglish:            "Hint: start the server with `cc-connect --config <file>` and pass the same --config / --data-dir / CC_DATA_DIR to this command, or set CC_DATA_DIR to match the server's data_dir.",
+		LangChinese:            "提示: 用 `cc-connect --config <文件>` 启动 server,并给本命令传入相同的 --config / --data-dir / CC_DATA_DIR,或设置 CC_DATA_DIR 与 server 的 data_dir 一致。",
+		LangTraditionalChinese: "提示: 用 `cc-connect --config <檔案>` 啟動 server,並給本命令傳入相同的 --config / --data-dir / CC_DATA_DIR,或設定 CC_DATA_DIR 與 server 的 data_dir 一致。",
+		LangJapanese:           "ヒント: `cc-connect --config <ファイル>` で server を起動し、同じ --config / --data-dir / CC_DATA_DIR をこのコマンドに渡すか、CC_DATA_DIR を server の data_dir と一致させてください。",
+		LangSpanish:            "Sugerencia: inicia el servidor con `cc-connect --config <archivo>` y pasa el mismo --config / --data-dir / CC_DATA_DIR a este comando, o define CC_DATA_DIR para que coincida con el data_dir del servidor.",
+	},
+	MsgSocketSearchedTitle: {
+		LangEnglish:            "Searched socket paths",
+		LangChinese:            "已搜索的 socket 路径",
+		LangTraditionalChinese: "已搜尋的 socket 路徑",
+		LangJapanese:           "検索した socket パス",
+		LangSpanish:            "Rutas de socket buscadas",
+	},
+	MsgSocketConfigHint: {
+		LangEnglish:            "Use --config to share the server's config file (recommended for Docker / nohup deployments).",
+		LangChinese:            "使用 --config 复用 server 的 config 文件(Docker / nohup 部署推荐)。",
+		LangTraditionalChinese: "使用 --config 復用 server 的 config 檔案(Docker / nohup 部署推薦)。",
+		LangJapanese:           "--config を使って server の設定ファイルを共有してください(Docker / nohup デプロイでは推奨)。",
+		LangSpanish:            "Use --config para compartir el archivo de configuración del servidor (recomendado para despliegues en Docker / nohup).",
+	},
+	MsgSocketEnvHint: {
+		LangEnglish:            "Or set the CC_DATA_DIR environment variable to override the default ~/.cc-connect.",
+		LangChinese:            "或设置 CC_DATA_DIR 环境变量覆盖默认 ~/.cc-connect。",
+		LangTraditionalChinese: "或設定 CC_DATA_DIR 環境變數覆寫預設 ~/.cc-connect。",
+		LangJapanese:           "または環境変数 CC_DATA_DIR を設定してデフォルトの ~/.cc-connect を上書きしてください。",
+		LangSpanish:            "O define la variable de entorno CC_DATA_DIR para sobrescribir el valor por defecto ~/.cc-connect.",
+	},
+	MsgSocketDataDirLabel: {
+		LangEnglish:            "Resolved data_dir",
+		LangChinese:            "已解析的 data_dir",
+		LangTraditionalChinese: "已解析的 data_dir",
+		LangJapanese:           "解決された data_dir",
+		LangSpanish:            "data_dir resuelto",
 	},
 }
 
