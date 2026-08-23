@@ -1,489 +1,613 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import {
-  AlertCircle,
-  Bot,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
+  AlertTriangle,
   CircleStop,
-  Code2,
-  FileCode2,
-  Folder,
-  FolderGit2,
+  Copy,
   Loader2,
   Menu,
-  MessageSquarePlus,
-  Plus,
-  Search,
+  Mic,
+  MicOff,
   Send,
-  TerminalSquare,
-  User,
-  Wrench,
-  X,
 } from 'lucide-react';
-import { Button, Input } from '@/components/ui';
+import { Badge } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import {
-  createWorkspaceThread,
+  collectAllPages,
+  conversationPath,
+  createWorkspaceDraft,
   getWorkspaceChatSelection,
-  listWorkspaces,
+  getWorkspaceRuntimeCatalog,
+  listWorkspaceItems,
   listWorkspaceThreads,
+  listWorkspaceTurns,
   putWorkspaceChatSelection,
+  readWorkspaceDraft,
   readWorkspaceThread,
+  updateWorkspaceDraftSettings,
+  updateWorkspaceThreadSettings,
+  listWorkspaces,
+  type ConversationRef,
+  type NativeEventEnvelope,
+  type NativeItemRecord,
+  type NativeRuntimeCatalog,
   type NativeThread,
-  type NativeThreadDetail,
+  type NativeThreadSettingsPatch,
   type NativeTurn,
   type Workspace,
-  type WorkspaceChatEvent,
+  type WorkspaceChatClientRequest,
+  type WorkspaceChatDraft,
+  type WorkspaceChatServerEvent,
 } from '@/api/workspaceChat';
 import { useWorkspaceChatSocket } from '@/hooks/useWorkspaceChatSocket';
+import { useWorkspaceRealtime } from '@/hooks/useWorkspaceRealtime';
+import { WorkspaceHistory } from './WorkspaceChatItems';
+import { WorkspaceInteraction } from './WorkspaceChatInteractions';
+import { WorkspaceChatRail } from './WorkspaceChatRail';
+import { WorkspaceChatSettings } from './WorkspaceChatSettings';
+import {
+  initialWorkspaceChatStreamState,
+  nativeEnvelopeFromEvent,
+  statusType,
+  totalTokenCount,
+  workspaceChatStreamReducer,
+} from './workspaceChatState';
 
-const asString = (value: unknown) => typeof value === 'string' ? value : '';
-
-function itemText(item: Record<string, unknown>): string {
-  const text = asString(item.text);
-  if (text) return text;
-  if (!Array.isArray(item.content)) return '';
-  return item.content
-    .map((block) => block && typeof block === 'object' ? asString((block as Record<string, unknown>).text) : '')
-    .filter(Boolean)
-    .join('\n');
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
-function JsonDetails({ value, label }: { value: unknown; label: string }) {
-  return (
-    <details className="group text-xs text-gray-500 dark:text-gray-400">
-      <summary className="cursor-pointer select-none hover:text-gray-800 dark:hover:text-gray-200">{label}</summary>
-      <pre className="mt-2 max-h-80 overflow-auto rounded-md bg-gray-100 dark:bg-black/40 p-3 text-[11px] leading-5 text-gray-700 dark:text-gray-300">
-        {JSON.stringify(value, null, 2)}
-      </pre>
-    </details>
-  );
+function supportsCapability(catalog: NativeRuntimeCatalog | null, name: string): { supported: boolean; reason?: string } {
+  if (!catalog) return { supported: false };
+  return catalog.capabilities?.[name] || { supported: false };
 }
 
-function MarkdownText({ children }: { children: string }) {
-  return (
-    <div className="prose prose-sm max-w-none dark:prose-invert prose-pre:rounded-md prose-pre:bg-gray-950 prose-a:text-accent">
-      <Markdown remarkPlugins={[remarkGfm]}>{children}</Markdown>
-    </div>
-  );
+function statusVariant(status: string): 'default' | 'success' | 'warning' | 'danger' {
+  if (status === 'idle') return 'success';
+  if (status === 'active') return 'warning';
+  if (status === 'systemError') return 'danger';
+  return 'default';
 }
 
-function ThreadItem({ item }: { item: Record<string, unknown> }) {
-  const { t } = useTranslation();
-  const type = asString(item.type) || 'unknown';
-  const text = itemText(item);
-
-  if (type === 'userMessage') {
-    return (
-      <div className="flex justify-end gap-2">
-        <div className="max-w-[78%] rounded-md bg-accent px-4 py-3 text-sm text-white dark:text-black whitespace-pre-wrap">{text}</div>
-        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-gray-200 dark:bg-gray-700"><User size={14} /></div>
-      </div>
-    );
+async function loadThreadHistory(workspaceRef: string, threadId: string, validatedSnapshot?: Awaited<ReturnType<typeof readWorkspaceThread>>) {
+  const [snapshot, turns] = await Promise.all([
+    validatedSnapshot ? Promise.resolve(validatedSnapshot) : readWorkspaceThread(workspaceRef, threadId),
+    collectAllPages((cursor) => listWorkspaceTurns(workspaceRef, threadId, { cursor, sortDirection: 'asc' })),
+  ]);
+  const itemsByTurn: Record<string, NativeItemRecord[]> = {};
+  for (const turn of turns) {
+    itemsByTurn[turn.id] = await collectAllPages((cursor) =>
+      listWorkspaceItems(workspaceRef, threadId, turn.id, { cursor, sortDirection: 'asc' }));
   }
-  if (type === 'agentMessage') {
-    return (
-      <div className="flex gap-2">
-        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent/12 text-accent"><Bot size={14} /></div>
-        <div className="min-w-0 flex-1 py-1 text-sm"><MarkdownText>{text}</MarkdownText></div>
-      </div>
-    );
-  }
-  if (type === 'reasoning') {
-    const reasoning = text || asString(item.summary) || asString(item.reasoning);
-    return (
-      <details open className="ml-9 border-l-2 border-amber-400/50 pl-3 text-sm text-gray-600 dark:text-gray-400">
-        <summary className="cursor-pointer text-xs font-medium text-amber-700 dark:text-amber-300">{t('workspaceChat.reasoning')}</summary>
-        <div className="mt-2 whitespace-pre-wrap leading-6">{reasoning}</div>
-        <JsonDetails value={item} label={t('workspaceChat.rawItem')} />
-      </details>
-    );
-  }
-  if (type === 'plan') {
-    return (
-      <div className="ml-9 border-l-2 border-blue-400/50 pl-3 text-sm">
-        <div className="mb-1 text-xs font-medium text-blue-700 dark:text-blue-300">{t('workspaceChat.plan')}</div>
-        {text ? <MarkdownText>{text}</MarkdownText> : <JsonDetails value={item} label={t('workspaceChat.planDetails')} />}
-      </div>
-    );
-  }
-  if (type === 'commandExecution') {
-    return (
-      <div className="ml-9 border-l-2 border-gray-400/50 pl-3">
-        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-300">
-          <TerminalSquare size={14} /> {asString(item.status) || t('workspaceChat.command')}
-          {item.exitCode !== undefined && <span>{t('workspaceChat.exitCode', { code: String(item.exitCode) })}</span>}
-        </div>
-        <pre className="overflow-auto rounded-md bg-gray-950 p-3 text-xs leading-5 text-gray-100">$ {asString(item.command)}{asString(item.aggregatedOutput) ? `\n${asString(item.aggregatedOutput)}` : ''}</pre>
-      </div>
-    );
-  }
-  if (type === 'fileChange') {
-    return (
-      <div className="ml-9 border-l-2 border-emerald-400/50 pl-3 text-sm">
-        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300"><FileCode2 size={14} /> {t('workspaceChat.fileChanges')}</div>
-        <JsonDetails value={item.changes ?? item} label={t('workspaceChat.changes')} />
-      </div>
-    );
-  }
-  if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
-    return (
-      <div className="ml-9 border-l-2 border-violet-400/50 pl-3 text-sm">
-        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-violet-700 dark:text-violet-300"><Wrench size={14} /> {asString(item.server)} {asString(item.tool)}</div>
-        <JsonDetails value={item} label={t('workspaceChat.toolDetails')} />
-      </div>
-    );
-  }
-  if (type === 'webSearch') {
-    return (
-      <div className="ml-9 flex items-start gap-2 border-l-2 border-cyan-400/50 pl-3 text-sm text-gray-700 dark:text-gray-300">
-        <Search size={14} className="mt-1 shrink-0" /> <span>{asString(item.query) || text}</span>
-      </div>
-    );
-  }
-  if (type === 'error') {
-    return <div className="ml-9 rounded-md bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">{text || asString(item.message) || JSON.stringify(item)}</div>;
-  }
-  return <div className="ml-9 border-l-2 border-gray-300 pl-3"><JsonDetails value={item} label={type} /></div>;
-}
-
-function TurnView({ turn }: { turn: NativeTurn }) {
-  const { t } = useTranslation();
-  const completed = turn.status === 'completed';
-  return (
-    <section className="border-b border-gray-200 py-6 last:border-b-0 dark:border-white/[0.08]">
-      <div className="mb-4 flex items-center gap-2 text-[11px] text-gray-400">
-        {completed ? <CheckCircle2 size={13} className="text-emerald-500" /> : <AlertCircle size={13} className="text-amber-500" />}
-        <span className="font-medium uppercase">{turn.status || t('workspaceChat.turn')}</span>
-        {turn.duration_ms !== undefined && <span>{(turn.duration_ms / 1000).toFixed(1)}s</span>}
-      </div>
-      <div className="space-y-4">
-        {(turn.items || []).map((item, index) => <ThreadItem key={asString(item.id) || `${turn.id}-${index}`} item={item} />)}
-        {turn.error !== undefined && <JsonDetails value={turn.error} label={t('workspaceChat.turnError')} />}
-      </div>
-    </section>
-  );
-}
-
-function LiveEventView({ event, onApproval }: { event: WorkspaceChatEvent; onApproval: (decision: string) => void }) {
-  const { t } = useTranslation();
-  if (event.type === 'optimistic_user') {
-    return <ThreadItem item={{ type: 'userMessage', text: event.content || '' }} />;
-  }
-  if (event.type === 'approval_requested') {
-    return (
-      <div className="ml-9 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-700 dark:bg-amber-950/30">
-        <div className="mb-3 whitespace-pre-wrap">{event.content}</div>
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => onApproval('allow')}>{t('workspaceChat.allow')}</Button>
-          <Button size="sm" variant="secondary" onClick={() => onApproval('allow_all')}>{t('workspaceChat.allowAll')}</Button>
-          <Button size="sm" variant="danger" onClick={() => onApproval('deny')}>{t('workspaceChat.deny')}</Button>
-        </div>
-      </div>
-    );
-  }
-  if (event.type === 'agent_event') {
-    const payload = event.payload || {};
-    const eventType = asString(payload.event_type);
-    if (eventType === 'text') return <ThreadItem item={{ type: 'agentMessage', text: payload.content }} />;
-    if (eventType === 'thinking') return <ThreadItem item={{ type: 'reasoning', text: payload.content }} />;
-    return <div className="ml-9 border-l-2 border-gray-300 pl-3"><JsonDetails value={payload} label={eventType || t('workspaceChat.agentEvent')} /></div>;
-  }
-  if (event.type === 'error' || event.error) {
-    const message = event.error === 'workspace_chat_invalid_event' ? t('workspaceChat.invalidEvent') : event.error;
-    return <div className="ml-9 text-sm text-red-600 dark:text-red-400">{message}</div>;
-  }
-  return null;
-}
-
-function threadLabel(thread: NativeThread): string {
-  return thread.name || thread.preview || thread.id.slice(0, 12);
-}
-
-function chatPath(workspaceRef: string, threadId: string): string {
-  return `/chat/${encodeURIComponent(workspaceRef)}/${encodeURIComponent(threadId)}`;
+  return { snapshot, turns, itemsByTurn };
 }
 
 export default function WorkspaceChat() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const params = useParams<{ workspaceRef?: string; threadId?: string }>();
+  const params = useParams<{ workspaceRef?: string; threadId?: string; draftRef?: string }>();
   const workspaceRef = params.workspaceRef;
-  const threadId = params.threadId;
+  const conversation = useMemo<ConversationRef | undefined>(() => {
+    if (params.draftRef) return { kind: 'draft', id: params.draftRef };
+    if (params.threadId) return { kind: 'thread', id: params.threadId };
+    return undefined;
+  }, [params.draftRef, params.threadId]);
+  const targetKey = workspaceRef && conversation ? `${workspaceRef}\u0000${conversation.kind}\u0000${conversation.id}` : '';
+
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [threads, setThreads] = useState<NativeThread[]>([]);
-  const [detail, setDetail] = useState<NativeThreadDetail | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [liveEvents, setLiveEvents] = useState<WorkspaceChatEvent[]>([]);
+  const [draft, setDraft] = useState<WorkspaceChatDraft | null>(null);
+  const [catalog, setCatalog] = useState<NativeRuntimeCatalog | null>(null);
+  const [draftSettings, setDraftSettings] = useState<NativeThreadSettingsPatch>({});
+  const [stream, dispatch] = useReducer(workspaceChatStreamReducer, initialWorkspaceChatStreamState);
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [projectPanelOpen, setProjectPanelOpen] = useState(false);
-  const [newDialogOpen, setNewDialogOpen] = useState(false);
-  const [newThreadName, setNewThreadName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [updatingSettings, setUpdatingSettings] = useState(false);
+  const [respondingInteraction, setRespondingInteraction] = useState('');
+  const [projectPanelOpen, setProjectPanelOpen] = useState(false);
+  const [voice, setVoice] = useState('');
   const endRef = useRef<HTMLDivElement>(null);
+  const loadGeneration = useRef(0);
+  const targetKeyRef = useRef(targetKey);
+  const realtimeEventRef = useRef<(event: NativeEventEnvelope) => void>(() => undefined);
+  const realtimeRequestErrorRef = useRef<(requestID: string | undefined, message: string) => void>(() => undefined);
+	const streamCursorRef = useRef<{ epoch?: string; sequence?: number }>({});
+	const reconnectPendingRef = useRef(false);
+	targetKeyRef.current = targetKey;
+	streamCursorRef.current = { epoch: stream.epoch, sequence: stream.sequence };
 
-  const loadCatalog = useCallback(async () => {
+  const loadWorkspaceCatalog = useCallback(async () => {
     const response = await listWorkspaces();
-    const items = response.workspaces || [];
-    setWorkspaces(items);
-    setExpanded(new Set(items.map((workspace) => workspace.project_id)));
+    setWorkspaces(response.workspaces || []);
+    return response.workspaces || [];
   }, []);
 
-  const loadThread = useCallback(async () => {
-    if (!workspaceRef || !threadId) {
-      setDetail(null);
+  const fetchThreads = useCallback((ref: string) =>
+    collectAllPages((cursor) => listWorkspaceThreads(ref, { cursor, sortDirection: 'desc' })), []);
+
+  const refreshThread = useCallback(async () => {
+    if (!workspaceRef || conversation?.kind !== 'thread') return;
+    const expectedTarget = targetKey;
+	let result;
+	const started = streamCursorRef.current;
+    try {
+      result = await loadThreadHistory(workspaceRef, conversation.id);
+    } catch (cause) {
+      if (targetKeyRef.current === expectedTarget) throw cause;
       return;
     }
-    const [threadResponse, threadList] = await Promise.all([
-      readWorkspaceThread(workspaceRef, threadId),
-      listWorkspaceThreads(workspaceRef),
-    ]);
-    setDetail(threadResponse);
-    setThreads(threadList.threads || []);
-  }, [workspaceRef, threadId]);
+    if (targetKeyRef.current !== expectedTarget) return;
+	dispatch({ type: 'history_loaded', ...result, startedEpoch: started.epoch, startedSequence: started.sequence });
+  }, [conversation?.id, conversation?.kind, targetKey, workspaceRef]);
 
   useEffect(() => {
     let cancelled = false;
-    const initialize = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        await loadCatalog();
-        if (workspaceRef && threadId) {
-          await putWorkspaceChatSelection(workspaceRef, threadId);
-        } else {
-          const selected = await getWorkspaceChatSelection();
-          if (!cancelled) {
-            if (selected) navigate(chatPath(selected.workspace_ref, selected.thread_id), { replace: true });
-          }
-        }
-      } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    initialize();
+    setLoading(true);
+    loadWorkspaceCatalog()
+      .catch((cause) => { if (!cancelled) setError(errorMessage(cause)); })
+      .finally(() => { if (!cancelled && !conversation) setLoading(false); });
     return () => { cancelled = true; };
-  }, [workspaceRef, threadId, navigate, loadCatalog]);
+  }, [conversation, loadWorkspaceCatalog]);
 
   useEffect(() => {
-    if (!workspaceRef || !threadId) return;
-    setLiveEvents([]);
-    loadThread().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, [workspaceRef, threadId, loadThread]);
+    if (workspaceRef || conversation) return;
+    let cancelled = false;
+    getWorkspaceChatSelection().then((selection) => {
+      if (!cancelled && selection) navigate(conversationPath(selection.workspace_ref, selection.conversation), { replace: true });
+    }).catch((cause) => { if (!cancelled) setError(errorMessage(cause)); });
+    return () => { cancelled = true; };
+  }, [conversation, navigate, workspaceRef]);
 
-  const onSocketEvent = useCallback((event: WorkspaceChatEvent) => {
-    if (event.type === 'subscribed') return;
-    if (event.type === 'turn_queued' || event.type === 'turn_started') setRunning(true);
-    if (event.type === 'turn_completed' || event.type === 'turn_failed' || event.type === 'turn_cancelled') {
-      setRunning(false);
-      loadThread().then(() => setLiveEvents([])).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-      return;
+  useEffect(() => {
+    if (!workspaceRef || !conversation) return;
+    const generation = ++loadGeneration.current;
+    let cancelled = false;
+    dispatch({ type: 'reset' });
+    setDraft(null);
+    setDraftSettings({});
+    setCatalog(null);
+    setLoading(true);
+    setError('');
+    setSubmitting(false);
+    setUpdatingSettings(false);
+    setRespondingInteraction('');
+	const load = async () => {
+	  let nextDraft: WorkspaceChatDraft | null = null;
+	  let validatedSnapshot: Awaited<ReturnType<typeof readWorkspaceThread>> | undefined;
+      if (conversation.kind === 'draft') {
+        nextDraft = await readWorkspaceDraft(workspaceRef, conversation.id);
+        if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+        if (nextDraft.state === 'materialized') {
+          if (!nextDraft.thread_id) throw new Error(t('workspaceChat.materializationMissingThread'));
+          await readWorkspaceThread(workspaceRef, nextDraft.thread_id);
+          if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+          const materializedConversation: ConversationRef = { kind: 'thread', id: nextDraft.thread_id };
+          await putWorkspaceChatSelection(workspaceRef, materializedConversation);
+          if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+          navigate(conversationPath(workspaceRef, materializedConversation), { replace: true });
+          return;
+        }
+		if (nextDraft.state !== 'draft') {
+          throw new Error(`workspace_chat_invalid_draft_state: ${nextDraft.state}`);
+		}
+	  } else {
+		validatedSnapshot = await readWorkspaceThread(workspaceRef, conversation.id);
+		if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+	  }
+	  await putWorkspaceChatSelection(workspaceRef, conversation);
+	  if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+	  const [runtimeCatalog, availableThreads, loadedThread] = await Promise.all([
+        getWorkspaceRuntimeCatalog(workspaceRef),
+        fetchThreads(workspaceRef),
+		conversation.kind === 'thread' ? loadThreadHistory(workspaceRef, conversation.id, validatedSnapshot) : Promise.resolve(null),
+	  ]);
+	  if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+      setThreads(availableThreads);
+      setCatalog(runtimeCatalog);
+      const preferredVoice = runtimeCatalog.voices.default_v2
+        || runtimeCatalog.voices.v2[0]
+        || runtimeCatalog.voices.default_v1
+        || runtimeCatalog.voices.v1[0]
+        || '';
+      setVoice(preferredVoice);
+      if (conversation.kind === 'draft') {
+        if (!nextDraft) throw new Error('workspace_chat_draft_not_loaded');
+        setDraft(nextDraft);
+        setDraftSettings(nextDraft.settings_patch);
+        return;
+      }
+      if (!loadedThread) throw new Error('workspace_chat_thread_not_loaded');
+      dispatch({ type: 'history_loaded', ...loadedThread });
+    };
+    load().catch((cause) => {
+      if (!cancelled && generation === loadGeneration.current && targetKeyRef.current === targetKey) setError(errorMessage(cause));
+    })
+      .finally(() => { if (!cancelled && generation === loadGeneration.current) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [conversation?.id, conversation?.kind, fetchThreads, navigate, t, targetKey, workspaceRef]);
+
+  const onSocketEvent = useCallback((event: WorkspaceChatServerEvent) => {
+    if (!workspaceRef || !conversation || event.workspace_ref !== workspaceRef) return;
+    const isCurrentConversation = event.conversation.kind === conversation.kind
+      && event.conversation.id === conversation.id;
+    const isDraftMaterialization = event.type === 'thread_materialized'
+      && conversation.kind === 'draft'
+      && event.conversation.kind === 'thread'
+      && !!event.thread_id
+      && event.conversation.id === event.thread_id;
+    if (!isCurrentConversation && !isDraftMaterialization) return;
+    dispatch({ type: 'server_event', event });
+    const envelope = nativeEnvelopeFromEvent(event);
+    if (envelope) {
+      realtimeEventRef.current(envelope);
+      if (envelope.method === 'turn/started' || envelope.method === 'turn/completed') setSubmitting(false);
     }
-    setLiveEvents((current) => [...current, event]);
-  }, [loadThread]);
+    if (event.type === 'error' || event.type === 'protocol_error') {
+      realtimeRequestErrorRef.current(event.request_id, event.error || t('workspaceChat.unknownError'));
+      setSubmitting(false);
+      setRespondingInteraction('');
+      setError(event.error || t('workspaceChat.unknownError'));
+    }
+    if (event.type === 'thread_materialized') {
+      const threadID = event.thread_id || '';
+      if (!threadID) {
+        setError(t('workspaceChat.materializationMissingThread'));
+        return;
+      }
+      setSubmitting(false);
+      navigate(conversationPath(workspaceRef, { kind: 'thread', id: threadID }), { replace: true });
+    }
+  }, [conversation, navigate, t, workspaceRef]);
 
-  const { status: socketStatus, send } = useWorkspaceChatSocket({ workspaceRef, threadId, onEvent: onSocketEvent });
+	const { status: socketStatus, send } = useWorkspaceChatSocket({
+    workspaceRef,
+    conversation,
+    onEvent: onSocketEvent,
+    onProtocolError: (cause) => setError(cause.message),
+	});
+
+	useEffect(() => {
+	  if (socketStatus === 'disconnected') {
+		reconnectPendingRef.current = true;
+		setSubmitting(false);
+		setRespondingInteraction('');
+		return;
+	  }
+	  if (socketStatus !== 'connected' || !reconnectPendingRef.current || !workspaceRef || !conversation) return;
+	  reconnectPendingRef.current = false;
+	  let cancelled = false;
+	  const reconcile = async () => {
+		const selection = await getWorkspaceChatSelection();
+		if (cancelled) return;
+		if (selection && (selection.workspace_ref !== workspaceRef || selection.conversation.kind !== conversation.kind || selection.conversation.id !== conversation.id)) {
+		  navigate(conversationPath(selection.workspace_ref, selection.conversation), { replace: true });
+		  return;
+		}
+		if (conversation.kind === 'thread') await refreshThread();
+		else {
+		  const currentDraft = await readWorkspaceDraft(workspaceRef, conversation.id);
+		  if (!cancelled && currentDraft.state === 'materialized' && currentDraft.thread_id) {
+			navigate(conversationPath(workspaceRef, { kind: 'thread', id: currentDraft.thread_id }), { replace: true });
+		  }
+		}
+	  };
+	  reconcile().catch((cause) => { if (!cancelled) setError(errorMessage(cause)); });
+	  return () => { cancelled = true; };
+	}, [conversation, navigate, refreshThread, socketStatus, workspaceRef]);
+
+  const realtimeCapability = supportsCapability(catalog, 'realtime');
+  const realtime = useWorkspaceRealtime({
+    workspaceRef,
+    conversation,
+    supported: conversation?.kind === 'thread' && realtimeCapability.supported,
+    send,
+  });
+  realtimeEventRef.current = realtime.handleNativeEvent;
+  realtimeRequestErrorRef.current = realtime.handleRequestError;
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [detail, liveEvents]);
+    if (socketStatus !== 'connected' && realtime.status !== 'idle') realtime.stop();
+  }, [realtime.status, realtime.stop, socketStatus]);
+
+  useEffect(() => {
+    if ((!stream.needsHistoryRefresh && !stream.needsResync) || conversation?.kind !== 'thread') return;
+    refreshThread().catch((cause) => setError(errorMessage(cause)));
+  }, [conversation?.kind, refreshThread, stream.needsHistoryRefresh, stream.needsResync]);
+
+  useEffect(() => {
+    if (!respondingInteraction) return;
+    const pending = stream.snapshot?.pending_interactions.some((interaction) => interaction.id === respondingInteraction);
+    if (pending === false) setRespondingInteraction('');
+  }, [respondingInteraction, stream.snapshot?.pending_interactions]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [stream.liveItems, stream.optimisticInputs, stream.turns]);
 
   useEffect(() => {
     const refresh = () => {
-      loadCatalog().catch(() => undefined);
-      loadThread().catch(() => undefined);
+      loadWorkspaceCatalog().catch((cause) => setError(errorMessage(cause)));
+      if (workspaceRef) {
+        const expectedTarget = targetKey;
+        fetchThreads(workspaceRef).then((values) => {
+          if (targetKeyRef.current === expectedTarget) setThreads(values);
+        }).catch((cause) => {
+          if (targetKeyRef.current === expectedTarget) setError(errorMessage(cause));
+        });
+      }
+      if (conversation?.kind === 'thread') refreshThread().catch((cause) => setError(errorMessage(cause)));
     };
     window.addEventListener('cc:refresh', refresh);
     return () => window.removeEventListener('cc:refresh', refresh);
-  }, [loadCatalog, loadThread]);
-
-  const groupedWorkspaces = useMemo(() => {
-    const groups = new Map<string, Workspace[]>();
-    workspaces.forEach((workspace) => groups.set(workspace.project_id, [...(groups.get(workspace.project_id) || []), workspace]));
-    return [...groups.values()];
-  }, [workspaces]);
+  }, [conversation?.kind, fetchThreads, loadWorkspaceCatalog, refreshThread, targetKey, workspaceRef]);
 
   const activeWorkspace = workspaces.find((workspace) => workspace.ref === workspaceRef);
+  const activeTurn = stream.snapshot?.active_turn || null;
+  const currentStatus = statusType(stream.snapshot?.status);
+  const tokenCount = totalTokenCount(stream.snapshot?.usage);
+  const unsupportedCapabilities = Object.entries(catalog?.capabilities || {}).filter(([, status]) => !status.supported);
+
+  const createDraft = useCallback(async (ref: string) => {
+    setCreating(true);
+    setError('');
+    try {
+      const nextDraft = await createWorkspaceDraft(ref);
+      const nextConversation: ConversationRef = { kind: 'draft', id: nextDraft.id };
+      navigate(conversationPath(ref, nextConversation));
+      setProjectPanelOpen(false);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setCreating(false);
+    }
+  }, [navigate]);
 
   const chooseWorkspace = async (workspace: Workspace) => {
     if (!workspace.available) return;
     setError('');
     try {
-      const selected = await putWorkspaceChatSelection(workspace.ref);
+      const availableThreads = await fetchThreads(workspace.ref);
+      if (availableThreads.length === 0) {
+        await createDraft(workspace.ref);
+        return;
+      }
+      const nextConversation: ConversationRef = { kind: 'thread', id: availableThreads[0].id };
+      navigate(conversationPath(workspace.ref, nextConversation));
       setProjectPanelOpen(false);
-      navigate(chatPath(selected.workspace_ref, selected.thread_id));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     }
   };
 
-  const chooseThread = async (nextThreadId: string) => {
+  const chooseThread = async (thread: NativeThread) => {
     if (!workspaceRef) return;
+    const nextConversation: ConversationRef = { kind: 'thread', id: thread.id };
     try {
-      const selected = await putWorkspaceChatSelection(workspaceRef, nextThreadId);
-      navigate(chatPath(selected.workspace_ref, selected.thread_id));
+      navigate(conversationPath(workspaceRef, nextConversation));
+      setProjectPanelOpen(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     }
   };
 
-  const createThread = async () => {
-    if (!workspaceRef) return;
-    setCreating(true);
+  const copyLink = async (thread: NativeThread) => {
     try {
-      const thread = await createWorkspaceThread(workspaceRef, newThreadName.trim());
-      setNewDialogOpen(false);
-      setNewThreadName('');
-      navigate(chatPath(workspaceRef, thread.id));
+      if (!workspaceRef) return;
+      if (!navigator.clipboard?.writeText) throw new Error('workspace_chat_clipboard_unavailable');
+      const link = stream.snapshot?.thread.id === thread.id && stream.snapshot.deep_link
+        ? stream.snapshot.deep_link
+        : (await readWorkspaceThread(workspaceRef, thread.id)).deep_link;
+      await navigator.clipboard.writeText(link);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
+    }
+  };
+
+  const patchSettings = async (patch: NativeThreadSettingsPatch) => {
+    if (!workspaceRef || !conversation) return;
+    const expectedTarget = targetKey;
+    setUpdatingSettings(true);
+    setError('');
+    try {
+      if (conversation.kind === 'draft') {
+        const nextDraft = await updateWorkspaceDraftSettings(workspaceRef, conversation.id, patch);
+        if (targetKeyRef.current !== expectedTarget) return;
+        setDraft(nextDraft);
+        setDraftSettings(nextDraft.settings_patch);
+        return;
+      }
+      const settings = await updateWorkspaceThreadSettings(workspaceRef, conversation.id, patch);
+      if (targetKeyRef.current !== expectedTarget) return;
+      dispatch({ type: 'settings_updated', settings });
+    } catch (cause) {
+      if (targetKeyRef.current === expectedTarget) setError(errorMessage(cause));
     } finally {
-      setCreating(false);
+      if (targetKeyRef.current === expectedTarget) setUpdatingSettings(false);
     }
+  };
+
+  const sendRequest = (request: WorkspaceChatClientRequest, optimistic?: { requestId: string; text: string; kind: 'turn_start' | 'turn_steer' | 'realtime' }) => {
+    setError('');
+    dispatch({ type: 'clear_error' });
+    if (!send(request)) {
+      setError(t('workspaceChat.disconnected'));
+      return false;
+    }
+    if (optimistic) dispatch({ type: 'optimistic_input', input: optimistic });
+    return true;
   };
 
   const submit = () => {
-    const content = input.trim();
-    if (!content || !workspaceRef || !threadId) return;
+    const text = input.trim();
+    if (!text || !workspaceRef || !conversation) return;
     const requestId = crypto.randomUUID();
-    if (!send({ type: 'turn_start', request_id: requestId, workspace_ref: workspaceRef, thread_id: threadId, content })) {
-      setError(t('workspaceChat.disconnected'));
-      return;
+    const base = { request_id: requestId, workspace_ref: workspaceRef, conversation };
+    let request: WorkspaceChatClientRequest;
+    let kind: 'turn_start' | 'turn_steer' | 'realtime';
+    if (realtime.status === 'connected') {
+      request = { ...base, type: 'realtime_append_text', text };
+      kind = 'realtime';
+    } else if (activeTurn) {
+      request = { ...base, type: 'turn_steer', expected_turn_id: activeTurn.id, input: [{ type: 'text', text }] };
+      kind = 'turn_steer';
+    } else {
+      const hasDraftSettings = conversation.kind === 'draft' && Object.keys(draftSettings).length > 0;
+      request = {
+        ...base,
+        type: 'turn_start',
+        input: [{ type: 'text', text }],
+        ...(hasDraftSettings ? { payload: { settings: draftSettings } } : {}),
+      };
+      kind = 'turn_start';
     }
+    if (!sendRequest(request, { requestId, text, kind })) return;
     setInput('');
-    setRunning(true);
-    setLiveEvents((current) => [...current, { type: 'optimistic_user', request_id: requestId, content }]);
+    if (kind === 'turn_start') setSubmitting(true);
   };
 
-  const cancelTurn = () => {
-    if (!workspaceRef || !threadId) return;
-    send({ type: 'cancel', request_id: crypto.randomUUID(), workspace_ref: workspaceRef, thread_id: threadId });
+  const interrupt = () => {
+    if (!workspaceRef || !conversation || !activeTurn) return;
+    sendRequest({
+      type: 'turn_interrupt',
+      request_id: crypto.randomUUID(),
+      workspace_ref: workspaceRef,
+      conversation,
+      expected_turn_id: activeTurn.id,
+    });
   };
 
-  const approve = (decision: string) => {
-    if (!workspaceRef || !threadId) return;
-    send({ type: 'approval_response', request_id: crypto.randomUUID(), workspace_ref: workspaceRef, thread_id: threadId, decision });
+  const respondInteraction = (interactionId: string, response: unknown) => {
+    if (!workspaceRef || !conversation) return;
+    const sent = sendRequest({
+      type: 'interaction_response',
+      request_id: crypto.randomUUID(),
+      workspace_ref: workspaceRef,
+      conversation,
+      interaction_id: interactionId,
+      response,
+    });
+    if (sent) setRespondingInteraction(interactionId);
   };
+
+  const toggleRealtime = async () => {
+    try {
+      if (realtime.status !== 'idle') {
+        realtime.stop();
+        return;
+      }
+      const version = catalog?.voices?.v2?.length ? 'v2' : catalog?.voices?.v1?.length ? 'v1' : undefined;
+      await realtime.start({ voice: voice || undefined, version });
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+
+  const currentSettings = conversation?.kind === 'draft' ? draftSettings : stream.snapshot?.settings || null;
+  const selectedThread = conversation?.kind === 'thread' ? threads.find((thread) => thread.id === conversation.id) : undefined;
+  const realtimeVoices = catalog?.voices?.v2?.length ? catalog.voices.v2 : catalog?.voices?.v1 || [];
+  const composerDisabled = !conversation || socketStatus !== 'connected' || loading || submitting;
 
   return (
-    <div className="relative flex h-[calc(100vh-8.5rem)] min-h-[520px] overflow-hidden rounded-md border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-[#0b0b0d]">
-      <aside className={cn(
-        'absolute inset-y-0 left-0 z-30 w-[280px] border-r border-gray-200 bg-white transition-transform dark:border-white/[0.08] dark:bg-[#0b0b0d] md:static md:z-auto md:translate-x-0',
-        projectPanelOpen ? 'translate-x-0' : '-translate-x-full',
-      )}>
-        <div className="flex h-12 items-center justify-between border-b border-gray-200 px-3 dark:border-white/[0.08]">
-          <div className="flex items-center gap-2 text-sm font-semibold"><FolderGit2 size={16} /> {t('workspaceChat.workspaces')}</div>
-          <button type="button" className="p-1 md:hidden" onClick={() => setProjectPanelOpen(false)} aria-label={t('common.close')}><X size={17} /></button>
-        </div>
-        <nav className="h-[calc(100%-3rem)] overflow-y-auto p-2">
-          {groupedWorkspaces.map((roots) => {
-            const project = roots[0];
-            const isExpanded = expanded.has(project.project_id);
-            const multiRoot = roots.length > 1;
-            if (!multiRoot) {
-              const workspace = roots[0];
-              return <WorkspaceButton key={workspace.ref} workspace={workspace} active={workspace.ref === workspaceRef} onClick={() => chooseWorkspace(workspace)} />;
-            }
-            return (
-              <div key={project.project_id} className="mb-1">
-                <button type="button" onClick={() => setExpanded((current) => {
-                  const next = new Set(current);
-                  if (next.has(project.project_id)) next.delete(project.project_id); else next.add(project.project_id);
-                  return next;
-                })} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm font-medium hover:bg-gray-100 dark:hover:bg-white/[0.06]">
-                  {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}<Folder size={15} className="text-amber-500" /><span className="truncate">{project.project_name}</span>
-                </button>
-                {isExpanded && <div className="ml-5 border-l border-gray-200 pl-1 dark:border-white/[0.1]">{roots.map((workspace) => <WorkspaceButton key={workspace.ref} workspace={workspace} active={workspace.ref === workspaceRef} onClick={() => chooseWorkspace(workspace)} rootOnly />)}</div>}
-              </div>
-            );
-          })}
-          {!loading && workspaces.length === 0 && <p className="p-4 text-sm text-gray-400">{t('workspaceChat.noWorkspaces')}</p>}
-        </nav>
-      </aside>
-
-      {projectPanelOpen && <button type="button" className="absolute inset-0 z-20 bg-black/30 md:hidden" onClick={() => setProjectPanelOpen(false)} aria-label={t('common.close')} />}
+    <div className="relative flex h-[calc(100dvh-9.5rem)] min-h-0 overflow-hidden rounded-md border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-[#0b0b0d]">
+      <WorkspaceChatRail
+        open={projectPanelOpen}
+        loading={loading}
+        creating={creating}
+        workspaces={workspaces}
+        threads={threads}
+        workspaceRef={workspaceRef}
+        conversation={conversation}
+        onClose={() => setProjectPanelOpen(false)}
+        onWorkspace={chooseWorkspace}
+        onThread={chooseThread}
+        onNew={() => workspaceRef && void createDraft(workspaceRef)}
+        onCopyLink={(thread) => void copyLink(thread)}
+      />
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex min-h-12 items-center gap-2 border-b border-gray-200 px-3 dark:border-white/[0.08]">
-          <button type="button" className="p-1.5 md:hidden" onClick={() => setProjectPanelOpen(true)} aria-label={t('workspaceChat.openWorkspaces')}><Menu size={18} /></button>
+        <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-gray-200 px-3 dark:border-white/[0.08]">
+          <button type="button" className="rounded-md p-1.5 hover:bg-gray-100 md:hidden dark:hover:bg-white/[0.08]" onClick={() => setProjectPanelOpen(true)} aria-label={t('workspaceChat.openWorkspaces')}><Menu size={18} /></button>
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{activeWorkspace ? `${activeWorkspace.project_name}${activeWorkspace.root_name !== activeWorkspace.project_name ? ` / ${activeWorkspace.root_name}` : ''}` : t('workspaceChat.chooseWorkspace')}</div>
-            {activeWorkspace && <div className="truncate text-[11px] text-gray-400">{activeWorkspace.root_path}</div>}
+            {activeWorkspace && <div className="truncate text-[11px] text-gray-400">{conversation?.kind === 'draft' ? t('workspaceChat.newDraft') : selectedThread?.name || selectedThread?.preview || activeWorkspace.root_path}</div>}
           </div>
-          {workspaceRef && threadId && (
-            <>
-              <select value={threadId} onChange={(event) => chooseThread(event.target.value)} className="max-w-[220px] rounded-md border border-gray-200 bg-white px-2 py-1.5 text-xs dark:border-white/[0.12] dark:bg-black/30">
-                {threads.map((thread) => <option key={thread.id} value={thread.id}>{threadLabel(thread)}</option>)}
-              </select>
-              <button type="button" onClick={() => setNewDialogOpen(true)} className="rounded-md p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-white/[0.06]" title={t('workspaceChat.newThread')}><MessageSquarePlus size={17} /></button>
-              {running && <button type="button" onClick={cancelTurn} className="rounded-md p-2 text-red-500 hover:bg-red-500/10" title={t('workspaceChat.cancelTurn')}><CircleStop size={17} /></button>}
-            </>
-          )}
+          {currentStatus && <Badge variant={statusVariant(currentStatus)} className="hidden sm:inline-flex">{currentStatus}</Badge>}
+          {tokenCount !== null && <Badge variant="outline" className="hidden sm:inline-flex">{t('workspaceChat.tokens', { count: tokenCount.toLocaleString() })}</Badge>}
+          {unsupportedCapabilities.length > 0 && <span className="hidden text-amber-600 sm:inline-flex" title={unsupportedCapabilities.map(([name, value]) => `${name}: ${value.reason || t('workspaceChat.notSupported')}`).join('\n')}><AlertTriangle size={15} /></span>}
+          {selectedThread && <button type="button" onClick={() => void copyLink(selectedThread)} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/[0.08] dark:hover:text-white" title={t('workspaceChat.copyLink')} aria-label={t('workspaceChat.copyLink')}><Copy size={15} /></button>}
+          {conversation?.kind === 'draft' && <button type="button" disabled className="flex h-8 w-8 shrink-0 cursor-not-allowed items-center justify-center rounded-md text-gray-300 dark:text-gray-700" title={t('workspaceChat.afterFirstTurn')} aria-label={t('workspaceChat.copyLink')}><Copy size={15} /></button>}
+          {activeTurn && <button type="button" onClick={interrupt} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-500 hover:bg-red-500/10" title={t('workspaceChat.cancelTurn')} aria-label={t('workspaceChat.cancelTurn')}><CircleStop size={16} /></button>}
         </header>
 
-        {error && <div className="flex items-start gap-2 border-b border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"><AlertCircle size={14} className="mt-0.5 shrink-0" /><span className="flex-1">{error}</span><button type="button" onClick={() => setError('')}><X size={14} /></button></div>}
+        {conversation && <WorkspaceChatSettings catalog={catalog} settings={currentSettings} disabled={loading || submitting} updating={updatingSettings} onPatch={(patch) => void patchSettings(patch)} />}
 
-        <main className="flex-1 overflow-y-auto px-4 md:px-8">
-          {!workspaceRef || !threadId ? (
-            <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
-              <FolderGit2 size={34} className="mb-3" />
-              <p className="text-sm">{t('workspaceChat.chooseWorkspace')}</p>
-            </div>
-          ) : loading && !detail ? (
-            <div className="flex h-full items-center justify-center"><Loader2 className="animate-spin text-gray-400" /></div>
+        <main className="min-h-0 flex-1 overflow-y-auto px-3 sm:px-5">
+          {!conversation ? (
+            <div className="flex h-full items-center justify-center text-center text-gray-400"><p className="max-w-xs text-sm">{t('workspaceChat.chooseWorkspace')}</p></div>
+          ) : loading ? (
+            <div className="flex h-full items-center justify-center"><Loader2 className="animate-spin text-accent" size={24} /></div>
           ) : (
-            <div className="mx-auto max-w-4xl">
-              {(detail?.turns || []).map((turn) => <TurnView key={turn.id} turn={turn} />)}
-              {liveEvents.length > 0 && <section className="space-y-4 py-6">{liveEvents.map((event, index) => <LiveEventView key={`${event.request_id || event.type}-${index}`} event={event} onApproval={approve} />)}</section>}
-              {detail && detail.turns.length === 0 && liveEvents.length === 0 && <div className="flex min-h-64 flex-col items-center justify-center text-gray-400"><Bot size={30} className="mb-3" /><p className="text-sm">{t('workspaceChat.emptyThread')}</p></div>}
+            <div className="mx-auto w-full max-w-4xl">
+              <WorkspaceHistory
+                turns={stream.turns as NativeTurn[]}
+                itemsByTurn={stream.itemsByTurn}
+                liveItems={stream.liveItems}
+                optimisticInputs={stream.optimisticInputs}
+                nativeEvents={stream.nativeEvents}
+                interactions={stream.snapshot?.pending_interactions || []}
+                renderInteraction={(interaction) => (
+                  <WorkspaceInteraction
+                    interaction={interaction}
+                    disabled={socketStatus !== 'connected' || !!respondingInteraction}
+                    onRespond={respondInteraction}
+                  />
+                )}
+              />
               <div ref={endRef} />
             </div>
           )}
         </main>
 
-        <footer className="border-t border-gray-200 p-3 dark:border-white/[0.08]">
+        {(error || stream.error) && <div role="alert" className="shrink-0 border-t border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">{error || stream.error}</div>}
+        {realtime.error && <div role="alert" className="shrink-0 border-t border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">{realtime.error}</div>}
+
+        <footer className="shrink-0 border-t border-gray-200 px-3 py-2 dark:border-white/[0.08]">
           <div className="mx-auto flex max-w-4xl items-end gap-2">
-            <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); }
-            }} disabled={!threadId || socketStatus !== 'connected'} rows={2} placeholder={t('workspaceChat.inputPlaceholder')} className="max-h-36 min-h-[46px] flex-1 resize-none rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 dark:border-white/[0.12] dark:bg-black/30" />
-            <button type="button" onClick={submit} disabled={!input.trim() || socketStatus !== 'connected'} className="flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-md bg-accent text-white disabled:opacity-40 dark:text-black" title={t('workspaceChat.send')}><Send size={18} /></button>
+            {conversation?.kind === 'thread' && realtimeCapability.supported && realtimeVoices.length > 0 && (
+              <select value={voice} disabled={realtime.status !== 'idle'} onChange={(event) => setVoice(event.target.value)} className="hidden h-[46px] max-w-[7.5rem] rounded-md border border-gray-300 bg-white px-2 text-xs outline-none focus:border-accent sm:block dark:border-white/[0.12] dark:bg-black/30" title={t('workspaceChat.voice')}>
+                {realtimeVoices.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+            )}
+            <button type="button" onClick={() => void toggleRealtime()} disabled={conversation?.kind !== 'thread' || !realtimeCapability.supported || socketStatus !== 'connected'} className={cn('flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-md border transition-colors disabled:cursor-not-allowed disabled:opacity-35', realtime.status === 'idle' ? 'border-gray-300 text-gray-500 hover:bg-gray-100 dark:border-white/[0.12] dark:hover:bg-white/[0.08]' : 'border-red-400 bg-red-500/10 text-red-600')} title={conversation?.kind === 'draft' ? t('workspaceChat.afterFirstTurn') : realtimeCapability.supported ? t(realtime.status === 'idle' ? 'workspaceChat.startVoice' : 'workspaceChat.stopVoice') : realtimeCapability.reason || t('workspaceChat.notSupported')} aria-label={t(realtime.status === 'idle' ? 'workspaceChat.startVoice' : 'workspaceChat.stopVoice')}>
+              {realtime.status === 'requesting_microphone' || realtime.status === 'connecting' ? <Loader2 size={17} className="animate-spin" /> : realtime.status === 'idle' ? <Mic size={17} /> : <MicOff size={17} />}
+            </button>
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              disabled={!conversation || loading}
+              rows={2}
+              placeholder={realtime.status === 'connected' ? t('workspaceChat.realtimePlaceholder') : activeTurn ? t('workspaceChat.steerPlaceholder') : t('workspaceChat.inputPlaceholder')}
+              className="max-h-36 min-h-[46px] min-w-0 flex-1 resize-none rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/30 disabled:opacity-50 dark:border-white/[0.12] dark:bg-black/30"
+            />
+            <button type="button" onClick={submit} disabled={!input.trim() || composerDisabled} className="flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-md bg-accent text-white disabled:opacity-40 dark:text-black" title={activeTurn ? t('workspaceChat.steer') : t('workspaceChat.send')} aria-label={activeTurn ? t('workspaceChat.steer') : t('workspaceChat.send')}><Send size={18} /></button>
           </div>
-          <div className="mx-auto mt-1 max-w-4xl text-right text-[10px] text-gray-400">{socketStatus === 'connected' ? t('workspaceChat.connected') : t('workspaceChat.disconnected')}</div>
+          <div className="mx-auto mt-1 flex max-w-4xl items-center justify-end gap-2 text-[10px] text-gray-400">
+            {draft && <span>{t('workspaceChat.draft')}</span>}
+            <span>{socketStatus === 'connected' ? t('workspaceChat.connected') : t('workspaceChat.disconnected')}</span>
+          </div>
+          <audio ref={realtime.audioRef} autoPlay className="hidden" />
         </footer>
       </section>
-
-      {newDialogOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
-          <div className="w-full max-w-sm rounded-md bg-white p-5 shadow-xl dark:bg-gray-900">
-            <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">{t('workspaceChat.newThread')}</h2><button type="button" onClick={() => setNewDialogOpen(false)}><X size={17} /></button></div>
-            <Input label={t('workspaceChat.threadName')} value={newThreadName} onChange={(event) => setNewThreadName(event.target.value)} autoFocus />
-            <div className="mt-5 flex justify-end gap-2"><Button variant="secondary" onClick={() => setNewDialogOpen(false)}>{t('common.cancel')}</Button><Button loading={creating} onClick={createThread}><Plus size={15} />{t('workspaceChat.create')}</Button></div>
-          </div>
-        </div>
-      )}
     </div>
-  );
-}
-
-function WorkspaceButton({ workspace, active, onClick, rootOnly = false }: { workspace: Workspace; active: boolean; onClick: () => void; rootOnly?: boolean }) {
-  return (
-    <button type="button" disabled={!workspace.available} onClick={onClick} title={workspace.available ? workspace.root_path : workspace.error} className={cn(
-      'mb-1 flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors',
-      active ? 'bg-accent/12 text-accent' : 'hover:bg-gray-100 dark:hover:bg-white/[0.06]',
-      !workspace.available && 'cursor-not-allowed opacity-45',
-    )}>
-      {rootOnly ? <Code2 size={15} className="mt-0.5 shrink-0" /> : <Folder size={15} className="mt-0.5 shrink-0 text-amber-500" />}
-      <span className="min-w-0"><span className="block truncate text-sm font-medium">{rootOnly ? workspace.root_name : workspace.project_name}</span><span className="block truncate text-[10px] text-gray-400">{workspace.available ? workspace.root_path : workspace.error}</span></span>
-    </button>
   );
 }

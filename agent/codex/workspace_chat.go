@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -130,7 +129,7 @@ func (a *Agent) ResolveWorkspace(ctx context.Context, ref string) (core.Workspac
 			return workspace, nil
 		}
 	}
-	return core.Workspace{}, fmt.Errorf("codex: unknown workspace reference")
+	return core.Workspace{}, fmt.Errorf("codex: unknown workspace reference: %w", core.ErrWorkspaceNotFound)
 }
 
 func (a *Agent) appServerControl(ctx context.Context) (*appServerSession, error) {
@@ -148,7 +147,7 @@ func (a *Agent) appServerControl(ctx context.Context) (*appServerSession, error)
 	}
 	a.mu.Lock()
 	mode, model, effort := a.mode, a.model, a.reasoningEffort
-	url, workDir, codexHome, cliBin := a.appServerURL, a.workDir, a.codexHome, a.cmd
+	workDir, codexHome, cliBin := a.workDir, a.codexHome, a.cmd
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -165,135 +164,10 @@ func (a *Agent) appServerControl(ctx context.Context) (*appServerSession, error)
 	if backend != "app_server" {
 		return nil, fmt.Errorf("codex: native threads require backend=app_server")
 	}
-	control, err := newAppServerControl(cliBin, url, workDir, model, effort, mode, baseURL, provider, extraEnv, codexHome)
+	control, err := newAppServerControl(cliBin, workDir, model, effort, mode, baseURL, provider, extraEnv, codexHome)
 	if err != nil {
 		return nil, err
 	}
 	a.control = control
 	return control, nil
-}
-
-type nativeThreadWire struct {
-	ID        string           `json:"id"`
-	Cwd       string           `json:"cwd"`
-	Name      string           `json:"name"`
-	Preview   string           `json:"preview"`
-	Status    json.RawMessage  `json:"status"`
-	CreatedAt int64            `json:"createdAt"`
-	UpdatedAt int64            `json:"updatedAt"`
-	Turns     []nativeTurnWire `json:"turns"`
-}
-
-type nativeTurnWire struct {
-	ID          string            `json:"id"`
-	Status      string            `json:"status"`
-	StartedAt   *int64            `json:"startedAt"`
-	CompletedAt *int64            `json:"completedAt"`
-	DurationMS  *int64            `json:"durationMs"`
-	Error       json.RawMessage   `json:"error"`
-	Items       []json.RawMessage `json:"items"`
-}
-
-func mapNativeThread(thread nativeThreadWire) core.NativeThreadDetail {
-	detail := core.NativeThreadDetail{NativeThread: core.NativeThread{
-		ID: thread.ID, Cwd: thread.Cwd, Name: thread.Name, Preview: thread.Preview, Status: thread.Status,
-		CreatedAt: time.Unix(thread.CreatedAt, 0), UpdatedAt: time.Unix(thread.UpdatedAt, 0),
-	}, Turns: make([]core.NativeTurn, 0, len(thread.Turns))}
-	for _, turn := range thread.Turns {
-		mapped := core.NativeTurn{ID: turn.ID, Status: turn.Status, DurationMS: turn.DurationMS, Error: turn.Error, Items: turn.Items}
-		if turn.StartedAt != nil {
-			value := time.Unix(*turn.StartedAt, 0)
-			mapped.StartedAt = &value
-		}
-		if turn.CompletedAt != nil {
-			value := time.Unix(*turn.CompletedAt, 0)
-			mapped.CompletedAt = &value
-		}
-		detail.Turns = append(detail.Turns, mapped)
-	}
-	return detail
-}
-
-func (a *Agent) ListNativeThreads(ctx context.Context) ([]core.NativeThread, error) {
-	control, err := a.appServerControl(ctx)
-	if err != nil {
-		return nil, err
-	}
-	a.mu.RLock()
-	workDir := a.workDir
-	a.mu.RUnlock()
-	var all []core.NativeThread
-	var cursor any
-	for {
-		params := map[string]any{"cwd": workDir, "limit": 100, "sortKey": "updated_at", "sortDirection": "desc"}
-		if cursor != nil {
-			params["cursor"] = cursor
-		}
-		var response struct {
-			Data       []nativeThreadWire `json:"data"`
-			NextCursor *string            `json:"nextCursor"`
-		}
-		if err := control.request("thread/list", params, &response); err != nil {
-			return nil, fmt.Errorf("codex: thread/list: %w", err)
-		}
-		for _, thread := range response.Data {
-			mapped := mapNativeThread(thread).NativeThread
-			if sameCodexPath(mapped.Cwd, workDir) {
-				all = append(all, mapped)
-			}
-		}
-		if response.NextCursor == nil || *response.NextCursor == "" {
-			break
-		}
-		cursor = *response.NextCursor
-	}
-	return all, nil
-}
-
-func (a *Agent) ReadNativeThread(ctx context.Context, threadID string) (core.NativeThreadDetail, error) {
-	control, err := a.appServerControl(ctx)
-	if err != nil {
-		return core.NativeThreadDetail{}, err
-	}
-	var response struct {
-		Thread nativeThreadWire `json:"thread"`
-	}
-	if err := control.request("thread/read", map[string]any{"threadId": threadID, "includeTurns": true}, &response); err != nil {
-		return core.NativeThreadDetail{}, fmt.Errorf("codex: thread/read: %w", err)
-	}
-	a.mu.RLock()
-	workDir := a.workDir
-	a.mu.RUnlock()
-	if !sameCodexPath(response.Thread.Cwd, workDir) {
-		return core.NativeThreadDetail{}, fmt.Errorf("codex: thread does not belong to work_dir")
-	}
-	return mapNativeThread(response.Thread), nil
-}
-
-func (a *Agent) StartNativeThread(ctx context.Context, name string) (core.NativeThread, error) {
-	control, err := a.appServerControl(ctx)
-	if err != nil {
-		return core.NativeThread{}, err
-	}
-	a.mu.RLock()
-	workDir := a.workDir
-	a.mu.RUnlock()
-	params := control.threadRequestParams()
-	params["cwd"] = workDir
-	var response struct {
-		Thread nativeThreadWire `json:"thread"`
-	}
-	if err := control.request("thread/start", params, &response); err != nil {
-		return core.NativeThread{}, fmt.Errorf("codex: thread/start: %w", err)
-	}
-	if response.Thread.ID == "" || !sameCodexPath(response.Thread.Cwd, workDir) {
-		return core.NativeThread{}, fmt.Errorf("codex: thread/start returned invalid workspace thread")
-	}
-	if name = strings.TrimSpace(name); name != "" {
-		if err := control.request("thread/name/set", map[string]any{"threadId": response.Thread.ID, "name": name}, nil); err != nil {
-			return core.NativeThread{}, fmt.Errorf("codex: thread/name/set: %w", err)
-		}
-		response.Thread.Name = name
-	}
-	return mapNativeThread(response.Thread).NativeThread, nil
 }

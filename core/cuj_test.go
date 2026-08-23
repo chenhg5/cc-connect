@@ -223,13 +223,24 @@ type cujEnv struct {
 	tempDir string
 }
 
+func newCUJEngine(t *testing.T, name string, agent Agent, platforms []Platform, storePath string, lang Language) *Engine {
+	t.Helper()
+	e := NewEngine(name, agent, platforms, storePath, lang)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop CUJ engine: %v", err)
+		}
+	})
+	return e
+}
+
 func newCUJEnv(t *testing.T) *cujEnv {
 	t.Helper()
 	dir := t.TempDir()
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
-	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, storePath, LangEnglish)
 	return &cujEnv{
 		t:       t,
 		engine:  e,
@@ -638,7 +649,7 @@ func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
 	agent := &failingAgent{}
 	agent.failNext.Set(true)
 	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
 	msg := &Message{
 		SessionKey: "test:fred",
@@ -821,7 +832,7 @@ func TestCUJ_B12_RestartRestoresEverything(t *testing.T) {
 	{
 		plat := &stubPlatformEngine{n: "test"}
 		agent := &cujAgent{}
-		e1 := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+		e1 := newCUJEngine(t, "test", agent, []Platform{plat}, storePath, LangEnglish)
 		store, err := NewCronStore(cronDir)
 		if err != nil {
 			t.Fatalf("NewCronStore: %v", err)
@@ -871,7 +882,7 @@ func TestCUJ_B12_RestartRestoresEverything(t *testing.T) {
 	{
 		plat := &stubPlatformEngine{n: "test"}
 		agent := &cujAgent{}
-		e2 := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+		e2 := newCUJEngine(t, "test", agent, []Platform{plat}, storePath, LangEnglish)
 		store, err := NewCronStore(cronDir)
 		if err != nil {
 			t.Fatalf("run2 NewCronStore: %v", err)
@@ -1023,7 +1034,7 @@ func TestCUJ_G3_PlatformReconnectReinitializesAndDelivers(t *testing.T) {
 		stubPlatformEngine: stubPlatformEngine{n: "test-lifecycle"},
 	}
 	agent := &cujAgent{}
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
 	// 1. Initial connect.
 	e.OnPlatformReady(plat)
@@ -1126,7 +1137,7 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &cujAgent{}
 	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
 	msg := &Message{
 		SessionKey: "test:img", Platform: "test", MessageID: "img1",
@@ -1161,7 +1172,7 @@ func TestCUJ_A4_VoiceMessageWithoutSTTSurfacesClearMessage(t *testing.T) {
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &cujAgent{}
 	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
 	msg := &Message{
 		SessionKey: "test:voice", Platform: "test", MessageID: "v1",
@@ -1190,7 +1201,7 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &cujAgent{}
 	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
@@ -1606,7 +1617,7 @@ func TestCUJ_E4_TimerFiresAndDeliversToAgentAndUser(t *testing.T) {
 	dir := t.TempDir()
 	plat := &cujReplyCtxPlatform{stubPlatformEngine: &stubPlatformEngine{n: "test"}}
 	agent := &cujAgent{}
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
 	timerDir := dir + "/timer"
 	if err := os.MkdirAll(timerDir, 0o755); err != nil {
@@ -1964,7 +1975,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pA := &stubPlatformEngine{n: "platA"}
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
-	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
 
 	// Fire 5 messages on each platform concurrently.
 	var wg sync.WaitGroup
@@ -2114,7 +2125,7 @@ func newCUJStreamingEnv(t *testing.T) *cujEnv {
 	plat := &cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
-	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	e := newCUJEngine(t, "test", agent, []Platform{plat}, storePath, LangEnglish)
 	// env.plat is typed *stubPlatformEngine so that userSends (which
 	// calls plat(env.plat) to bridge into a Platform interface) works.
 	// We point it at the same embedded instance the engine holds, so
@@ -2346,7 +2357,8 @@ func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
 		return &namedTestAgent{name: agentName}, nil
 	})
 	platform := &stubPlatformEngine{n: "feishu"}
-	engine := NewEngine(
+	engine := newCUJEngine(
+		t,
 		"test",
 		&namedTestAgent{name: agentName},
 		[]Platform{platform},

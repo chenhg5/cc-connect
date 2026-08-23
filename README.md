@@ -409,7 +409,7 @@ make build
 
 > **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
 
-The main Web chat can also use Codex App projects and native Codex threads. Enable `[workspace_chat]` with a Codex `app_server` template project; `/chat` then restores the selected directory and thread from SQLite, while legacy platform sessions remain available under **Platform sessions**. See [Unified workspace chat](docs/workspace-chat.md).
+The main Web chat can use read-only Codex App projects and native Codex threads. Enable `[workspace_chat]` with a Codex `app_server` template project; `/chat` restores the exact SQLite selection, New creates an unnamed draft that materializes on its first Turn, and materialized threads expose native settings, interactions, complete paginated history, deep links, and WebRTC voice. Platform `session_key` conversations remain an independent product domain under **Platform sessions**. See [Unified workspace chat](docs/workspace-chat.md).
 
 If you prefer manual configuration:
 
@@ -499,7 +499,9 @@ cc-connect update --pre     # Include pre-releases
 
 ## 🎯 Key Features
 
-### 💬 Session Management
+### 💬 Platform Session Management
+
+These commands manage the independent platform-session domain, not Codex native workspace threads. Workspace chat has its own project, draft, and thread controls documented above.
 
 ```
 /new [name]       Start a new session

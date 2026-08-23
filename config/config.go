@@ -1033,6 +1033,13 @@ func (c *Config) validateInternal(permissive bool) error {
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
+	projectNames := make(map[string]int, len(c.Projects))
+	for i, project := range c.Projects {
+		if previous, exists := projectNames[project.Name]; project.Name != "" && exists {
+			return fmt.Errorf("config: projects[%d].name %q duplicates projects[%d].name", i, project.Name, previous)
+		}
+		projectNames[project.Name] = i
+	}
 	if c.WorkspaceChat.Enabled != nil && *c.WorkspaceChat.Enabled {
 		name := strings.TrimSpace(c.WorkspaceChat.TemplateProject)
 		if name == "" {
@@ -1052,8 +1059,8 @@ func (c *Config) validateInternal(permissive bool) error {
 			return fmt.Errorf("config: workspace_chat.template_project %q must use the codex agent", name)
 		}
 		backend, _ := template.Agent.Options["backend"].(string)
-		backend = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(backend), "-", "_"))
-		if backend != "app_server" && backend != "appserver" {
+		backend = strings.TrimSpace(backend)
+		if backend != "app_server" {
 			return fmt.Errorf("config: workspace_chat.template_project %q must set projects.agent.options.backend = \"app_server\"", name)
 		}
 		seenTransport := make(map[string]struct{}, len(c.WorkspaceChat.Transports))

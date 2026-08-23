@@ -374,10 +374,7 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 
 	session.events <- Event{Type: EventText, Content: "partial response", SessionID: "relay-session"}
 	time.Sleep(40 * time.Millisecond)
-	// After timeout, HandleRelay consumes the next event from the channel to
-	// unblock the for-range loop, then checks ctx.Err() and spawns the drain
-	// goroutine. We need two events: one to unblock HandleRelay, and one
-	// EventResult for the drain goroutine to close the session cleanly.
+	// 超时后前台返回 partial，后台 drain 继续消费终态并关闭 session。
 	session.events <- Event{Type: EventThinking, Content: "still working"}
 	session.events <- Event{Type: EventResult, Content: "done", Done: true}
 
@@ -416,7 +413,7 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	}()
 
 	time.Sleep(40 * time.Millisecond)
-	// One event to unblock HandleRelay's for-range, one for the drain goroutine.
+	// 后台 drain 消费剩余事件并关闭 session。
 	session.events <- Event{Type: EventThinking, Content: "still working"}
 	session.events <- Event{Type: EventResult, Content: "done", Done: true}
 

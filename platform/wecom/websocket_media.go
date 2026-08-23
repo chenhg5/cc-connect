@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,8 +19,12 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// Max download size for WeCom WS image/file payloads (matches OpenClaw default).
-const wecomWSMediaMaxBytes = 20 << 20
+const (
+	// Max download size for WeCom WS image/file payloads (matches OpenClaw default).
+	wecomWSMediaMaxBytes = 20 << 20
+
+	wecomWSMediaDownloadFailureMessage = "Attachment download failed. The message was not submitted; please resend it."
+)
 
 // wsMediaRef is an encrypted download URL plus optional AES key (base64) from the WS protocol.
 type wsMediaRef struct {
@@ -27,21 +32,26 @@ type wsMediaRef struct {
 	Aeskey string
 }
 
-// wsMsgCallbackBodyWS is the full callback body for media-capable parsing (embedded in main struct).
-// We keep flat fields on wsMsgCallbackBody for backward compatibility; this mirrors the official JSON.
+type wsTextContent struct {
+	Content string `json:"content"`
+}
+
+// wsVoiceContent follows the official AI Bot payload. WebSocket voice callbacks
+// contain only transcription text; they do not contain downloadable audio bytes.
+type wsVoiceContent struct {
+	Content string `json:"content"`
+}
+
+type wsMediaContent struct {
+	URL    string `json:"url"`
+	Aeskey string `json:"aeskey"`
+}
+
 type wsMixedItem struct {
-	MsgType string `json:"msgtype"`
-	Text    *struct {
-		Content string `json:"content"`
-	} `json:"text,omitempty"`
-	Image *struct {
-		URL    string `json:"url"`
-		Aeskey string `json:"aeskey"`
-	} `json:"image,omitempty"`
-	File *struct {
-		URL    string `json:"url"`
-		Aeskey string `json:"aeskey"`
-	} `json:"file,omitempty"`
+	MsgType string          `json:"msgtype"`
+	Text    *wsTextContent  `json:"text,omitempty"`
+	Image   *wsMediaContent `json:"image,omitempty"`
+	File    *wsMediaContent `json:"file,omitempty"`
 }
 
 type wsMixedBlock struct {
@@ -49,22 +59,12 @@ type wsMixedBlock struct {
 }
 
 type wsQuoteBlock struct {
-	MsgType string `json:"msgtype"`
-	Text    *struct {
-		Content string `json:"content"`
-	} `json:"text,omitempty"`
-	Voice *struct {
-		Content string `json:"content"`
-	} `json:"voice,omitempty"`
-	Image *struct {
-		URL    string `json:"url"`
-		Aeskey string `json:"aeskey"`
-	} `json:"image,omitempty"`
-	File *struct {
-		URL    string `json:"url"`
-		Aeskey string `json:"aeskey"`
-	} `json:"file,omitempty"`
-	Mixed *wsMixedBlock `json:"mixed,omitempty"`
+	MsgType string          `json:"msgtype"`
+	Text    *wsTextContent  `json:"text,omitempty"`
+	Voice   *wsVoiceContent `json:"voice,omitempty"`
+	Image   *wsMediaContent `json:"image,omitempty"`
+	File    *wsMediaContent `json:"file,omitempty"`
+	Mixed   *wsMixedBlock   `json:"mixed,omitempty"`
 }
 
 // wsInboundParts keeps the current message separate from its quoted context.
@@ -88,7 +88,7 @@ func formatWSQuotedContent(parts wsInboundParts) string {
 
 // wsCollectInboundParts separates main-message and quote content so the engine can
 // deliver the latter as explicit context instead of treating it as a new instruction.
-// It does not include the top-level voice transcription, which is handled by wsVoiceText.
+// It does not include the top-level voice transcription, which is read from voice.content.
 func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundParts) {
 	appendText := func(parts *wsInboundParts, s string) {
 		s = strings.TrimSpace(s)
@@ -97,17 +97,13 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 		}
 	}
 	appendImage := func(parts *wsInboundParts, url, aeskey string, marker bool) {
-		if url != "" {
-			parts.images = append(parts.images, wsMediaRef{URL: url, Aeskey: aeskey})
-		}
+		parts.images = append(parts.images, wsMediaRef{URL: url, Aeskey: aeskey})
 		if marker {
 			parts.content = append(parts.content, "[image]")
 		}
 	}
 	appendFile := func(parts *wsInboundParts, url, aeskey string, marker bool) {
-		if url != "" {
-			parts.files = append(parts.files, wsMediaRef{URL: url, Aeskey: aeskey})
-		}
+		parts.files = append(parts.files, wsMediaRef{URL: url, Aeskey: aeskey})
 		if marker {
 			parts.content = append(parts.content, "[file]")
 		}
@@ -125,14 +121,14 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 			case "image":
 				if item.Image != nil {
 					appendImage(parts, item.Image.URL, item.Image.Aeskey, markers)
-				} else if markers {
-					parts.content = append(parts.content, "[image]")
+				} else {
+					appendImage(parts, "", "", markers)
 				}
 			case "file":
 				if item.File != nil {
 					appendFile(parts, item.File.URL, item.File.Aeskey, markers)
-				} else if markers {
-					parts.content = append(parts.content, "[file]")
+				} else {
+					appendFile(parts, "", "", markers)
 				}
 			}
 		}
@@ -157,13 +153,13 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 			if q.Image != nil {
 				appendImage(&quoted, q.Image.URL, q.Image.Aeskey, true)
 			} else {
-				quoted.content = append(quoted.content, "[image]")
+				appendImage(&quoted, "", "", true)
 			}
 		case "file":
 			if q.File != nil {
 				appendFile(&quoted, q.File.URL, q.File.Aeskey, true)
 			} else {
-				quoted.content = append(quoted.content, "[file]")
+				appendFile(&quoted, "", "", true)
 			}
 		case "mixed":
 			walkMixed(&quoted, q.Mixed, true)
@@ -178,19 +174,33 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 		}
 		if body.Image != nil {
 			appendImage(&current, body.Image.URL, body.Image.Aeskey, false)
+		} else if body.MsgType == "image" {
+			appendImage(&current, "", "", false)
 		}
-		if body.MsgType == "file" && body.File != nil {
-			appendFile(&current, body.File.URL, body.File.Aeskey, false)
+		if body.MsgType == "file" {
+			if body.File != nil {
+				appendFile(&current, body.File.URL, body.File.Aeskey, false)
+			} else {
+				appendFile(&current, "", "", false)
+			}
 		}
 	}
 	// WeCom may send msgtype=file (or image) together with a non-empty mixed block; the real
 	// download url is then only on the top-level file/image object. Merge those here.
 	if body.Mixed != nil && len(body.Mixed.MsgItem) > 0 {
-		if body.MsgType == "file" && body.File != nil {
-			appendFile(&current, body.File.URL, body.File.Aeskey, false)
+		if body.MsgType == "file" {
+			if body.File != nil {
+				appendFile(&current, body.File.URL, body.File.Aeskey, false)
+			} else {
+				appendFile(&current, "", "", false)
+			}
 		}
-		if body.MsgType == "image" && body.Image != nil {
-			appendImage(&current, body.Image.URL, body.Image.Aeskey, false)
+		if body.MsgType == "image" {
+			if body.Image != nil {
+				appendImage(&current, body.Image.URL, body.Image.Aeskey, false)
+			} else {
+				appendImage(&current, "", "", false)
+			}
 		}
 	}
 	walkQuote(body.Quote)
@@ -367,6 +377,14 @@ func downloadWeComWSMedia(ctx context.Context, urlStr, aesKey string) (data []by
 	return raw, fileName, nil
 }
 
+func safeWSMediaDownloadError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("wecom-ws: media request %s failed: %w", urlErr.Op, urlErr.Err)
+	}
+	return err
+}
+
 // deliverWSMediaInbound downloads media and forwards one core.Message. Quoted media
 // is downloaded first so attachment order mirrors the quoted-context prompt.
 func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, chatName string, rctx wsReplyContext, current, quoted wsInboundParts, fromVoice bool) {
@@ -376,12 +394,11 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 	var images []core.ImageAttachment
 	var fileAtts []core.FileAttachment
 
-	downloadImages := func(refs []wsMediaRef) {
+	downloadImages := func(refs []wsMediaRef) error {
 		for _, im := range refs {
 			buf, fn, err := downloadWeComWSMedia(ctx, im.URL, im.Aeskey)
 			if err != nil {
-				slog.Error("wecom-ws: download image failed", "error", err)
-				continue
+				return fmt.Errorf("download image: %w", err)
 			}
 			base := filepath.Base(strings.TrimSpace(fn))
 			if base == "" || base == "." {
@@ -397,14 +414,14 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 			images = append(images, core.ImageAttachment{MimeType: mt, Data: buf, FileName: base})
 			slog.Info("wecom-ws: image downloaded", "bytes", len(buf), "mime", mt, "name", base)
 		}
+		return nil
 	}
 
-	downloadFiles := func(refs []wsMediaRef) {
+	downloadFiles := func(refs []wsMediaRef) error {
 		for _, f := range refs {
 			buf, fn, err := downloadWeComWSMedia(ctx, f.URL, f.Aeskey)
 			if err != nil {
-				slog.Error("wecom-ws: download file failed", "error", err)
-				continue
+				return fmt.Errorf("download file: %w", err)
 			}
 			base := filepath.Base(strings.TrimSpace(fn))
 			if base == "" || base == "." {
@@ -414,12 +431,23 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 			fileAtts = append(fileAtts, core.FileAttachment{MimeType: mt, Data: buf, FileName: base})
 			slog.Info("wecom-ws: file downloaded", "bytes", len(buf), "mime", mt, "name", base)
 		}
+		return nil
 	}
 
-	downloadImages(quoted.images)
-	downloadImages(current.images)
-	downloadFiles(quoted.files)
-	downloadFiles(current.files)
+	for _, download := range []func() error{
+		func() error { return downloadImages(quoted.images) },
+		func() error { return downloadImages(current.images) },
+		func() error { return downloadFiles(quoted.files) },
+		func() error { return downloadFiles(current.files) },
+	} {
+		if err := download(); err != nil {
+			slog.Error("wecom-ws: media download failed; message not delivered", "error", safeWSMediaDownloadError(err))
+			if replyErr := p.Reply(context.Background(), rctx, wecomWSMediaDownloadFailureMessage); replyErr != nil {
+				slog.Error("wecom-ws: media download failure reply failed", "error", replyErr)
+			}
+			return
+		}
+	}
 
 	content := strings.Join(current.content, "\n")
 	content = stripWeComAtMentions(content, p.botID, body.AibotID)

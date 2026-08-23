@@ -1,23 +1,49 @@
 # cc-connect 管理 API 规范
 
-> **版本：** 1.0-draft  
-> **状态：** 草案 — 实现前可能变更  
-> **最后更新：** 2026-03-10
+> **版本：** 0.1.0
+> **状态：** 当前契约；兼容承诺前允许破坏性变更
+> **最后更新：** 2026-08-24
 
 ## 统一工作区对话资源
 
-当 `[workspace_chat]` 启用 `web` transport 时，管理 API 提供以下认证资源。客户端只能提交不透明的 `workspaceRef`，不能提交任意 `cwd`。
+当 `[workspace_chat]` 启用 `web` transport 时，管理 API 只提供下列工作区聊天资源。这是破坏性替换：被删除的工作区路由、字段、事件和解析器没有别名或版本协商。客户端只能提交不透明的 `workspaceRef` 和 `conversation` 对象（`{"kind":"draft|thread","id":"..."}`），不能提交任意 `cwd` 或服务器路径。
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
 | `GET` | `/api/v1/chat/workspaces` | 列出 Codex App 项目根目录，包括失效目录和真实错误 |
-| `GET` | `/api/v1/chat/workspaces/{ref}/threads` | 列出校验后目录的全部原生会话 |
-| `POST` | `/api/v1/chat/workspaces/{ref}/threads` | 创建原生会话；请求体：`{"name":"可选名称"}` |
-| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}` | 读取包含全部 Turn/item 的原生会话 |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads` | 分页列出校验后目录的原生会话 |
+| `POST` | `/api/v1/chat/workspaces/{ref}/drafts` | 创建并选择无名称草稿；请求体为 `{}` 或空 |
+| `GET` | `/api/v1/chat/workspaces/{ref}/drafts/{draftRef}` | 读取属于 `web:admin` 的草稿 |
+| `PATCH` | `/api/v1/chat/workspaces/{ref}/drafts/{draftRef}/settings` | 在首个 Turn 前持久化经过 catalog 校验的草稿设置 |
+| `GET` | `/api/v1/chat/workspaces/{ref}/runtime-catalog` | 读取模型/effort/tier/permission catalog、协作 mode mask、App Server schema 的 personality/summary 枚举、voice catalog 和能力不可用原因 |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}` | 读取 metadata、settings、status、usage、活动 Turn、交互、capabilities 和 deep link 快照 |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/turns` | 分页读取权威 Turn |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/items` | 分页读取权威 item；可用 `turn_id` 限定一个 Turn |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/settings` | 读取已物化 thread 设置 |
+| `PATCH` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/settings` | 提交经 catalog 校验的设置 patch，并等待 `thread/settings/updated` |
 | `GET` | `/api/v1/chat/selection` | 读取持久化的 `web:admin` 选择 |
-| `PUT` | `/api/v1/chat/selection` | 选择目录/会话；请求体：`{"workspace_ref":"ws_...","thread_id":"..."}` |
+| `PUT` | `/api/v1/chat/selection` | 选择目录/会话；请求体：`{"workspace_ref":"ws_...","conversation":{"kind":"thread","id":"..."}}` |
 
-`GET /api/v1/chat/ws` 使用独立的实时 WebSocket 协议，不复用外部 Bridge 协议。客户端消息包括 `subscribe`、`turn_start`、`approval_response` 和 `cancel`；服务端消息包括 `subscribed`、`turn_queued`、`turn_started`、`agent_event`、`approval_requested`、`turn_cancel_requested`、`turn_completed`、`turn_failed`、`turn_cancelled` 和 `error`。每次操作都会重新校验 thread 属于所选目录。WebSocket 使用相同管理 Token，通常通过 `?token=...` 传递。
+thread、Turn 和 item 列表路由接受 `cursor`、`limit` 和 `sort_direction=asc|desc`。客户端持续读取 cursor 直到结束；不存在固定条数的完整历史接口。
+
+草稿和 thread 的 settings patch 只接受当前字段：`model`、`effort`、`plan_effort`、`service_tier`、`personality`、`reasoning_summary`、`permission_profile` 和 `mode`。`effort` 只表示 Default 模式的普通 effort，`plan_effort` 只表示 Plan 模式 effort；两者独立保存。Plan 下修改模型或 `plan_effort` 时，服务端原子同步顶层设置与 collaboration mode settings。不存在旧字段别名或根据当前 mode 猜测 `effort` 含义的解析分支。
+
+`GET /api/v1/chat/ws` 是唯一工作区聊天 WebSocket，与外部 Bridge 协议相互独立。它只接受以下八种请求：
+
+| 类型 | 专用字段 |
+|------|----------|
+| `subscribe` | 用于有界回放的 `after_epoch`、`after_sequence` |
+| `turn_start` | 结构化 `input[]`；草稿首 Turn 可携带 `payload.settings` |
+| `turn_steer` | 结构化 `input[]` 与 `expected_turn_id` |
+| `turn_interrupt` | `expected_turn_id` |
+| `interaction_response` | `interaction_id` 与 App Server 声明的 `response` 对象 |
+| `realtime_start` | WebRTC `sdp`，以及可选 `voice`、`version` |
+| `realtime_append_text` | `text` |
+| `realtime_stop` | 无额外 payload |
+
+每个请求都包含 `request_id`、`workspace_ref` 和 `conversation`。服务端统一事件 envelope 包含 `type`、`epoch`、`sequence`、`workspace_ref`、`conversation`、可选 thread/Turn/request 标识、`payload`、`error` 和 `occurred_at`。现行事件类型为 `subscribed`、`snapshot`、`native_event`、`thread_materialized`、`resync_required`、`error` 和 `protocol_error`。actor 事件（包括操作 `error`）都按 epoch 和 sequence 排序。`protocol_error` 是唯一无序事件，只用于尚未订阅 conversation 或引用无法通过校验的场景；客户端展示它但不能更新 actor cursor。`native_event` payload 保留 App Server `method` 与原始 payload；回放缺口以服务端当前 sequence 为基线依次发送 `subscribed`、`resync_required` 和新 snapshot。
+
+每次 REST 与 WebSocket 操作都会重新校验 workspace 引用和原生 thread cwd。WebSocket 使用管理 API Token，通常通过 `?token=...` 传递。
 
 REST 响应继续使用管理 API 统一 envelope；WebSocket 事件直接发送 JSON 对象。
 

@@ -15,6 +15,12 @@ type Platform interface {
 	Stop() error
 }
 
+// MessagePreflightConfigurer 允许平台在昂贵的附件下载前把轻量消息交给
+// Engine 的唯一 interceptor。返回 true 时平台不得继续下载或再次投递。
+type MessagePreflightConfigurer interface {
+	SetMessagePreflight(func(Platform, *Message) bool)
+}
+
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 

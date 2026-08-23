@@ -568,9 +568,12 @@ func TestMultiWorkspaceAgent_PropagatesRunAsUser(t *testing.T) {
 
 	// Trigger per-workspace agent creation via the path the production
 	// code uses when a message arrives for a resolved workspace.
-	_, _, err := e.getOrCreateWorkspaceAgent(workspaceDir)
+	_, sessions, err := e.getOrCreateWorkspaceAgent(workspaceDir)
 	if err != nil {
 		t.Fatalf("getOrCreateWorkspaceAgent: %v", err)
+	}
+	if got := sessions.StorePath(); got != "" {
+		t.Fatalf("workspace session store path = %q, want disabled persistence", got)
 	}
 
 	if len(capturedOpts) != 1 {

@@ -30,6 +30,7 @@ type WSPlatform struct {
 	allowFrom   string
 	conn        *websocket.Conn
 	handler     core.MessageHandler
+	preflight   func(core.Platform, *core.Message) bool
 	ctx         context.Context
 	cancel      context.CancelFunc
 	mu          sync.Mutex // protects conn writes
@@ -85,36 +86,14 @@ type wsMsgCallbackBody struct {
 	From     struct {
 		UserID string `json:"userid"`
 	} `json:"from"`
-	MsgType string `json:"msgtype"`
-	Text    struct {
-		Content string `json:"content"`
-	} `json:"text"`
-	// Voice: official field is content; some payloads used text — accept both.
-	Voice struct {
-		Text    string `json:"text,omitempty"`
-		Content string `json:"content,omitempty"`
-	} `json:"voice"`
-	Image *struct {
-		URL    string `json:"url"`
-		Aeskey string `json:"aeskey"`
-	} `json:"image,omitempty"`
-	File *struct {
-		URL    string `json:"url"`
-		Aeskey string `json:"aeskey"`
-	} `json:"file,omitempty"`
-	Mixed      *wsMixedBlock `json:"mixed,omitempty"`
-	Quote      *wsQuoteBlock `json:"quote,omitempty"`
-	CreateTime int64         `json:"create_time"`
-}
-
-func wsVoiceText(v struct {
-	Text    string `json:"text,omitempty"`
-	Content string `json:"content,omitempty"`
-}) string {
-	if s := strings.TrimSpace(v.Content); s != "" {
-		return s
-	}
-	return strings.TrimSpace(v.Text)
+	MsgType    string          `json:"msgtype"`
+	Text       wsTextContent   `json:"text"`
+	Voice      wsVoiceContent  `json:"voice"`
+	Image      *wsMediaContent `json:"image,omitempty"`
+	File       *wsMediaContent `json:"file,omitempty"`
+	Mixed      *wsMixedBlock   `json:"mixed,omitempty"`
+	Quote      *wsQuoteBlock   `json:"quote,omitempty"`
+	CreateTime int64           `json:"create_time"`
 }
 
 func newWebSocket(opts map[string]any) (core.Platform, error) {
@@ -139,6 +118,14 @@ func (p *WSPlatform) generateReqID(prefix string) string {
 }
 
 func (p *WSPlatform) Name() string { return "wecom" }
+
+// WorkspaceChatTransport 显式允许 WebSocket 智能机器人进入统一工作区聊天。
+// Webhook Platform 不实现此能力，因此仍使用独立的平台会话域。
+func (p *WSPlatform) WorkspaceChatTransport() string { return "wecom" }
+
+func (p *WSPlatform) SetMessagePreflight(preflight func(core.Platform, *core.Message) bool) {
+	p.preflight = preflight
+}
 
 func (p *WSPlatform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -406,13 +393,20 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 	if body.ChatType == "group" {
 		chatName = body.ChatID
 	}
+	if body.ChatType == "group" && p.preflight != nil && p.preflight(p, &core.Message{
+		SessionKey: sessionKey, Platform: "wecom", Scope: core.ConversationScopeGroup,
+		MessageID: body.MsgID, UserID: body.From.UserID, UserName: body.From.UserID,
+		ChatName: chatName, ReplyCtx: rctx,
+	}) {
+		return
+	}
 
 	current, quoted := wsCollectInboundParts(&body)
 	quotedContent := formatWSQuotedContent(quoted)
 
 	switch body.MsgType {
 	case "voice":
-		vt := stripWeComAtMentions(wsVoiceText(body.Voice), p.botID, body.AibotID)
+		vt := stripWeComAtMentions(strings.TrimSpace(body.Voice.Content), p.botID, body.AibotID)
 		if vt != "" {
 			current.content = append([]string{vt}, current.content...)
 		}

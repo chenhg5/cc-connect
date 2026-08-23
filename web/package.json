@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run --maxWorkers=2 --minWorkers=1"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
@@ -25,13 +26,17 @@
     "zustand": "^5.0.5"
   },
   "devDependencies": {
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/react": "16.3.0",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "@vitejs/plugin-react": "^4.4.1",
     "autoprefixer": "^10.4.21",
+    "jsdom": "26.1.0",
     "postcss": "^8.5.3",
     "tailwindcss": "^3.4.17",
     "typescript": "~5.8.3",
-    "vite": "^6.3.2"
+    "vite": "^6.3.2",
+    "vitest": "3.2.4"
   }
 }

@@ -293,7 +293,7 @@ func TestIFlowTurnPendingToolTimeoutReleasesTurn(t *testing.T) {
 }
 
 func TestIFlowTurnTimerResetsOnPartialToolCompletion(t *testing.T) {
-	timeout := 100 * time.Millisecond
+	timeout := time.Second
 
 	var cancelled atomic.Bool
 	turn := &iflowTurn{
@@ -311,18 +311,17 @@ func TestIFlowTurnTimerResetsOnPartialToolCompletion(t *testing.T) {
 		{ID: "run_shell_command:2", Name: "run_shell_command"},
 	})
 
-	// Wait 70ms (>50% of timeout), then complete one tool
-	time.Sleep(70 * time.Millisecond)
+	// 在原 deadline 前完成一个工具并重置 timer。
+	time.Sleep(250 * time.Millisecond)
 	turn.completeTools([]iflowToolResult{{ID: "write_file:1", Output: "ok"}})
 
-	// Timer was reset — wait another 70ms; should NOT have timed out yet
-	time.Sleep(70 * time.Millisecond)
+	// 此时已经越过原 deadline，但距离重置后的 deadline 仍有充足余量。
+	time.Sleep(800 * time.Millisecond)
 	if turn.readyForResult() {
 		t.Fatal("timer should have been reset; should not be ready yet")
 	}
 
-	// Now wait for the full reset timeout to expire
-	time.Sleep(50 * time.Millisecond)
+	// 等待重置后的完整 timeout 到期。
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if turn.readyForResult() {

@@ -38,7 +38,6 @@ type Agent struct {
 	reasoningEffort string
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
 	backend         string // "exec" | "app_server"
-	appServerURL    string
 	codexHome       string
 	systemPrompt    string
 	appendPrompt    string
@@ -62,13 +61,18 @@ func New(opts map[string]any) (core.Agent, error) {
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	backend, _ := opts["backend"].(string)
-	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
-	backend = normalizeBackend(backend)
-	appServerURL = normalizeAppServerURL(appServerURL)
+	var err error
+	backend, err = parseBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	if _, exists := opts["app_server_url"]; exists {
+		return nil, fmt.Errorf("codex: app_server_url is not supported; app_server uses stdio://")
+	}
 
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
 
@@ -99,7 +103,6 @@ func New(opts map[string]any) (core.Agent, error) {
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
 		mode:            mode,
 		backend:         backend,
-		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
 		systemPrompt:    strings.TrimSpace(systemPrompt),
 		appendPrompt:    strings.TrimSpace(appendPrompt),
@@ -110,24 +113,17 @@ func New(opts map[string]any) (core.Agent, error) {
 	}, nil
 }
 
-func normalizeBackend(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "app-server", "app_server", "appserver", "ws":
-		return "app_server"
+func parseBackend(raw string) (string, error) {
+	backend := strings.TrimSpace(raw)
+	if backend == "" {
+		return "exec", nil
+	}
+	switch backend {
+	case "exec", "app_server":
+		return backend, nil
 	default:
-		return "exec"
+		return "", fmt.Errorf("codex: unsupported backend %q; expected exec or app_server", backend)
 	}
-}
-
-func normalizeAppServerURL(raw string) string {
-	url := strings.TrimSpace(raw)
-	if url == "" {
-		return "ws://127.0.0.1:3845"
-	}
-	if strings.EqualFold(url, "stdio") {
-		return "stdio://"
-	}
-	return url
 }
 
 func normalizeMode(raw string) string {
@@ -577,9 +573,6 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort
-	}
-	if a.appServerURL != "" {
-		opts["app_server_url"] = a.appServerURL
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome

@@ -20,11 +20,11 @@ func boolPtr(v bool) *bool { return &v }
 func TestNewHookManager_ValidatesConfig(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "message.received", Type: "command", Command: "echo ok"},
-		{Event: "", Type: "command", Command: "echo bad"},         // missing event
-		{Event: "error", Type: "http", URL: ""},                   // missing url
-		{Event: "error", Type: "http", URL: "ftp://bad"},          // bad url scheme
-		{Event: "error", Type: "unknown", Command: "echo"},        // bad type
-		{Event: "error", Type: "command", Command: ""},            // missing command
+		{Event: "", Type: "command", Command: "echo bad"},  // missing event
+		{Event: "error", Type: "http", URL: ""},            // missing url
+		{Event: "error", Type: "http", URL: "ftp://bad"},   // bad url scheme
+		{Event: "error", Type: "unknown", Command: "echo"}, // bad type
+		{Event: "error", Type: "command", Command: ""},     // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
 	hm := NewHookManager("test", hooks, "sh", "-c", "")
@@ -258,6 +258,7 @@ func TestEmit_WildcardMatchesAll(t *testing.T) {
 		{Event: "*", Type: "http", URL: srv.URL, Async: boolPtr(false)},
 	}
 	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+	t.Cleanup(hm.Close)
 
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})
 	hm.Emit(HookEvent{Event: HookEventSessionStarted})
@@ -317,8 +318,7 @@ func TestEmit_AsyncDoesNotBlock(t *testing.T) {
 		t.Errorf("async emit took %v, expected near-instant return", elapsed)
 	}
 
-	// Wait for the async command to finish
-	time.Sleep(300 * time.Millisecond)
+	hm.Close()
 	if _, err := os.Stat(marker); os.IsNotExist(err) {
 		t.Error("expected async command to eventually create marker file")
 	}

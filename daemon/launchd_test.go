@@ -69,6 +69,14 @@ func TestPreferredLaunchdDomainFallsBackToUserWhenGUIDomainUnavailable(t *testin
 func TestLaunchdStatusUsesUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
+	t.Setenv("HOME", t.TempDir())
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plistPath, []byte("<plist></plist>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	guiDomain := launchdGUIDomain()
 	userDomain := launchdUserDomain()
@@ -487,6 +495,10 @@ func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
 	}
 	if err := os.WriteFile(plistPath, []byte("<plist>old</plist>\n"), 0o644); err != nil {
 		t.Fatalf("seed legacy plist: %v", err)
+	}
+	// 资源守卫以 umask 077 启动测试；显式 chmod 才能构造旧版 0644 文件。
+	if err := os.Chmod(plistPath, 0o644); err != nil {
+		t.Fatalf("chmod legacy plist: %v", err)
 	}
 	if info, _ := os.Stat(plistPath); info.Mode().Perm() != 0o644 {
 		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())

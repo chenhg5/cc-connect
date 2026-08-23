@@ -62,6 +62,14 @@ Optional capability interfaces (implement only when needed):
 
 ## Development Rules
 
+### 0. v0.1.0 破坏性变更与单协议策略
+
+- 当前项目处于 `v0.1.0`，不承诺 REST、WebSocket、事件、命令、配置或持久化结构的向后兼容。需求替换现有契约时，直接更新权威定义及全部消费者。
+- 同一能力只能保留一套现行协议。禁止新旧路由、字段、事件、解析器、别名、双读双写、兼容开关和静默 fallback 并存。
+- 协议替换必须在同一变更中删除旧生产者、旧消费者、旧测试和旧文档；不得以“后续清理”为由暂时保留第二套路径。
+- 工作区聊天数据库结构变化时不编写版本迁移或旧结构读取器。发现 `workspace_chat.db` schema 版本不匹配时，精确删除该数据库及其 SQLite sidecar 后按当前结构重新创建；数据库损坏必须明确报错，不得伪装成版本升级后静默重建。
+- 上游协议的能力探测只用于判断当前能力是否可用。cc-connect 对外仍须提供一套权威契约，能力缺失时返回明确原因，不得切换到旧 RPC、旧字段或另一套下游协议。
+
 ### 1. No Hardcoding Platform or Agent Names in Core
 
 The `core/` package must remain agnostic. Never write `if p.Name() == "feishu"` or `CreateAgent("claudecode", ...)` in core. Use interfaces and capability checks instead:

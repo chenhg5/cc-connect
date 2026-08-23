@@ -4947,7 +4947,7 @@ func TestGetOrCreateWorkspaceAgent_InheritsSnapshotOptions(t *testing.T) {
 		},
 		opts: map[string]any{
 			"backend":          "app_server",
-			"app_server_url":   "ws://127.0.0.1:3846",
+			"snapshot_option":  "snapshot-only",
 			"codex_home":       "/tmp/codex-home",
 			"reasoning_effort": "high",
 			"mode":             "yolo",
@@ -4974,8 +4974,8 @@ func TestGetOrCreateWorkspaceAgent_InheritsSnapshotOptions(t *testing.T) {
 	if got := wsAgent.opts["backend"]; got != "app_server" {
 		t.Fatalf("workspace backend = %#v, want app_server", got)
 	}
-	if got := wsAgent.opts["app_server_url"]; got != "ws://127.0.0.1:3846" {
-		t.Fatalf("workspace app_server_url = %#v, want ws://127.0.0.1:3846", got)
+	if got := wsAgent.opts["snapshot_option"]; got != "snapshot-only" {
+		t.Fatalf("workspace snapshot_option = %#v, want snapshot-only", got)
 	}
 	if got := wsAgent.opts["codex_home"]; got != "/tmp/codex-home" {
 		t.Fatalf("workspace codex_home = %#v, want /tmp/codex-home", got)
@@ -13919,6 +13919,148 @@ func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []
 	}
 }
 
+type pumpOrderingSession struct {
+	*controllableAgentSession
+	pumpDone         <-chan struct{}
+	closedBeforePump atomic.Bool
+}
+
+func (s *pumpOrderingSession) Close() error {
+	select {
+	case <-s.pumpDone:
+	default:
+		s.closedBeforePump.Store(true)
+	}
+	return s.controllableAgentSession.Close()
+}
+
+func TestEngine_StopClosesUnsolicitedPumpBeforeAgentSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sess := &pumpOrderingSession{controllableAgentSession: newControllableSession("stop-order")}
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:stop-order"] = state
+	e.interactiveMu.Unlock()
+
+	if err := state.unsolicitedPump.Start(e.ctx, func(ctx context.Context) {
+		<-ctx.Done()
+	}); err != nil {
+		t.Fatalf("start unsolicited pump: %v", err)
+	}
+	sess.pumpDone = state.unsolicitedPump.activeDone()
+	if sess.pumpDone == nil {
+		t.Fatal("expected active unsolicited pump")
+	}
+
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if sess.closedBeforePump.Load() {
+		t.Fatal("agent session closed before unsolicited pump exited")
+	}
+	if err := state.unsolicitedPump.Start(context.Background(), func(context.Context) {}); !errors.Is(err, errTurnLifecyclePumpClosed) {
+		t.Fatalf("restart closed pump error = %v, want %v", err, errTurnLifecyclePumpClosed)
+	}
+}
+
+func TestEngine_StopWaitsForInteractiveWorkersAndIsIdempotent(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if !e.startInteractiveWorker(func() {
+		close(started)
+		<-release
+	}) {
+		t.Fatal("expected interactive worker to start")
+	}
+	<-started
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- e.Stop() }()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		e.platformLifecycleMu.Lock()
+		stopping := e.stopping
+		e.platformLifecycleMu.Unlock()
+		if stopping {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("engine did not enter stopping state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop returned before interactive worker exited: %v", err)
+	default:
+	}
+	if e.startInteractiveWorker(func() {}) {
+		t.Fatal("interactive worker started after Stop began")
+	}
+
+	close(release)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := e.Stop(); err != nil {
+		t.Fatalf("second Stop: %v", err)
+	}
+	if p.stopCalls != 1 {
+		t.Fatalf("platform stop calls = %d, want 1", p.stopCalls)
+	}
+}
+
+type blockingPermissionSession struct {
+	*controllableAgentSession
+	respondStarted chan struct{}
+	respondRelease chan struct{}
+}
+
+func (s *blockingPermissionSession) RespondPermission(string, PermissionResult) error {
+	close(s.respondStarted)
+	<-s.respondRelease
+	return nil
+}
+
+func TestEngine_StopWaitsForUnsolicitedPermissionResponse(t *testing.T) {
+	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sess := &blockingPermissionSession{
+		controllableAgentSession: newControllableSession("permission-stop"),
+		respondStarted:           make(chan struct{}),
+		respondRelease:           make(chan struct{}),
+	}
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:permission-stop"] = state
+	e.interactiveMu.Unlock()
+	session := e.sessions.GetOrCreateActive("test:permission-stop")
+	e.startUnsolicitedReader(state, session, e.sessions, "test:permission-stop", "")
+	sess.events <- Event{Type: EventPermissionRequest, RequestID: "permission-1", ToolName: "shell"}
+
+	select {
+	case <-sess.respondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("permission response worker did not start")
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- e.Stop() }()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop returned before permission response exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(sess.respondRelease)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 // TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
 // goroutine relays EventResult content to the platform.
 func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
@@ -14071,13 +14213,10 @@ func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
 
 	e.startUnsolicitedReader(state, session, sessions, "test:ch1:u1", "")
 
-	// Capture the done channel before stop nils it.
-	state.mu.Lock()
-	doneCh := state.unsolicitedDone
-	state.mu.Unlock()
+	doneCh := state.unsolicitedPump.activeDone()
 
 	if doneCh == nil {
-		t.Fatal("expected unsolicitedDone to be set after startUnsolicitedReader")
+		t.Fatal("expected unsolicited pump to be active after startUnsolicitedReader")
 	}
 
 	start := time.Now()
@@ -14117,9 +14256,7 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 
 	e.startUnsolicitedReader(state, session, sessions, "test:close:u1", "")
 
-	state.mu.Lock()
-	doneCh := state.unsolicitedDone
-	state.mu.Unlock()
+	doneCh := state.unsolicitedPump.activeDone()
 
 	// Close the events channel (simulates agent process exit).
 	close(sess.events)
@@ -14159,9 +14296,7 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 
 	e.startUnsolicitedReader(state, session, sessions, "test:error:u1", "")
 
-	state.mu.Lock()
-	doneCh := state.unsolicitedDone
-	state.mu.Unlock()
+	doneCh := state.unsolicitedPump.activeDone()
 
 	// Send an error event.
 	sess.events <- Event{Type: EventError, Error: errors.New("something broke")}
@@ -14350,10 +14485,7 @@ func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
 
 	e.startUnsolicitedReader(state, session, sessions, iKey, "")
 
-	// Capture the done channel before cleanup nils it.
-	state.mu.Lock()
-	doneCh := state.unsolicitedDone
-	state.mu.Unlock()
+	doneCh := state.unsolicitedPump.activeDone()
 
 	// Cleanup should stop the reader and close the session.
 	e.cleanupInteractiveState(iKey)

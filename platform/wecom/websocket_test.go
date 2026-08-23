@@ -228,6 +228,37 @@ func wsCallbackFrame(t *testing.T, reqID string, body wsMsgCallbackBody) wsFrame
 	}
 }
 
+func TestWSGroupMediaPreflightRejectsBeforeDownload(t *testing.T) {
+	downloaded := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		downloaded <- struct{}{}
+	}))
+	defer server.Close()
+	preflightCalled := make(chan *core.Message, 1)
+	platform := &WSPlatform{allowFrom: "*"}
+	platform.SetMessagePreflight(func(_ core.Platform, message *core.Message) bool {
+		preflightCalled <- message
+		return true
+	})
+	body := wsMsgCallbackBody{MsgID: "group-file", ChatID: "group-1", ChatType: "group", MsgType: "file"}
+	body.From.UserID = "user-1"
+	body.File = &wsMediaContent{URL: server.URL + "/secret-file"}
+	platform.handleMsgCallback(wsCallbackFrame(t, "req_group_file", body))
+	select {
+	case message := <-preflightCalled:
+		if message.Scope != core.ConversationScopeGroup || message.UserID != "user-1" {
+			t.Fatalf("preflight message = %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("group media did not enter preflight")
+	}
+	select {
+	case <-downloaded:
+		t.Fatal("group media was downloaded before workspace chat rejection")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestHandleMsgCallback_SingleChat_ChatIDFallback(t *testing.T) {
 	p, captured := newCapturedWSPlatform()
 
@@ -283,6 +314,68 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("handler not called")
+	}
+}
+
+func TestHandleMsgCallback_VoiceUsesOfficialTranscriptionWithoutAudioAttachment(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	frame := wsFrame{
+		Cmd:     "aibot_msg_callback",
+		Headers: wsFrameHeaders{ReqID: "req_voice_content"},
+		Body: json.RawMessage(`{
+			"msgid":"msg_voice_content",
+			"aibotid":"bot",
+			"chattype":"single",
+			"from":{"userid":"user"},
+			"msgtype":"voice",
+			"voice":{
+				"content":"official transcription",
+				"url":"https://example.invalid/audio",
+				"aeskey":"must-not-be-used",
+				"format":"amr"
+			}
+		}`),
+	}
+
+	p.handleMsgCallback(frame)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "official transcription" {
+			t.Fatalf("Content = %q", msg.Content)
+		}
+		if !msg.FromVoice {
+			t.Fatal("FromVoice = false, want true")
+		}
+		if msg.Audio != nil {
+			t.Fatalf("Audio = %#v, want nil because the WS payload contains transcription only", msg.Audio)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler not called for official voice.content payload")
+	}
+}
+
+func TestHandleMsgCallback_VoiceTextAliasIsRejected(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	frame := wsFrame{
+		Cmd:     "aibot_msg_callback",
+		Headers: wsFrameHeaders{ReqID: "req_voice_text_alias"},
+		Body: json.RawMessage(`{
+			"msgid":"msg_voice_text_alias",
+			"aibotid":"bot",
+			"chattype":"single",
+			"from":{"userid":"user"},
+			"msgtype":"voice",
+			"voice":{"text":"legacy alias"}
+		}`),
+	}
+
+	p.handleMsgCallback(frame)
+
+	select {
+	case msg := <-captured:
+		t.Fatalf("handler accepted unsupported voice.text payload: %#v", msg)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -403,9 +496,7 @@ func TestHandleMsgCallback_SeparatesQuotedTextFromCurrentInstruction(t *testing.
 		CreateTime: time.Now().Unix(),
 		Quote: &wsQuoteBlock{
 			MsgType: "text",
-			Text: &struct {
-				Content string `json:"content"`
-			}{Content: "请检查这段旧代码"},
+			Text:    &wsTextContent{Content: "请检查这段旧代码"},
 		},
 	}
 	body.From.UserID = "u1"
@@ -439,9 +530,7 @@ func TestHandleMsgCallback_MentionOnlyWithQuoteStillDispatches(t *testing.T) {
 		CreateTime: time.Now().Unix(),
 		Quote: &wsQuoteBlock{
 			MsgType: "text",
-			Text: &struct {
-				Content string `json:"content"`
-			}{Content: "总结这段内容"},
+			Text:    &wsTextContent{Content: "总结这段内容"},
 		},
 	}
 	body.From.UserID = "u1"

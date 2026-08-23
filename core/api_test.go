@@ -363,7 +363,12 @@ func TestHandleCronExec_TriggersJob(t *testing.T) {
 	}
 	agentSession := newResultAgentSession("triggered from local api")
 	engine := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
-	defer engine.cancel()
+	t.Cleanup(func() {
+		if err := engine.Stop(); err != nil {
+			t.Errorf("Engine.Stop() error = %v", err)
+		}
+	})
+	t.Cleanup(scheduler.Stop)
 	engine.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", engine)
 
@@ -416,7 +421,12 @@ func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
 	}
 	agentSession := newResultAgentSession("triggered from local api alias")
 	engine := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
-	defer engine.cancel()
+	t.Cleanup(func() {
+		if err := engine.Stop(); err != nil {
+			t.Errorf("Engine.Stop() error = %v", err)
+		}
+	})
+	t.Cleanup(scheduler.Stop)
 	engine.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", engine)
 

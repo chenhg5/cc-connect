@@ -1,23 +1,49 @@
 # cc-connect Management API Specification
 
-> **Version:** 1.1-draft  
-> **Status:** Draft — subject to change before implementation  
-> **Last Updated:** 2026-03-24
+> **Version:** 0.1.0
+> **Status:** Current contract; breaking changes are allowed before a compatibility promise
+> **Last Updated:** 2026-08-24
 
 ## Unified workspace chat resources
 
-When `[workspace_chat]` enables the `web` transport, the Management API exposes the following authenticated resources. Clients submit only the opaque `workspaceRef`; arbitrary `cwd` values are never accepted.
+When `[workspace_chat]` enables the `web` transport, the Management API exposes exactly the workspace-chat resources below. This is a breaking replacement: removed workspace routes, fields, events, and parsers have no aliases or version negotiation. Clients submit only the opaque `workspaceRef` and a `conversation` object (`{"kind":"draft|thread","id":"..."}`); arbitrary `cwd` or server paths are never accepted.
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/v1/chat/workspaces` | List Codex App project roots, including unavailable roots and their errors |
-| `GET` | `/api/v1/chat/workspaces/{ref}/threads` | List all native threads for the validated root |
-| `POST` | `/api/v1/chat/workspaces/{ref}/threads` | Create a native thread; body: `{"name":"optional"}` |
-| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}` | Read the full native thread with Turns and items |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads` | Paginate native threads for the validated root |
+| `POST` | `/api/v1/chat/workspaces/{ref}/drafts` | Create and select an unnamed draft; body is `{}` or empty |
+| `GET` | `/api/v1/chat/workspaces/{ref}/drafts/{draftRef}` | Read a draft owned by `web:admin` |
+| `PATCH` | `/api/v1/chat/workspaces/{ref}/drafts/{draftRef}/settings` | Persist catalog-validated settings for the draft before its first Turn |
+| `GET` | `/api/v1/chat/workspaces/{ref}/runtime-catalog` | Read model/effort/tier/permission catalogs, collaboration-mode masks, App Server schema personality/summary enums, voice catalogs, and capability reasons |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}` | Read the thread snapshot: metadata, settings, status, usage, active Turn, interactions, capabilities, and deep link |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/turns` | Paginate authoritative Turns |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/items` | Paginate authoritative items; optional `turn_id` filters one Turn |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/settings` | Read materialized thread settings |
+| `PATCH` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}/settings` | Apply a catalog-validated settings patch and wait for `thread/settings/updated` |
 | `GET` | `/api/v1/chat/selection` | Read the persisted `web:admin` selection |
-| `PUT` | `/api/v1/chat/selection` | Select a workspace/thread; body: `{"workspace_ref":"ws_...","thread_id":"..."}` |
+| `PUT` | `/api/v1/chat/selection` | Select a workspace/conversation; body: `{"workspace_ref":"ws_...","conversation":{"kind":"thread","id":"..."}}` |
 
-`GET /api/v1/chat/ws` is a separate real-time WebSocket protocol, not the external Bridge protocol. Client messages are `subscribe`, `turn_start`, `approval_response`, and `cancel`. Server messages include `subscribed`, `turn_queued`, `turn_started`, `agent_event`, `approval_requested`, `turn_cancel_requested`, `turn_completed`, `turn_failed`, `turn_cancelled`, and `error`. Every operation revalidates that the thread belongs to the selected root. WebSocket authentication uses the same token, normally through `?token=...`.
+Thread, Turn, and item list routes accept `cursor`, `limit`, and `sort_direction=asc|desc`. Clients follow cursors until exhausted; there is no fixed-size full-history endpoint.
+
+Draft and thread settings patches accept only the current fields: `model`, `effort`, `plan_effort`, `service_tier`, `personality`, `reasoning_summary`, `permission_profile`, and `mode`. `effort` is the normal Default-mode effort, while `plan_effort` is the independent Plan-mode effort. In Plan mode, changing the model or `plan_effort` atomically updates both top-level settings and collaboration-mode settings. There are no legacy aliases and no parser branch that guesses the meaning of `effort` from the current mode.
+
+`GET /api/v1/chat/ws` is the only workspace-chat WebSocket and is independent from the external Bridge protocol. It accepts exactly these eight request types:
+
+| Type | Purpose-specific fields |
+|------|-------------------------|
+| `subscribe` | `after_epoch`, `after_sequence` for bounded replay |
+| `turn_start` | structured `input[]`; an initial draft may include `payload.settings` |
+| `turn_steer` | structured `input[]` and `expected_turn_id` |
+| `turn_interrupt` | `expected_turn_id` |
+| `interaction_response` | `interaction_id` and the App Server-declared `response` object |
+| `realtime_start` | WebRTC `sdp`, optional `voice` and `version` |
+| `realtime_append_text` | `text` |
+| `realtime_stop` | no additional payload |
+
+Every request includes `request_id`, `workspace_ref`, and `conversation`. Server events use one envelope with `type`, `epoch`, `sequence`, `workspace_ref`, `conversation`, optional thread/Turn/request identifiers, `payload`, `error`, and `occurred_at`. Current event types are `subscribed`, `snapshot`, `native_event`, `thread_materialized`, `resync_required`, `error`, and `protocol_error`. Actor events, including operation `error`, are ordered by epoch and sequence. `protocol_error` is the only unsequenced event and is used only before a conversation has been subscribed or when its reference cannot be validated; clients display it without changing the actor cursor. A `native_event` payload preserves the App Server `method` and raw payload. A replay gap emits `subscribed`, `resync_required`, and a new snapshot at the server's current sequence baseline.
+
+Every REST and WebSocket operation revalidates the workspace reference and native thread cwd. WebSocket authentication uses the Management API token, normally through `?token=...`.
 
 REST responses use the standard Management API envelope. WebSocket events are sent directly as JSON objects.
 

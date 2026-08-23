@@ -17,14 +17,14 @@ import (
 type HookEventType string
 
 const (
-	HookEventMessageReceived    HookEventType = "message.received"
-	HookEventMessageSent        HookEventType = "message.sent"
-	HookEventSessionStarted     HookEventType = "session.started"
-	HookEventSessionEnded       HookEventType = "session.ended"
-	HookEventCronTriggered      HookEventType = "cron.triggered"
-	HookEventTimerTriggered     HookEventType = "timer.triggered"
+	HookEventMessageReceived     HookEventType = "message.received"
+	HookEventMessageSent         HookEventType = "message.sent"
+	HookEventSessionStarted      HookEventType = "session.started"
+	HookEventSessionEnded        HookEventType = "session.ended"
+	HookEventCronTriggered       HookEventType = "cron.triggered"
+	HookEventTimerTriggered      HookEventType = "timer.triggered"
 	HookEventPermissionRequested HookEventType = "permission.requested"
-	HookEventError              HookEventType = "error"
+	HookEventError               HookEventType = "error"
 )
 
 // HookHandlerType is the execution strategy for a hook.
@@ -38,7 +38,7 @@ const (
 // HookConfig is the user-facing configuration for a single hook rule.
 type HookConfig struct {
 	Event   string `toml:"event" json:"event"`
-	Type    string `toml:"type" json:"type"`       // "command" or "http"
+	Type    string `toml:"type" json:"type"` // "command" or "http"
 	Command string `toml:"command" json:"command,omitempty"`
 	URL     string `toml:"url" json:"url,omitempty"`
 	Timeout int    `toml:"timeout" json:"timeout,omitempty"` // seconds; 0 = default (10s cmd, 5s http)
@@ -75,13 +75,15 @@ type HookEvent struct {
 
 // HookManager dispatches lifecycle events to configured hook handlers.
 type HookManager struct {
-	hooks       []HookConfig
-	project     string
-	shell       string // shell binary (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command")
+	hooks        []HookConfig
+	project      string
+	shell        string // shell binary (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command")
 	shellProfile string // prepended to every command
-	mu          sync.RWMutex
-	client      *http.Client
+	mu           sync.RWMutex
+	closed       bool
+	workers      sync.WaitGroup
+	client       *http.Client
 }
 
 // NewHookManager creates a manager for the given project name.
@@ -95,12 +97,12 @@ func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, shellP
 		valid = append(valid, h)
 	}
 	return &HookManager{
-		hooks:       valid,
-		project:     project,
-		shell:       shell,
-		shellFlag:   shellFlag,
+		hooks:        valid,
+		project:      project,
+		shell:        shell,
+		shellFlag:    shellFlag,
 		shellProfile: shellProfile,
-		client:      &http.Client{},
+		client:       &http.Client{},
 	}
 }
 
@@ -136,21 +138,50 @@ func (hm *HookManager) Emit(event HookEvent) {
 		event.Timestamp = time.Now()
 	}
 
-	hm.mu.RLock()
-	hooks := hm.hooks
-	hm.mu.RUnlock()
-
-	for i := range hooks {
-		h := &hooks[i]
+	type scheduledHook struct {
+		config HookConfig
+		async  bool
+	}
+	hm.mu.Lock()
+	if hm.closed {
+		hm.mu.Unlock()
+		return
+	}
+	scheduled := make([]scheduledHook, 0, len(hm.hooks))
+	for i := range hm.hooks {
+		h := hm.hooks[i]
 		if !matchEvent(h.Event, string(event.Event)) {
 			continue
 		}
-		if h.isAsync() {
-			go hm.execute(h, event)
+		scheduled = append(scheduled, scheduledHook{config: h, async: h.isAsync()})
+		hm.workers.Add(1)
+	}
+	hm.mu.Unlock()
+
+	for i := range scheduled {
+		h := scheduled[i]
+		if h.async {
+			go func() {
+				defer hm.workers.Done()
+				hm.execute(&h.config, event)
+			}()
 		} else {
-			hm.execute(h, event)
+			hm.execute(&h.config, event)
+			hm.workers.Done()
 		}
 	}
+}
+
+// Close 禁止新增 hook，并等待已登记的同步和异步执行完成。
+func (hm *HookManager) Close() {
+	if hm == nil {
+		return
+	}
+	hm.mu.Lock()
+	hm.closed = true
+	hm.mu.Unlock()
+	hm.workers.Wait()
+	hm.client.CloseIdleConnections()
 }
 
 // matchEvent checks if a hook's event pattern matches the fired event.

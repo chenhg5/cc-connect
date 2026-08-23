@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -27,6 +28,20 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 	if got := s.GetReasoningEffort(); got != "xhigh" {
 		t.Fatalf("GetReasoningEffort() = %q, want xhigh", got)
+	}
+}
+
+func TestRedactAppServerStderrUsesConfiguredSecretEnvironment(t *testing.T) {
+	line := "request failed Authorization: Bearer sk-test-secret password=visible-only"
+	redacted := redactAppServerStderr(line, []string{
+		"OPENAI_API_KEY=sk-test-secret",
+		"NORMAL_SETTING=visible-only",
+	})
+	if strings.Contains(redacted, "sk-test-secret") || !strings.Contains(redacted, "[REDACTED]") {
+		t.Fatalf("secret was not redacted: %q", redacted)
+	}
+	if !strings.Contains(redacted, "visible-only") {
+		t.Fatalf("non-secret environment value was unexpectedly redacted: %q", redacted)
 	}
 }
 
@@ -175,6 +190,79 @@ func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) 
 	if !stdin.Closed() {
 		t.Fatal("blocked stdin was not closed after timeout")
 	}
+}
+
+func TestNativeMutationRequestClassifiesAcceptance(t *testing.T) {
+	t.Run("explicit RPC rejection is definite", func(t *testing.T) {
+		session, stdin, cancel := newMutationRequestTestSession()
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			var out map[string]any
+			done <- session.mutationRequestContext(context.Background(), "turn/start", map[string]any{}, &out)
+		}()
+		requestID := waitForWrittenRequestID(t, stdin)
+		session.handleResponse(rpcResponseEnvelope{ID: requestID, Error: &rpcError{Code: -32000, Message: "rejected"}})
+		err := <-done
+		var rpcErr *rpcError
+		if !errors.As(err, &rpcErr) || core.IsNativeAcceptanceUnknown(err) {
+			t.Fatalf("error = %T %v, want definite rpcError", err, err)
+		}
+	})
+
+	t.Run("response decode failure is unknown", func(t *testing.T) {
+		session, stdin, cancel := newMutationRequestTestSession()
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			var out map[string]any
+			done <- session.mutationRequestContext(context.Background(), "turn/start", map[string]any{}, &out)
+		}()
+		requestID := waitForWrittenRequestID(t, stdin)
+		session.handleResponse(rpcResponseEnvelope{ID: requestID, Result: json.RawMessage(`{"broken"`)})
+		if err := <-done; !core.IsNativeAcceptanceUnknown(err) {
+			t.Fatalf("error = %T %v, want acceptance unknown", err, err)
+		}
+	})
+
+	t.Run("disconnect after write is unknown", func(t *testing.T) {
+		session, stdin, cancel := newMutationRequestTestSession()
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- session.mutationRequestContext(context.Background(), "thread/settings/update", map[string]any{}, nil)
+		}()
+		_ = waitForWrittenRequestID(t, stdin)
+		session.rejectPending(io.EOF)
+		if err := <-done; !core.IsNativeAcceptanceUnknown(err) || !errors.Is(err, io.EOF) {
+			t.Fatalf("error = %T %v, want EOF acceptance unknown", err, err)
+		}
+	})
+
+	t.Run("operation cancellation after write is unknown", func(t *testing.T) {
+		session, stdin, stopSession := newMutationRequestTestSession()
+		defer stopSession()
+		operationCtx, cancelOperation := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- session.mutationRequestContext(operationCtx, "turn/steer", map[string]any{}, nil)
+		}()
+		_ = waitForWrittenRequestID(t, stdin)
+		cancelOperation()
+		if err := <-done; !core.IsNativeAcceptanceUnknown(err) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %T %v, want canceled acceptance unknown", err, err)
+		}
+	})
+
+	t.Run("failure before write is definite", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		session := &appServerSession{ctx: ctx, cancel: cancel, pending: make(map[int64]chan rpcResponseEnvelope)}
+		err := session.mutationRequestContext(context.Background(), "turn/interrupt", map[string]any{}, nil)
+		if err == nil || core.IsNativeAcceptanceUnknown(err) {
+			t.Fatalf("error = %T %v, want definite pre-write failure", err, err)
+		}
+	})
 }
 
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
@@ -370,6 +458,27 @@ func (w *lockedWriteCloser) String() string {
 }
 
 var _ io.WriteCloser = (*lockedWriteCloser)(nil)
+
+func newMutationRequestTestSession() (*appServerSession, *lockedWriteCloser, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stdin := &lockedWriteCloser{}
+	return &appServerSession{
+		ctx: ctx, cancel: cancel, stdin: stdin,
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}, stdin, cancel
+}
+
+func waitForWrittenRequestID(t *testing.T, stdin *lockedWriteCloser) int64 {
+	t.Helper()
+	line := waitForWrittenJSONLine(t, stdin)
+	var request struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(line), &request); err != nil || request.ID == 0 {
+		t.Fatalf("decode request id from %q: id=%d err=%v", line, request.ID, err)
+	}
+	return request.ID
+}
 
 type blockingWriteCloser struct {
 	started   chan struct{}

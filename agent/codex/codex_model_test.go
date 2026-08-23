@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -56,29 +57,44 @@ func TestGetModel_PrefersActiveProviderModel(t *testing.T) {
 	}
 }
 
-func TestNormalizeAppServerURL_StdIOIsExplicit(t *testing.T) {
-	for _, raw := range []string{"stdio", " stdio "} {
-		if got := normalizeAppServerURL(raw); got != "stdio://" {
-			t.Fatalf("normalizeAppServerURL(%q) = %q, want stdio://", raw, got)
-		}
+func TestParseBackend_OnlyAcceptsCurrentIdentifiers(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{raw: "", want: "exec"},
+		{raw: "exec", want: "exec"},
+		{raw: "app_server", want: "app_server"},
+		{raw: "appserver", wantErr: true},
+		{raw: "app-server", wantErr: true},
+		{raw: "APP_SERVER", wantErr: true},
+		{raw: "ws", wantErr: true},
+		{raw: "unknown", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := parseBackend(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseBackend(%q) unexpectedly succeeded with %q", tt.raw, got)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("parseBackend(%q) = %q, %v; want %q, nil", tt.raw, got, err, tt.want)
+			}
+		})
 	}
 }
 
-func TestNormalizeAppServerURL_EmptyKeepsWebSocketDefault(t *testing.T) {
-	if got := normalizeAppServerURL(""); got != "ws://127.0.0.1:3845" {
-		t.Fatalf("normalizeAppServerURL(empty) = %q, want ws://127.0.0.1:3845", got)
-	}
-}
-
-func TestWorkspaceAgentOptions_PreservesStdIOAppServerURL(t *testing.T) {
-	a := &Agent{
-		backend:      "app_server",
-		appServerURL: normalizeAppServerURL("stdio"),
-	}
-
-	opts := a.WorkspaceAgentOptions()
-	if got := opts["app_server_url"]; got != "stdio://" {
-		t.Fatalf("WorkspaceAgentOptions()[app_server_url] = %#v, want stdio://", got)
+func TestNewRejectsRemovedAppServerURL(t *testing.T) {
+	_, err := New(map[string]any{
+		"backend":        "app_server",
+		"app_server_url": "ws://127.0.0.1:3845",
+	})
+	if err == nil || !strings.Contains(err.Error(), "app_server_url is not supported") {
+		t.Fatalf("New() error = %v, want removed app_server_url error", err)
 	}
 }
 

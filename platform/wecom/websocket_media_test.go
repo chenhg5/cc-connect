@@ -7,10 +7,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestParseContentDispositionFilename(t *testing.T) {
@@ -201,27 +205,148 @@ func TestDeliverWSMediaInbound_QuotedAttachmentsPrecedeCurrentAttachments(t *tes
 	}
 }
 
-func TestDeliverWSMediaInbound_QuotedDownloadFailureKeepsContextMarker(t *testing.T) {
-	t.Parallel()
-	p, captured := newCapturedWSPlatform()
-	body := &wsMsgCallbackBody{MsgID: "quoted-media-failure"}
-	p.deliverWSMediaInbound(
-		body,
-		"wecom:chat:user",
-		"",
-		wsReplyContext{},
-		wsInboundParts{content: []string{"what is this?"}},
-		wsInboundParts{content: []string{"[image]"}, images: []wsMediaRef{{URL: "http://127.0.0.1:1/unavailable"}}},
-		false,
-	)
+func TestDeliverWSMediaInbound_DownloadFailureRejectsWholeMessage(t *testing.T) {
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.Header().Set("Content-Disposition", `attachment; filename="ok.png"`)
+			_, _ = w.Write([]byte("downloaded attachment"))
+		case "/failed":
+			http.Error(w, "unavailable", http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mediaServer.Close()
 
-	msg := <-captured
-	if got, want := msg.ExtraContent, "[Quoted message]:\n[image]\n\n"; got != want {
-		t.Fatalf("ExtraContent = %q, want %q", got, want)
+	tests := []struct {
+		name  string
+		parts func(okURL, failedURL string) (wsInboundParts, wsInboundParts)
+	}{
+		{
+			name: "current image",
+			parts: func(okURL, failedURL string) (wsInboundParts, wsInboundParts) {
+				return wsInboundParts{
+					content: []string{"inspect"},
+					images:  []wsMediaRef{{URL: okURL}, {URL: failedURL}},
+				}, wsInboundParts{}
+			},
+		},
+		{
+			name: "quoted image",
+			parts: func(okURL, failedURL string) (wsInboundParts, wsInboundParts) {
+				return wsInboundParts{content: []string{"inspect"}}, wsInboundParts{
+					content: []string{"[image]", "[image]"},
+					images:  []wsMediaRef{{URL: okURL}, {URL: failedURL}},
+				}
+			},
+		},
+		{
+			name: "current file",
+			parts: func(okURL, failedURL string) (wsInboundParts, wsInboundParts) {
+				return wsInboundParts{
+					content: []string{"inspect"},
+					images:  []wsMediaRef{{URL: okURL}},
+					files:   []wsMediaRef{{URL: failedURL}},
+				}, wsInboundParts{}
+			},
+		},
+		{
+			name: "quoted file",
+			parts: func(okURL, failedURL string) (wsInboundParts, wsInboundParts) {
+				return wsInboundParts{content: []string{"inspect"}}, wsInboundParts{
+					content: []string{"[image]", "[file]"},
+					images:  []wsMediaRef{{URL: okURL}},
+					files:   []wsMediaRef{{URL: failedURL}},
+				}
+			},
+		},
 	}
-	if len(msg.Images) != 0 {
-		t.Fatalf("Images = %#v, want no downloaded images", msg.Images)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, reply := newWSReplyCapture(t)
+			p, captured := newCapturedWSPlatform()
+			p.conn = conn
+			current, quoted := tt.parts(mediaServer.URL+"/ok", mediaServer.URL+"/failed")
+
+			p.deliverWSMediaInbound(
+				&wsMsgCallbackBody{MsgID: "media-download-failure", ChatType: "single"},
+				"wecom:chat:user",
+				"",
+				wsReplyContext{reqID: "req_media_download_failure", userID: "user"},
+				current,
+				quoted,
+				false,
+			)
+
+			select {
+			case msg := <-captured:
+				t.Fatalf("handler received a partial message: %#v", msg)
+			default:
+			}
+
+			select {
+			case result := <-reply:
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				if result.content != wecomWSMediaDownloadFailureMessage {
+					t.Fatalf("reply = %q, want %q", result.content, wecomWSMediaDownloadFailureMessage)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for the media failure reply")
+			}
+		})
 	}
+}
+
+type wsCapturedReply struct {
+	content string
+	err     error
+}
+
+func newWSReplyCapture(t *testing.T) (*websocket.Conn, <-chan wsCapturedReply) {
+	t.Helper()
+
+	result := make(chan wsCapturedReply, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			result <- wsCapturedReply{err: fmt.Errorf("upgrade reply capture: %w", err)}
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		var frame wsFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			result <- wsCapturedReply{err: fmt.Errorf("read reply frame: %w", err)}
+			return
+		}
+		if frame.Cmd != "aibot_respond_msg" {
+			result <- wsCapturedReply{err: fmt.Errorf("reply cmd = %q", frame.Cmd)}
+			return
+		}
+		var body struct {
+			Stream struct {
+				Content string `json:"content"`
+			} `json:"stream"`
+		}
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			result <- wsCapturedReply{err: fmt.Errorf("decode reply body: %w", err)}
+			return
+		}
+		result <- wsCapturedReply{content: body.Stream.Content}
+	}))
+	t.Cleanup(server.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial reply capture: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn, result
 }
 
 func TestDecodeWeComAESKey_URLSafeUnpadded(t *testing.T) {

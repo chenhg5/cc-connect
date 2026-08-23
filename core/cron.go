@@ -418,6 +418,9 @@ type CronScheduler struct {
 	entries            map[string]cron.EntryID // job ID → cron entry
 	defaultSilent      bool                    // global default for suppressing cron start notifications
 	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	stopping           bool
+	stopOnce           sync.Once
+	workers            sync.WaitGroup
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -461,6 +464,12 @@ func (cs *CronScheduler) UsesNewSession(job *CronJob) bool {
 }
 
 func (cs *CronScheduler) Start() error {
+	cs.mu.Lock()
+	if cs.stopping {
+		cs.mu.Unlock()
+		return fmt.Errorf("cron scheduler is stopped")
+	}
+	cs.mu.Unlock()
 	jobs := cs.store.List()
 	for _, job := range jobs {
 		if job.Enabled {
@@ -475,7 +484,14 @@ func (cs *CronScheduler) Start() error {
 }
 
 func (cs *CronScheduler) Stop() {
-	cs.cron.Stop()
+	cs.stopOnce.Do(func() {
+		cs.mu.Lock()
+		cs.stopping = true
+		cs.mu.Unlock()
+		cronStopped := cs.cron.Stop()
+		<-cronStopped.Done()
+		cs.workers.Wait()
+	})
 }
 
 func (cs *CronScheduler) AddJob(job *CronJob) error {
@@ -652,6 +668,10 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 }
 
 func (cs *CronScheduler) executeJob(jobID string) {
+	if !cs.beginRun() {
+		return
+	}
+	defer cs.workers.Done()
 	job := cs.store.Get(jobID)
 	if job == nil {
 		return
@@ -666,15 +686,34 @@ func (cs *CronScheduler) RunJobNow(id string) error {
 	if job == nil {
 		return fmt.Errorf("%w: %q", ErrCronJobNotFound, id)
 	}
-	cs.mu.RLock()
+	cs.mu.Lock()
+	if cs.stopping {
+		cs.mu.Unlock()
+		return fmt.Errorf("cron scheduler is stopped")
+	}
 	_, ok := cs.engines[job.Project]
-	cs.mu.RUnlock()
 	if !ok {
+		cs.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrCronProjectNotFound, job.Project)
 	}
+	cs.workers.Add(1)
+	cs.mu.Unlock()
 	snapshot := *job
-	go cs.runJob(&snapshot, true)
+	go func() {
+		defer cs.workers.Done()
+		cs.runJob(&snapshot, true)
+	}()
 	return nil
+}
+
+func (cs *CronScheduler) beginRun() bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.stopping {
+		return false
+	}
+	cs.workers.Add(1)
+	return true
 }
 
 func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
@@ -731,7 +770,6 @@ type mutePlatform struct {
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
-
 
 func GenerateCronID() string {
 	b := make([]byte, 4)

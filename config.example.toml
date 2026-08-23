@@ -412,15 +412,28 @@ level = "info" # debug, info, warn, error
 # agent backend is app_server. The Web transport also requires management.enabled.
 # Web 管理后台和企业微信单聊共用 Codex App 项目与原生会话。template_project
 # 必须指向 backend=app_server 的 Codex 项目；启用 web 还必须开启 management。
+# The project rail is read-only. New creates an unnamed SQLite draft; the first
+# Turn materializes its native thread. Web realtime uses WebRTC; WeCom supports
+# text, images, audio and files but not realtime voice.
+# 项目侧栏只读。新建只创建无名称 SQLite 草稿，首个 Turn 才物化原生 thread。
+# Web 实时语音使用 WebRTC；企业微信支持文本、图片、音频和文件，不支持实时语音。
 #
 # [workspace_chat]
 # enabled = true
 # template_project = "codex-template"
 # transports = ["web", "wecom"]
 #
-# The referenced project can use an arbitrary work_dir: workspace chat replaces
-# it with the server-validated Codex App directory selected by the client.
-# 被引用项目的 work_dir 仅作为模板值；工作区聊天会改用服务端校验后的 Codex App 目录。
+# The referenced project's work_dir is only a template value. Clients submit an
+# opaque workspaceRef; the server resolves and revalidates the Codex App root.
+# 模板项目的 work_dir 仅作为模板值。客户端只提交不透明 workspaceRef，服务端
+# 解析并重新校验对应的 Codex App 根目录。
+# data_dir/workspace_chat.db has one current PRAGMA user_version. A healthy
+# version mismatch removes exactly the db, -wal and -shm files and recreates it;
+# unreadable or corrupt databases fail startup and are preserved. No old state
+# is migrated, while native Codex threads under CODEX_HOME are unaffected.
+# data_dir/workspace_chat.db 只接受当前 PRAGMA user_version。健康数据库版本
+# 不匹配时精确删除 db、-wal、-shm 后重建；无法读取或损坏时保留文件并启动失败。
+# 不迁移旧协调状态，CODEX_HOME 中的 Codex 原生 thread 不受影响。
 #
 # [[projects]]
 # name = "codex-template"

@@ -21,9 +21,10 @@ import (
 )
 
 type rpcResponseEnvelope struct {
-	ID     any             `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
+	ID             any             `json:"id"`
+	Result         json.RawMessage `json:"result"`
+	Error          *rpcError       `json:"error"`
+	TransportError error           `json:"-"`
 }
 
 type rpcNotificationEnvelope struct {
@@ -32,8 +33,20 @@ type rpcNotificationEnvelope struct {
 }
 
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+func (e *rpcError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "RPC request failed"
+	}
+	return fmt.Sprintf("rpc error %d: %s", e.Code, message)
 }
 
 type initResponse struct {
@@ -141,7 +154,6 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	url            string
 	cliBin         string
 	workDir        string
 	model          string
@@ -158,6 +170,7 @@ type appServerSession struct {
 	owner      *appServerSession
 	childrenMu sync.RWMutex
 	children   map[string]*appServerSession
+	logicalMu  sync.Mutex
 	eventsMu   sync.RWMutex
 	eventsDone bool
 
@@ -186,30 +199,53 @@ type appServerSession struct {
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
+	turnStarting bool
 	preambleSent bool
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
 	context   *core.ContextUsage
+
+	// native* 仅由 Agent 级物理连接使用。工作区会话保留 App Server 原始事件，
+	// 不经过旧平台 AgentSession 的扁平事件转换。
+	nativeMu              sync.Mutex
+	nativeThreads         map[string]string
+	nativeStates          map[string]*nativeConversationState
+	nativeSubscriptions   map[string]map[uint64]*nativeEventSubscription
+	nativeRequests        map[string]nativePendingRequest
+	nativeSettingsWaiters map[string]map[uint64]chan core.NativeThreadSettings
+	nativeNextID          uint64
+	connectionGeneration  uint64
+	threadOwnersMu        sync.Mutex
+	threadOwners          map[string]string
 }
+
+var appServerConnectionGeneration atomic.Uint64
 
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 	appServerInterruptTimeout    = 5 * time.Second
+	appServerWriteAbortWait      = 100 * time.Millisecond
 )
 
 // newAppServerControl 创建 Agent 级长驻物理连接，不隐式创建 thread。
 // 原生 thread 管理和所有逻辑 AgentSession 共用该连接，通知按 threadId 分发。
-func newAppServerControl(cliBin, url, workDir, model, effort, mode, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerControl(cliBin, workDir, model, effort, mode, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	s := &appServerSession{
-		url: url, cliBin: cliBin, workDir: workDir, model: model, effort: effort, mode: mode,
+		cliBin: cliBin, workDir: workDir, model: model, effort: effort, mode: mode,
 		baseURL: baseURL, modelProvider: modelProvider, extraEnv: append([]string(nil), extraEnv...),
 		codexHome: strings.TrimSpace(codexHome), events: make(chan core.Event, 128),
 		ctx: sessionCtx, cancel: cancel, pending: make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals: make(map[string]chan core.PermissionResult), preambleSent: true,
-		children: make(map[string]*appServerSession),
+		children:      make(map[string]*appServerSession),
+		nativeThreads: make(map[string]string), nativeStates: make(map[string]*nativeConversationState),
+		nativeSubscriptions:   make(map[string]map[uint64]*nativeEventSubscription),
+		nativeRequests:        make(map[string]nativePendingRequest),
+		nativeSettingsWaiters: make(map[string]map[uint64]chan core.NativeThreadSettings),
+		connectionGeneration:  appServerConnectionGeneration.Add(1),
+		threadOwners:          make(map[string]string),
 	}
 	s.alive.Store(true)
 	if err := s.connect(); err != nil {
@@ -227,6 +263,8 @@ func (s *appServerSession) logicalSession(ctx context.Context, resumeID, model, 
 	if s.owner != nil || !s.alive.Load() {
 		return nil, fmt.Errorf("codex app-server control connection is closed")
 	}
+	s.logicalMu.Lock()
+	defer s.logicalMu.Unlock()
 	resumeID = strings.TrimSpace(resumeID)
 	if resumeID != "" && resumeID != core.ContinueSession {
 		if existing := s.child(resumeID); existing != nil && existing.Alive() {
@@ -242,11 +280,33 @@ func (s *appServerSession) logicalSession(ctx context.Context, resumeID, model, 
 		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
 	}
 	logical.alive.Store(true)
+	preclaimedThreadID := ""
+	if resumeID != "" && resumeID != core.ContinueSession {
+		if err := s.claimThreadOwner(resumeID, "logical"); err != nil {
+			logical.closeLogical()
+			return nil, err
+		}
+		preclaimedThreadID = resumeID
+	}
 	if err := logical.ensureThread(resumeID); err != nil {
+		if preclaimedThreadID != "" {
+			s.releaseThreadOwner(preclaimedThreadID, "logical")
+		}
 		logical.closeLogical()
 		return nil, err
 	}
 	threadID := logical.CurrentSessionID()
+	if preclaimedThreadID != "" && threadID != preclaimedThreadID {
+		s.releaseThreadOwner(preclaimedThreadID, "logical")
+		logical.closeLogical()
+		return nil, fmt.Errorf("codex app-server resumed unexpected thread %s", threadID)
+	}
+	if preclaimedThreadID == "" {
+		if err := s.claimThreadOwner(threadID, "logical"); err != nil {
+			logical.closeLogical()
+			return nil, err
+		}
+	}
 	s.childrenMu.Lock()
 	if existing := s.children[threadID]; existing != nil && existing.Alive() {
 		s.childrenMu.Unlock()
@@ -278,15 +338,13 @@ func (s *appServerSession) unregisterChild(child *appServerSession) {
 	s.childrenMu.Lock()
 	if s.children[threadID] == child {
 		delete(s.children, threadID)
+		s.releaseThreadOwner(threadID, "logical")
 	}
 	s.childrenMu.Unlock()
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
-	if strings.TrimSpace(s.url) != "" {
-		args = append(args, "--listen", strings.TrimSpace(s.url))
-	}
+	args := []string{"app-server", "--listen", "stdio://"}
 	if model := strings.TrimSpace(s.model); model != "" {
 		args = append(args, "-c", fmt.Sprintf("model=%q", model))
 	}
@@ -351,15 +409,8 @@ func (s *appServerSession) initialize() error {
 			"version": "0.1.0",
 		},
 		"capabilities": map[string]any{
-			"experimentalApi": true,
-			"optOutNotificationMethods": []string{
-				"command/exec/outputDelta",
-				"item/agentMessage/delta",
-				"item/plan/delta",
-				"item/fileChange/outputDelta",
-				"item/reasoning/summaryTextDelta",
-				"item/reasoning/textDelta",
-			},
+			"experimentalApi":                true,
+			"mcpServerOpenaiFormElicitation": true,
 		},
 	}
 
@@ -548,16 +599,28 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	var resp turnStartResponse
+	s.stateMu.Lock()
+	s.turnStarting = true
+	s.pendingMsgs = s.pendingMsgs[:0]
+	s.stateMu.Unlock()
 	if err := s.request("turn/start", params, &resp); err != nil {
+		s.stateMu.Lock()
+		s.turnStarting = false
+		s.stateMu.Unlock()
 		return fmt.Errorf("codex app-server turn/start: %w", err)
 	}
 	if resp.Turn.ID == "" {
+		s.stateMu.Lock()
+		s.turnStarting = false
+		s.stateMu.Unlock()
 		return fmt.Errorf("codex app-server turn/start returned empty turn id")
 	}
 
 	s.stateMu.Lock()
-	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
+	if s.turnStarting {
+		s.currentTurn = resp.Turn.ID
+		s.turnStarting = false
+	}
 	s.stateMu.Unlock()
 
 	return nil
@@ -1001,6 +1064,7 @@ func (s *appServerSession) Close() error {
 	}
 	s.alive.Store(false)
 	s.cancel()
+	s.closeNativeState(context.Canceled)
 
 	s.childrenMu.Lock()
 	children := make([]*appServerSession, 0, len(s.children))
@@ -1070,6 +1134,7 @@ func (s *appServerSession) failChildren(err error) {
 	s.children = make(map[string]*appServerSession)
 	s.childrenMu.Unlock()
 	for _, child := range children {
+		s.releaseThreadOwner(child.CurrentSessionID(), "logical")
 		if err != nil {
 			child.emitError(err)
 		}
@@ -1125,6 +1190,9 @@ func (s *appServerSession) readLoop(r io.Reader) {
 
 		case hasID && hasMethod:
 			// Server-initiated request that requires a response (e.g. approval).
+			if s.handleNativeServerRequest(probe) {
+				continue
+			}
 			target := s
 			if child := s.child(appServerThreadID(probe["params"])); child != nil {
 				target = child
@@ -1155,6 +1223,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		s.alive.Store(false)
 		s.rejectPending(err)
 		s.rejectPendingApprovals(err)
+		s.closeNativeState(err)
 		s.failChildren(err)
 		return
 	}
@@ -1162,6 +1231,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 	s.alive.Store(false)
 	s.rejectPending(io.EOF)
 	s.rejectPendingApprovals(io.EOF)
+	s.closeNativeState(io.EOF)
 	s.failChildren(io.EOF)
 }
 
@@ -1175,11 +1245,33 @@ func (s *appServerSession) stderrLoop(r io.Reader) {
 		if line == "" {
 			continue
 		}
-		slog.Debug("codex app-server stderr", "line", line)
+		slog.Debug("codex app-server stderr", "line", redactAppServerStderr(line, s.extraEnv))
 	}
 	if err := scanner.Err(); err != nil && s.ctx.Err() == nil {
 		slog.Debug("codex app-server stderr read failed", "error", err)
 	}
+}
+
+func redactAppServerStderr(line string, env []string) string {
+	redacted := line
+	for _, entry := range env {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || strings.TrimSpace(value) == "" || !appServerSecretEnv(name) {
+			continue
+		}
+		redacted = core.RedactToken(redacted, value)
+	}
+	return redacted
+}
+
+func appServerSecretEnv(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	for _, marker := range []string{"TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "API_KEY", "APIKEY"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *appServerSession) waitLoop() {
@@ -1202,6 +1294,7 @@ func (s *appServerSession) waitLoop() {
 		err = io.EOF
 	}
 	s.rejectPending(err)
+	s.closeNativeState(err)
 	s.failChildren(err)
 }
 
@@ -1228,6 +1321,7 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
 	if s.owner == nil {
+		s.handleNativeNotification(method, paramsRaw)
 		if child := s.child(appServerThreadID(paramsRaw)); child != nil {
 			child.handleNotification(method, paramsRaw)
 			return
@@ -1250,6 +1344,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
+			s.turnStarting = false
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
@@ -1729,7 +1824,7 @@ func (s *appServerSession) rejectPending(err error) {
 	for id, ch := range s.pending {
 		delete(s.pending, id)
 		select {
-		case ch <- rpcResponseEnvelope{ID: id, Error: &rpcError{Message: err.Error()}}:
+		case ch <- rpcResponseEnvelope{ID: id, TransportError: err}:
 		default:
 		}
 	}
@@ -1783,8 +1878,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	ctxDone := s.contextDone()
 	select {
 	case resp := <-ch:
+		if resp.TransportError != nil {
+			return resp.TransportError
+		}
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return resp.Error
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {
@@ -1803,25 +1901,61 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 }
 
 func (s *appServerSession) writeJSONWithTimeout(method string, v any, timeout time.Duration) error {
-	done := make(chan error, 1)
+	_, err := s.writeJSONWithTimeoutContextState(context.Background(), method, v, timeout)
+	return err
+}
+
+type appServerWriteResult struct {
+	possiblyDispatched bool
+	err                error
+}
+
+func finishAbortedAppServerWrite(done <-chan appServerWriteResult, writeEntered *atomic.Bool, abortErr error) (bool, error) {
+	timer := time.NewTimer(appServerWriteAbortWait)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		return result.possiblyDispatched, abortErr
+	case <-timer.C:
+		return writeEntered.Load(), abortErr
+	}
+}
+
+func (s *appServerSession) writeJSONWithTimeoutContextState(ctx context.Context, method string, v any, timeout time.Duration) (bool, error) {
+	if s.owner != nil {
+		return s.owner.writeJSONWithTimeoutContextState(ctx, method, v, timeout)
+	}
+	var writeEntered atomic.Bool
+	done := make(chan appServerWriteResult, 1)
 	go func() {
-		done <- s.writeJSON(v)
+		possiblyDispatched, err := s.writeJSONState(v, &writeEntered)
+		done <- appServerWriteResult{possiblyDispatched: possiblyDispatched, err: err}
 	}()
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	ctxDone := s.contextDone()
+	var operationDone <-chan struct{}
+	if ctx != nil {
+		operationDone = ctx.Done()
+	}
 	select {
-	case err := <-done:
-		return err
+	case result := <-done:
+		return result.possiblyDispatched, result.err
 	case <-ctxDone:
-		return s.contextErr()
+		err := s.contextErr()
+		s.abortTransport()
+		return finishAbortedAppServerWrite(done, &writeEntered, err)
+	case <-operationDone:
+		err := ctx.Err()
+		s.abortTransport()
+		return finishAbortedAppServerWrite(done, &writeEntered, err)
 	case <-timer.C:
 		err := fmt.Errorf("%s write timed out", method)
 		slog.Warn("codex app-server write timed out, closing session", "method", method, "timeout", timeout)
 		s.abortTransport()
-		return err
+		return finishAbortedAppServerWrite(done, &writeEntered, err)
 	}
 }
 
@@ -1878,25 +2012,39 @@ func (s *appServerSession) notify(method string, params any) error {
 }
 
 func (s *appServerSession) writeJSON(v any) error {
+	_, err := s.writeJSONState(v, nil)
+	return err
+}
+
+func (s *appServerSession) writeJSONState(v any, writeEntered *atomic.Bool) (bool, error) {
 	if s.owner != nil {
-		return s.owner.writeJSON(v)
+		return s.owner.writeJSONState(v, writeEntered)
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("codex app-server encode: %w", err)
+		return false, fmt.Errorf("codex app-server encode: %w", err)
 	}
 
 	s.procMu.Lock()
 	stdin := s.stdin
 	s.procMu.Unlock()
 	if stdin == nil {
-		return fmt.Errorf("codex app-server connection is closed")
+		return false, fmt.Errorf("codex app-server connection is closed")
 	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if _, err := stdin.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("codex app-server write: %w", err)
+	if writeEntered != nil {
+		writeEntered.Store(true)
 	}
-	return nil
+	payload := append(b, '\n')
+	written, err := stdin.Write(payload)
+	possiblyDispatched := written > 0
+	if err != nil {
+		return possiblyDispatched, fmt.Errorf("codex app-server write: %w", err)
+	}
+	if written != len(payload) {
+		return possiblyDispatched, fmt.Errorf("codex app-server write: %w", io.ErrShortWrite)
+	}
+	return true, nil
 }

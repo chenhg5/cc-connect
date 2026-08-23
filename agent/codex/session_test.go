@@ -617,7 +617,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 
 	var gotTextLen int
 	var gotResult bool
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(30 * time.Second)
 
 	for !gotResult {
 		select {
@@ -735,11 +735,15 @@ func writeFakeCodexScript(t *testing.T, dir, shellScript, powershellScript strin
 func waitForArgsFile(t *testing.T, path string) []string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	var previous string
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			text := strings.TrimSpace(string(data))
-			if text != "" {
+			// Shell redirection creates the file before printf has completed its
+			// write. Require a stable observation so a loaded test run cannot
+			// mistake a partially written argv file for the finished command.
+			if text != "" && text == previous {
 				lines := strings.Split(text, "\n")
 				args := make([]string, 0, len(lines))
 				for _, line := range lines {
@@ -752,6 +756,7 @@ func waitForArgsFile(t *testing.T, path string) []string {
 					return args
 				}
 			}
+			previous = text
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -472,28 +472,64 @@ const (
 	MsgWebNeedRestart  MsgKey = "web_need_restart"
 	MsgWebStatus       MsgKey = "web_status"
 
-	MsgWorkspaceChatGroupUnsupported MsgKey = "workspace_chat_group_unsupported"
-	MsgWorkspaceChatProjectsTitle    MsgKey = "workspace_chat_projects_title"
-	MsgWorkspaceChatProjectsEmpty    MsgKey = "workspace_chat_projects_empty"
-	MsgWorkspaceChatProjectSelected  MsgKey = "workspace_chat_project_selected"
-	MsgWorkspaceChatThreadsTitle     MsgKey = "workspace_chat_threads_title"
-	MsgWorkspaceChatThreadsEmpty     MsgKey = "workspace_chat_threads_empty"
-	MsgWorkspaceChatThreadSelected   MsgKey = "workspace_chat_thread_selected"
-	MsgWorkspaceChatNoSelection      MsgKey = "workspace_chat_no_selection"
-	MsgWorkspaceChatCurrent          MsgKey = "workspace_chat_current"
-	MsgWorkspaceChatNewThread        MsgKey = "workspace_chat_new_thread"
-	MsgWorkspaceChatHistoryTitle     MsgKey = "workspace_chat_history_title"
-	MsgWorkspaceChatHistoryEmpty     MsgKey = "workspace_chat_history_empty"
-	MsgWorkspaceChatRoleUser         MsgKey = "workspace_chat_role_user"
-	MsgWorkspaceChatRoleAssistant    MsgKey = "workspace_chat_role_assistant"
-	MsgWorkspaceChatUnavailable      MsgKey = "workspace_chat_unavailable"
-	MsgWorkspaceChatInvalidIndex     MsgKey = "workspace_chat_invalid_index"
-	MsgWorkspaceChatInvalidNumber    MsgKey = "workspace_chat_invalid_number"
-	MsgWorkspaceChatPageOutOfRange   MsgKey = "workspace_chat_page_out_of_range"
-	MsgWorkspaceChatMenuExpired      MsgKey = "workspace_chat_menu_expired"
-	MsgWorkspaceChatTurnNotRunning   MsgKey = "workspace_chat_turn_not_running"
-	MsgWorkspaceChatCancelled        MsgKey = "workspace_chat_cancelled"
-	MsgWorkspaceChatUsage            MsgKey = "workspace_chat_usage"
+	MsgWorkspaceChatGroupUnsupported      MsgKey = "workspace_chat_group_unsupported"
+	MsgWorkspaceChatUserIDMissing         MsgKey = "workspace_chat_user_id_missing"
+	MsgWorkspaceChatUsage                 MsgKey = "workspace_chat_usage"
+	MsgWorkspaceChatProjectsTitle         MsgKey = "workspace_chat_projects_title"
+	MsgWorkspaceChatProjectsEmpty         MsgKey = "workspace_chat_projects_empty"
+	MsgWorkspaceChatProjectsHint          MsgKey = "workspace_chat_projects_hint"
+	MsgWorkspaceChatProjectSelectedDraft  MsgKey = "workspace_chat_project_selected_draft"
+	MsgWorkspaceChatProjectSelectedThread MsgKey = "workspace_chat_project_selected_thread"
+	MsgWorkspaceChatThreadsTitle          MsgKey = "workspace_chat_threads_title"
+	MsgWorkspaceChatThreadsEmpty          MsgKey = "workspace_chat_threads_empty"
+	MsgWorkspaceChatThreadsHint           MsgKey = "workspace_chat_threads_hint"
+	MsgWorkspaceChatThreadSelected        MsgKey = "workspace_chat_thread_selected"
+	MsgWorkspaceChatNoSelection           MsgKey = "workspace_chat_no_selection"
+	MsgWorkspaceChatNeedConversation      MsgKey = "workspace_chat_need_conversation"
+	MsgWorkspaceChatNewArguments          MsgKey = "workspace_chat_new_arguments"
+	MsgWorkspaceChatDraftCreated          MsgKey = "workspace_chat_draft_created"
+	MsgWorkspaceChatLinkAfterFirstTurn    MsgKey = "workspace_chat_link_after_first_turn"
+	MsgWorkspaceChatCurrentNoProject      MsgKey = "workspace_chat_current_no_project"
+	MsgWorkspaceChatCurrentDraft          MsgKey = "workspace_chat_current_draft"
+	MsgWorkspaceChatCurrent               MsgKey = "workspace_chat_current"
+	MsgWorkspaceChatStatusIdle            MsgKey = "workspace_chat_status_idle"
+	MsgWorkspaceChatStatusRunning         MsgKey = "workspace_chat_status_running"
+	MsgWorkspaceChatHistoryEmpty          MsgKey = "workspace_chat_history_empty"
+	MsgWorkspaceChatRoleUser              MsgKey = "workspace_chat_role_user"
+	MsgWorkspaceChatRoleAssistant         MsgKey = "workspace_chat_role_assistant"
+	MsgWorkspaceChatUsageUnavailable      MsgKey = "workspace_chat_usage_unavailable"
+	MsgWorkspaceChatTurnNotRunning        MsgKey = "workspace_chat_turn_not_running"
+	MsgWorkspaceChatCancelled             MsgKey = "workspace_chat_cancelled"
+	MsgWorkspaceChatSteerUsage            MsgKey = "workspace_chat_steer_usage"
+	MsgWorkspaceChatSteerNoTurn           MsgKey = "workspace_chat_steer_no_turn"
+	MsgWorkspaceChatSteerSubmitted        MsgKey = "workspace_chat_steer_submitted"
+	MsgWorkspaceChatRequestsEmpty         MsgKey = "workspace_chat_requests_empty"
+	MsgWorkspaceChatRequestDecisions      MsgKey = "workspace_chat_request_decisions"
+	MsgWorkspaceChatRequests              MsgKey = "workspace_chat_requests"
+	MsgWorkspaceChatRespondUsage          MsgKey = "workspace_chat_respond_usage"
+	MsgWorkspaceChatRequestSubmitted      MsgKey = "workspace_chat_request_submitted"
+	MsgWorkspaceChatAnswerUsage           MsgKey = "workspace_chat_answer_usage"
+	MsgWorkspaceChatAnswerWrongKind       MsgKey = "workspace_chat_answer_wrong_kind"
+	MsgWorkspaceChatAnswerMissingQuestion MsgKey = "workspace_chat_answer_missing_question"
+	MsgWorkspaceChatAnswerSubmitted       MsgKey = "workspace_chat_answer_submitted"
+	MsgWorkspaceChatSettingsTitle         MsgKey = "workspace_chat_settings_title"
+	MsgWorkspaceChatSettingsHint          MsgKey = "workspace_chat_settings_hint"
+	MsgWorkspaceChatSettingUnsupported    MsgKey = "workspace_chat_setting_unsupported"
+	MsgWorkspaceChatSettingApplied        MsgKey = "workspace_chat_setting_applied"
+	MsgWorkspaceChatBindProjectFirst      MsgKey = "workspace_chat_bind_project_first"
+	MsgWorkspaceChatTurnRunning           MsgKey = "workspace_chat_turn_running"
+	MsgWorkspaceChatTurnSubmitted         MsgKey = "workspace_chat_turn_submitted"
+	MsgWorkspaceChatTurnEndedStatus       MsgKey = "workspace_chat_turn_ended_status"
+	MsgWorkspaceChatDraftUnavailable      MsgKey = "workspace_chat_draft_unavailable"
+	MsgWorkspaceChatUnavailableReason     MsgKey = "workspace_chat_unavailable_reason"
+	MsgWorkspaceChatInvalidIndex          MsgKey = "workspace_chat_invalid_index"
+	MsgWorkspaceChatInvalidNumber         MsgKey = "workspace_chat_invalid_number"
+	MsgWorkspaceChatPageOutOfRange        MsgKey = "workspace_chat_page_out_of_range"
+	MsgWorkspaceChatMenuExpired           MsgKey = "workspace_chat_menu_expired"
+	MsgWorkspaceChatAttachmentSaveFailed  MsgKey = "workspace_chat_attachment_save_failed"
+	MsgWorkspaceChatEmptyMessage          MsgKey = "workspace_chat_empty_message"
+	MsgWorkspaceChatVerifiedAttachment    MsgKey = "workspace_chat_verified_attachment"
+	MsgWorkspaceChatInteractionDelivery   MsgKey = "workspace_chat_interaction_delivery"
 
 	MsgAliasEmpty      MsgKey = "alias_empty"
 	MsgAliasListHeader MsgKey = "alias_list_header"
@@ -676,38 +712,68 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Workspace chat is not supported in group chats.", LangChinese: "不支持群聊工作区对话。",
 		LangTraditionalChinese: "不支援群聊工作區對話。", LangJapanese: "グループチャットではワークスペース会話を利用できません。", LangSpanish: "El chat de espacio de trabajo no está disponible en grupos.",
 	},
+	MsgWorkspaceChatUserIDMissing: {
+		LangEnglish: "The WeCom user ID is missing.", LangChinese: "企业微信用户 ID 为空。", LangTraditionalChinese: "企業微信使用者 ID 為空。", LangJapanese: "WeCom のユーザー ID がありません。", LangSpanish: "Falta el ID de usuario de WeCom.",
+	},
 	MsgWorkspaceChatProjectsTitle: {
 		LangEnglish: "Codex App projects (page %d)", LangChinese: "Codex App 项目（第 %d 页）", LangTraditionalChinese: "Codex App 專案（第 %d 頁）", LangJapanese: "Codex App プロジェクト（%d ページ）", LangSpanish: "Proyectos de Codex App (página %d)",
 	},
 	MsgWorkspaceChatProjectsEmpty: {
 		LangEnglish: "No selectable Codex App projects.", LangChinese: "没有可选择的 Codex App 项目。", LangTraditionalChinese: "沒有可選擇的 Codex App 專案。", LangJapanese: "選択できる Codex App プロジェクトがありません。", LangSpanish: "No hay proyectos de Codex App disponibles.",
 	},
-	MsgWorkspaceChatProjectSelected: {
-		LangEnglish: "Project selected: %s", LangChinese: "已选择项目：%s", LangTraditionalChinese: "已選擇專案：%s", LangJapanese: "プロジェクトを選択しました: %s", LangSpanish: "Proyecto seleccionado: %s",
+	MsgWorkspaceChatProjectsHint: {
+		LangEnglish: "Use /project N to select a project from this page.", LangChinese: "使用 /project N 选择本页项目。", LangTraditionalChinese: "使用 /project N 選擇本頁專案。", LangJapanese: "/project N でこのページのプロジェクトを選択します。", LangSpanish: "Usa /project N para seleccionar un proyecto de esta página.",
+	},
+	MsgWorkspaceChatProjectSelectedDraft: {
+		LangEnglish: "Project selected and a draft was created. The first message will create the Codex thread.", LangChinese: "已选择项目并新建草稿。发送首条消息后会创建 Codex 会话。", LangTraditionalChinese: "已選擇專案並建立草稿。傳送第一則訊息後會建立 Codex 會話。", LangJapanese: "プロジェクトを選択して下書きを作成しました。最初のメッセージ送信時に Codex スレッドを作成します。", LangSpanish: "Se seleccionó el proyecto y se creó un borrador. El primer mensaje creará la conversación de Codex.",
+	},
+	MsgWorkspaceChatProjectSelectedThread: {
+		LangEnglish: "Project selected and its most recent Codex thread was restored.", LangChinese: "已选择项目并恢复最近 Codex 会话。", LangTraditionalChinese: "已選擇專案並恢復最近的 Codex 會話。", LangJapanese: "プロジェクトを選択し、直近の Codex スレッドを復元しました。", LangSpanish: "Se seleccionó el proyecto y se restauró su conversación de Codex más reciente.",
 	},
 	MsgWorkspaceChatThreadsTitle: {
-		LangEnglish: "Native threads (page %d)", LangChinese: "原生会话（第 %d 页）", LangTraditionalChinese: "原生會話（第 %d 頁）", LangJapanese: "ネイティブスレッド（%d ページ）", LangSpanish: "Conversaciones nativas (página %d)",
+		LangEnglish: "Codex threads (page %d)", LangChinese: "Codex 会话（第 %d 页）", LangTraditionalChinese: "Codex 會話（第 %d 頁）", LangJapanese: "Codex スレッド（%d ページ）", LangSpanish: "Conversaciones de Codex (página %d)",
 	},
 	MsgWorkspaceChatThreadsEmpty: {
-		LangEnglish: "No native threads in this project.", LangChinese: "当前项目没有原生会话。", LangTraditionalChinese: "目前專案沒有原生會話。", LangJapanese: "このプロジェクトにはネイティブスレッドがありません。", LangSpanish: "Este proyecto no tiene conversaciones nativas.",
+		LangEnglish: "This project has no materialized threads. Use /new to create a draft.", LangChinese: "当前项目还没有已物化会话。使用 /new 新建草稿。", LangTraditionalChinese: "目前專案還沒有已物化會話。使用 /new 建立草稿。", LangJapanese: "このプロジェクトには実体化済みスレッドがありません。/new で下書きを作成してください。", LangSpanish: "Este proyecto no tiene conversaciones materializadas. Usa /new para crear un borrador.",
+	},
+	MsgWorkspaceChatThreadsHint: {
+		LangEnglish: "Use /switch N to switch to a thread on this page.", LangChinese: "使用 /switch N 切换本页会话。", LangTraditionalChinese: "使用 /switch N 切換本頁會話。", LangJapanese: "/switch N でこのページのスレッドに切り替えます。", LangSpanish: "Usa /switch N para cambiar a una conversación de esta página.",
 	},
 	MsgWorkspaceChatThreadSelected: {
-		LangEnglish: "Thread selected: %s", LangChinese: "已切换会话：%s", LangTraditionalChinese: "已切換會話：%s", LangJapanese: "スレッドを切り替えました: %s", LangSpanish: "Conversación seleccionada: %s",
+		LangEnglish: "Codex thread selected: %s", LangChinese: "已切换 Codex 会话：%s", LangTraditionalChinese: "已切換 Codex 會話：%s", LangJapanese: "Codex スレッドを切り替えました: %s", LangSpanish: "Conversación de Codex seleccionada: %s",
 	},
 	MsgWorkspaceChatNoSelection: {
-		LangEnglish: "Select a project first with /projects and /project N.", LangChinese: "请先用 /projects 查看项目，再用 /project N 选择。", LangTraditionalChinese: "請先用 /projects 查看專案，再用 /project N 選擇。", LangJapanese: "まず /projects で確認し、/project N で選択してください。", LangSpanish: "Primero usa /projects y después /project N.",
+		LangEnglish: "Select a project first with /projects and /project N.", LangChinese: "请先使用 /projects 和 /project N 选择项目。", LangTraditionalChinese: "請先使用 /projects 和 /project N 選擇專案。", LangJapanese: "まず /projects と /project N でプロジェクトを選択してください。", LangSpanish: "Primero selecciona un proyecto con /projects y /project N.",
+	},
+	MsgWorkspaceChatNeedConversation: {
+		LangEnglish: "Select a project and thread first.", LangChinese: "请先选择项目和会话。", LangTraditionalChinese: "請先選擇專案和會話。", LangJapanese: "まずプロジェクトとスレッドを選択してください。", LangSpanish: "Primero selecciona un proyecto y una conversación.",
+	},
+	MsgWorkspaceChatNewArguments: {
+		LangEnglish: "/new does not accept a name or other arguments.", LangChinese: "/new 不接受名称或其他参数。", LangTraditionalChinese: "/new 不接受名稱或其他參數。", LangJapanese: "/new は名前やその他の引数を受け付けません。", LangSpanish: "/new no acepta nombres ni otros argumentos.",
+	},
+	MsgWorkspaceChatDraftCreated: {
+		LangEnglish: "Draft created. The first message will create the Codex thread; deep links and realtime voice are unavailable until then.", LangChinese: "已新建草稿。发送首条消息后会创建 Codex 会话；此前不能复制深链或开启实时语音。", LangTraditionalChinese: "已建立草稿。傳送第一則訊息後會建立 Codex 會話；此前無法複製深層連結或啟用即時語音。", LangJapanese: "下書きを作成しました。最初のメッセージで Codex スレッドが作成されるまで、ディープリンクとリアルタイム音声は利用できません。", LangSpanish: "Se creó el borrador. El primer mensaje creará la conversación de Codex; hasta entonces no estarán disponibles el enlace profundo ni la voz en tiempo real.",
+	},
+	MsgWorkspaceChatLinkAfterFirstTurn: {
+		LangEnglish: "Available after the first turn.", LangChinese: "首个 Turn 后可用。", LangTraditionalChinese: "第一個 Turn 後可用。", LangJapanese: "最初のターン後に利用できます。", LangSpanish: "Disponible después del primer turno.",
+	},
+	MsgWorkspaceChatCurrentNoProject: {
+		LangEnglish: "No project is currently selected.", LangChinese: "当前未选择项目。", LangTraditionalChinese: "目前未選擇專案。", LangJapanese: "現在プロジェクトが選択されていません。", LangSpanish: "No hay ningún proyecto seleccionado.",
+	},
+	MsgWorkspaceChatCurrentDraft: {
+		LangEnglish: "Project: %s\nCurrent: unmaterialized draft %s", LangChinese: "项目：%s\n当前：未物化草稿 %s", LangTraditionalChinese: "專案：%s\n目前：未物化草稿 %s", LangJapanese: "プロジェクト: %s\n現在: 未実体化の下書き %s", LangSpanish: "Proyecto: %s\nActual: borrador no materializado %s",
 	},
 	MsgWorkspaceChatCurrent: {
-		LangEnglish: "Current project: %s\nCurrent thread: %s", LangChinese: "当前项目：%s\n当前会话：%s", LangTraditionalChinese: "目前專案：%s\n目前會話：%s", LangJapanese: "現在のプロジェクト: %s\n現在のスレッド: %s", LangSpanish: "Proyecto actual: %s\nConversación actual: %s",
+		LangEnglish: "Project: %s\nThread: %s\nStatus: %s\nModel: %s\nMode: %s\nEffort: %s", LangChinese: "项目：%s\n会话：%s\n状态：%s\n模型：%s\n模式：%s\nEffort：%s", LangTraditionalChinese: "專案：%s\n會話：%s\n狀態：%s\n模型：%s\n模式：%s\nEffort：%s", LangJapanese: "プロジェクト: %s\nスレッド: %s\n状態: %s\nモデル: %s\nモード: %s\n推論強度: %s", LangSpanish: "Proyecto: %s\nConversación: %s\nEstado: %s\nModelo: %s\nModo: %s\nEsfuerzo: %s",
 	},
-	MsgWorkspaceChatNewThread: {
-		LangEnglish: "New thread created: %s", LangChinese: "已创建新会话：%s", LangTraditionalChinese: "已建立新會話：%s", LangJapanese: "新しいスレッドを作成しました: %s", LangSpanish: "Nueva conversación creada: %s",
+	MsgWorkspaceChatStatusIdle: {
+		LangEnglish: "idle", LangChinese: "空闲", LangTraditionalChinese: "閒置", LangJapanese: "待機中", LangSpanish: "inactivo",
 	},
-	MsgWorkspaceChatHistoryTitle: {
-		LangEnglish: "Recent conversation", LangChinese: "最近对话", LangTraditionalChinese: "最近對話", LangJapanese: "最近の会話", LangSpanish: "Conversación reciente",
+	MsgWorkspaceChatStatusRunning: {
+		LangEnglish: "running %s", LangChinese: "运行中 %s", LangTraditionalChinese: "執行中 %s", LangJapanese: "実行中 %s", LangSpanish: "en ejecución %s",
 	},
 	MsgWorkspaceChatHistoryEmpty: {
-		LangEnglish: "There is no conversation history yet.", LangChinese: "当前还没有对话记录。", LangTraditionalChinese: "目前還沒有對話記錄。", LangJapanese: "会話履歴はまだありません。", LangSpanish: "Todavía no hay historial de conversación.",
+		LangEnglish: "This thread has no displayable conversation yet.", LangChinese: "当前会话还没有可显示的对话。", LangTraditionalChinese: "目前會話還沒有可顯示的對話。", LangJapanese: "このスレッドには表示できる会話がまだありません。", LangSpanish: "Esta conversación aún no tiene contenido que mostrar.",
 	},
 	MsgWorkspaceChatRoleUser: {
 		LangEnglish: "User", LangChinese: "用户", LangTraditionalChinese: "使用者", LangJapanese: "ユーザー", LangSpanish: "Usuario",
@@ -715,33 +781,111 @@ var messages = map[MsgKey]map[Language]string{
 	MsgWorkspaceChatRoleAssistant: {
 		LangEnglish: "Assistant", LangChinese: "助手", LangTraditionalChinese: "助理", LangJapanese: "アシスタント", LangSpanish: "Asistente",
 	},
-	MsgWorkspaceChatUnavailable: {
-		LangEnglish: "Unavailable", LangChinese: "不可用", LangTraditionalChinese: "不可用", LangJapanese: "利用不可", LangSpanish: "No disponible",
+	MsgWorkspaceChatUsageUnavailable: {
+		LangEnglish: "This thread has no usage data.", LangChinese: "当前会话没有 usage 数据。", LangTraditionalChinese: "目前會話沒有 usage 資料。", LangJapanese: "このスレッドには usage データがありません。", LangSpanish: "Esta conversación no tiene datos de uso.",
 	},
 	MsgWorkspaceChatInvalidIndex: {
-		LangEnglish: "Enter a valid list number.", LangChinese: "请输入有效的列表编号。", LangTraditionalChinese: "請輸入有效的清單編號。", LangJapanese: "有効な一覧番号を入力してください。", LangSpanish: "Introduce un número de lista válido.",
+		LangEnglish: "The number is invalid. List the items again.", LangChinese: "编号无效，请重新获取列表。", LangTraditionalChinese: "編號無效，請重新取得清單。", LangJapanese: "番号が無効です。一覧を再取得してください。", LangSpanish: "El número no es válido. Vuelve a obtener la lista.",
 	},
 	MsgWorkspaceChatInvalidNumber: {
-		LangEnglish: "Enter a positive integer.", LangChinese: "请输入正整数。", LangTraditionalChinese: "請輸入正整數。", LangJapanese: "正の整数を入力してください。", LangSpanish: "Introduce un entero positivo.",
+		LangEnglish: "Enter a positive integer number or page.", LangChinese: "请输入正整数编号或页码。", LangTraditionalChinese: "請輸入正整數編號或頁碼。", LangJapanese: "正の整数の番号またはページを入力してください。", LangSpanish: "Introduce un número o una página con un entero positivo.",
 	},
 	MsgWorkspaceChatPageOutOfRange: {
-		LangEnglish: "That page does not exist.", LangChinese: "该页不存在。", LangTraditionalChinese: "該頁不存在。", LangJapanese: "そのページは存在しません。", LangSpanish: "Esa página no existe.",
+		LangEnglish: "The page is out of range.", LangChinese: "页码超出范围。", LangTraditionalChinese: "頁碼超出範圍。", LangJapanese: "ページ番号が範囲外です。", LangSpanish: "La página está fuera de rango.",
 	},
 	MsgWorkspaceChatMenuExpired: {
-		LangEnglish: "The numbered list is missing or has changed. List it again before selecting.", LangChinese: "编号列表不存在或已变化，请重新查看列表后再选择。", LangTraditionalChinese: "編號清單不存在或已變更，請重新查看清單後再選擇。", LangJapanese: "番号付き一覧がないか変更されています。もう一度一覧を表示してから選択してください。", LangSpanish: "La lista numerada no existe o cambió. Vuelve a mostrarla antes de seleccionar.",
+		LangEnglish: "The list snapshot has expired. List the items again.", LangChinese: "列表快照已失效，请重新获取列表。", LangTraditionalChinese: "清單快照已失效，請重新取得清單。", LangJapanese: "一覧のスナップショットが失効しました。再取得してください。", LangSpanish: "La instantánea de la lista caducó. Vuelve a obtenerla.",
 	},
 	MsgWorkspaceChatTurnNotRunning: {
-		LangEnglish: "There is no active turn to cancel.", LangChinese: "当前没有可取消的 Turn。", LangTraditionalChinese: "目前沒有可取消的 Turn。", LangJapanese: "キャンセルできる実行中のターンはありません。", LangSpanish: "No hay ningún turno activo para cancelar.",
+		LangEnglish: "There is no active turn.", LangChinese: "当前没有运行中的 Turn。", LangTraditionalChinese: "目前沒有執行中的 Turn。", LangJapanese: "実行中のターンはありません。", LangSpanish: "No hay ningún turno activo.",
 	},
 	MsgWorkspaceChatCancelled: {
-		LangEnglish: "Current turn cancelled.", LangChinese: "已取消当前 Turn。", LangTraditionalChinese: "已取消目前 Turn。", LangJapanese: "現在のターンをキャンセルしました。", LangSpanish: "Se canceló el turno actual.",
+		LangEnglish: "Cancellation of the current turn was requested.", LangChinese: "已请求取消当前 Turn。", LangTraditionalChinese: "已請求取消目前 Turn。", LangJapanese: "現在のターンのキャンセルを要求しました。", LangSpanish: "Se solicitó cancelar el turno actual.",
 	},
 	MsgWorkspaceChatUsage: {
-		LangEnglish:            "Commands: /projects [page], /project N, /threads [page], /switch N, /new [name], /current, /history [count], /cancel",
-		LangChinese:            "命令：/projects [页码]、/project N、/threads [页码]、/switch N、/new [名称]、/current、/history [数量]、/cancel",
-		LangTraditionalChinese: "命令：/projects [頁碼]、/project N、/threads [頁碼]、/switch N、/new [名稱]、/current、/history [數量]、/cancel",
-		LangJapanese:           "コマンド: /projects [ページ]、/project N、/threads [ページ]、/switch N、/new [名前]、/current、/history [件数]、/cancel",
-		LangSpanish:            "Comandos: /projects [página], /project N, /threads [página], /switch N, /new [nombre], /current, /history [cantidad], /cancel",
+		LangEnglish:            "Unknown workspace command. Commands: /projects, /project, /threads, /switch, /new, /link, /current, /history, /usage, /steer, /cancel, /requests, /respond, /answer, and the model/settings commands.",
+		LangChinese:            "未知工作区命令。可用命令：/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer，以及模型和设置命令。",
+		LangTraditionalChinese: "未知工作區命令。可用命令：/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer，以及模型與設定命令。",
+		LangJapanese:           "不明なワークスペースコマンドです。利用可能: /projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer、およびモデル・設定コマンド。",
+		LangSpanish:            "Comando de espacio de trabajo desconocido. Disponibles: /projects, /project, /threads, /switch, /new, /link, /current, /history, /usage, /steer, /cancel, /requests, /respond, /answer y los comandos de modelo y configuración.",
+	},
+	MsgWorkspaceChatSteerUsage: {
+		LangEnglish: "Usage: /steer additional content", LangChinese: "用法：/steer 要补充的内容", LangTraditionalChinese: "用法：/steer 要補充的內容", LangJapanese: "使用法: /steer 追加内容", LangSpanish: "Uso: /steer contenido adicional",
+	},
+	MsgWorkspaceChatSteerNoTurn: {
+		LangEnglish: "There is no active turn; a regular message will start a new turn.", LangChinese: "当前没有运行中的 Turn；普通消息会开启新 Turn。", LangTraditionalChinese: "目前沒有執行中的 Turn；一般訊息會開啟新的 Turn。", LangJapanese: "実行中のターンはありません。通常のメッセージは新しいターンを開始します。", LangSpanish: "No hay un turno activo; un mensaje normal iniciará uno nuevo.",
+	},
+	MsgWorkspaceChatSteerSubmitted: {
+		LangEnglish: "Additional input was sent to the current turn.", LangChinese: "已补充当前 Turn。", LangTraditionalChinese: "已補充目前 Turn。", LangJapanese: "現在のターンに追加内容を送信しました。", LangSpanish: "Se envió contenido adicional al turno actual.",
+	},
+	MsgWorkspaceChatRequestsEmpty: {
+		LangEnglish: "There are no pending requests.", LangChinese: "当前没有待处理请求。", LangTraditionalChinese: "目前沒有待處理請求。", LangJapanese: "保留中のリクエストはありません。", LangSpanish: "No hay solicitudes pendientes.",
+	},
+	MsgWorkspaceChatRequestDecisions: {
+		LangEnglish: "; choices: %s", LangChinese: "；可选：%s", LangTraditionalChinese: "；可選：%s", LangJapanese: "；選択肢: %s", LangSpanish: "; opciones: %s",
+	},
+	MsgWorkspaceChatRequests: {
+		LangEnglish: "Pending requests\n%s\n\nUse /respond N decision or /answer N content.", LangChinese: "待处理请求\n%s\n\n使用 /respond N decision 或 /answer N 内容。", LangTraditionalChinese: "待處理請求\n%s\n\n使用 /respond N decision 或 /answer N 內容。", LangJapanese: "保留中のリクエスト\n%s\n\n/respond N decision または /answer N 内容 を使用してください。", LangSpanish: "Solicitudes pendientes\n%s\n\nUsa /respond N decision o /answer N contenido.",
+	},
+	MsgWorkspaceChatRespondUsage: {
+		LangEnglish: "Usage: /respond N decision", LangChinese: "用法：/respond N decision", LangTraditionalChinese: "用法：/respond N decision", LangJapanese: "使用法: /respond N decision", LangSpanish: "Uso: /respond N decision",
+	},
+	MsgWorkspaceChatRequestSubmitted: {
+		LangEnglish: "The request response was submitted.", LangChinese: "请求已提交。", LangTraditionalChinese: "請求回覆已提交。", LangJapanese: "リクエストへの応答を送信しました。", LangSpanish: "Se envió la respuesta a la solicitud.",
+	},
+	MsgWorkspaceChatAnswerUsage: {
+		LangEnglish: "Usage: /answer N answer", LangChinese: "用法：/answer N 回答内容", LangTraditionalChinese: "用法：/answer N 回答內容", LangJapanese: "使用法: /answer N 回答内容", LangSpanish: "Uso: /answer N respuesta",
+	},
+	MsgWorkspaceChatAnswerWrongKind: {
+		LangEnglish: "This request is not a structured question. Use /respond.", LangChinese: "该请求不是结构化提问，请使用 /respond。", LangTraditionalChinese: "該請求不是結構化提問，請使用 /respond。", LangJapanese: "このリクエストは構造化された質問ではありません。/respond を使用してください。", LangSpanish: "Esta solicitud no es una pregunta estructurada. Usa /respond.",
+	},
+	MsgWorkspaceChatAnswerMissingQuestion: {
+		LangEnglish: "The request has no answerable question ID.", LangChinese: "请求缺少可回答的问题 ID。", LangTraditionalChinese: "請求缺少可回答的問題 ID。", LangJapanese: "リクエストに回答可能な質問 ID がありません。", LangSpanish: "La solicitud no contiene un ID de pregunta que pueda responderse.",
+	},
+	MsgWorkspaceChatAnswerSubmitted: {
+		LangEnglish: "The answer was submitted.", LangChinese: "回答已提交。", LangTraditionalChinese: "回答已提交。", LangJapanese: "回答を送信しました。", LangSpanish: "Se envió la respuesta.",
+	},
+	MsgWorkspaceChatSettingsTitle: {
+		LangEnglish: "%s (page %d)", LangChinese: "%s（第 %d 页）", LangTraditionalChinese: "%s（第 %d 頁）", LangJapanese: "%s（%d ページ）", LangSpanish: "%s (página %d)",
+	},
+	MsgWorkspaceChatSettingsHint: {
+		LangEnglish: "Use /%s N to select a setting from this page.", LangChinese: "使用 /%s N 选择本页设置。", LangTraditionalChinese: "使用 /%s N 選擇本頁設定。", LangJapanese: "/%s N でこのページの設定を選択します。", LangSpanish: "Usa /%s N para seleccionar una opción de esta página.",
+	},
+	MsgWorkspaceChatSettingUnsupported: {
+		LangEnglish: "This setting is not supported.", LangChinese: "不支持的设置。", LangTraditionalChinese: "不支援此設定。", LangJapanese: "この設定はサポートされていません。", LangSpanish: "Esta configuración no es compatible.",
+	},
+	MsgWorkspaceChatSettingApplied: {
+		LangEnglish: "The setting is active (revision %s).", LangChinese: "设置已生效（revision %s）。", LangTraditionalChinese: "設定已生效（revision %s）。", LangJapanese: "設定を適用しました（revision %s）。", LangSpanish: "La configuración está activa (revisión %s).",
+	},
+	MsgWorkspaceChatBindProjectFirst: {
+		LangEnglish: "Bind a project first with /project N.\n\n%s", LangChinese: "请先用 /project N 绑定项目。\n\n%s", LangTraditionalChinese: "請先用 /project N 綁定專案。\n\n%s", LangJapanese: "まず /project N でプロジェクトを割り当ててください。\n\n%s", LangSpanish: "Primero vincula un proyecto con /project N.\n\n%s",
+	},
+	MsgWorkspaceChatTurnRunning: {
+		LangEnglish: "The current turn is running. Use /steer content to add input or /cancel to cancel it.", LangChinese: "当前 Turn 正在运行。若要补充当前 Turn，请使用 /steer 内容；若要取消，请使用 /cancel。", LangTraditionalChinese: "目前 Turn 正在執行。若要補充目前 Turn，請使用 /steer 內容；若要取消，請使用 /cancel。", LangJapanese: "現在のターンは実行中です。追加するには /steer 内容、キャンセルするには /cancel を使用してください。", LangSpanish: "El turno actual está en ejecución. Usa /steer contenido para añadir información o /cancel para cancelarlo.",
+	},
+	MsgWorkspaceChatTurnSubmitted: {
+		LangEnglish: "The Codex turn was submitted.", LangChinese: "已提交 Codex Turn。", LangTraditionalChinese: "已提交 Codex Turn。", LangJapanese: "Codex ターンを送信しました。", LangSpanish: "Se envió el turno de Codex.",
+	},
+	MsgWorkspaceChatTurnEndedStatus: {
+		LangEnglish: "The Codex turn ended with status: %s", LangChinese: "Codex Turn 已结束，状态：%s", LangTraditionalChinese: "Codex Turn 已結束，狀態：%s", LangJapanese: "Codex ターンが終了しました。状態: %s", LangSpanish: "El turno de Codex terminó con el estado: %s",
+	},
+	MsgWorkspaceChatDraftUnavailable: {
+		LangEnglish: "This is an unmaterialized draft. Send the first message before using this command.", LangChinese: "当前是未物化草稿；发送首条消息后再使用此命令。", LangTraditionalChinese: "目前是未物化草稿；傳送第一則訊息後再使用此命令。", LangJapanese: "これは未実体化の下書きです。最初のメッセージを送信してからこのコマンドを使用してください。", LangSpanish: "Este es un borrador no materializado. Envía el primer mensaje antes de usar este comando.",
+	},
+	MsgWorkspaceChatUnavailableReason: {
+		LangEnglish: " (unavailable: %s)", LangChinese: "（不可用：%s）", LangTraditionalChinese: "（不可用：%s）", LangJapanese: "（利用不可: %s）", LangSpanish: " (no disponible: %s)",
+	},
+	MsgWorkspaceChatAttachmentSaveFailed: {
+		LangEnglish: "Not all WeCom attachments could be saved safely.", LangChinese: "未能安全保存全部企业微信附件。", LangTraditionalChinese: "未能安全儲存全部企業微信附件。", LangJapanese: "すべての WeCom 添付ファイルを安全に保存できませんでした。", LangSpanish: "No se pudieron guardar de forma segura todos los archivos adjuntos de WeCom.",
+	},
+	MsgWorkspaceChatEmptyMessage: {
+		LangEnglish: "The message has no text or attachment to submit.", LangChinese: "消息没有可提交的文本或附件。", LangTraditionalChinese: "訊息沒有可提交的文字或附件。", LangJapanese: "送信できるテキストまたは添付ファイルがありません。", LangSpanish: "El mensaje no contiene texto ni archivos adjuntos para enviar.",
+	},
+	MsgWorkspaceChatVerifiedAttachment: {
+		LangEnglish: "A verified attachment is available at this local path: %s", LangChinese: "已验证附件位于本地路径：%s", LangTraditionalChinese: "已驗證附件位於本機路徑：%s", LangJapanese: "検証済みの添付ファイルは次のローカルパスにあります: %s", LangSpanish: "Hay un archivo adjunto verificado en esta ruta local: %s",
+	},
+	MsgWorkspaceChatInteractionDelivery: {
+		LangEnglish: "Codex requires input (%s)\nRequest ID: %s\nUse /requests to inspect it, then reply with /respond or /answer.", LangChinese: "Codex 请求处理（%s）\n请求编号：%s\n请使用 /requests 查看，并用 /respond 或 /answer 回复。", LangTraditionalChinese: "Codex 請求處理（%s）\n請求編號：%s\n請使用 /requests 查看，並用 /respond 或 /answer 回覆。", LangJapanese: "Codex が入力を求めています（%s）\nリクエスト ID: %s\n/requests で確認し、/respond または /answer で応答してください。", LangSpanish: "Codex requiere una respuesta (%s)\nID de solicitud: %s\nUsa /requests para revisarla y responde con /respond o /answer.",
 	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
