@@ -287,6 +287,20 @@ level = "info" # debug, info, warn, error
 # Per-platform overrides / 每平台覆盖配置:
 # [outgoing_rate_limit.platforms.wecom]
 # max_per_second = 1
+
+# =============================================================================
+# Message Deduplication / 消息去重 (issue #1667)
+# Engine-level safety net that catches duplicate message IDs slipping past the
+# per-platform dedup layer. Useful for platforms (e.g. WeChat) whose server
+# retransmits the same message with a refreshed timestamp, breaking the
+# platform's composite dedup key. Default ON.
+# 引擎层消息 ID 去重安全网，兜底拦截漏过平台层去重的重复消息。
+# 适用于服务器端重传时刷新时间戳导致平台层去重键失效的平台（如微信）。
+# 默认开启。
+# =============================================================================
+# [dedup]
+# enabled = true             # Toggle the engine-level dedup (default: true) / 开关（默认 true）
+# window_secs = 30           # Dedup window in seconds (default: 30) / 去重时间窗秒数（默认 30）
 # [outgoing_rate_limit.platforms.telegram]
 # max_per_second = 25
 # [outgoing_rate_limit.platforms.feishu]

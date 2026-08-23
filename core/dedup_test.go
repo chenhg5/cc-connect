@@ -42,6 +42,47 @@ func TestMessageDedup_Concurrent(t *testing.T) {
 	}
 }
 
+func TestNewMessageDedup_ConfigurableWindow(t *testing.T) {
+	d := NewMessageDedup(20 * time.Millisecond)
+	if d.IsDuplicate("m1") {
+		t.Fatal("first call should not be a duplicate")
+	}
+	if !d.IsDuplicate("m1") {
+		t.Fatal("second call within window should be a duplicate")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if d.IsDuplicate("m1") {
+		t.Fatal("after window expiry the same id should be accepted again")
+	}
+}
+
+func TestNewMessageDedup_DefaultOnZero(t *testing.T) {
+	d := NewMessageDedup(0)
+	if d.ttl != dedupTTL {
+		t.Errorf("expected default TTL %v, got %v", dedupTTL, d.ttl)
+	}
+}
+
+func TestNewMessageDedup_DefaultOnNegative(t *testing.T) {
+	d := NewMessageDedup(-5 * time.Second)
+	if d.ttl != dedupTTL {
+		t.Errorf("expected default TTL %v on negative input, got %v", dedupTTL, d.ttl)
+	}
+}
+
+func TestMessageDedup_ZeroValueStillUsesDefaultTTL(t *testing.T) {
+	// Backward-compat: every platform that embeds `core.MessageDedup{}` must
+	// continue to work with the original 60s window. First call primes,
+	// second call inside the window must be flagged duplicate.
+	var d MessageDedup
+	if d.IsDuplicate("z1") {
+		t.Fatal("first call should not be a duplicate")
+	}
+	if !d.IsDuplicate("z1") {
+		t.Fatal("second call within window should be a duplicate")
+	}
+}
+
 func TestIsOldMessage(t *testing.T) {
 	if IsOldMessage(time.Now()) {
 		t.Error("current time should not be considered old")
