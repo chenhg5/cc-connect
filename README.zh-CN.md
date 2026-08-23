@@ -426,6 +426,14 @@ vim ~/.cc-connect/config.toml
 ./cc-connect
 ```
 
+### 🐳 部署 (Docker / nohup / tmux / screen)
+
+在容器或没有 systemd 的环境运行 cc-connect? 参考
+[docs/deployment.md](docs/deployment.md) 了解经过验证的部署方式,
+以及最常见的失败原因 (Issue #1719: cron 找不到 daemon socket)。
+简短总结:守护进程和所有客户端子命令 (`cron`、`send`、`timer`、`relay`)
+都传同一个 `--config /path/to.toml`,并以一致的 UID/GID 挂载 `data_dir`。
+
 
 ### 🔄 升级
 
@@ -633,6 +641,7 @@ cc-connect send --tts "你好"
 
 - [使用指南](docs/usage.zh-CN.md) — 完整功能文档
 - [INSTALL.md](INSTALL.md) — AI Agent 友好的安装指南
+- [部署指南](docs/deployment.md) — Docker / nohup / tmux / screen 配置 (Issue #1719)
 - [config.example.toml](config.example.toml) — 配置模板
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Issue / PR 提交流程与贡献说明
 

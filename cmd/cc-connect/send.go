@@ -19,7 +19,7 @@ import (
 )
 
 func runSend(args []string) {
-	req, dataDir, err := parseSendArgs(args)
+	req, dataDir, configPath, err := parseSendArgs(args)
 	if err != nil {
 		if errors.Is(err, errSendUsage) {
 			printSendUsage()
@@ -30,9 +30,10 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
+	dataDir = resolveDataDir(dataDir, configPath)
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		printSocketNotFound(os.Stderr, dataDir, configPath, sockPath)
 		os.Exit(1)
 	}
 
@@ -68,9 +69,10 @@ func runSend(args []string) {
 
 var errSendUsage = errors.New("show send usage")
 
-func parseSendArgs(args []string) (core.SendRequest, string, error) {
+func parseSendArgs(args []string) (core.SendRequest, string, string, error) {
 	var req core.SendRequest
 	var dataDir string
+	var configPath string
 	var useStdin bool
 	var imagePaths []string
 	var filePaths []string
@@ -82,55 +84,55 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		switch args[i] {
 		case "--project", "-p":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--project requires a value")
+				return req, "", "", fmt.Errorf("--project requires a value")
 			}
 			i++
 			req.Project = args[i]
 		case "--session", "-s":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--session requires a value")
+				return req, "", "", fmt.Errorf("--session requires a value")
 			}
 			i++
 			req.SessionKey = args[i]
 		case "--message", "-m":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--message requires a value")
+				return req, "", "", fmt.Errorf("--message requires a value")
 			}
 			i++
 			req.Message = args[i]
 		case "--cwd", "--work-dir":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("%s requires a value", args[i])
+				return req, "", "", fmt.Errorf("%s requires a value", args[i])
 			}
 			i++
 			req.WorkDir = args[i]
 		case "--tts":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("%s requires a value", args[i])
+				return req, "", "", fmt.Errorf("%s requires a value", args[i])
 			}
 			i++
 			req.TTSText = args[i]
 		case "--image":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--image requires a path")
+				return req, "", "", fmt.Errorf("--image requires a path")
 			}
 			i++
 			imagePaths = append(imagePaths, args[i])
 		case "--file":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--file requires a path")
+				return req, "", "", fmt.Errorf("--file requires a path")
 			}
 			i++
 			filePaths = append(filePaths, args[i])
 		case "--audio":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--audio requires a path")
+				return req, "", "", fmt.Errorf("--audio requires a path")
 			}
 			i++
 			audioPaths = append(audioPaths, args[i])
 		case "--video":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--video requires a path")
+				return req, "", "", fmt.Errorf("--video requires a path")
 			}
 			i++
 			videoPaths = append(videoPaths, args[i])
@@ -138,7 +140,7 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			useStdin = true
 		case "--at-users":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--at-users requires a value")
+				return req, "", "", fmt.Errorf("--at-users requires a value")
 			}
 			i++
 			for _, uid := range strings.Split(args[i], ",") {
@@ -151,12 +153,18 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			req.AtAll = true
 		case "--data-dir":
 			if i+1 >= len(args) {
-				return req, "", fmt.Errorf("--data-dir requires a value")
+				return req, "", "", fmt.Errorf("--data-dir requires a value")
 			}
 			i++
 			dataDir = args[i]
+		case "--config":
+			if i+1 >= len(args) {
+				return req, "", "", fmt.Errorf("--config requires a value")
+			}
+			i++
+			configPath = args[i]
 		case "--help", "-h":
-			return req, "", errSendUsage
+			return req, "", "", errSendUsage
 		default:
 			positional = append(positional, args[i])
 		}
@@ -165,7 +173,7 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	if useStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			return req, "", fmt.Errorf("reading stdin: %w", err)
+			return req, "", "", fmt.Errorf("reading stdin: %w", err)
 		}
 		req.Message = strings.TrimSpace(string(data))
 	}
@@ -183,19 +191,19 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 
 	images, err := loadImageAttachments(imagePaths, maxAtt)
 	if err != nil {
-		return req, "", err
+		return req, "", "", err
 	}
 	files, err := loadFileAttachments(filePaths, maxAtt)
 	if err != nil {
-		return req, "", err
+		return req, "", "", err
 	}
 	audioFiles, err := loadTypedFileAttachments(audioPaths, "audio", maxAtt)
 	if err != nil {
-		return req, "", err
+		return req, "", "", err
 	}
 	videoFiles, err := loadTypedFileAttachments(videoPaths, "video", maxAtt)
 	if err != nil {
-		return req, "", err
+		return req, "", "", err
 	}
 	req.Images = images
 	// Keep audio / video clips on dedicated fields. Routing them through
@@ -209,10 +217,10 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	req.Videos = videoFiles
 
 	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
-		return req, "", fmt.Errorf("message, tts text, or attachment is required")
+		return req, "", "", fmt.Errorf("message, tts text, or attachment is required")
 	}
 
-	return req, dataDir, nil
+	return req, dataDir, configPath, nil
 }
 
 func loadImageAttachments(paths []string, maxSize int64) ([]core.ImageAttachment, error) {
@@ -343,20 +351,6 @@ func decodeSendPayload(data []byte, req *core.SendRequest) error {
 	return json.Unmarshal(data, req)
 }
 
-func resolveSocketPath(dataDir string) string {
-	if dataDir != "" {
-		return filepath.Join(dataDir, "run", "api.sock")
-	}
-	// Check CC_DATA_DIR env var for custom data_dir configuration
-	if envDataDir := strings.TrimSpace(os.Getenv("CC_DATA_DIR")); envDataDir != "" {
-		return filepath.Join(envDataDir, "run", "api.sock")
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect", "run", "api.sock")
-	}
-	return filepath.Join(".cc-connect", "run", "api.sock")
-}
-
 func printSendUsage() {
 	fmt.Println(`Usage: cc-connect send [options] <message>
        cc-connect send [options] -m <message>
@@ -384,7 +378,10 @@ Options:
       --at-all             @ everyone (DingTalk)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
-      --data-dir <path>    Data directory (default: ~/.cc-connect)
+      --data-dir <path>    Data directory (default: ~/.cc-connect, or data_dir from --config)
+      --config <path>      Config file used by the running daemon (so client and
+                           server agree on data_dir). Useful when the daemon was
+                           started with --config /etc/cc-connect.toml. See #1719.
   -h, --help               Show this help
 
 Examples:
@@ -395,6 +392,7 @@ Examples:
   cc-connect send --video /tmp/demo.mp4
   cc-connect send --audio /tmp/voice.opus
   cc-connect send --tts "Hello from cc-connect"
+  cc-connect send --config /etc/cc-connect.toml -m "hi"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)

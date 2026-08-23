@@ -27,7 +27,7 @@ func runRelay(args []string) {
 }
 
 func runRelaySend(args []string) {
-	var from, to, sessionKey, message, dataDir string
+	var from, to, sessionKey, message, dataDir, configPath string
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -56,6 +56,11 @@ func runRelaySend(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		case "--help", "-h":
 			printRelaySendUsage()
@@ -90,9 +95,10 @@ func runRelaySend(args []string) {
 		os.Exit(1)
 	}
 
+	dataDir = resolveDataDir(dataDir, configPath)
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		printSocketNotFound(os.Stderr, dataDir, configPath, sockPath)
 		os.Exit(1)
 	}
 
@@ -146,6 +152,7 @@ Options:
   -s, --session-key <key>    Session key (auto-detected from CC_SESSION_KEY env)
   -m, --message <text>       Message to send
       --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --config <path>        Config file used by the running daemon (Issue #1719)
   -h, --help                 Show this help
 
 Examples:

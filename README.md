@@ -428,6 +428,15 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 ./cc-connect
 ```
 
+### 🐳 Deployment (Docker / nohup / tmux / screen)
+
+Running cc-connect in a container or without systemd? See
+[docs/deployment.md](docs/deployment.md) for the proven recipes and the
+most common failure mode (Issue #1719: cron can't find the daemon
+socket). The short version: always pass the same `--config /path/to.toml`
+to both the daemon and any client subcommand (`cron`, `send`, `timer`,
+`relay`), and mount the `data_dir` volume with matching UID/GID.
+
 
 ### 🔄 Upgrade
 
@@ -647,6 +656,7 @@ Notes:
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
+- [Deployment Guide](docs/deployment.md) — Docker, nohup, tmux, screen recipes (Issue #1719)
 - [config.example.toml](config.example.toml) — Configuration template
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests
 

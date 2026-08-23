@@ -1258,46 +1258,64 @@ func main() {
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
 	if err != nil {
-		slog.Warn("api server unavailable", "error", err)
-	} else {
-		globalAPIServer = apiSrv
-		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
-
-		relayMgr := core.NewRelayManager(cfg.DataDir)
-		if cfg.Relay.TimeoutSecs != nil {
-			secs := *cfg.Relay.TimeoutSecs
-			if secs <= 0 {
-				relayMgr.SetTimeout(0)
-			} else {
-				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
-			}
+		// Issue #1719: in Docker / chroot / nohup scenarios the socket bind
+		// frequently fails (permissions, abstract-namespace length, SELinux).
+		// Before this fix the server silently continued with the PID lock
+		// acquired but no socket, so subsequent cron/send calls saw
+		// "socket not found" while a second start saw "PID already running"
+		// — a confusing dead state. Fail fast instead: release the PID
+		// lock so the operator can re-try after fixing data_dir/permissions,
+		// and surface the underlying error.
+		slog.Error("api server failed to start; aborting to avoid serving without API socket",
+			"error", err,
+			"data_dir", cfg.DataDir,
+			"hint", "check that data_dir is writable and that the run/ subdirectory is reachable; if running in Docker, ensure the volume is mounted and the user owns the directory")
+		if instanceLock != nil {
+			instanceLock.Release()
 		}
-		relayMgr.SetVisibility(cfg.Relay.Visibility)
-		apiSrv.SetRelayManager(relayMgr)
-
-		// Create shared DirHistory for all engines
-		dirHistory := core.NewDirHistory(cfg.DataDir)
-
-		for i, e := range engines {
-			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
-			e.SetRelayManager(relayMgr)
-			e.SetDirHistory(dirHistory)
-
-			// Ensure initial work_dir is in history
-			if initWorkDir := effectiveWorkDirs[i]; initWorkDir != "" {
-				if !dirHistory.Contains(cfg.Projects[i].Name, initWorkDir) {
-					dirHistory.Add(cfg.Projects[i].Name, initWorkDir)
-				}
-			}
-		}
-		if cronSched != nil {
-			apiSrv.SetCronScheduler(cronSched)
-		}
-		if timerSched != nil {
-			apiSrv.SetTimerScheduler(timerSched)
-		}
-		apiSrv.Start()
+		fmt.Fprintf(os.Stderr, "Error: failed to start API server (%v). Instance lock released.\n", err)
+		os.Exit(1)
 	}
+	globalAPIServer = apiSrv
+	apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+
+	relayMgr := core.NewRelayManager(cfg.DataDir)
+	if cfg.Relay.TimeoutSecs != nil {
+		secs := *cfg.Relay.TimeoutSecs
+		if secs <= 0 {
+			relayMgr.SetTimeout(0)
+		} else {
+			relayMgr.SetTimeout(time.Duration(secs) * time.Second)
+		}
+	}
+	relayMgr.SetVisibility(cfg.Relay.Visibility)
+	apiSrv.SetRelayManager(relayMgr)
+
+	// Create shared DirHistory for all engines
+	dirHistory := core.NewDirHistory(cfg.DataDir)
+
+	for i, e := range engines {
+		apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
+		e.SetRelayManager(relayMgr)
+		e.SetDirHistory(dirHistory)
+
+		// Ensure initial work_dir is in history
+		if initWorkDir := effectiveWorkDirs[i]; initWorkDir != "" {
+			if !dirHistory.Contains(cfg.Projects[i].Name, initWorkDir) {
+				dirHistory.Add(cfg.Projects[i].Name, initWorkDir)
+			}
+		}
+	}
+	if cronSched != nil {
+		apiSrv.SetCronScheduler(cronSched)
+	}
+	if timerSched != nil {
+		apiSrv.SetTimerScheduler(timerSched)
+	}
+	apiSrv.Start()
+	slog.Info("api socket listening",
+		"socket", apiSrv.SocketPath(),
+		"hint", "client subcommands (cron/send/timer/relay) can pass --config to reuse this socket")
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
