@@ -611,6 +611,18 @@ func (a *namedStubWorkDirAgent) Name() string {
 	return a.name
 }
 
+type namedStubWorkDirListAgent struct {
+	stubWorkDirAgent
+	name     string
+	sessions []AgentSessionInfo
+}
+
+func (a *namedStubWorkDirListAgent) Name() string { return a.name }
+
+func (a *namedStubWorkDirListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return append([]AgentSessionInfo(nil), a.sessions...), nil
+}
+
 type stubListAgent struct {
 	stubAgent
 	sessions []AgentSessionInfo
@@ -3271,7 +3283,7 @@ func TestSessionContextForKey_RecoversWorkspaceFromLiveState(t *testing.T) {
 	e.interactiveStates[storedKey] = &interactiveState{}
 	e.interactiveMu.Unlock()
 
-	agent, sessions := e.sessionContextForKey(threadSessionKey)
+	agent, sessions := e.sessionContextForKey(threadSessionKey, threadSessionKey)
 	if agent == e.agent {
 		t.Fatal("sessionContextForKey returned the global agent; live-state recovery did not engage")
 	}
@@ -6368,7 +6380,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	// Switch active to the session mapped to sessions[5] (agent-session-F).
 	e.sessions.SwitchSession("test:user1", internalIDs[5])
 
-	card, err := e.renderListCard("test:user1", 1)
+	card, err := e.renderListCard("test:user1", "test:user1", 1)
 	if err != nil {
 		t.Fatalf("renderListCard returned error: %v", err)
 	}
@@ -6437,6 +6449,101 @@ func TestHandleCardNav_DirSelectSwitchesWorkDir(t *testing.T) {
 	card := e.handleCardNav("nav:/dir 1", sk)
 	if card == nil {
 		t.Fatal("expected dir card after nav")
+	}
+}
+
+func TestCardList_AfterPerKeyDirUsesChildWorkspaceAndSwitchesChildSession(t *testing.T) {
+	baseDir := t.TempDir()
+	parentDir := filepath.Join(baseDir, "parent")
+	childDir := filepath.Join(parentDir, "child")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir child workspace: %v", err)
+	}
+	parentDir = normalizeWorkspacePath(parentDir)
+	childDir = normalizeWorkspacePath(childDir)
+
+	parentSession := AgentSessionInfo{ID: "parent-session", Summary: "Parent workspace session"}
+	childSession := AgentSessionInfo{ID: "child-session", Summary: "Child workspace session"}
+	agentName := "test-card-list-per-key-dir"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		workDir = normalizeWorkspacePath(workDir)
+		sessions := []AgentSessionInfo{parentSession}
+		if workDir == childDir {
+			sessions = []AgentSessionInfo{childSession}
+		}
+		return &namedStubWorkDirListAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: workDir},
+			name:             agentName,
+			sessions:         sessions,
+		}, nil
+	})
+
+	platform := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	globalAgent := &namedStubWorkDirListAgent{
+		stubWorkDirAgent: stubWorkDirAgent{workDir: parentDir},
+		name:             agentName,
+		sessions:         []AgentSessionInfo{parentSession},
+	}
+	e := NewEngine("test", globalAgent, []Platform{platform}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project-state.json")))
+
+	channelID := "oc_card_list"
+	sessionKey := "feishu:" + channelID + ":ou_user"
+	e.workspaceBindings.Bind("project:test", workspaceChannelKey("feishu", channelID), "card-list", parentDir)
+	msg := &Message{
+		SessionKey: sessionKey,
+		ChannelKey: channelID,
+		Platform:   "feishu",
+		ReplyCtx:   "ctx",
+	}
+
+	e.cmdDir(platform, msg, []string{childDir})
+	interactiveKey := parentDir + ":" + sessionKey
+	if got := e.projectState.WorkspaceDirOverride(interactiveKey); got != childDir {
+		t.Fatalf("workspace dir override = %q, want %q", got, childDir)
+	}
+
+	platform.mu.Lock()
+	platform.repliedCards = nil
+	platform.mu.Unlock()
+	e.cmdList(platform, msg, nil)
+
+	platform.mu.Lock()
+	if len(platform.repliedCards) != 1 {
+		got := len(platform.repliedCards)
+		platform.mu.Unlock()
+		t.Fatalf("replied cards = %d, want 1", got)
+	}
+	listCard := platform.repliedCards[0]
+	platform.mu.Unlock()
+	listText := listCard.RenderText()
+	if !strings.Contains(listText, childSession.Summary) {
+		t.Fatalf("card /list missing child session:\n%s", listText)
+	}
+	if strings.Contains(listText, parentSession.Summary) {
+		t.Fatalf("card /list leaked parent session:\n%s", listText)
+	}
+
+	resultCard := e.handleCardNav("act:/switch 1", sessionKey)
+	if resultCard == nil || !strings.Contains(resultCard.RenderText(), childSession.Summary) {
+		t.Fatalf("card /switch did not stay in child workspace: %#v", resultCard)
+	}
+	childState := e.workspacePool.Get(childDir)
+	if childState == nil || childState.sessions == nil {
+		t.Fatal("child workspace session manager was not created")
+	}
+	if got := childState.sessions.GetOrCreateActive(sessionKey).GetAgentSessionID(); got != childSession.ID {
+		t.Fatalf("active child session = %q, want %q", got, childSession.ID)
+	}
+
+	agent, _, _, effectiveDir, err := e.commandContextWithWorkspace(platform, msg)
+	if err != nil {
+		t.Fatalf("commandContextWithWorkspace: %v", err)
+	}
+	if agent == nil || effectiveDir != childDir {
+		t.Fatalf("normal message context dir = %q, want %q", effectiveDir, childDir)
 	}
 }
 
@@ -14691,7 +14798,7 @@ func TestRenderListCard_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
 	}
 	e.sessions.Save()
 
-	card, err := e.renderListCard(userKey, 1)
+	card, err := e.renderListCard(userKey, userKey, 1)
 	if err != nil {
 		t.Fatalf("renderListCard error: %v", err)
 	}
@@ -15078,7 +15185,7 @@ func TestFilterExternalSessions_DeleteByIndex(t *testing.T) {
 func TestFilterExternalSessions_RenderListCard(t *testing.T) {
 	t.Run("disabled: card shows all sessions", func(t *testing.T) {
 		e, _, userKey, agentSessions := setupFilterTestEngine(t, false)
-		card, err := e.renderListCard(userKey, 1)
+		card, err := e.renderListCard(userKey, userKey, 1)
 		if err != nil {
 			t.Fatalf("renderListCard: %v", err)
 		}
@@ -15090,7 +15197,7 @@ func TestFilterExternalSessions_RenderListCard(t *testing.T) {
 
 	t.Run("enabled: card hides external sessions", func(t *testing.T) {
 		e, _, userKey, _ := setupFilterTestEngine(t, true)
-		card, err := e.renderListCard(userKey, 1)
+		card, err := e.renderListCard(userKey, userKey, 1)
 		if err != nil {
 			t.Fatalf("renderListCard: %v", err)
 		}

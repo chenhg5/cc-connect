@@ -6343,7 +6343,7 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	// When the session is idle, injecting via agentSession.Send bypasses the
 	// session lock and races with concurrent normal messages on the CLI's
 	// stdin, so reject instead.
-	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	_, sessions := e.sessionContextForKey(iKey, msg.SessionKey)
 	if session := sessions.GetOrCreateActive(msg.SessionKey); !session.Busy() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
@@ -6909,7 +6909,7 @@ const listPageSize = 20
 const dirCardPageSize = 20
 
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
-	agent, sessions, _, err := e.commandContext(p, msg)
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -6992,7 +6992,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			page = n
 		}
 	}
-	card, err := e.renderListCard(msg.SessionKey, page)
+	card, err := e.renderListCard(interactiveKey, msg.SessionKey, page)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, err.Error())
 		return
@@ -8911,10 +8911,10 @@ func (e *Engine) simpleCard(title, color, content string) *Card {
 }
 
 // renderListCardSafe wraps renderListCard and returns an error card on failure.
-func (e *Engine) renderListCardSafe(sessionKey string, page int) *Card {
-	card, err := e.renderListCard(sessionKey, page)
+func (e *Engine) renderListCardSafe(interactiveKey, sessionKey string, page int) *Card {
+	card, err := e.renderListCard(interactiveKey, sessionKey, page)
 	if err != nil {
-		agent, _ := e.sessionContextForKey(sessionKey)
+		agent, _ := e.sessionContextForKey(interactiveKey, sessionKey)
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "red", err.Error())
 	}
 	return card
@@ -8930,7 +8930,8 @@ func (e *Engine) renderDirCardSafe(sessionKey string, page int) *Card {
 }
 
 func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	platNames := make([]string, len(e.platforms))
 	for i, pl := range e.platforms {
 		platNames[i] = pl.Name()
@@ -11902,6 +11903,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		cmd = body[:i]
 		args = strings.TrimSpace(body[i+1:])
 	}
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
@@ -11931,7 +11933,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 				page = n
 			}
 		}
-		return e.renderListCardSafe(sessionKey, page)
+		return e.renderListCardSafe(interactiveKey, sessionKey, page)
 	case "/dir":
 		page := 1
 		if args != "" {
@@ -11975,10 +11977,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/new":
 		return e.renderCurrentCard(sessionKey)
 	case "/switch":
-		return e.renderListCardSafe(sessionKey, 1)
+		return e.renderListCardSafe(interactiveKey, sessionKey, 1)
 	case "/delete-mode":
 		if strings.HasPrefix(args, "cancel") {
-			return e.renderListCardSafe(sessionKey, 1)
+			return e.renderListCardSafe(interactiveKey, sessionKey, 1)
 		}
 		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
@@ -11990,7 +11992,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 }
 
 func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
@@ -12009,7 +12012,6 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
-	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	if err == nil {
 		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
 	}
@@ -12066,7 +12068,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		agent, sessions := e.sessionContextForKey(sessionKey)
+		agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 		switcher, ok := agent.(ModelSwitcher)
 		if !ok {
 			return
@@ -12233,7 +12235,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		e.executeProviderLink(sessionKey, args)
 
 	case "/new":
-		_, sessions := e.sessionContextForKey(sessionKey)
+		_, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		sessions.NewSession(sessionKey, "")
 
@@ -12244,7 +12246,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		agent, sessions := e.sessionContextForKey(sessionKey)
+		agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 		agentSessions, err := agent.ListSessions(e.ctx)
 		if err != nil || len(agentSessions) == 0 {
 			return
@@ -12263,8 +12265,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if len(fields) == 0 {
 			return
 		}
-		agent, sessions := e.sessionContextForKey(sessionKey)
-		ik := e.interactiveKeyForSessionKey(sessionKey)
+		agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 		var applyArgs []string
 		switch fields[0] {
 		case "select":
@@ -12279,7 +12280,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		default:
 			return
 		}
-		errMsg, _ := e.dirApply(agent, sessions, ik, sessionKey, applyArgs)
+		errMsg, _ := e.dirApply(agent, sessions, interactiveKey, sessionKey, applyArgs)
 		if errMsg != "" {
 			slog.Debug("dir card action failed", "message", errMsg)
 		}
@@ -12417,7 +12418,8 @@ func (e *Engine) getModelSwitchState(sessionKey string) *modelSwitchState {
 }
 
 func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
@@ -12782,7 +12784,8 @@ func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
 }
 
 func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[string]struct{}) []string {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	deleter, ok := agent.(SessionDeleter)
 	if !ok {
 		return []string{e.i18n.T(MsgDeleteNotSupported)}
@@ -12852,7 +12855,8 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 
 	agent := e.agent
 	if sessionKey != "" {
-		agent, _ = e.sessionContextForKey(sessionKey)
+		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+		agent, _ = e.sessionContextForKey(interactiveKey, sessionKey)
 	}
 
 	switcher, ok := agent.(ModelSwitcher)
@@ -12997,8 +13001,8 @@ func (e *Engine) renderModeCard() *Card {
 	return cb.Build()
 }
 
-func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+func (e *Engine) renderListCard(interactiveKey, sessionKey string, page int) (*Card, error) {
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	agentSessions, err := agent.ListSessions(e.ctx)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
@@ -13090,7 +13094,8 @@ func dirCardTruncPath(absPath string) string {
 }
 
 func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
-	agent, _ := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, _ := e.sessionContextForKey(interactiveKey, sessionKey)
 	switcher, ok := agent.(WorkDirSwitcher)
 	if !ok {
 		return nil, fmt.Errorf("%s", e.i18n.T(MsgDirNotSupported))
@@ -13201,7 +13206,8 @@ func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager
 }
 
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	agentID := s.GetAgentSessionID()
 	if agentID == "" {
@@ -13217,7 +13223,8 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 }
 
 func (e *Engine) renderHistoryCard(sessionKey string) *Card {
-	agent, sessions := e.sessionContextForKey(sessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
 	entries := s.GetHistory(10)
 
@@ -15478,7 +15485,8 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 	}
 
 	// Prevent deleting the currently active session
-	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	_, sessions := e.sessionContextForKey(interactiveKey, msg.SessionKey)
 	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
 	if activeSession.GetAgentSessionID() == matched.ID {
 		return e.i18n.T(MsgDeleteActiveDenied)
@@ -16269,9 +16277,9 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 	return agent, sessions, interactiveKey, effectiveDir, nil
 }
 
-// sessionContextForKey resolves the agent and session manager for a sessionKey.
-// It uses existing workspace bindings and falls back to global context if unresolved.
-func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
+// sessionContextForKey resolves the agent and session manager for an interactiveKey/sessionKey pair.
+// It applies a persisted per-key /dir override before falling back to workspace bindings.
+func (e *Engine) sessionContextForKey(interactiveKey, sessionKey string) (Agent, *SessionManager) {
 	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions
@@ -16280,9 +16288,19 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
+	if workspace := workspaceFromInteractiveKey(interactiveKey, sessionKey); workspace != "" {
+		workspace = normalizeWorkspacePath(workspace)
+		effectiveDir := e.resolveChannelWorkDir(workspace, interactiveKey)
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir); err == nil {
+			return wsAgent, wsSessions
+		}
+	}
 	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+			workspace := normalizeWorkspacePath(b.Workspace)
+			bindingInteractiveKey := workspace + ":" + sessionKey
+			effectiveDir := e.resolveChannelWorkDir(workspace, bindingInteractiveKey)
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir); err == nil {
 				return wsAgent, wsSessions
 			}
 		}
@@ -16295,7 +16313,9 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	// returns the workspace-prefixed key, allowing concurrent unlocked sends
 	// to the same agent session.
 	if workspace := e.workspaceFromLiveState(sessionKey); workspace != "" {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
+		liveInteractiveKey := workspace + ":" + sessionKey
+		effectiveDir := e.resolveChannelWorkDir(workspace, liveInteractiveKey)
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(effectiveDir); err == nil {
 			return wsAgent, wsSessions
 		}
 	}

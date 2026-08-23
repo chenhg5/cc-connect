@@ -274,6 +274,35 @@ func (p *cujReplyCtxPlatform) ReconstructReplyCtx(sessionKey string) (any, error
 	return "reconstructed:" + sessionKey, nil
 }
 
+type cujCardPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *cujCardPlatform) ReplyCard(ctx context.Context, replyCtx any, card *Card) error {
+	return p.Reply(ctx, replyCtx, card.RenderText())
+}
+
+func (p *cujCardPlatform) SendCard(ctx context.Context, replyCtx any, card *Card) error {
+	return p.Send(ctx, replyCtx, card.RenderText())
+}
+
+type cujWorkspaceListAgent struct {
+	cujAgent
+	name     string
+	workDir  string
+	sessions []AgentSessionInfo
+}
+
+func (a *cujWorkspaceListAgent) Name() string { return a.name }
+
+func (a *cujWorkspaceListAgent) SetWorkDir(dir string) { a.workDir = dir }
+
+func (a *cujWorkspaceListAgent) GetWorkDir() string { return a.workDir }
+
+func (a *cujWorkspaceListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return append([]AgentSessionInfo(nil), a.sessions...), nil
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -1273,6 +1302,101 @@ func TestCUJ_B2_ListShowsAllSessions(t *testing.T) {
 	list := env.engine.sessions.ListSessions(key)
 	if len(list) < 3 {
 		t.Fatalf("SessionManager.ListSessions = %d, want ≥3", len(list))
+	}
+}
+
+func TestCUJ_B13_CardListHonorsPerKeyDir(t *testing.T) {
+	baseDir := t.TempDir()
+	parentDir := filepath.Join(baseDir, "parent")
+	childDir := filepath.Join(parentDir, "child")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir child workspace: %v", err)
+	}
+	parentDir = normalizeWorkspacePath(parentDir)
+	childDir = normalizeWorkspacePath(childDir)
+
+	parentSession := AgentSessionInfo{ID: "parent-session", Summary: "Parent workspace session"}
+	childSession := AgentSessionInfo{ID: "child-session", Summary: "Child workspace session"}
+	agentName := "cuj-card-list-per-key-dir"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		workDir = normalizeWorkspacePath(workDir)
+		sessions := []AgentSessionInfo{parentSession}
+		if workDir == childDir {
+			sessions = []AgentSessionInfo{childSession}
+		}
+		return &cujWorkspaceListAgent{
+			name:     agentName,
+			workDir:  workDir,
+			sessions: sessions,
+		}, nil
+	})
+
+	platform := &cujCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	globalAgent := &cujWorkspaceListAgent{
+		name:     agentName,
+		workDir:  parentDir,
+		sessions: []AgentSessionInfo{parentSession},
+	}
+	e := NewEngine("test", globalAgent, []Platform{platform}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project-state.json")))
+	e.SetAdminFrom("ou_user")
+
+	channelID := "oc_cuj_card_list"
+	sessionKey := "feishu:" + channelID + ":ou_user"
+	e.workspaceBindings.Bind("project:test", workspaceChannelKey("feishu", channelID), "card-list", parentDir)
+	send := func(content string) {
+		e.ReceiveMessage(platform, &Message{
+			SessionKey: sessionKey,
+			ChannelKey: channelID,
+			Platform:   "feishu",
+			MessageID:  "msg-" + content[:min(8, len(content))],
+			UserID:     "ou_user",
+			UserName:   "user",
+			Content:    content,
+			ReplyCtx:   "ctx",
+		})
+	}
+
+	// 1. The user applies a per-key child directory and sees that directory.
+	send("/dir " + childDir)
+	if got := platform.getSent(); len(got) == 0 || !strings.Contains(got[len(got)-1], childDir) {
+		t.Fatalf("/dir card did not show child workspace: %v", got)
+	}
+
+	// 2. A normal message still uses the effective child workspace.
+	platform.clearSent()
+	send("hello child workspace")
+	deadline := time.Now().Add(2 * time.Second)
+	for len(platform.getSent()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := platform.getSent(); len(got) == 0 || !strings.Contains(got[len(got)-1], "ok") {
+		t.Fatalf("normal child-workspace message did not complete: %v", got)
+	}
+
+	// 3. Card /list shows only sessions from the child workspace.
+	platform.clearSent()
+	send("/list")
+	listReply := platform.getSent()
+	if len(listReply) == 0 || !strings.Contains(listReply[len(listReply)-1], childSession.Summary) {
+		t.Fatalf("card /list missing child session: %v", listReply)
+	}
+	if strings.Contains(listReply[len(listReply)-1], parentSession.Summary) {
+		t.Fatalf("card /list leaked parent session: %v", listReply)
+	}
+
+	// 4. Switching and then viewing the current card stay in the child context.
+	platform.clearSent()
+	send("/switch 1")
+	if got := platform.getSent(); len(got) == 0 || !strings.Contains(got[len(got)-1], childSession.Summary) {
+		t.Fatalf("/switch did not select child session: %v", got)
+	}
+	platform.clearSent()
+	send("/current")
+	if got := platform.getSent(); len(got) == 0 || !strings.Contains(got[len(got)-1], childSession.ID) {
+		t.Fatalf("/current did not stay on child session: %v", got)
 	}
 }
 
