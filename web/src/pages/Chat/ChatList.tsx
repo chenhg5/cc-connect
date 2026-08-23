@@ -84,7 +84,7 @@ export default function ChatList() {
             const ts = latestSession?.updated_at || latestSession?.created_at || '';
 
             return (
-              <Link key={project.name} to={`/chat/${project.name}`}>
+              <Link key={project.name} to={`/platform-sessions/${project.name}`}>
                 <Card hover className="h-full flex flex-col">
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center gap-2">

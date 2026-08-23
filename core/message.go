@@ -368,7 +368,8 @@ type Message struct {
 	ChannelID    string
 	UserID       string
 	UserName     string
-	ChatName     string // human-readable chat/group name (optional)
+	ChatName     string            // human-readable chat/group name (optional)
+	Scope        ConversationScope // direct or group; empty means unspecified
 	Content      string
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)

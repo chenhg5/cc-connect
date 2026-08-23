@@ -4,6 +4,23 @@
 > **状态：** 草案 — 实现前可能变更  
 > **最后更新：** 2026-03-10
 
+## 统一工作区对话资源
+
+当 `[workspace_chat]` 启用 `web` transport 时，管理 API 提供以下认证资源。客户端只能提交不透明的 `workspaceRef`，不能提交任意 `cwd`。
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/api/v1/chat/workspaces` | 列出 Codex App 项目根目录，包括失效目录和真实错误 |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads` | 列出校验后目录的全部原生会话 |
+| `POST` | `/api/v1/chat/workspaces/{ref}/threads` | 创建原生会话；请求体：`{"name":"可选名称"}` |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}` | 读取包含全部 Turn/item 的原生会话 |
+| `GET` | `/api/v1/chat/selection` | 读取持久化的 `web:admin` 选择 |
+| `PUT` | `/api/v1/chat/selection` | 选择目录/会话；请求体：`{"workspace_ref":"ws_...","thread_id":"..."}` |
+
+`GET /api/v1/chat/ws` 使用独立的实时 WebSocket 协议，不复用外部 Bridge 协议。客户端消息包括 `subscribe`、`turn_start`、`approval_response` 和 `cancel`；服务端消息包括 `subscribed`、`turn_queued`、`turn_started`、`agent_event`、`approval_requested`、`turn_cancel_requested`、`turn_completed`、`turn_failed`、`turn_cancelled` 和 `error`。每次操作都会重新校验 thread 属于所选目录。WebSocket 使用相同管理 Token，通常通过 `?token=...` 传递。
+
+REST 响应继续使用管理 API 统一 envelope；WebSocket 事件直接发送 JSON 对象。
+
 ---
 
 ## 1. 概述

@@ -378,31 +378,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -471,6 +471,29 @@ const (
 	MsgWebSetupSuccess MsgKey = "web_setup_success"
 	MsgWebNeedRestart  MsgKey = "web_need_restart"
 	MsgWebStatus       MsgKey = "web_status"
+
+	MsgWorkspaceChatGroupUnsupported MsgKey = "workspace_chat_group_unsupported"
+	MsgWorkspaceChatProjectsTitle    MsgKey = "workspace_chat_projects_title"
+	MsgWorkspaceChatProjectsEmpty    MsgKey = "workspace_chat_projects_empty"
+	MsgWorkspaceChatProjectSelected  MsgKey = "workspace_chat_project_selected"
+	MsgWorkspaceChatThreadsTitle     MsgKey = "workspace_chat_threads_title"
+	MsgWorkspaceChatThreadsEmpty     MsgKey = "workspace_chat_threads_empty"
+	MsgWorkspaceChatThreadSelected   MsgKey = "workspace_chat_thread_selected"
+	MsgWorkspaceChatNoSelection      MsgKey = "workspace_chat_no_selection"
+	MsgWorkspaceChatCurrent          MsgKey = "workspace_chat_current"
+	MsgWorkspaceChatNewThread        MsgKey = "workspace_chat_new_thread"
+	MsgWorkspaceChatHistoryTitle     MsgKey = "workspace_chat_history_title"
+	MsgWorkspaceChatHistoryEmpty     MsgKey = "workspace_chat_history_empty"
+	MsgWorkspaceChatRoleUser         MsgKey = "workspace_chat_role_user"
+	MsgWorkspaceChatRoleAssistant    MsgKey = "workspace_chat_role_assistant"
+	MsgWorkspaceChatUnavailable      MsgKey = "workspace_chat_unavailable"
+	MsgWorkspaceChatInvalidIndex     MsgKey = "workspace_chat_invalid_index"
+	MsgWorkspaceChatInvalidNumber    MsgKey = "workspace_chat_invalid_number"
+	MsgWorkspaceChatPageOutOfRange   MsgKey = "workspace_chat_page_out_of_range"
+	MsgWorkspaceChatMenuExpired      MsgKey = "workspace_chat_menu_expired"
+	MsgWorkspaceChatTurnNotRunning   MsgKey = "workspace_chat_turn_not_running"
+	MsgWorkspaceChatCancelled        MsgKey = "workspace_chat_cancelled"
+	MsgWorkspaceChatUsage            MsgKey = "workspace_chat_usage"
 
 	MsgAliasEmpty      MsgKey = "alias_empty"
 	MsgAliasListHeader MsgKey = "alias_list_header"
@@ -649,6 +672,77 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgWorkspaceChatGroupUnsupported: {
+		LangEnglish: "Workspace chat is not supported in group chats.", LangChinese: "不支持群聊工作区对话。",
+		LangTraditionalChinese: "不支援群聊工作區對話。", LangJapanese: "グループチャットではワークスペース会話を利用できません。", LangSpanish: "El chat de espacio de trabajo no está disponible en grupos.",
+	},
+	MsgWorkspaceChatProjectsTitle: {
+		LangEnglish: "Codex App projects (page %d)", LangChinese: "Codex App 项目（第 %d 页）", LangTraditionalChinese: "Codex App 專案（第 %d 頁）", LangJapanese: "Codex App プロジェクト（%d ページ）", LangSpanish: "Proyectos de Codex App (página %d)",
+	},
+	MsgWorkspaceChatProjectsEmpty: {
+		LangEnglish: "No selectable Codex App projects.", LangChinese: "没有可选择的 Codex App 项目。", LangTraditionalChinese: "沒有可選擇的 Codex App 專案。", LangJapanese: "選択できる Codex App プロジェクトがありません。", LangSpanish: "No hay proyectos de Codex App disponibles.",
+	},
+	MsgWorkspaceChatProjectSelected: {
+		LangEnglish: "Project selected: %s", LangChinese: "已选择项目：%s", LangTraditionalChinese: "已選擇專案：%s", LangJapanese: "プロジェクトを選択しました: %s", LangSpanish: "Proyecto seleccionado: %s",
+	},
+	MsgWorkspaceChatThreadsTitle: {
+		LangEnglish: "Native threads (page %d)", LangChinese: "原生会话（第 %d 页）", LangTraditionalChinese: "原生會話（第 %d 頁）", LangJapanese: "ネイティブスレッド（%d ページ）", LangSpanish: "Conversaciones nativas (página %d)",
+	},
+	MsgWorkspaceChatThreadsEmpty: {
+		LangEnglish: "No native threads in this project.", LangChinese: "当前项目没有原生会话。", LangTraditionalChinese: "目前專案沒有原生會話。", LangJapanese: "このプロジェクトにはネイティブスレッドがありません。", LangSpanish: "Este proyecto no tiene conversaciones nativas.",
+	},
+	MsgWorkspaceChatThreadSelected: {
+		LangEnglish: "Thread selected: %s", LangChinese: "已切换会话：%s", LangTraditionalChinese: "已切換會話：%s", LangJapanese: "スレッドを切り替えました: %s", LangSpanish: "Conversación seleccionada: %s",
+	},
+	MsgWorkspaceChatNoSelection: {
+		LangEnglish: "Select a project first with /projects and /project N.", LangChinese: "请先用 /projects 查看项目，再用 /project N 选择。", LangTraditionalChinese: "請先用 /projects 查看專案，再用 /project N 選擇。", LangJapanese: "まず /projects で確認し、/project N で選択してください。", LangSpanish: "Primero usa /projects y después /project N.",
+	},
+	MsgWorkspaceChatCurrent: {
+		LangEnglish: "Current project: %s\nCurrent thread: %s", LangChinese: "当前项目：%s\n当前会话：%s", LangTraditionalChinese: "目前專案：%s\n目前會話：%s", LangJapanese: "現在のプロジェクト: %s\n現在のスレッド: %s", LangSpanish: "Proyecto actual: %s\nConversación actual: %s",
+	},
+	MsgWorkspaceChatNewThread: {
+		LangEnglish: "New thread created: %s", LangChinese: "已创建新会话：%s", LangTraditionalChinese: "已建立新會話：%s", LangJapanese: "新しいスレッドを作成しました: %s", LangSpanish: "Nueva conversación creada: %s",
+	},
+	MsgWorkspaceChatHistoryTitle: {
+		LangEnglish: "Recent conversation", LangChinese: "最近对话", LangTraditionalChinese: "最近對話", LangJapanese: "最近の会話", LangSpanish: "Conversación reciente",
+	},
+	MsgWorkspaceChatHistoryEmpty: {
+		LangEnglish: "There is no conversation history yet.", LangChinese: "当前还没有对话记录。", LangTraditionalChinese: "目前還沒有對話記錄。", LangJapanese: "会話履歴はまだありません。", LangSpanish: "Todavía no hay historial de conversación.",
+	},
+	MsgWorkspaceChatRoleUser: {
+		LangEnglish: "User", LangChinese: "用户", LangTraditionalChinese: "使用者", LangJapanese: "ユーザー", LangSpanish: "Usuario",
+	},
+	MsgWorkspaceChatRoleAssistant: {
+		LangEnglish: "Assistant", LangChinese: "助手", LangTraditionalChinese: "助理", LangJapanese: "アシスタント", LangSpanish: "Asistente",
+	},
+	MsgWorkspaceChatUnavailable: {
+		LangEnglish: "Unavailable", LangChinese: "不可用", LangTraditionalChinese: "不可用", LangJapanese: "利用不可", LangSpanish: "No disponible",
+	},
+	MsgWorkspaceChatInvalidIndex: {
+		LangEnglish: "Enter a valid list number.", LangChinese: "请输入有效的列表编号。", LangTraditionalChinese: "請輸入有效的清單編號。", LangJapanese: "有効な一覧番号を入力してください。", LangSpanish: "Introduce un número de lista válido.",
+	},
+	MsgWorkspaceChatInvalidNumber: {
+		LangEnglish: "Enter a positive integer.", LangChinese: "请输入正整数。", LangTraditionalChinese: "請輸入正整數。", LangJapanese: "正の整数を入力してください。", LangSpanish: "Introduce un entero positivo.",
+	},
+	MsgWorkspaceChatPageOutOfRange: {
+		LangEnglish: "That page does not exist.", LangChinese: "该页不存在。", LangTraditionalChinese: "該頁不存在。", LangJapanese: "そのページは存在しません。", LangSpanish: "Esa página no existe.",
+	},
+	MsgWorkspaceChatMenuExpired: {
+		LangEnglish: "The numbered list is missing or has changed. List it again before selecting.", LangChinese: "编号列表不存在或已变化，请重新查看列表后再选择。", LangTraditionalChinese: "編號清單不存在或已變更，請重新查看清單後再選擇。", LangJapanese: "番号付き一覧がないか変更されています。もう一度一覧を表示してから選択してください。", LangSpanish: "La lista numerada no existe o cambió. Vuelve a mostrarla antes de seleccionar.",
+	},
+	MsgWorkspaceChatTurnNotRunning: {
+		LangEnglish: "There is no active turn to cancel.", LangChinese: "当前没有可取消的 Turn。", LangTraditionalChinese: "目前沒有可取消的 Turn。", LangJapanese: "キャンセルできる実行中のターンはありません。", LangSpanish: "No hay ningún turno activo para cancelar.",
+	},
+	MsgWorkspaceChatCancelled: {
+		LangEnglish: "Current turn cancelled.", LangChinese: "已取消当前 Turn。", LangTraditionalChinese: "已取消目前 Turn。", LangJapanese: "現在のターンをキャンセルしました。", LangSpanish: "Se canceló el turno actual.",
+	},
+	MsgWorkspaceChatUsage: {
+		LangEnglish:            "Commands: /projects [page], /project N, /threads [page], /switch N, /new [name], /current, /history [count], /cancel",
+		LangChinese:            "命令：/projects [页码]、/project N、/threads [页码]、/switch N、/new [名称]、/current、/history [数量]、/cancel",
+		LangTraditionalChinese: "命令：/projects [頁碼]、/project N、/threads [頁碼]、/switch N、/new [名稱]、/current、/history [數量]、/cancel",
+		LangJapanese:           "コマンド: /projects [ページ]、/project N、/threads [ページ]、/switch N、/new [名前]、/current、/history [件数]、/cancel",
+		LangSpanish:            "Comandos: /projects [página], /project N, /threads [página], /switch N, /new [nombre], /current, /history [cantidad], /cancel",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

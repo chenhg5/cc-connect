@@ -409,6 +409,8 @@ make build
 
 > **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
 
+The main Web chat can also use Codex App projects and native Codex threads. Enable `[workspace_chat]` with a Codex `app_server` template project; `/chat` then restores the selected directory and thread from SQLite, while legacy platform sessions remain available under **Platform sessions**. See [Unified workspace chat](docs/workspace-chat.md).
+
 If you prefer manual configuration:
 
 ```bash

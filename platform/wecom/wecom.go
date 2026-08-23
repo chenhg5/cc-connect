@@ -368,6 +368,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 		slog.Debug("wecom: message received", "user", msg.FromUserName, "text_len", len(text))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
+			Scope:     core.ConversationScopeDirect,
 			MessageID: strconv.FormatInt(msg.MsgId, 10),
 			UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 			Content: text, ReplyCtx: rctx,
@@ -383,6 +384,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			}
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
+				Scope:     core.ConversationScopeDirect,
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
 				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 				Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
@@ -404,6 +406,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			}
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
+				Scope:     core.ConversationScopeDirect,
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
 				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 				Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
@@ -430,6 +433,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			mt := wecomInboundFileMime(baseName, fileData)
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
+				Scope:     core.ConversationScopeDirect,
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
 				UserID:    msg.FromUserName, UserName: p.resolveUserName(msg.FromUserName),
 				Files: []core.FileAttachment{{

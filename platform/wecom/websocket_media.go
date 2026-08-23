@@ -432,6 +432,7 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 
 	p.handler(p, &core.Message{
 		SessionKey: sessionKey, Platform: "wecom",
+		Scope:     conversationScopeForWeCom(body.ChatType),
 		MessageID: body.MsgID,
 		UserID:    body.From.UserID, UserName: body.From.UserID,
 		ChatName:     chatName,
@@ -441,4 +442,11 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 		Files:        fileAtts,
 		ReplyCtx:     rctx, FromVoice: fromVoice,
 	})
+}
+
+func conversationScopeForWeCom(chatType string) core.ConversationScope {
+	if strings.EqualFold(strings.TrimSpace(chatType), "group") {
+		return core.ConversationScopeGroup
+	}
+	return core.ConversationScopeDirect
 }

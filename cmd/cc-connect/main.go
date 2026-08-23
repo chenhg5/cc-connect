@@ -21,6 +21,7 @@ import (
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
+	"github.com/chenhg5/cc-connect/storage/workspacechat"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -356,6 +357,7 @@ func main() {
 	}
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
+	enginesByName := make(map[string]*core.Engine, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
@@ -962,7 +964,31 @@ func main() {
 		})
 
 		engines = append(engines, engine)
+		enginesByName[proj.Name] = engine
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
+	}
+
+	var workspaceChatService *core.WorkspaceChatService
+	if cfg.WorkspaceChat.Enabled != nil && *cfg.WorkspaceChat.Enabled {
+		templateEngine := enginesByName[cfg.WorkspaceChat.TemplateProject]
+		if templateEngine == nil {
+			slog.Error("workspace chat template engine is unavailable", "project", cfg.WorkspaceChat.TemplateProject)
+			os.Exit(1)
+		}
+		repository, err := workspacechat.Open(cfg.DataDir)
+		if err != nil {
+			slog.Error("workspace chat persistence unavailable", "error", err)
+			os.Exit(1)
+		}
+		workspaceChatService, err = core.NewWorkspaceChatService(templateEngine, repository, cfg.WorkspaceChat.Transports)
+		if err != nil {
+			_ = repository.Close()
+			slog.Error("workspace chat startup failed", "error", err)
+			os.Exit(1)
+		}
+		for _, engine := range engines {
+			engine.SetMessageInterceptor(workspaceChatService.HandleIncoming)
+		}
 	}
 
 	// Start cron scheduler
@@ -1110,6 +1136,9 @@ func main() {
 		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
 		if bridgeSrv != nil {
 			mgmtSrv.SetBridgeServer(bridgeSrv)
+		}
+		if workspaceChatService != nil && workspaceChatService.TransportEnabled("web") {
+			mgmtSrv.SetWorkspaceChat(workspaceChatService)
 		}
 		mgmtSrv.SetSetupFeishuSave(func(req core.FeishuSetupSaveRequest) error {
 			platType := req.PlatformType
@@ -1327,6 +1356,11 @@ func main() {
 	slog.Info("shutting down...")
 	if mgmtSrv != nil {
 		mgmtSrv.Stop()
+	}
+	if workspaceChatService != nil {
+		if err := workspaceChatService.Close(); err != nil {
+			slog.Error("workspace chat shutdown failed", "error", err)
+		}
 	}
 	if bridgeSrv != nil {
 		bridgeSrv.Stop()

@@ -576,7 +576,7 @@ export default function ChatView() {
       {/* Header */}
       <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
         <div className="flex items-center gap-3">
-          <Link to="/chat" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+          <Link to="/platform-sessions" className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
             <ArrowLeft size={18} className="text-gray-400" />
           </Link>
           <div>

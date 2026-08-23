@@ -94,7 +94,7 @@ export default function Dashboard() {
             {projects.slice(0, MAX_ITEMS).map((p) => (
               <Link
                 key={p.name}
-                to={`/chat/${p.name}`}
+                to={`/platform-sessions/${p.name}`}
                 className="block p-4 rounded-xl border border-gray-200/80 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-accent/40 hover:shadow-md hover:shadow-accent/5 transition-all"
               >
                 <div className="flex items-center gap-2.5 mb-3">
@@ -128,7 +128,7 @@ export default function Dashboard() {
             <MessageSquare size={14} className="text-gray-400" />
             {t('dashboard.recentSessions')}
           </h3>
-          <Link to="/chat" className="text-xs text-accent hover:underline flex items-center gap-0.5">
+          <Link to="/platform-sessions" className="text-xs text-accent hover:underline flex items-center gap-0.5">
             {t('common.viewAll')} <ChevronRight size={12} />
           </Link>
         </div>
@@ -141,7 +141,7 @@ export default function Dashboard() {
             {recentSessions.map((sess) => (
               <Link
                 key={`${sess.project}-${sess.id}`}
-                to={`/chat/${sess.project}`}
+                to={`/platform-sessions/${sess.project}`}
                 className="block p-4 rounded-xl border border-gray-200/80 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-accent/40 hover:shadow-md hover:shadow-accent/5 transition-all"
               >
                 <div className="flex items-center gap-2.5 mb-3">

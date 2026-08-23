@@ -49,6 +49,8 @@ type Agent struct {
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	mu              sync.RWMutex
+	controlMu       sync.Mutex
+	control         *appServerSession
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -353,7 +355,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +399,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -467,7 +467,6 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	reasoningEffort := a.reasoningEffort
 	backend := a.backend
-	appServerURL := a.appServerURL
 	codexHome := a.codexHome
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
@@ -501,7 +500,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		control, err := a.appServerControl(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return control.logicalSession(ctx, sessionID, model, reasoningEffort, mode, systemPrompt, appendPrompt)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -536,7 +539,16 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	return os.Remove(path)
 }
 
-func (a *Agent) Stop() error { return nil }
+func (a *Agent) Stop() error {
+	a.controlMu.Lock()
+	control := a.control
+	a.control = nil
+	a.controlMu.Unlock()
+	if control != nil {
+		return control.Close()
+	}
+	return nil
+}
 
 // SetMode changes the approval mode for future sessions.
 func (a *Agent) SetMode(mode string) {

@@ -95,6 +95,32 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 - **图片回传**：通过 `aibot_upload_media_*` 上传临时素材，再用 `aibot_send_msg` 发送图片
 - **限制**：同一机器人仅支持 1 个长连接；30 条/分钟、1000 条/小时
 
+### 统一工作区对话
+
+启用 `[workspace_chat]` 并在 `transports` 中包含 `"wecom"` 后，企业微信单聊会与 Web `/chat` 共用 Codex App 项目、原生 thread、SQLite 选择状态和 Turn 队列。此模式只使用上面的 WebSocket 长连接，不需要 VPN、内网穿透或公网回调。
+
+```toml
+[workspace_chat]
+enabled = true
+template_project = "codex-template"
+transports = ["web", "wecom"]
+```
+
+可用命令：
+
+| 命令 | 作用 |
+|------|------|
+| `/projects [页码]` | 查看 Codex App 项目并保存本次编号列表 |
+| `/project N` | 选择项目并恢复最近会话；没有会话时自动创建 |
+| `/threads [页码]` | 查看当前项目的原生会话 |
+| `/switch N` | 按最近一次 `/threads` 列表切换会话 |
+| `/new [名称]` | 新建并选择原生会话 |
+| `/current` | 查看当前项目和会话 |
+| `/history [数量]` | 查看最近的用户/助手对话 |
+| `/cancel` | 取消当前 Turn |
+
+未选择项目时，普通消息只返回项目列表；不会猜测服务器目录。工作区对话不支持企业微信群聊，群聊消息会收到明确拒绝提示。编号选择会重新验证目录和 thread，旧列表不会误选到后来新增的条目。
+
 ---
 
 ## 模式二：Webhook 回调

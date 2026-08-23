@@ -110,6 +110,7 @@ type Config struct {
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
+	WorkspaceChat      WorkspaceChatConfig     `toml:"workspace_chat"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
@@ -181,6 +182,15 @@ type ManagementConfig struct {
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+}
+
+// WorkspaceChatConfig controls the transport-independent workspace chat runtime.
+// The template project supplies the agent, provider, model and permission settings;
+// a selected workspace only replaces the agent working directory.
+type WorkspaceChatConfig struct {
+	Enabled         *bool    `toml:"enabled,omitempty"`
+	TemplateProject string   `toml:"template_project,omitempty"`
+	Transports      []string `toml:"transports,omitempty"`
 }
 
 // Display mode constants.
@@ -1022,6 +1032,50 @@ func (c *Config) validateInternal(permissive bool) error {
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
+	}
+	if c.WorkspaceChat.Enabled != nil && *c.WorkspaceChat.Enabled {
+		name := strings.TrimSpace(c.WorkspaceChat.TemplateProject)
+		if name == "" {
+			return fmt.Errorf("config: workspace_chat.template_project is required when workspace_chat is enabled")
+		}
+		var template *ProjectConfig
+		for i := range c.Projects {
+			if c.Projects[i].Name == name {
+				template = &c.Projects[i]
+				break
+			}
+		}
+		if template == nil {
+			return fmt.Errorf("config: workspace_chat.template_project %q does not exist", name)
+		}
+		if !strings.EqualFold(strings.TrimSpace(template.Agent.Type), "codex") {
+			return fmt.Errorf("config: workspace_chat.template_project %q must use the codex agent", name)
+		}
+		backend, _ := template.Agent.Options["backend"].(string)
+		backend = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(backend), "-", "_"))
+		if backend != "app_server" && backend != "appserver" {
+			return fmt.Errorf("config: workspace_chat.template_project %q must set projects.agent.options.backend = \"app_server\"", name)
+		}
+		seenTransport := make(map[string]struct{}, len(c.WorkspaceChat.Transports))
+		if len(c.WorkspaceChat.Transports) == 0 {
+			return fmt.Errorf("config: workspace_chat.transports requires at least one of \"web\" or \"wecom\"")
+		}
+		for _, raw := range c.WorkspaceChat.Transports {
+			transport := strings.ToLower(strings.TrimSpace(raw))
+			if transport == "" {
+				return fmt.Errorf("config: workspace_chat.transports must not contain empty values")
+			}
+			if transport != "web" && transport != "wecom" {
+				return fmt.Errorf("config: workspace_chat.transports has unsupported value %q", raw)
+			}
+			if _, exists := seenTransport[transport]; exists {
+				return fmt.Errorf("config: workspace_chat.transports contains duplicate value %q", raw)
+			}
+			seenTransport[transport] = struct{}{}
+		}
+		if _, wantsWeb := seenTransport["web"]; wantsWeb && (c.Management.Enabled == nil || !*c.Management.Enabled) {
+			return fmt.Errorf("config: workspace_chat transport \"web\" requires management.enabled = true")
+		}
 	}
 	for i, proj := range c.Projects {
 		prefix := fmt.Sprintf("projects[%d]", i)

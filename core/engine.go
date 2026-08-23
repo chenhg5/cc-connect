@@ -487,6 +487,8 @@ type Engine struct {
 
 	// Data directory for socket path injection
 	dataDir string
+
+	messageInterceptor func(Platform, *Message) bool
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -2405,6 +2407,10 @@ func (e *Engine) ReceiveMessage(p Platform, msg *Message) {
 	e.handleMessage(p, msg)
 }
 
+func (e *Engine) SetMessageInterceptor(interceptor func(Platform, *Message) bool) {
+	e.messageInterceptor = interceptor
+}
+
 func (e *Engine) onPlatformReady(p Platform) {
 	if !e.markPlatformReady(p) {
 		return
@@ -2790,6 +2796,9 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	if e.messageInterceptor != nil && e.messageInterceptor(p, msg) {
+		return
+	}
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
@@ -3683,6 +3692,28 @@ func isDenyResponse(s string) bool {
 
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
 	e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, msg.SessionKey, "", "")
+}
+
+// runWorkspaceChatMessage 把工作区服务已串行化的消息交给现有 Agent Turn 循环。
+// 工作区服务拥有 FIFO 与持久状态；Engine 继续拥有 AgentSession、审批和事件处理。
+func (e *Engine) runWorkspaceChatMessage(p Platform, msg *Message, agent Agent, sessions *SessionManager, workspaceDir, threadID string) error {
+	if p == nil || msg == nil || agent == nil || sessions == nil {
+		return fmt.Errorf("workspace chat: platform, message, agent and sessions are required")
+	}
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
+	runtimeKey := workspaceChatRuntimeKey(threadID)
+	session := sessions.SwitchToAgentSession(runtimeKey, threadID, agent.Name(), "workspace chat")
+	e.ensureInteractiveStateForQueueing(runtimeKey, p, msg.ReplyCtx)
+	if !session.TryLock() {
+		return fmt.Errorf("workspace chat: thread %s is already processing", threadID)
+	}
+	session.TouchUserActivity()
+	e.noteUserMessageAccepted(runtimeKey, msg.UserMessageTimeMs)
+	runMessageAccepted(msg)
+	e.processInteractiveMessageWith(p, msg, session, agent, sessions, runtimeKey, workspaceDir, runtimeKey)
+	return nil
 }
 
 // processInteractiveMessageWith is the core interactive processing loop.
@@ -4976,6 +5007,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()
+		if sink, ok := p.(WorkspaceAgentEventSink); ok {
+			sink.PublishWorkspaceAgentEvent(event)
+		}
 
 		// main codebase has no per-session quiet flag; pr309 referenced
 		// sessionQuiet which we drop. e.display.ThinkingMessages /

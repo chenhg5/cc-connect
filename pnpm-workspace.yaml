@@ -1,1 +1,4 @@
+packages:
+  - web
+
 onlyBuiltDependencies: esbuild

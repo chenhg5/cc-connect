@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   FolderKanban,
   MessageSquare,
+  MessagesSquare,
   Clock,
   Settings,
   ChevronLeft,
@@ -20,6 +21,7 @@ const navItems = [
   { key: 'providers', path: '/providers', icon: Plug },
   { key: 'skills', path: '/skills', icon: Puzzle },
   { key: 'chat', path: '/chat', icon: MessageSquare },
+  { key: 'platformSessions', path: '/platform-sessions', icon: MessagesSquare },
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'system', path: '/system', icon: Settings },
 ];

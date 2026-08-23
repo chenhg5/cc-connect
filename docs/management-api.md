@@ -4,6 +4,23 @@
 > **Status:** Draft — subject to change before implementation  
 > **Last Updated:** 2026-03-24
 
+## Unified workspace chat resources
+
+When `[workspace_chat]` enables the `web` transport, the Management API exposes the following authenticated resources. Clients submit only the opaque `workspaceRef`; arbitrary `cwd` values are never accepted.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/chat/workspaces` | List Codex App project roots, including unavailable roots and their errors |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads` | List all native threads for the validated root |
+| `POST` | `/api/v1/chat/workspaces/{ref}/threads` | Create a native thread; body: `{"name":"optional"}` |
+| `GET` | `/api/v1/chat/workspaces/{ref}/threads/{threadId}` | Read the full native thread with Turns and items |
+| `GET` | `/api/v1/chat/selection` | Read the persisted `web:admin` selection |
+| `PUT` | `/api/v1/chat/selection` | Select a workspace/thread; body: `{"workspace_ref":"ws_...","thread_id":"..."}` |
+
+`GET /api/v1/chat/ws` is a separate real-time WebSocket protocol, not the external Bridge protocol. Client messages are `subscribe`, `turn_start`, `approval_response`, and `cancel`. Server messages include `subscribed`, `turn_queued`, `turn_started`, `agent_event`, `approval_requested`, `turn_cancel_requested`, `turn_completed`, `turn_failed`, `turn_cancelled`, and `error`. Every operation revalidates that the thread belongs to the selected root. WebSocket authentication uses the same token, normally through `?token=...`.
+
+REST responses use the standard Management API envelope. WebSocket events are sent directly as JSON objects.
+
 ---
 
 ## 1. Overview

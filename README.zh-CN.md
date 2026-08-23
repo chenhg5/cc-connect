@@ -408,6 +408,8 @@ make build
 
 > **💡 推荐使用 Web UI 配置** — 安装完成后，运行 `cc-connect web` 配置 Web 管理后台并在浏览器中打开。可以可视化创建项目、添加平台、管理服务商、直接和 Agent 聊天，无需手动编辑 TOML 文件。**注意：** `cc-connect web` 仅用于配置和打开浏览器，并不会启动 cc-connect 服务本身，你仍需单独运行 `cc-connect` 来启动。
 
+Web 主聊天也可以直接使用 Codex App 项目和原生 Codex 会话。在 `[workspace_chat]` 中指定使用 `app_server` 的 Codex 模板项目后，`/chat` 会从 SQLite 恢复上次选择的目录和会话；旧平台 Session 仍可从“平台会话”入口访问。详见[统一工作区对话](docs/workspace-chat.zh-CN.md)。
+
 如果你更喜欢手动配置：
 
 ```bash

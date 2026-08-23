@@ -142,6 +142,7 @@ type appServerRequestUserInputAnswer struct {
 
 type appServerSession struct {
 	url            string
+	cliBin         string
 	workDir        string
 	model          string
 	effort         string
@@ -153,6 +154,12 @@ type appServerSession struct {
 	promptPreamble string
 
 	events chan core.Event
+	// owner 仅在逻辑 thread session 上设置。RPC、进程和写锁由物理连接统一拥有。
+	owner      *appServerSession
+	childrenMu sync.RWMutex
+	children   map[string]*appServerSession
+	eventsMu   sync.RWMutex
+	eventsDone bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -189,49 +196,90 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+	appServerInterruptTimeout    = 5 * time.Second
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
-	sessionCtx, cancel := context.WithCancel(ctx)
+// newAppServerControl 创建 Agent 级长驻物理连接，不隐式创建 thread。
+// 原生 thread 管理和所有逻辑 AgentSession 共用该连接，通知按 threadId 分发。
+func newAppServerControl(cliBin, url, workDir, model, effort, mode, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+	sessionCtx, cancel := context.WithCancel(context.Background())
 	s := &appServerSession{
-		url:              url,
-		workDir:          workDir,
-		model:            model,
-		effort:           effort,
-		mode:             mode,
-		baseURL:          baseURL,
-		modelProvider:    modelProvider,
-		extraEnv:         append([]string(nil), extraEnv...),
-		codexHome:        strings.TrimSpace(codexHome),
-		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:           make(chan core.Event, 128),
-		ctx:              sessionCtx,
-		cancel:           cancel,
-		pending:          make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+		url: url, cliBin: cliBin, workDir: workDir, model: model, effort: effort, mode: mode,
+		baseURL: baseURL, modelProvider: modelProvider, extraEnv: append([]string(nil), extraEnv...),
+		codexHome: strings.TrimSpace(codexHome), events: make(chan core.Event, 128),
+		ctx: sessionCtx, cancel: cancel, pending: make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals: make(map[string]chan core.PermissionResult), preambleSent: true,
+		children: make(map[string]*appServerSession),
 	}
 	s.alive.Store(true)
-
 	if err := s.connect(); err != nil {
 		cancel()
 		return nil, err
 	}
-
 	if err := s.initialize(); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
+	return s, nil
+}
 
-	if err := s.ensureThread(resumeID); err != nil {
-		_ = s.Close()
+func (s *appServerSession) logicalSession(ctx context.Context, resumeID, model, effort, mode, systemPrompt, appendPrompt string) (*appServerSession, error) {
+	if s.owner != nil || !s.alive.Load() {
+		return nil, fmt.Errorf("codex app-server control connection is closed")
+	}
+	resumeID = strings.TrimSpace(resumeID)
+	if resumeID != "" && resumeID != core.ContinueSession {
+		if existing := s.child(resumeID); existing != nil && existing.Alive() {
+			return existing, nil
+		}
+	}
+	logicalCtx, cancel := context.WithCancel(ctx)
+	logical := &appServerSession{
+		owner: s, workDir: s.GetWorkDir(), model: model, effort: effort, mode: mode,
+		promptPreamble: buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		events:         make(chan core.Event, 128), ctx: logicalCtx, cancel: cancel,
+		pendingApprovals: make(map[string]chan core.PermissionResult),
+		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+	}
+	logical.alive.Store(true)
+	if err := logical.ensureThread(resumeID); err != nil {
+		logical.closeLogical()
 		return nil, err
 	}
-	if err := s.refreshUsage(context.Background()); err != nil {
-		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+	threadID := logical.CurrentSessionID()
+	s.childrenMu.Lock()
+	if existing := s.children[threadID]; existing != nil && existing.Alive() {
+		s.childrenMu.Unlock()
+		logical.closeLogical()
+		return existing, nil
 	}
+	s.children[threadID] = logical
+	s.childrenMu.Unlock()
+	if err := logical.refreshUsage(context.Background()); err != nil {
+		slog.Debug("codex app-server: initial rate limit fetch failed", "thread_id", threadID, "error", err)
+	}
+	return logical, nil
+}
 
-	return s, nil
+func (s *appServerSession) child(threadID string) *appServerSession {
+	if strings.TrimSpace(threadID) == "" {
+		return nil
+	}
+	s.childrenMu.RLock()
+	defer s.childrenMu.RUnlock()
+	return s.children[threadID]
+}
+
+func (s *appServerSession) unregisterChild(child *appServerSession) {
+	if child == nil {
+		return
+	}
+	threadID := child.CurrentSessionID()
+	s.childrenMu.Lock()
+	if s.children[threadID] == child {
+		delete(s.children, threadID)
+	}
+	s.childrenMu.Unlock()
 }
 
 func (s *appServerSession) connect() error {
@@ -251,7 +299,11 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	cliBin := strings.TrimSpace(s.cliBin)
+	if cliBin == "" {
+		cliBin = "codex"
+	}
+	cmd := exec.CommandContext(s.ctx, cliBin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -934,12 +986,32 @@ func (s *appServerSession) GetContextUsage() *core.ContextUsage {
 }
 
 func (s *appServerSession) Alive() bool {
-	return s.alive.Load()
+	if !s.alive.Load() {
+		return false
+	}
+	return s.owner == nil || s.owner.alive.Load()
 }
 
 func (s *appServerSession) Close() error {
+	if s.owner != nil {
+		interruptErr := s.interruptCurrentTurn()
+		s.owner.unregisterChild(s)
+		s.closeLogical()
+		return interruptErr
+	}
 	s.alive.Store(false)
 	s.cancel()
+
+	s.childrenMu.Lock()
+	children := make([]*appServerSession, 0, len(s.children))
+	for _, child := range s.children {
+		children = append(children, child)
+	}
+	s.children = make(map[string]*appServerSession)
+	s.childrenMu.Unlock()
+	for _, child := range children {
+		child.closeLogical()
+	}
 
 	s.procMu.Lock()
 	if s.stdin != nil {
@@ -962,10 +1034,58 @@ func (s *appServerSession) Close() error {
 	case <-time.After(2 * time.Second):
 	}
 
-	s.closeOnce.Do(func() {
-		close(s.events)
-	})
+	s.closeEvents()
 	return nil
+}
+
+func (s *appServerSession) interruptCurrentTurn() error {
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	threadID := s.CurrentSessionID()
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(turnID) == "" {
+		return nil
+	}
+	if err := s.requestWithTimeout("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, nil, appServerInterruptTimeout); err != nil {
+		return fmt.Errorf("codex app-server turn/interrupt: %w", err)
+	}
+	return nil
+}
+
+func (s *appServerSession) closeLogical() {
+	s.alive.Store(false)
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.rejectPendingApprovals(context.Canceled)
+	s.closeEvents()
+}
+
+func (s *appServerSession) failChildren(err error) {
+	s.childrenMu.Lock()
+	children := make([]*appServerSession, 0, len(s.children))
+	for _, child := range s.children {
+		children = append(children, child)
+	}
+	s.children = make(map[string]*appServerSession)
+	s.childrenMu.Unlock()
+	for _, child := range children {
+		if err != nil {
+			child.emitError(err)
+		}
+		child.closeLogical()
+	}
+}
+
+func (s *appServerSession) closeEvents() {
+	s.closeOnce.Do(func() {
+		s.eventsMu.Lock()
+		defer s.eventsMu.Unlock()
+		if !s.eventsDone {
+			s.eventsDone = true
+			close(s.events)
+		}
+	})
 }
 
 func (s *appServerSession) readLoop(r io.Reader) {
@@ -1005,7 +1125,11 @@ func (s *appServerSession) readLoop(r io.Reader) {
 
 		case hasID && hasMethod:
 			// Server-initiated request that requires a response (e.g. approval).
-			s.handleServerRequest(probe)
+			target := s
+			if child := s.child(appServerThreadID(probe["params"])); child != nil {
+				target = child
+			}
+			target.handleServerRequest(probe)
 
 		default:
 			// Notification (no id).
@@ -1031,12 +1155,14 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		s.alive.Store(false)
 		s.rejectPending(err)
 		s.rejectPendingApprovals(err)
+		s.failChildren(err)
 		return
 	}
 
 	s.alive.Store(false)
 	s.rejectPending(io.EOF)
 	s.rejectPendingApprovals(io.EOF)
+	s.failChildren(io.EOF)
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
@@ -1076,6 +1202,7 @@ func (s *appServerSession) waitLoop() {
 		err = io.EOF
 	}
 	s.rejectPending(err)
+	s.failChildren(err)
 }
 
 func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
@@ -1100,6 +1227,23 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	if s.owner == nil {
+		if child := s.child(appServerThreadID(paramsRaw)); child != nil {
+			child.handleNotification(method, paramsRaw)
+			return
+		}
+		if method == "error" {
+			s.childrenMu.RLock()
+			children := make([]*appServerSession, 0, len(s.children))
+			for _, child := range s.children {
+				children = append(children, child)
+			}
+			s.childrenMu.RUnlock()
+			for _, child := range children {
+				child.handleNotification(method, paramsRaw)
+			}
+		}
+	}
 	switch method {
 	case "turn/started":
 		var notif turnNotification
@@ -1159,6 +1303,19 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.emitError(fmt.Errorf("%s", notif.Message))
 		}
 	}
+}
+
+func appServerThreadID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var payload struct {
+		ThreadID string `json:"threadId"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.ThreadID)
 }
 
 func (s *appServerSession) handleItemStarted(item map[string]any) {
@@ -1547,6 +1704,11 @@ func (s *appServerSession) flushPendingAsText() {
 }
 
 func (s *appServerSession) emit(event core.Event) {
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	if s.eventsDone {
+		return
+	}
 	select {
 	case s.events <- event:
 	default:
@@ -1574,10 +1736,16 @@ func (s *appServerSession) rejectPending(err error) {
 }
 
 func (s *appServerSession) request(method string, params any, out any) error {
+	if s.owner != nil {
+		return s.owner.request(method, params, out)
+	}
 	return s.requestWithTimeout(method, params, out, appServerRequestTimeout)
 }
 
 func (s *appServerSession) requestWithTimeout(method string, params any, out any, timeout time.Duration) error {
+	if s.owner != nil {
+		return s.owner.requestWithTimeout(method, params, out, timeout)
+	}
 	id := s.nextID.Add(1)
 	ch := make(chan rpcResponseEnvelope, 1)
 
@@ -1675,6 +1843,10 @@ func (s *appServerSession) contextErr() error {
 }
 
 func (s *appServerSession) abortTransport() {
+	if s.owner != nil {
+		s.owner.abortTransport()
+		return
+	}
 	s.alive.Store(false)
 	if s.cancel != nil {
 		s.cancel()
@@ -1692,6 +1864,9 @@ func (s *appServerSession) abortTransport() {
 }
 
 func (s *appServerSession) notify(method string, params any) error {
+	if s.owner != nil {
+		return s.owner.notify(method, params)
+	}
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
@@ -1703,6 +1878,9 @@ func (s *appServerSession) notify(method string, params any) error {
 }
 
 func (s *appServerSession) writeJSON(v any) error {
+	if s.owner != nil {
+		return s.owner.writeJSON(v)
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("codex app-server encode: %w", err)

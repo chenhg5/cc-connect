@@ -2,6 +2,8 @@ module github.com/chenhg5/cc-connect
 
 go 1.25.0
 
+toolchain go1.25.1
+
 require (
 	cloud.google.com/go/pubsub/v2 v2.4.0
 	github.com/BurntSushi/toml v1.6.0

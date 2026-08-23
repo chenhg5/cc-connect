@@ -7,6 +7,7 @@ import ProjectList from '@/pages/Projects/ProjectList';
 import ProjectDetail from '@/pages/Projects/ProjectDetail';
 import ChatList from '@/pages/Chat/ChatList';
 import ChatView from '@/pages/Chat/ChatView';
+import WorkspaceChat from '@/pages/Chat/WorkspaceChat';
 import CronList from '@/pages/Cron/CronList';
 import SystemConfig from '@/pages/System/Config';
 import ProviderList from '@/pages/Providers/ProviderList';
@@ -30,8 +31,10 @@ export default function App() {
         <Route path="projects/:name" element={<ProjectDetail />} />
         <Route path="providers" element={<ProviderList />} />
         <Route path="skills" element={<SkillList />} />
-        <Route path="chat" element={<ChatList />} />
-        <Route path="chat/:name" element={<ChatView />} />
+        <Route path="chat" element={<WorkspaceChat />} />
+        <Route path="chat/:workspaceRef/:threadId" element={<WorkspaceChat />} />
+        <Route path="platform-sessions" element={<ChatList />} />
+        <Route path="platform-sessions/:name" element={<ChatView />} />
         <Route path="cron" element={<CronList />} />
         <Route path="system" element={<SystemConfig />} />
       </Route>

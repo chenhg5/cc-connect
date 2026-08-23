@@ -48,6 +48,7 @@ type ManagementServer struct {
 	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
+	workspaceChat      *WorkspaceChatService
 
 	setupFeishuSave      func(req FeishuSetupSaveRequest) error
 	setupWeixinSave      func(req WeixinSetupSaveRequest) error
@@ -89,10 +90,11 @@ func (m *ManagementServer) RegisterEngine(name string, e *Engine) {
 	m.engines[name] = e
 }
 
-func (m *ManagementServer) SetCronScheduler(cs *CronScheduler)           { m.cronScheduler = cs }
-func (m *ManagementServer) SetTimerScheduler(ts *TimerScheduler)         { m.timerScheduler = ts }
-func (m *ManagementServer) SetHeartbeatScheduler(hs *HeartbeatScheduler) { m.heartbeatScheduler = hs }
-func (m *ManagementServer) SetBridgeServer(bs *BridgeServer)             { m.bridgeServer = bs }
+func (m *ManagementServer) SetCronScheduler(cs *CronScheduler)             { m.cronScheduler = cs }
+func (m *ManagementServer) SetTimerScheduler(ts *TimerScheduler)           { m.timerScheduler = ts }
+func (m *ManagementServer) SetHeartbeatScheduler(hs *HeartbeatScheduler)   { m.heartbeatScheduler = hs }
+func (m *ManagementServer) SetBridgeServer(bs *BridgeServer)               { m.bridgeServer = bs }
+func (m *ManagementServer) SetWorkspaceChat(service *WorkspaceChatService) { m.workspaceChat = service }
 func (m *ManagementServer) SetSetupFeishuSave(fn func(FeishuSetupSaveRequest) error) {
 	m.setupFeishuSave = fn
 }
@@ -250,6 +252,12 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 
 	// Bridge
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
+
+	// Unified workspace chat
+	mux.HandleFunc(prefix+"/chat/workspaces", m.wrap(m.handleWorkspaceChatWorkspaces))
+	mux.HandleFunc(prefix+"/chat/workspaces/", m.wrap(m.handleWorkspaceChatWorkspaceRoutes))
+	mux.HandleFunc(prefix+"/chat/selection", m.wrap(m.handleWorkspaceChatSelection))
+	mux.HandleFunc(prefix+"/chat/ws", m.wrap(m.handleWorkspaceChatWS))
 
 	// Static file serving for cc-connect-web (SPA)
 	return m.withStaticFallback(mux)

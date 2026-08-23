@@ -405,6 +405,38 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# Unified Workspace Chat / 统一工作区对话
+# =============================================================================
+# Uses Codex App projects and native Codex threads in the Web dashboard and
+# WeCom direct messages. template_project must reference a Codex project whose
+# agent backend is app_server. The Web transport also requires management.enabled.
+# Web 管理后台和企业微信单聊共用 Codex App 项目与原生会话。template_project
+# 必须指向 backend=app_server 的 Codex 项目；启用 web 还必须开启 management。
+#
+# [workspace_chat]
+# enabled = true
+# template_project = "codex-template"
+# transports = ["web", "wecom"]
+#
+# The referenced project can use an arbitrary work_dir: workspace chat replaces
+# it with the server-validated Codex App directory selected by the client.
+# 被引用项目的 work_dir 仅作为模板值；工作区聊天会改用服务端校验后的 Codex App 目录。
+#
+# [[projects]]
+# name = "codex-template"
+# work_dir = "/path/to/a/default/project"
+# [projects.agent]
+# type = "codex"
+# [projects.agent.options]
+# backend = "app_server"
+# [[projects.platforms]]
+# type = "wecom"
+# [projects.platforms.options]
+# mode = "websocket"
+# bot_id = "your-bot-id"
+# bot_secret = "your-bot-secret"
+
+# =============================================================================
 # Hooks (Event Triggers / 事件钩子)
 # =============================================================================
 # Execute shell commands or send HTTP requests when lifecycle events occur.
