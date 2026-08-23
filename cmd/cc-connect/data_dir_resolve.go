@@ -162,14 +162,14 @@ func printSocketNotFound(w io.Writer, dataDir, configPath, sockPath string) {
 			"  4. In Docker / container setups, ensure data_dir is mounted as a writable volume and the in-container user owns it (see docs/deployment.md)"
 	}
 
-	fmt.Fprintf(w, "Error: cc-connect is not running.\n")
-	fmt.Fprintf(w, "  Tried socket: %s\n", sockPath)
+	_, _ = fmt.Fprintf(w, "Error: cc-connect is not running.\n")
+	_, _ = fmt.Fprintf(w, "  Tried socket: %s\n", sockPath)
 	if len(unique) > 0 {
-		fmt.Fprintf(w, "  Other candidate data_dirs: %s\n", strings.Join(unique, ", "))
+		_, _ = fmt.Fprintf(w, "  Other candidate data_dirs: %s\n", strings.Join(unique, ", "))
 	}
 	if configPath != "" {
-		fmt.Fprintf(w, "  --config used: %s\n", configPath)
+		_, _ = fmt.Fprintf(w, "  --config used: %s\n", configPath)
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, hint)
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, hint)
 }
