@@ -55,7 +55,7 @@ type sessionRecord struct {
 }
 
 func runSessions(args []string) {
-	var dataDir string
+	var dataDir, configPath string
 	var subcommand string
 	var positional []string
 
@@ -65,6 +65,11 @@ func runSessions(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		case "--help", "-h", "help":
 			printSessionsUsage()
@@ -78,7 +83,7 @@ func runSessions(args []string) {
 		}
 	}
 
-	dataDir = resolveDataDir(dataDir)
+	dataDir = resolveDataDir(dataDir, configPath)
 
 	switch subcommand {
 	case "list":
@@ -136,16 +141,6 @@ func runSessions(args []string) {
 		// Default: launch TUI
 		runSessionsTUI(dataDir)
 	}
-}
-
-func resolveDataDir(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect")
-	}
-	return ".cc-connect"
 }
 
 func loadAllSessions(dataDir string) ([]sessionRecord, error) {
@@ -431,6 +426,7 @@ Commands:
 
 Options:
   --data-dir <path>  Data directory (default: ~/.cc-connect)
+  --config <path>    Config file used by the running daemon (Issue #1719)
   -h, --help         Show this help
 
 Session ID formats for 'show':
