@@ -1127,7 +1127,7 @@ func TestProcessInteractiveEvents_ReturnsRetriableErrorWithoutSendingRawError(t 
 		Error:     errors.New("Selected model is at capacity. Please try a different model."),
 		ErrorKind: ErrorKindOverloaded,
 	}
-	retryTurn := e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	retryTurn := e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, 0)
 
 	if retryTurn == nil {
 		t.Fatal("retryTurn = nil, want retriable turn")
@@ -1177,7 +1177,7 @@ func TestProcessInteractiveTurnWithRetry_ReplaysQueuedPromptAfterOverloaded(t *t
 	}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"))
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"), 0)
 
 	calls := agentSession.prompts()
 	if len(calls) != 3 {
@@ -1221,7 +1221,7 @@ func TestProcessInteractiveTurnWithRetry_StopCancelsRetryDelay(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"))
+		e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
 		close(done)
 	}()
 
@@ -1267,7 +1267,7 @@ func TestProcessInteractiveTurnWithRetry_ReplaysPromptAfterOverloaded(t *testing
 	}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"))
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
 
 	if got := agentSession.sendCount(); got != 2 {
 		t.Fatalf("sendCount = %d, want 2", got)
@@ -1321,7 +1321,7 @@ func TestProcessInteractiveTurnWithRetry_RichCardNoticeUpdatesCard(t *testing.T)
 	}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-rich-retry", nil, nil, "ctx-rich-retry", time.Now(), sessionKey, len("hello"))
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-rich-retry", nil, nil, "ctx-rich-retry", time.Now(), sessionKey, len("hello"), 0)
 
 	if got := agentSession.sendCount(); got != 2 {
 		t.Fatalf("sendCount = %d, want 2", got)
@@ -1372,7 +1372,7 @@ func TestProcessInteractiveTurnWithRetry_ProgressCardNoticeUpdatesCard(t *testin
 	}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry", nil, nil, "ctx-progress-card-retry", time.Now(), sessionKey, len("hello"))
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry", nil, nil, "ctx-progress-card-retry", time.Now(), sessionKey, len("hello"), 0)
 
 	for _, sent := range p.getSent() {
 		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
@@ -1436,7 +1436,7 @@ func TestProcessInteractiveTurnWithRetry_ProgressCardRetryExhaustionFinalizesFai
 	}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-exhausted", nil, nil, "ctx-progress-card-retry-exhausted", time.Now(), sessionKey, len("hello"))
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-exhausted", nil, nil, "ctx-progress-card-retry-exhausted", time.Now(), sessionKey, len("hello"), 0)
 
 	edits := p.getPreviewEdits()
 	var sawFailed bool
@@ -1486,7 +1486,7 @@ func TestProcessInteractiveTurnWithRetry_ProgressCardRetryNoticeBypassesThrottle
 	}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-throttle", nil, nil, "ctx-progress-card-retry-throttle", time.Now(), sessionKey, len("hello"))
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-throttle", nil, nil, "ctx-progress-card-retry-throttle", time.Now(), sessionKey, len("hello"), 0)
 
 	edits := p.getPreviewEdits()
 	var sawRetry bool
