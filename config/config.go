@@ -467,7 +467,7 @@ type ReferenceConfig struct {
 	EnclosureStyle  string   `toml:"enclosure_style,omitempty"`
 }
 
-// ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
+// ProjectConfig binds one agent (with a specific work_dir) to zero or more platforms.
 type ProjectConfig struct {
 	Name    string `toml:"name"`
 	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
@@ -1030,9 +1030,6 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
-		}
-		if len(proj.Platforms) == 0 && !permissive {
-			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {
 			if p.Type == "" {

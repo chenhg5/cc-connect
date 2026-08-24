@@ -44,7 +44,7 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: `projects[0].agent.type is required`,
 		},
 		{
-			name: "requires at least one platform",
+			name: "allows projects without platforms",
 			cfg: Config{
 				Projects: []ProjectConfig{
 					func() ProjectConfig {
@@ -54,7 +54,6 @@ func TestConfigValidate(t *testing.T) {
 					}(),
 				},
 			},
-			wantErr: `projects[0] needs at least one [[projects.platforms]]`,
 		},
 		{
 			name: "requires platform type",
