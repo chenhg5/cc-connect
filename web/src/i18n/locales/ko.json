@@ -9,7 +9,7 @@
     "cron": "예약 작업",
     "bridge": "브리지",
     "skills": "스킬",
-    "system": "시스템",
+    "system": "시스템", "profile": "개인 센터",
     "operations": "운영"
   },
   "dashboard": {
@@ -502,6 +502,8 @@
     "paid": "유료"
   },
   "control": {
+    "profileTitle": "관리자 개인 센터", "account": "계정", "changePassword": "비밀번호 변경", "currentPassword": "현재 비밀번호", "newPassword": "새 비밀번호", "passwordChanged": "비밀번호가 변경되었습니다. 다시 로그인하세요.", "savePassword": "비밀번호 업데이트",
+    "adminUsername": "관리자 계정",
     "firstSetup": "컨트롤 플레인 초기화", "setupSubtitle": "유일한 관리자 계정을 만듭니다", "loginSubtitle": "cc-connect 컨트롤 플레인 로그인",
     "setupToken": "일회용 설정 토큰", "adminPassword": "관리자 비밀번호", "confirmPassword": "비밀번호 확인", "passwordMismatch": "비밀번호가 일치하지 않습니다", "createAdmin": "관리자 만들기",
     "operations": "운영", "operationsSubtitle": "Runtime 장치, 릴리스, 로그 및 서비스를 관리합니다", "devices": "macOS Runtime 장치", "pairDevice": "장치 페어링", "pairExpires": "{{time}}까지 유효", "online": "온라인", "offline": "오프라인", "revoke": "해지", "renameDevice": "장치 이름 변경", "deviceLogs": "연결 로그", "noDevices": "페어링된 장치가 없습니다",

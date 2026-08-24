@@ -20,13 +20,13 @@ func TestStoreSetupSessionAndPairingAreOneTime(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	if err := store.SetupAdministrator(ctx, "setup-once", "long-enough-password"); err != nil {
+	if err := store.SetupAdministrator(ctx, "setup-once", "ccshus", "long-enough-password"); err != nil {
 		t.Fatalf("SetupAdministrator() error = %v", err)
 	}
-	if err := store.SetupAdministrator(ctx, "setup-once", "another-long-password"); err == nil {
+	if err := store.SetupAdministrator(ctx, "setup-once", "ccshus", "another-long-password"); err == nil {
 		t.Fatal("second SetupAdministrator() unexpectedly succeeded")
 	}
-	if err := store.AuthenticateAdministrator(ctx, "long-enough-password"); err != nil {
+	if err := store.AuthenticateAdministrator(ctx, "ccshus", "long-enough-password"); err != nil {
 		t.Fatalf("AuthenticateAdministrator() error = %v", err)
 	}
 	session, token, err := store.CreateSession(ctx)
@@ -60,6 +60,45 @@ func TestStoreSetupSessionAndPairingAreOneTime(t *testing.T) {
 	}
 }
 
+func TestChangeAdministratorPasswordInvalidatesAllSessions(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "control.db"), "setup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.SetupAdministrator(ctx, "setup", "ccshus", "long-enough-password"); err != nil {
+		t.Fatal(err)
+	}
+	first, firstToken, err := store.CreateSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, secondToken, err := store.CreateSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ChangeAdministratorPassword(ctx, "long-enough-password", "new-long-enough-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateSession(ctx, firstToken, first.CSRFToken, true); err == nil {
+		t.Fatal("first session remained valid")
+	}
+	if _, err := store.ValidateSession(ctx, secondToken, second.CSRFToken, true); err == nil {
+		t.Fatal("second session remained valid")
+	}
+	if err := store.AuthenticateAdministrator(ctx, "ccshus", "long-enough-password"); err == nil {
+		t.Fatal("old password remained valid")
+	}
+	if err := store.AuthenticateAdministrator(ctx, "ccshus", "new-long-enough-password"); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.AdministratorProfile(ctx)
+	if err != nil || profile.Username != "ccshus" {
+		t.Fatalf("profile = %#v err=%v", profile, err)
+	}
+}
+
 func TestRuntimeCheckpointAdvancesMonotonically(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "control.db"), "setup")
@@ -87,30 +126,29 @@ func TestRuntimeCheckpointAdvancesMonotonically(t *testing.T) {
 	}
 }
 
-func TestStoreMigratesWithoutDeletingExistingData(t *testing.T) {
+func TestStoreRejectsSchemaMismatchWithoutReadingOldAdministrator(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "control.db")
 	store, err := Open(path, "setup")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if err := store.SetupAdministrator(ctx, "setup", "long-enough-password"); err != nil {
+	if err := store.SetupAdministrator(ctx, "setup", "ccshus", "long-enough-password"); err != nil {
 		t.Fatalf("SetupAdministrator() error = %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	reopened, err := Open(path, "ignored-token")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 4"); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if _, err := Open(path, "ignored-token"); err == nil || !strings.Contains(err.Error(), "does not match required version") {
 		t.Fatalf("Open(existing) error = %v", err)
-	}
-	defer func() { _ = reopened.Close() }()
-	if err := reopened.AuthenticateAdministrator(ctx, "long-enough-password"); err != nil {
-		t.Fatalf("existing administrator lost after reopen: %v", err)
-	}
-	var version int
-	if err := reopened.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
-		t.Fatalf("schema version = %d, error = %v", version, err)
 	}
 }
 
@@ -136,7 +174,7 @@ func TestStoreBackupIsConsistentAndPreservesAdministrator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetupAdministrator(ctx, "setup", "long-enough-password"); err != nil {
+	if err := store.SetupAdministrator(ctx, "setup", "ccshus", "long-enough-password"); err != nil {
 		t.Fatal(err)
 	}
 	backup := filepath.Join(directory, "backups", "control.db")
@@ -151,7 +189,7 @@ func TestStoreBackupIsConsistentAndPreservesAdministrator(t *testing.T) {
 		t.Fatalf("Open(backup) error = %v", err)
 	}
 	defer func() { _ = restored.Close() }()
-	if err := restored.AuthenticateAdministrator(ctx, "long-enough-password"); err != nil {
+	if err := restored.AuthenticateAdministrator(ctx, "ccshus", "long-enough-password"); err != nil {
 		t.Fatalf("backup lost administrator: %v", err)
 	}
 }
@@ -188,7 +226,7 @@ func TestStoreExpiresSessionAndPairingCode(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	clock := time.Unix(1_800_000_000, 0)
 	store.now = func() time.Time { return clock }
-	if err := store.SetupAdministrator(ctx, "setup", "long-enough-password"); err != nil {
+	if err := store.SetupAdministrator(ctx, "setup", "ccshus", "long-enough-password"); err != nil {
 		t.Fatal(err)
 	}
 	session, token, err := store.CreateSession(ctx)

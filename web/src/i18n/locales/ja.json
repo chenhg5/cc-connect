@@ -9,7 +9,7 @@
     "cron": "スケジュールジョブ",
     "bridge": "ブリッジ",
     "skills": "スキル",
-    "system": "システム",
+    "system": "システム", "profile": "プロフィール",
     "operations": "運用"
   },
   "dashboard": {
@@ -502,6 +502,8 @@
     "paid": "有料"
   },
   "control": {
+    "profileTitle": "管理者プロフィール", "account": "アカウント", "changePassword": "パスワード変更", "currentPassword": "現在のパスワード", "newPassword": "新しいパスワード", "passwordChanged": "パスワードを変更しました。再度ログインしてください。", "savePassword": "パスワードを更新",
+    "adminUsername": "管理者アカウント",
     "firstSetup": "コントロールプレーンの初期化", "setupSubtitle": "唯一の管理者アカウントを作成します", "loginSubtitle": "cc-connect コントロールプレーンにログイン",
     "setupToken": "ワンタイムセットアップトークン", "adminPassword": "管理者パスワード", "confirmPassword": "パスワード確認", "passwordMismatch": "パスワードが一致しません", "createAdmin": "管理者を作成",
     "operations": "運用", "operationsSubtitle": "Runtime デバイス、リリース、ログ、サービスを管理", "devices": "macOS Runtime デバイス", "pairDevice": "デバイスをペアリング", "pairExpires": "{{time}} まで有効", "online": "オンライン", "offline": "オフライン", "revoke": "取り消す", "renameDevice": "デバイス名を変更", "deviceLogs": "接続ログ", "noDevices": "ペアリング済みデバイスはありません",

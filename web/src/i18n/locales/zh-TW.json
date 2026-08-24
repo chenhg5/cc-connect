@@ -9,7 +9,7 @@
     "cron": "排程工作",
     "bridge": "橋接",
     "skills": "技能",
-    "system": "系統",
+    "system": "系統", "profile": "個人中心",
     "operations": "維運中心"
   },
   "dashboard": {
@@ -502,6 +502,8 @@
     "paid": "付費"
   },
   "control": {
+    "profileTitle": "管理員個人中心", "account": "帳號", "changePassword": "修改密碼", "currentPassword": "目前密碼", "newPassword": "新密碼", "passwordChanged": "密碼已修改，請重新登入。", "savePassword": "更新密碼",
+    "adminUsername": "管理員帳號",
     "firstSetup": "初始化控制面", "setupSubtitle": "建立唯一的管理員帳戶", "loginSubtitle": "登入 cc-connect 控制面",
     "setupToken": "一次性設定 Token", "adminPassword": "管理員密碼", "confirmPassword": "確認密碼", "passwordMismatch": "兩次輸入的密碼不一致", "createAdmin": "建立管理員",
     "operations": "維運中心", "operationsSubtitle": "管理 Runtime 裝置、發布、日誌與業務程序", "devices": "macOS Runtime 裝置", "pairDevice": "配對裝置", "pairExpires": "有效至 {{time}}", "online": "在線", "offline": "離線", "revoke": "撤銷", "renameDevice": "重新命名裝置", "deviceLogs": "連線日誌", "noDevices": "尚未配對裝置",

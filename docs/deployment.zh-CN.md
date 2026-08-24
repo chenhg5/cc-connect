@@ -51,7 +51,7 @@ systemd 只管理 `cc-connect-control`。control 以唯一生命周期所有者�
 ssh -L 9820:127.0.0.1:9820 user@server
 ```
 
-访问 `http://127.0.0.1:9820/setup`，用一次性 Token 创建至少 12 位的管理员密码。Token 文件在 control 首次读取后删除，Token 使用后也不能再次设置管理员。
+访问 `https://cc.syggu.cn/login`，用一次性 Token、管理员账号和至少 12 位密码完成初始化。Token 文件在 control 首次读取后删除，Token 使用后也不能再次设置管理员。`v0.2.0` 首次部署前必须精确删除属于 cc-connect 的 `control.db` 及其 SQLite sidecar，旧 schema 不会迁移或读取。
 
 ## 1Panel/OpenResty
 

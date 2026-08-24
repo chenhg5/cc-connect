@@ -9,7 +9,7 @@
     "cron": "Tareas programadas",
     "bridge": "Puente",
     "skills": "Habilidades",
-    "system": "Sistema",
+    "system": "Sistema", "profile": "Perfil",
     "operations": "Operaciones"
   },
   "dashboard": {
@@ -502,6 +502,8 @@
     "paid": "De pago"
   },
   "control": {
+    "profileTitle": "Perfil del administrador", "account": "Cuenta", "changePassword": "Cambiar contraseña", "currentPassword": "Contraseña actual", "newPassword": "Nueva contraseña", "passwordChanged": "Contraseña cambiada. Inicia sesión de nuevo.", "savePassword": "Actualizar contraseña",
+    "adminUsername": "Usuario administrador",
     "firstSetup": "Inicializar el plano de control", "setupSubtitle": "Crea la única cuenta de administrador", "loginSubtitle": "Inicia sesión en el plano de control de cc-connect",
     "setupToken": "Token de configuración de un solo uso", "adminPassword": "Contraseña de administrador", "confirmPassword": "Confirmar contraseña", "passwordMismatch": "Las contraseñas no coinciden", "createAdmin": "Crear administrador",
     "operations": "Operaciones", "operationsSubtitle": "Gestiona dispositivos Runtime, versiones, registros y el servicio", "devices": "Dispositivos macOS Runtime", "pairDevice": "Emparejar dispositivo", "pairExpires": "Caduca a las {{time}}", "online": "En línea", "offline": "Sin conexión", "revoke": "Revocar", "renameDevice": "Renombrar dispositivo", "deviceLogs": "Registros de conexión", "noDevices": "No hay dispositivos emparejados",

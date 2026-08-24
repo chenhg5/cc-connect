@@ -43,7 +43,7 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 		t.Fatalf("runtime installer response = %d, %q", installerResponse.Code, installerResponse.Body.String())
 	}
 
-	setupBody := []byte(`{"setup_token":"setup-once","password":"long-enough-password"}`)
+	setupBody := []byte(`{"setup_token":"setup-once","username":"ccshus","password":"long-enough-password"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/setup", bytes.NewReader(setupBody))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -66,6 +66,13 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Data.CSRFToken == "" {
 		t.Fatalf("setup session = %#v, %v", envelope, err)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/profile", nil)
+	request.AddCookie(cookies[0])
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"username":"ccshus"`) {
+		t.Fatalf("profile response = %d, body=%s", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/devices/pairing-code", nil)
@@ -96,7 +103,7 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 	}
 
 	for attempt := 0; attempt < 6; attempt++ {
-		request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader([]byte(`{"password":"wrong-password"}`)))
+		request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader([]byte(`{"username":"ccshus","password":"wrong-password"}`)))
 		request.RemoteAddr = "203.0.113.7:1234"
 		request.Header.Set("Origin", "http://127.0.0.1:9820")
 		response = httptest.NewRecorder()

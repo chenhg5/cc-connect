@@ -9,7 +9,7 @@
     "cron": "Cron",
     "bridge": "Bridge",
     "skills": "Skills",
-    "system": "System",
+    "system": "System", "profile": "Profile",
     "operations": "Operations"
   },
   "dashboard": {
@@ -507,6 +507,8 @@
     "paid": "Paid"
   },
   "control": {
+    "profileTitle": "Administrator profile", "account": "Account", "changePassword": "Change password", "currentPassword": "Current password", "newPassword": "New password", "passwordChanged": "Password changed. Sign in again.", "savePassword": "Update password",
+    "adminUsername": "Administrator username",
     "firstSetup": "Initialize control plane", "setupSubtitle": "Create the only administrator account", "loginSubtitle": "Sign in to the cc-connect control plane",
     "setupToken": "One-time setup token", "adminPassword": "Administrator password", "confirmPassword": "Confirm password", "passwordMismatch": "Passwords do not match", "createAdmin": "Create administrator",
     "operations": "Operations", "operationsSubtitle": "Manage Runtime devices, releases, logs, and the business service", "devices": "macOS Runtime devices", "pairDevice": "Pair device", "pairExpires": "Expires at {{time}}", "online": "Online", "offline": "Offline", "revoke": "Revoke", "renameDevice": "Rename device", "deviceLogs": "Connection logs", "noDevices": "No paired devices",

@@ -9,7 +9,7 @@
     "cron": "Расписание",
     "bridge": "Мост",
     "skills": "Навыки",
-    "system": "Система",
+    "system": "Система", "profile": "Профиль",
     "operations": "Операции"
   },
   "dashboard": {
@@ -483,6 +483,8 @@
     "paid": "Платно"
   },
   "control": {
+    "profileTitle": "Профиль администратора", "account": "Учетная запись", "changePassword": "Сменить пароль", "currentPassword": "Текущий пароль", "newPassword": "Новый пароль", "passwordChanged": "Пароль изменен. Войдите снова.", "savePassword": "Обновить пароль",
+    "adminUsername": "Имя администратора",
     "firstSetup": "Инициализация панели управления", "setupSubtitle": "Создайте единственную учетную запись администратора", "loginSubtitle": "Вход в панель управления cc-connect",
     "setupToken": "Одноразовый токен настройки", "adminPassword": "Пароль администратора", "confirmPassword": "Подтвердите пароль", "passwordMismatch": "Пароли не совпадают", "createAdmin": "Создать администратора",
     "operations": "Операции", "operationsSubtitle": "Управление Runtime, релизами, журналами и сервисом", "devices": "Устройства macOS Runtime", "pairDevice": "Сопряжение", "pairExpires": "Действует до {{time}}", "online": "В сети", "offline": "Не в сети", "revoke": "Отозвать", "renameDevice": "Переименовать устройство", "deviceLogs": "Журнал подключений", "noDevices": "Нет сопряженных устройств",

@@ -4,7 +4,7 @@
 
 `GET /api/v1/deploy/dashboard` includes the authoritative `deployment` capability (`owner`, `available`, `reason`, `detail`, `update`, `rollback`, `restart`). Both systemd and container owners support signed Web update and rollback. In container mode, an unavailable host executor returns `reason=container_host_unavailable` and disables version operations; server restart remains owned by control.
 
-At `v0.1.0`, the resources below are the sole current contract. Management tokens, query-string authentication, `cc-connect web`, and a public business-process TCP listener are removed.
+At `v0.2.0`, the resources below are the sole current contract. Management tokens, query-string authentication, `cc-connect web`, and a public business-process TCP listener are removed.
 
 ## Authentication
 
@@ -12,6 +12,10 @@ At `v0.1.0`, the resources below are the sole current contract. Management token
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
 - `GET /api/v1/auth/session`
+- `GET /api/v1/auth/profile`
+- `POST /api/v1/auth/password`
+
+Setup and login both require `username` and `password`; setup additionally requires the one-time `setup_token`. The initial administrator username is immutable. Password changes require `current_password` and a new password of at least 12 characters, then invalidate every browser session.
 
 Passwords use Argon2id. Session tokens are stored only as digests. Cookies are `Secure`, `HttpOnly`, and `SameSite=Strict`; unsafe methods require both a same-origin `Origin` and `X-CSRF-Token`.
 

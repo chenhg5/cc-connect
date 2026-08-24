@@ -42,10 +42,14 @@ export interface Dashboard {
 }
 
 export interface PairingCode { code: string; expires_at: string }
+export interface AdministratorProfile { username: string; created_at: string; updated_at: string }
 export interface DeployLogLine { sequence: number; occurred_at: string; stream: string; line: string }
 export interface DeviceLogLine { id: number; occurred_at: string; actor: string; action: string; resource: string; outcome: string; details: unknown }
 
 export const getControlDashboard = () => api.get<Dashboard>('/deploy/dashboard');
+export const getAdministratorProfile = () => api.get<AdministratorProfile>('/auth/profile');
+export const changeAdministratorPassword = (currentPassword: string, newPassword: string) =>
+	api.post<{ sessions_invalidated: boolean }>('/auth/password', { current_password: currentPassword, new_password: newPassword });
 export const savePublicURL = (publicURL: string) => api.post<{ public_url: string }>('/deploy/preflight-operations', { public_url: publicURL });
 export const getPreflightOperations = () => api.get<Array<{ id: string; ok: boolean; message: string }>>('/deploy/preflight-operations');
 export const configureServer = (input: {

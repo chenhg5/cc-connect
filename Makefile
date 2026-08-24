@@ -6,7 +6,7 @@ RUNTIME_CMD := ./cmd/cc-connect-runtime
 DEPLOY_HOST_CMD := ./cmd/cc-connect-deploy-host
 DIST       := dist
 
-VERSION := v0.1.0
+VERSION := v0.2.0
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 

@@ -149,6 +149,8 @@ func (s *Server) publicHandler() http.Handler {
 	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/v1/auth/logout", s.requireSession(s.handleLogout))
 	mux.HandleFunc("/api/v1/auth/session", s.requireSession(s.handleSession))
+	mux.HandleFunc("/api/v1/auth/profile", s.requireSession(s.handleProfile))
+	mux.HandleFunc("/api/v1/auth/password", s.requireSession(s.handlePassword))
 	mux.HandleFunc("/api/v1/devices", s.requireSession(s.handleDevices))
 	mux.HandleFunc("/api/v1/devices/pairing-code", s.requireSession(s.handlePairingCode))
 	mux.HandleFunc("/api/v1/devices/", s.requireSession(s.handleDevice))
@@ -322,13 +324,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		SetupToken string `json:"setup_token"`
+		Username   string `json:"username"`
 		Password   string `json:"password"`
 	}
 	if err := decodeRequest(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, false, nil, err.Error())
 		return
 	}
-	if err := s.store.SetupAdministrator(r.Context(), request.SetupToken, request.Password); err != nil {
+	if err := s.store.SetupAdministrator(r.Context(), request.SetupToken, request.Username, request.Password); err != nil {
 		writeJSON(w, http.StatusUnauthorized, false, nil, err.Error())
 		return
 	}
@@ -346,13 +349,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := decodeRequest(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, false, nil, err.Error())
 		return
 	}
-	if err := s.store.AuthenticateAdministrator(r.Context(), request.Password); err != nil {
+	if err := s.store.AuthenticateAdministrator(r.Context(), request.Username, request.Password); err != nil {
 		s.loginLimiter.failed(key, time.Now())
 		writeJSON(w, http.StatusUnauthorized, false, nil, "管理员密码错误")
 		return
@@ -390,6 +394,40 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	session, _ := r.Context().Value(sessionContextKey{}).(controlstore.Session)
 	writeJSON(w, http.StatusOK, true, session, "")
+}
+
+func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, false, nil, "method not allowed")
+		return
+	}
+	profile, err := s.store.AdministratorProfile(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, false, nil, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, true, profile, "")
+}
+
+func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, false, nil, "method not allowed")
+		return
+	}
+	var request struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeRequest(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, false, nil, err.Error())
+		return
+	}
+	if err := s.store.ChangeAdministratorPassword(r.Context(), request.CurrentPassword, request.NewPassword); err != nil {
+		writeJSON(w, http.StatusBadRequest, false, nil, err.Error())
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	writeJSON(w, http.StatusOK, true, map[string]bool{"sessions_invalidated": true}, "")
 }
 
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {

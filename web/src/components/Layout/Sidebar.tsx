@@ -12,6 +12,7 @@ import {
   Plug,
   Puzzle,
   ServerCog,
+  UserRound,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -26,6 +27,7 @@ const navItems = [
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'system', path: '/system', icon: Settings },
   { key: 'operations', path: '/operations', icon: ServerCog },
+  { key: 'profile', path: '/profile', icon: UserRound },
 ];
 
 export default function Sidebar() {

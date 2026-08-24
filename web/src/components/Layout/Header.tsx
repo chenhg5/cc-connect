@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { useState, useRef, useEffect } from 'react';
 import {
   RefreshCw, Sun, Moon, Monitor, LogOut, Languages, ChevronDown,
+  UserRound,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useThemeStore } from '@/store/theme';
@@ -104,6 +105,9 @@ export default function Header() {
       </button>
 
       {/* Logout */}
+      <button type="button" onClick={() => window.location.assign('/profile')} className={btnCls} aria-label={t('nav.profile')}>
+        <UserRound size={16} />
+      </button>
       <button
         type="button"
         onClick={logout}
