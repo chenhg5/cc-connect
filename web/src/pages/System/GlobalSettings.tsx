@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Save, Loader2 } from 'lucide-react';
-import { Card, Button, Input } from '@/components/ui';
-import { getGlobalSettings, updateGlobalSettings, type GlobalSettings as GS } from '@/api/settings';
+import { Card, Button } from '@/components/ui';
+import { getGlobalSettings, updateGlobalSettings } from '@/api/settings';
 import { cn } from '@/lib/utils';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
@@ -83,6 +83,9 @@ export default function GlobalSettings() {
   const [spInterval, setSpInterval] = useState(1500);
   const [rlMax, setRlMax] = useState(20);
   const [rlWindow, setRlWindow] = useState(60);
+  const [retriableInitialDelay, setRetriableInitialDelay] = useState(30);
+  const [retriableRetryDelay, setRetriableRetryDelay] = useState(60);
+  const [retriableMaxAttempts, setRetriableMaxAttempts] = useState(30);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,6 +103,9 @@ export default function GlobalSettings() {
       setSpInterval(s.stream_preview_interval_ms ?? 1500);
       setRlMax(s.rate_limit_max_messages ?? 20);
       setRlWindow(s.rate_limit_window_secs ?? 60);
+      setRetriableInitialDelay(s.retriable_error_initial_delay_secs ?? 30);
+      setRetriableRetryDelay(s.retriable_error_retry_delay_secs ?? 60);
+      setRetriableMaxAttempts(s.retriable_error_max_attempts ?? 30);
     } catch {
       // ignore
     } finally {
@@ -126,6 +132,9 @@ export default function GlobalSettings() {
         stream_preview_interval_ms: spInterval,
         rate_limit_max_messages: rlMax,
         rate_limit_window_secs: rlWindow,
+        retriable_error_initial_delay_secs: retriableInitialDelay,
+        retriable_error_retry_delay_secs: retriableRetryDelay,
+        retriable_error_max_attempts: retriableMaxAttempts,
       });
       setMsg(t('common.success'));
       setTimeout(() => setMsg(''), 3000);
@@ -240,6 +249,34 @@ export default function GlobalSettings() {
             onChange={setRlWindow}
             min={1}
             hint={t('settings.rlWindowSecsHint', 'Time window in seconds')}
+          />
+        </div>
+      </Card>
+
+      {/* Retries */}
+      <Card>
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('settings.retriableError', 'Retriable errors')}</h3>
+        <div className="space-y-4 max-w-lg">
+          <NumberInput
+            label={t('settings.retriableInitialDelay', 'Initial retry delay (sec)')}
+            value={retriableInitialDelay}
+            onChange={setRetriableInitialDelay}
+            min={0}
+            hint={t('settings.retriableInitialDelayHint', 'Delay before the first retry; 0 = retry immediately')}
+          />
+          <NumberInput
+            label={t('settings.retriableRetryDelay', 'Retry delay (sec)')}
+            value={retriableRetryDelay}
+            onChange={setRetriableRetryDelay}
+            min={0}
+            hint={t('settings.retriableRetryDelayHint', 'Delay between later retries; 0 = retry immediately')}
+          />
+          <NumberInput
+            label={t('settings.retriableMaxAttempts', 'Max attempts')}
+            value={retriableMaxAttempts}
+            onChange={setRetriableMaxAttempts}
+            min={1}
+            hint={t('settings.retriableMaxAttemptsHint', 'Total attempts including the first send')}
           />
         </div>
       </Card>
