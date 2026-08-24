@@ -1697,6 +1697,67 @@ func TestLoad_DefaultsAutoCompressDisabled(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesRetriableErrorConfig(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+[retriable_error]
+initial_delay_secs = 12
+retry_delay_secs = 34
+max_attempts = 7
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.RetriableError.InitialDelaySecs == nil || *cfg.RetriableError.InitialDelaySecs != 12 {
+		t.Fatalf("initial_delay_secs = %v, want 12", cfg.RetriableError.InitialDelaySecs)
+	}
+	if cfg.RetriableError.RetryDelaySecs == nil || *cfg.RetriableError.RetryDelaySecs != 34 {
+		t.Fatalf("retry_delay_secs = %v, want 34", cfg.RetriableError.RetryDelaySecs)
+	}
+	if cfg.RetriableError.MaxAttempts == nil || *cfg.RetriableError.MaxAttempts != 7 {
+		t.Fatalf("max_attempts = %v, want 7", cfg.RetriableError.MaxAttempts)
+	}
+}
+
+func TestGetAndSaveGlobalSettings_RetriableErrorConfig(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML)
+	patchConfigPath(t, configPath)
+
+	saved := GetGlobalSettings()
+	if got := saved["retriable_error_initial_delay_secs"]; got != 30 {
+		t.Fatalf("default initial_delay_secs = %v, want 30", got)
+	}
+	if got := saved["retriable_error_retry_delay_secs"]; got != 60 {
+		t.Fatalf("default retry_delay_secs = %v, want 60", got)
+	}
+	if got := saved["retriable_error_max_attempts"]; got != 30 {
+		t.Fatalf("default max_attempts = %v, want 30", got)
+	}
+
+	initialDelay := 11
+	retryDelay := 22
+	maxAttempts := 33
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{
+		RetriableErrorInitialDelaySecs: &initialDelay,
+		RetriableErrorRetryDelaySecs:   &retryDelay,
+		RetriableErrorMaxAttempts:      &maxAttempts,
+	}); err != nil {
+		t.Fatalf("SaveGlobalSettings returned error: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	if cfg.RetriableError.InitialDelaySecs == nil || *cfg.RetriableError.InitialDelaySecs != initialDelay {
+		t.Fatalf("saved initial_delay_secs = %v, want %d", cfg.RetriableError.InitialDelaySecs, initialDelay)
+	}
+	if cfg.RetriableError.RetryDelaySecs == nil || *cfg.RetriableError.RetryDelaySecs != retryDelay {
+		t.Fatalf("saved retry_delay_secs = %v, want %d", cfg.RetriableError.RetryDelaySecs, retryDelay)
+	}
+	if cfg.RetriableError.MaxAttempts == nil || *cfg.RetriableError.MaxAttempts != maxAttempts {
+		t.Fatalf("saved max_attempts = %v, want %d", cfg.RetriableError.MaxAttempts, maxAttempts)
+	}
+}
+
 func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithResetOnIdleFixture)
 
